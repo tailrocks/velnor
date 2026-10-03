@@ -30,6 +30,246 @@ fn must_fail<T, E>(result: Result<T, E>, context: &str) -> E {
     }
 }
 
+#[test]
+fn runner_policy_requires_exact_hosted_labels_and_declared_local_selectors() {
+    let mut selectors = BTreeMap::new();
+    selectors.insert(
+        "github-hosted".to_owned(),
+        vec!["ubuntu-private".to_owned()],
+    );
+    selectors.insert(
+        "velnor".to_owned(),
+        vec!["self-hosted".to_owned(), "velnor-target-mvp".to_owned()],
+    );
+    let policy = VelnorPolicyContract {
+        selectors,
+        ..VelnorPolicyContract::default()
+    };
+
+    for label in ["ubuntu-24.04", "ubuntu-26.04", "xcode-27"] {
+        let analysis = classify_static_label(label, &policy);
+        assert!(!analysis.foreign, "supported exact label {label:?}");
+        assert!(!analysis.local_provider, "supported exact label {label:?}");
+    }
+    for label in ["ubuntu-private", "self-hosted"] {
+        let analysis = classify_static_label(label, &policy);
+        assert!(analysis.foreign, "unverified label {label:?}");
+    }
+    let local = classify_static_labels(&["self-hosted", "velnor-target-mvp"], &policy);
+    assert!(local.local_provider, "exact Velnor selector stays local");
+    assert!(!local.foreign, "exact Velnor selector is declared");
+
+    let grouped: Value =
+        serde_yaml::from_str("group: hosted-looking-group\nlabels: ubuntu-24.04\n")
+            .expect("valid runner-group mapping");
+    let mut resolving = BTreeSet::new();
+    let analysis = analyze_runner(&grouped, None, &mut resolving, &policy);
+    assert!(analysis.foreign, "group membership has no trusted contract");
+}
+
+#[test]
+fn runner_policy_rejects_custom_label_in_declared_hosted_selector() {
+    let policy = VelnorPolicyContract {
+        providers: vec!["github-hosted".to_owned()],
+        selectors: BTreeMap::from([(
+            "github-hosted".to_owned(),
+            vec!["ubuntu-private".to_owned()],
+        )]),
+        ..VelnorPolicyContract::default()
+    };
+    let error = must_fail(policy.validate(), "custom hosted label selector");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported label in the `github-hosted` selector"),
+        "{error}"
+    );
+}
+
+#[test]
+fn generator_runner_contract_api_rejects_missing_or_empty_jobs() {
+    let config = hosted_project_config(PIN_A);
+    for (name, workflow) in [
+        ("missing", "name: Missing jobs\non: push\n"),
+        ("empty", "name: Empty jobs\non: push\njobs: {}\n"),
+    ] {
+        let error = must_fail(
+            workflow_runner_environment_matches(workflow, &config, &BTreeMap::new()),
+            name,
+        )
+        .to_string();
+        assert!(error.contains("jobs mapping"), "{name}: {error}");
+    }
+}
+
+#[test]
+fn generator_runner_contract_api_rejects_uncovered_dynamic_triggers() {
+    let mut config = hosted_project_config(PIN_A);
+    let local_provider = crate::s2::provider::ProviderId::Velnor;
+    config.providers.insert(local_provider);
+    config.selectors.insert(
+        local_provider,
+        crate::s2::provider::ProviderSelector {
+            runs_on: vec!["self-hosted".to_owned(), "velnor-target-mvp".to_owned()],
+        },
+    );
+    let shape = crate::s2::estate::APPROVED_DYNAMIC_RUNNERS[0];
+    let direct = format!(
+        "name: Dynamic\non: workflow_run\njobs:\n  check:\n    runs-on: >-\n      ${{{{ {shape} }}}}\n    steps:\n      - run: echo user code\n"
+    );
+    let error = must_fail(
+        workflow_runner_environment_matches(&direct, &config, &BTreeMap::new()),
+        "dynamic unsupported trigger",
+    )
+    .to_string();
+    assert!(error.contains("unsupported trigger"), "{error}");
+
+    let matrix = format!(
+        "name: Dynamic matrix\non: workflow_run\njobs:\n  check:\n    strategy:\n      matrix:\n        runner:\n          - >-\n            ${{{{ {shape} }}}}\n    runs-on: ${{{{ matrix.runner }}}}\n    steps:\n      - run: echo user code\n"
+    );
+    let error = must_fail(
+        workflow_runner_environment_matches(&matrix, &config, &BTreeMap::new()),
+        "matrix dynamic unsupported trigger",
+    )
+    .to_string();
+    assert!(error.contains("unsupported trigger"), "{error}");
+}
+
+#[test]
+fn runner_guard_generation_requires_the_shared_pre_action_allowlist() {
+    let config = hosted_project_config(PIN_A);
+    let unknown = format!(
+        "name: Unknown action\non: push\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: example/action@{PIN_B}\n"
+    );
+    let error = must_fail(
+        workflow_runner_environment_matches(&unknown, &config, &BTreeMap::new()),
+        "unknown full-SHA action before runner guard",
+    )
+    .to_string();
+    assert!(error.contains("reviewed no-pre allowlist"), "{error}");
+
+    let approved = crate::s2::ActionPin::Checkout
+        .reference()
+        .split_once(" #")
+        .map_or(
+            crate::s2::ActionPin::Checkout.reference(),
+            |(reference, _)| reference,
+        );
+    let known = format!(
+        "name: Known action\non: push\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: {approved}\n"
+    );
+    must(
+        workflow_runner_environment_matches(&known, &config, &BTreeMap::new()),
+        "current shared pre-action allowlist reference",
+    );
+}
+
+#[test]
+fn runner_guard_generation_validates_local_actions_from_the_file_snapshot() {
+    let config = hosted_project_config(PIN_A);
+    let checkout = crate::s2::ActionPin::Checkout
+        .reference()
+        .split_once(" #")
+        .map_or(
+            crate::s2::ActionPin::Checkout.reference(),
+            |(reference, _)| reference,
+        );
+    let local_reference = "./.github/actions/local";
+    let manifest =
+        format!("name: local\nruns:\n  using: composite\n  steps:\n    - uses: {checkout}\n");
+    let files = BTreeMap::from([(PathBuf::from(".github/actions/local/action.yml"), manifest)]);
+    let manifests = runner_guard_action_manifest_snapshot(&files)
+        .expect("snapshot local action metadata from generated file map");
+    assert!(manifests.contains_key(local_reference));
+    let workflow = format!(
+        "name: Local action\non: push\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: {local_reference}\n"
+    );
+    must(
+        workflow_runner_environment_matches(&workflow, &config, &manifests),
+        "generated local composite action with reviewed nested action",
+    );
+
+    let missing = must_fail(
+        workflow_runner_environment_matches(&workflow, &config, &BTreeMap::new()),
+        "generated local action without file snapshot metadata",
+    )
+    .to_string();
+    assert!(missing.contains("manifest is missing"), "{missing}");
+
+    let nested_unknown = format!(
+        "name: local\nruns:\n  using: composite\n  steps:\n    - uses: example/action@{PIN_B}\n"
+    );
+    let bad_files = BTreeMap::from([(
+        PathBuf::from(".github/actions/local/action.yml"),
+        nested_unknown,
+    )]);
+    let bad_manifests = runner_guard_action_manifest_snapshot(&bad_files)
+        .expect("snapshot nested unknown action fixture");
+    let error = must_fail(
+        workflow_runner_environment_matches(&workflow, &config, &bad_manifests),
+        "nested unknown external ref in generated action",
+    )
+    .to_string();
+    assert!(error.contains("reviewed no-pre allowlist"), "{error}");
+}
+
+#[test]
+fn runner_guard_generation_requires_the_bound_release_chain_for_workflow_run() {
+    let config = bound_release_project_config(PIN_A);
+    let runner_gate = "(github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')";
+    let condition = format!(
+        "(({runner_gate}) || (github.event_name == 'workflow_run' && needs.publish-gate.outputs.admitted == 'true')) && ({})",
+        trusted_event_conjunct()
+    );
+    let uninstrumented = uninstrumented_bound_release_workflow_run_fixture(&condition);
+    must(
+        workflow_runner_environment_matches(&uninstrumented, &config, &BTreeMap::new()),
+        "valid generated Velnor-only bound-release workflow",
+    );
+
+    let unbound = "name: Unbound\non:\n  workflow_run:\n    workflows: [CI]\n    types: [completed]\n    branches: [main]\njobs:\n  check:\n    runs-on: [self-hosted, example-runner]\n    steps:\n      - run: echo unsafe\n";
+    let error = must_fail(
+        workflow_runner_environment_matches(unbound, &config, &BTreeMap::new()),
+        "unbound static local workflow_run trigger",
+    )
+    .to_string();
+    assert!(error.contains("bound-release admission chain"), "{error}");
+
+    let trusted_only = uninstrumented_bound_release_workflow_run_fixture(trusted_event_conjunct());
+    let error = must_fail(
+        workflow_runner_environment_matches(&trusted_only, &config, &BTreeMap::new()),
+        "broad trusted-event gate without producer admission",
+    )
+    .to_string();
+    assert!(error.contains("bound-release admission chain"), "{error}");
+
+    let wrong_head_repository = uninstrumented.replace(
+        "PRODUCER_HEAD_REPOSITORY_ID: ${{ github.event.workflow_run.head_repository.id }}",
+        "PRODUCER_HEAD_REPOSITORY_ID: ${{ github.event.workflow_run.repository.id }}",
+    );
+    let error = must_fail(
+        workflow_runner_environment_matches(&wrong_head_repository, &config, &BTreeMap::new()),
+        "release gate without workflow_run head_repository identity",
+    )
+    .to_string();
+    assert!(error.contains("bound-release admission chain"), "{error}");
+
+    let mut mixed_provider_config = config.clone();
+    mixed_provider_config
+        .providers
+        .insert(crate::s2::provider::ProviderId::GithubHosted);
+    let error = must_fail(
+        workflow_runner_environment_matches(
+            &uninstrumented,
+            &mixed_provider_config,
+            &BTreeMap::new(),
+        ),
+        "workflow_run cannot route local jobs in a mixed-provider tree",
+    )
+    .to_string();
+    assert!(error.contains("bound-release admission chain"), "{error}");
+}
+
 fn temporary_directory(name: &str) -> PathBuf {
     let root = env::temp_dir().join(format!(
         "velnor-workflow-policy-{name}-{}",
@@ -605,7 +845,7 @@ fn pin_monotonic_admits_an_unchanged_inherited_pin_and_refuses_a_regression() {
 // The entrypoint
 // ---------------------------------------------------------------------------
 
-fn hosted_entrypoint(revision: &str) -> String {
+fn hosted_project_config(revision: &str) -> ProjectConfig {
     let fixture = temporary_directory("entrypoint-fixture");
     write(
         &fixture.join("Cargo.toml"),
@@ -628,6 +868,32 @@ fn hosted_entrypoint(revision: &str) -> String {
     let _ = fs::remove_dir_all(fixture);
     let mut config = ProjectConfig::from(shape);
     revision.clone_into(&mut config.workflow_revision);
+    config
+}
+
+fn bound_release_project_config(revision: &str) -> ProjectConfig {
+    let mut config = hosted_project_config(revision);
+    let velnor = crate::s2::provider::ProviderId::Velnor;
+    config.providers = [velnor].into_iter().collect();
+    config.automatic_providers = config.providers.clone();
+    config.selectors = BTreeMap::from([(
+        velnor,
+        crate::s2::provider::ProviderSelector {
+            runs_on: vec!["self-hosted".to_owned(), "example-runner".to_owned()],
+        },
+    )]);
+    config.default_branch = "main".to_owned();
+    config.release = Some(crate::s2::ReleaseSpec {
+        producer_workflow: "CI".to_owned(),
+        producer_workflow_id: 42,
+        producer_workflow_path: ".github/workflows/ci.yml".to_owned(),
+        ..crate::s2::ReleaseSpec::default()
+    });
+    config
+}
+
+fn hosted_entrypoint(revision: &str) -> String {
+    let config = hosted_project_config(revision);
     must(
         crate::s2::render_policy_entrypoint(&config),
         "render policy entrypoint",
@@ -1161,7 +1427,9 @@ fn velnor_tree(name: &str, pr_workflow: &str) -> PathBuf {
         "schema = 3\nrepository = \"example/consumer\"\nprofile = \"generic\"\nverified = true\ndefault_branch = \"main\"\nproviders = [\"github-hosted\", \"velnor\"]\nautomatic_providers = [\"github-hosted\", \"velnor\"]\ndefault_dispatch_providers = [\"github-hosted\", \"velnor\"]\n",
     );
     write(&root.join(PULL_REQUEST_AGGREGATE), pr_workflow);
-    write(&root.join(POLICY_ENTRYPOINT), &hosted_entrypoint(PIN_A));
+    let hosted_policy = runner_policy_fixture();
+    let entrypoint = with_runner_guards(&hosted_entrypoint(PIN_A), &hosted_policy);
+    write(&root.join(POLICY_ENTRYPOINT), &entrypoint);
     root
 }
 
@@ -1171,8 +1439,1011 @@ fn velnor_tree(name: &str, pr_workflow: &str) -> PathBuf {
 /// trusted-event conjunct.
 fn gated_trusted_job() -> String {
     format!(
-        "name: CI / PR\non:\n  pull_request:\njobs:\n  ci-required:\n    name: ci-required\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo ok\n  velnor-docker:\n    name: Docker\n    if: ${{{{ (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}}}\n    runs-on: [{VELNOR_SELECTOR}]\n    steps:\n      - run: echo trusted\n"
+        "name: CI / PR\non:\n  pull_request:\njobs:\n  ci-required:\n    name: ci-required\n    runs-on: ubuntu-24.04\n    steps:\n__HOSTED_GUARD__      - run: echo ok\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n  velnor-docker:\n    name: Docker\n    if: ${{{{ (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}}}\n    runs-on: [{VELNOR_SELECTOR}]\n    steps:\n__LOCAL_GUARD__      - run: echo trusted\n        if: ${{{{ runner.environment == 'self-hosted' }}}}\n"
     )
+    .replace("__HOSTED_GUARD__", &hosted_guard())
+    .replace("__LOCAL_GUARD__", &self_hosted_guard())
+}
+
+fn runner_policy_fixture() -> VelnorPolicyContract {
+    VelnorPolicyContract {
+        providers: vec!["github-hosted".to_owned(), "velnor".to_owned()],
+        automatic_providers: vec!["github-hosted".to_owned(), "velnor".to_owned()],
+        selectors: BTreeMap::from([
+            (
+                "github-hosted".to_owned(),
+                vec!["ubuntu-24.04".to_owned(), "ubuntu-26.04".to_owned()],
+            ),
+            (
+                "velnor".to_owned(),
+                vec!["self-hosted".to_owned(), "velnor-target-mvp".to_owned()],
+            ),
+        ]),
+        default_branch: "main".to_owned(),
+        ..VelnorPolicyContract::default()
+    }
+}
+
+fn bound_release_runner_policy_fixture() -> VelnorPolicyContract {
+    VelnorPolicyContract {
+        providers: vec!["velnor".to_owned()],
+        automatic_providers: vec!["velnor".to_owned()],
+        selectors: BTreeMap::from([(
+            "velnor".to_owned(),
+            vec!["self-hosted".to_owned(), "example-runner".to_owned()],
+        )]),
+        default_branch: "main".to_owned(),
+        release_producer_workflow: Some("CI".to_owned()),
+        release_producer_workflow_id: Some(42),
+        release_producer_workflow_path: Some(".github/workflows/ci.yml".to_owned()),
+        ..VelnorPolicyContract::default()
+    }
+}
+
+fn bound_release_workflow_run_fixture(check_condition: &str) -> String {
+    let condition = format!("    if: ${{{{ {check_condition} }}}}\n");
+    let source_run = indent_workflow_script(BOUND_RELEASE_SOURCE_RUN);
+    let admit_run = indent_workflow_script(BOUND_RELEASE_ADMIT_RUN);
+    r#"name: Bound release
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+jobs:
+  source:
+    name: Resolve release source
+    runs-on: [self-hosted, example-runner]
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+__SOURCE_GUARD__      - name: Resolve source revision
+        id: resolve
+        if: '${{ (runner.environment==''self-hosted'') }}'
+        env:
+          EVENT: ${{ github.event_name }}
+          SHA: ${{ github.sha }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+__SOURCE_RUN__
+  publish-gate:
+    name: Admit rolling publish
+    needs: source
+    runs-on: [self-hosted, example-runner]
+    timeout-minutes: 10
+    outputs:
+      admitted: ${{ steps.admit.outputs.admitted }}
+      mode: ${{ steps.admit.outputs.mode }}
+      sha: ${{ needs.source.outputs.sha }}
+    steps:
+__GATE_GUARD__      - name: Admit producer or resolve drill mode
+        id: admit
+        if: '${{ (runner.environment==''self-hosted'') }}'
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          PRODUCER: ${{ github.event.workflow_run.name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          STATUS: ${{ github.event.workflow_run.status }}
+          PRODUCER_REPOSITORY: ${{ github.event.workflow_run.repository.full_name }}
+          PRODUCER_REPOSITORY_ID: ${{ github.event.workflow_run.repository.id }}
+          PRODUCER_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          PRODUCER_HEAD_REPOSITORY_ID: ${{ github.event.workflow_run.head_repository.id }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_REPOSITORY_ID: ${{ github.repository_id }}
+          WORKFLOW_ID: ${{ github.event.workflow_run.workflow_id }}
+          WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
+          EXPECTED_WORKFLOW_ID: 42
+          EXPECTED_WORKFLOW_PATH: '.github/workflows/ci.yml'
+          PRODUCER_EVENT: ${{ github.event.workflow_run.event }}
+          PRODUCER_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          EXPECTED_EVENT: push
+          EXPECTED_BRANCH: main
+          EXPECTED_REF: refs/heads/main
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          MODE_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || '' }}
+          EXPECTED: CI
+          BRANCH: main
+        run: |
+__ADMIT_RUN__
+  check:
+    name: Build bound source
+    needs: [source, publish-gate]
+__CHECK_CONDITION__    runs-on: [self-hosted, example-runner]
+    steps:
+__CHECK_GUARD__      - name: Build admitted source
+        if: ${{ runner.environment == 'self-hosted' }}
+        run: echo safe
+"#
+    .replace("__SOURCE_GUARD__", &self_hosted_guard())
+    .replace("__GATE_GUARD__", &self_hosted_guard())
+    .replace("__CHECK_GUARD__", &self_hosted_guard())
+    .replace("__SOURCE_RUN__", &source_run)
+    .replace("__ADMIT_RUN__", &admit_run)
+    .replace("__CHECK_CONDITION__", &condition)
+}
+
+fn uninstrumented_bound_release_workflow_run_fixture(check_condition: &str) -> String {
+    bound_release_workflow_run_fixture(check_condition)
+        .replace(&self_hosted_guard(), "")
+        .replace(
+            "        if: '${{ (runner.environment==''self-hosted'') }}'\n",
+            "",
+        )
+        .replace(
+            "        if: ${{ runner.environment == 'self-hosted' }}\n",
+            "",
+        )
+}
+
+fn indent_workflow_script(script: &str) -> String {
+    script
+        .lines()
+        .map(|line| format!("          {line}\n"))
+        .collect()
+}
+
+fn audit_runner_fixture(yaml: &str, policy: &VelnorPolicyContract) -> WorkflowAudit {
+    let workflow: Value = must(serde_yaml::from_str(yaml), "parse runner policy fixture");
+    let workflow = workflow.as_mapping().expect("workflow mapping");
+    let jobs = mapping_value(workflow, "jobs").expect("workflow jobs");
+    let mut failures = PolicyFindings::default();
+    inspect_jobs(
+        jobs,
+        mapping_value(workflow, "on"),
+        Path::new(".github/workflows/runner-fixture.yml"),
+        policy,
+        &mut failures,
+    );
+    failures.audit
+}
+
+fn with_runner_guards(content: &str, policy: &VelnorPolicyContract) -> String {
+    let mut document: Value = must(
+        serde_yaml::from_str(content),
+        "parse guarded workflow fixture",
+    );
+    let workflow = document.as_mapping_mut().expect("workflow mapping");
+    let jobs = mapping_value(workflow, "jobs")
+        .and_then(Value::as_mapping)
+        .cloned()
+        .expect("workflow jobs");
+    let mut jobs = jobs;
+    for (_, job_value) in jobs.iter_mut() {
+        let Some(job) = job_value.as_mapping().cloned() else {
+            continue;
+        };
+        if mapping_value(&job, "uses").is_some() {
+            continue;
+        }
+        let Some(runs_on) = mapping_value(&job, "runs-on") else {
+            continue;
+        };
+        let matrix = mapping_value(&job, "strategy")
+            .and_then(Value::as_mapping)
+            .and_then(|strategy| mapping_value(strategy, "matrix"))
+            .and_then(Value::as_mapping);
+        let Some(expected) = runner_environment_expectation(runs_on, matrix, policy) else {
+            continue;
+        };
+        let predicate = expected.predicate();
+        let Some(mut steps) = mapping_value(&job, "steps")
+            .and_then(Value::as_sequence)
+            .cloned()
+        else {
+            continue;
+        };
+        let mut guard = Mapping::new();
+        guard.insert("id", Value::String("runner_provenance".to_owned()));
+        guard.insert(
+            "shell",
+            Value::String("bash --noprofile --norc -p -e -o pipefail {0}".to_owned()),
+        );
+        guard.insert(
+            "working-directory",
+            Value::String(crate::primitives::runner_guard::GUARD_WORKING_DIRECTORY.to_owned()),
+        );
+        guard.insert("env", runner_guard_environment_value());
+        guard.insert("if", Value::String(format!("${{{{ !({predicate}) }}}}")));
+        guard.insert("run", Value::String("((0))".to_owned()));
+        let mut guarded_steps = vec![Value::Mapping(guard)];
+        for step in &mut steps {
+            if let Some(step) = step.as_mapping_mut() {
+                let body = mapping_value(step, "if")
+                    .and_then(Value::as_str)
+                    .map(normalize_runner_expression)
+                    .unwrap_or_default();
+                let condition = if body.is_empty() {
+                    format!("${{{{ ({predicate}) }}}}")
+                } else {
+                    format!("${{{{ ({body}) && ({predicate}) }}}}")
+                };
+                step.insert("if", Value::String(condition));
+            }
+        }
+        guarded_steps.extend(steps);
+        let mut job = job;
+        job.insert("steps", Value::Sequence(guarded_steps));
+        *job_value = Value::Mapping(job);
+    }
+    workflow.insert("jobs", Value::Mapping(jobs));
+    must(
+        serde_yaml::to_string(&document),
+        "serialize guarded workflow fixture",
+    )
+}
+
+fn runner_fixture(runs_on: &str, steps: &str, extra_job_fields: &str) -> String {
+    format!(
+        "name: Runner fixture\non: push\njobs:\n  check:\n{extra_job_fields}    runs-on: {runs_on}\n    steps:\n{steps}"
+    )
+}
+
+fn runner_guard_environment_value() -> Value {
+    Value::Mapping(Mapping::from_iter(
+        crate::primitives::runner_guard::GUARD_SANITIZED_ENVIRONMENT
+            .iter()
+            .map(|key| ((*key).into(), Value::String(String::new()))),
+    ))
+}
+
+fn runner_guard_environment_yaml() -> String {
+    let entries = crate::primitives::runner_guard::GUARD_SANITIZED_ENVIRONMENT
+        .iter()
+        .map(|key| format!("{key}: \"\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{{entries}}}")
+}
+
+fn runner_guard(expected: &str) -> String {
+    runner_guard_with_condition(&format!("runner.environment != '{expected}'"))
+}
+
+fn runner_guard_with_condition(condition: &str) -> String {
+    format!(
+        "      - name: Verify runner environment\n        id: runner_provenance\n        shell: bash --noprofile --norc -p -e -o pipefail {{0}}\n        working-directory: '{}'\n        env: {}\n        if: ${{{{ {condition} }}}}\n        run: ((0))\n",
+        crate::primitives::runner_guard::GUARD_WORKING_DIRECTORY,
+        runner_guard_environment_yaml(),
+    )
+}
+
+fn hosted_guard() -> String {
+    runner_guard("github-hosted")
+}
+
+fn self_hosted_guard() -> String {
+    runner_guard("self-hosted")
+}
+
+fn with_hosted_guard(workflow: &str) -> String {
+    if workflow.contains("id: runner_provenance") {
+        return workflow.to_owned();
+    }
+    workflow.replacen(
+        "    steps:\n",
+        &format!("    steps:\n{}", hosted_guard()),
+        1,
+    )
+}
+
+#[test]
+fn provenance_guard_is_required_for_exact_hosted_and_local_runner_classes() {
+    let policy = runner_policy_fixture();
+    let missing = runner_fixture("ubuntu-24.04", "      - run: echo user code\n", "");
+    let audit = audit_runner_fixture(&missing, &policy);
+    assert!(
+        audit
+            .runners
+            .iter()
+            .any(|finding| finding.contains("first step must")),
+        "missing first guard must fail: {:?}",
+        audit.runners
+    );
+
+    for hosted in ["ubuntu-24.04", "ubuntu-26.04", "xcode-27"] {
+        let workflow = runner_fixture(hosted, &hosted_guard(), "");
+        let audit = audit_runner_fixture(&workflow, &policy);
+        assert!(audit.runners.is_empty(), "{hosted}: {:?}", audit.runners);
+    }
+
+    let local_gate = "    if: ${{ (!(github.event_name=='pull_request'&&(github.event.pull_request.head.repo.fork||github.event.pull_request.user.type=='Bot'))) }}\n";
+    let local = runner_fixture(
+        "[self-hosted, velnor-target-mvp]",
+        &self_hosted_guard(),
+        local_gate,
+    );
+    let audit = audit_runner_fixture(&local, &policy);
+    assert!(
+        audit.runners.is_empty(),
+        "exact local selector: {:?}",
+        audit.runners
+    );
+
+    for unknown in ["ubuntu-private", "self-hosted"] {
+        let workflow = runner_fixture(unknown, &hosted_guard(), "");
+        let audit = audit_runner_fixture(&workflow, &policy);
+        assert!(
+            audit.runners.iter().any(|finding| {
+                finding.contains("one verified runner environment class")
+                    || finding.contains("does not match any declared provider selector")
+            }),
+            "unknown runner {unknown:?} must fail: {:?}",
+            audit.runners
+        );
+    }
+}
+
+#[test]
+fn local_runner_gate_rejects_untrusted_suffix_false() {
+    let policy = runner_policy_fixture();
+    let condition = "    if: ${{ true || github.event_name == 'pull_request' && false }}\n";
+    let workflow = runner_fixture(
+        "[self-hosted, velnor-target-mvp]",
+        &self_hosted_guard(),
+        condition,
+    );
+    let audit = audit_runner_fixture(&workflow, &policy);
+    assert!(
+        audit
+            .runners
+            .iter()
+            .any(|finding| finding.contains("local-provider jobs require a trusted-event gate")),
+        "a trailing false cannot prove a trusted gate: {:?}",
+        audit.runners
+    );
+}
+
+#[test]
+fn workflow_run_local_runner_requires_the_exact_bound_release_admission_chain() {
+    let policy = bound_release_runner_policy_fixture();
+    let default_branch = policy.default_branch.as_str();
+    let runner_gate = format!(
+        "(github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/{default_branch}')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{default_branch}')"
+    );
+    let condition = format!(
+        "(({runner_gate}) || (github.event_name == 'workflow_run' && needs.publish-gate.outputs.admitted == 'true')) && ({})",
+        trusted_event_conjunct()
+    );
+    let generated = bound_release_workflow_run_fixture(&condition);
+    let audit = audit_runner_fixture(&generated, &policy);
+    assert!(
+        audit.runners.is_empty(),
+        "the renderer's source, producer-admission, and downstream gate must pass: {:?}",
+        audit.runners
+    );
+
+    let trusted_only = bound_release_workflow_run_fixture(trusted_event_conjunct());
+    let audit = audit_runner_fixture(&trusted_only, &policy);
+    assert!(
+        audit.runners.iter().any(|finding| {
+            finding.contains("local-provider jobs require a trusted-event gate")
+        }),
+        "a broad trusted-event predicate cannot admit workflow_run: {:?}",
+        audit.runners
+    );
+
+    let admitted_but_or_bypassed = condition.replace(
+        "(github.event_name == 'workflow_run' && needs.publish-gate.outputs.admitted == 'true')",
+        "(true || (github.event_name == 'workflow_run' && needs.publish-gate.outputs.admitted == 'true'))",
+    );
+    let bypassed = bound_release_workflow_run_fixture(&admitted_but_or_bypassed);
+    assert!(
+        !audit_runner_fixture(&bypassed, &policy).runners.is_empty(),
+        "an OR branch must not bypass producer admission"
+    );
+
+    let missing_dependency = generated.replace("needs: [source, publish-gate]", "needs: [source]");
+    assert!(
+        !audit_runner_fixture(&missing_dependency, &policy)
+            .runners
+            .is_empty(),
+        "the admitted output is unusable without a direct job dependency"
+    );
+
+    let wrong_producer = generated.replace("workflows: [CI]", "workflows: [Other]");
+    assert!(
+        !audit_runner_fixture(&wrong_producer, &policy)
+            .runners
+            .is_empty(),
+        "workflow_run display-name matching must use configured producer identity"
+    );
+
+    let wrong_workflow_id =
+        generated.replace("EXPECTED_WORKFLOW_ID: 42", "EXPECTED_WORKFLOW_ID: 43");
+    assert!(
+        !audit_runner_fixture(&wrong_workflow_id, &policy)
+            .runners
+            .is_empty(),
+        "producer gate must bind the configured Actions workflow id"
+    );
+
+    let wrong_head_repository = generated.replace(
+        "PRODUCER_HEAD_REPOSITORY_ID: ${{ github.event.workflow_run.head_repository.id }}",
+        "PRODUCER_HEAD_REPOSITORY_ID: ${{ github.event.workflow_run.repository.id }}",
+    );
+    assert!(
+        !audit_runner_fixture(&wrong_head_repository, &policy)
+            .runners
+            .is_empty(),
+        "workflow_run admission must prove the event's head_repository identity"
+    );
+}
+
+#[test]
+fn provenance_guard_blocks_always_steps_without_the_class_predicate() {
+    let policy = runner_policy_fixture();
+    let unconditional = format!(
+        "{}      - name: Unconditional command\n        run: echo command\n",
+        hosted_guard()
+    );
+    let audit = audit_runner_fixture(&runner_fixture("ubuntu-24.04", &unconditional, ""), &policy);
+    assert!(
+        audit.runners.iter().any(|finding| {
+            finding.contains("step Unconditional command")
+                && finding.contains("expected runner.environment predicate")
+        }),
+        "an omitted condition must fail provenance: {:?}",
+        audit.runners
+    );
+
+    let bypass = format!(
+        "{}      - name: Always cleanup\n        if: always()\n        run: echo cleanup\n",
+        hosted_guard()
+    );
+    let audit = audit_runner_fixture(&runner_fixture("ubuntu-24.04", &bypass, ""), &policy);
+    assert!(
+        audit.runners.iter().any(|finding| {
+            finding.contains("step Always cleanup")
+                && finding.contains("expected runner.environment predicate")
+        }),
+        "always() must not bypass provenance: {:?}",
+        audit.runners
+    );
+
+    let gated = format!(
+        "{}      - name: Always cleanup\n        if: ${{{{ always() && runner.environment == 'github-hosted' }}}}\n        run: echo cleanup\n",
+        hosted_guard()
+    );
+    let audit = audit_runner_fixture(&runner_fixture("ubuntu-24.04", &gated, ""), &policy);
+    assert!(
+        audit.runners.is_empty(),
+        "explicit class gate: {:?}",
+        audit.runners
+    );
+}
+
+#[test]
+fn provenance_guard_cannot_be_disabled_with_continue_on_error() {
+    let policy = runner_policy_fixture();
+    let guard = "      - id: runner_provenance\n        shell: bash --noprofile --norc -p -e -o pipefail {0}\n        env: {BASH_ENV: \"\", SHELLOPTS: \"\", BASHOPTS: \"\"}\n        if: ${{ runner.environment != 'github-hosted' }}\n        continue-on-error: true\n        run: ((0))\n";
+    let audit = audit_runner_fixture(
+        &runner_fixture("ubuntu-24.04", guard, "    continue-on-error: true\n"),
+        &policy,
+    );
+    assert!(
+        audit
+            .runners
+            .iter()
+            .any(|finding| finding.contains("job continue-on-error")),
+        "job continue-on-error must fail: {:?}",
+        audit.runners
+    );
+    assert!(
+        audit
+            .runners
+            .iter()
+            .any(|finding| finding.contains("guard must not use continue-on-error")),
+        "guard continue-on-error must fail: {:?}",
+        audit.runners
+    );
+}
+
+#[test]
+fn provenance_guard_requires_bash_and_a_single_nonzero_exit() {
+    let policy = runner_policy_fixture();
+    let no_shell = "      - id: runner_provenance\n        if: ${{ runner.environment != 'github-hosted' }}\n        run: ((0))\n";
+    let audit = audit_runner_fixture(&runner_fixture("ubuntu-24.04", no_shell, ""), &policy);
+    assert!(
+        audit
+            .runners
+            .iter()
+            .any(|finding| finding.contains("privileged Bash shell template")),
+        "guard without explicit bash must fail: {:?}",
+        audit.runners
+    );
+
+    let default_bash = "      - id: runner_provenance\n        shell: bash\n        env: {BASH_ENV: \"\", SHELLOPTS: \"\", BASHOPTS: \"\"}\n        if: ${{ runner.environment != 'github-hosted' }}\n        run: ((0))\n";
+    let audit = audit_runner_fixture(&runner_fixture("ubuntu-24.04", default_bash, ""), &policy);
+    assert!(
+        audit
+            .runners
+            .iter()
+            .any(|finding| finding.contains("privileged Bash shell template")),
+        "default Bash template imports inherited shell functions"
+    );
+
+    for run in ["exit 1", "exit 0; exit 1", "exit 0\nexit 1", "exit 256"] {
+        assert!(
+            !run_guarantees_nonzero(run),
+            "unsafe guard script must fail closed: {run:?}"
+        );
+    }
+    assert!(run_guarantees_nonzero("((0))"));
+}
+
+#[test]
+fn provenance_guard_clears_bash_startup_environment_exactly() {
+    let policy = runner_policy_fixture();
+    let clean_guard = hosted_guard();
+    let clean_env = format!("        env: {}\n", runner_guard_environment_yaml());
+    for env in [
+        None,
+        Some("{}"),
+        Some("{BASH_ENV: \"\", BASHOPTS: \"\"}"),
+        Some("{BASH_ENV: /tmp/hostile.sh}"),
+        Some("{BASH_ENV: \"\", SHELLOPTS: noexec, BASHOPTS: \"\"}"),
+        Some("{BASH_ENV: \"\", SHELLOPTS: \"\", BASHOPTS: \"\", EXTRA: value}"),
+    ] {
+        let guard = env.map_or_else(
+            || clean_guard.replace(&clean_env, ""),
+            |env| clean_guard.replace(&clean_env, &format!("        env: {env}\n")),
+        );
+        let audit = audit_runner_fixture(&runner_fixture("ubuntu-24.04", &guard, ""), &policy);
+        assert!(
+            audit
+                .runners
+                .iter()
+                .any(|finding| finding.contains("clear every shell-startup and loader override")),
+            "unsafe Bash startup environment must fail: {env:?}: {:?}",
+            audit.runners
+        );
+    }
+    assert!(
+        audit_runner_fixture(
+            &runner_fixture("ubuntu-24.04", &hosted_guard(), ""),
+            &policy
+        )
+        .runners
+        .is_empty(),
+        "the exact empty shell-startup and loader overrides allow the generated guard"
+    );
+
+    let wrong_directory = hosted_guard().replace(
+        &format!(
+            "working-directory: '{}'",
+            crate::primitives::runner_guard::GUARD_WORKING_DIRECTORY
+        ),
+        "working-directory: .",
+    );
+    let audit = audit_runner_fixture(
+        &runner_fixture("ubuntu-24.04", &wrong_directory, ""),
+        &policy,
+    );
+    assert!(
+        audit
+            .runners
+            .iter()
+            .any(|finding| { finding.contains("runner-owned temporary working directory") }),
+        "guard must execute from the runner-owned temporary directory: {:?}",
+        audit.runners
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn runner_guard_failure_survives_inherited_noexec_and_exit_function() {
+    let inherited_noexec = Command::new("bash")
+        .args([
+            "--noprofile",
+            "--norc",
+            "-e",
+            "-o",
+            "pipefail",
+            "-c",
+            "((0))",
+        ])
+        .env("SHELLOPTS", "noexec")
+        .env("BASH_ENV", "")
+        .output()
+        .expect("run Bash with inherited noexec");
+    assert_eq!(
+        inherited_noexec.status.code(),
+        Some(0),
+        "inherited SHELLOPTS=noexec skips the guard body"
+    );
+
+    let guarded = Command::new("bash")
+        .args([
+            "--noprofile",
+            "--norc",
+            "-p",
+            "-e",
+            "-o",
+            "pipefail",
+            "-c",
+            "((0))",
+        ])
+        .env("BASH_ENV", "")
+        .env("SHELLOPTS", "noexec")
+        .env("BASHOPTS", "extdebug")
+        .env("BASH_FUNC_exit%%", "() { return 0; }")
+        .env("BASH_FUNC_builtin%%", "() { return 0; }")
+        .output()
+        .expect("run hardened Bash guard");
+    assert_eq!(
+        guarded.status.code(),
+        Some(1),
+        "arithmetic failure cannot be bypassed by imported exit function"
+    );
+}
+
+#[test]
+fn container_and_service_jobs_cannot_claim_runner_provenance() {
+    let policy = runner_policy_fixture();
+    for field in [
+        "container: ubuntu:latest",
+        "services:\n      database:\n        image: postgres",
+    ] {
+        let audit = audit_runner_fixture(
+            &runner_fixture("ubuntu-24.04", &hosted_guard(), &format!("    {field}\n")),
+            &policy,
+        );
+        assert!(
+            audit
+                .runners
+                .iter()
+                .any(|finding| finding.contains("container or services")),
+            "container/service must fail provenance audit: {field}: {:?}",
+            audit.runners
+        );
+    }
+}
+
+#[test]
+fn runner_provenance_resolves_only_homogeneous_finite_matrix_classes() {
+    let policy = runner_policy_fixture();
+    let hosted_matrix =
+        "    strategy:\n      matrix:\n        runner: [ubuntu-24.04, ubuntu-26.04]\n";
+    let audit = audit_runner_fixture(
+        &runner_fixture("${{ matrix.runner }}", &hosted_guard(), hosted_matrix),
+        &policy,
+    );
+    assert!(
+        audit.runners.is_empty(),
+        "same-class matrix: {:?}",
+        audit.runners
+    );
+
+    let mixed_matrix = "    strategy:\n      matrix:\n        include:\n          - runner: ubuntu-24.04\n          - runner: [self-hosted, velnor-target-mvp]\n";
+    let audit = audit_runner_fixture(
+        &runner_fixture("${{ matrix.runner }}", &hosted_guard(), mixed_matrix),
+        &policy,
+    );
+    assert!(
+        audit.runners.iter().any(|finding| {
+            finding.contains("one verified runner environment class")
+                || finding.contains("does not match any declared provider selector")
+        }),
+        "mixed hosted/local matrix must fail closed: {:?}",
+        audit.runners
+    );
+
+    let unresolved = "    strategy:\n      matrix:\n        config: [{runner: ubuntu-24.04}]\n";
+    let audit = audit_runner_fixture(
+        &runner_fixture("${{ matrix.config.runner }}", &hosted_guard(), unresolved),
+        &policy,
+    );
+    assert!(
+        audit.runners.iter().any(|finding| {
+            finding.contains("unresolved or dynamic runner label")
+                || finding.contains("one verified runner environment class")
+        }),
+        "unresolved matrix selector must fail: {:?}",
+        audit.runners
+    );
+}
+
+#[test]
+fn approved_dynamic_provider_selector_tracks_its_runner_environment_branch() {
+    let policy = runner_policy_fixture();
+    let shape = crate::s2::estate::APPROVED_DYNAMIC_RUNNERS[0];
+    let workflow_without_guard = runner_fixture(
+        &format!(">-\n      ${{{{ {shape} }}}}"),
+        "      - run: echo user code\n",
+        "",
+    );
+    let document: Value = must(
+        serde_yaml::from_str(&workflow_without_guard),
+        "parse dynamic runner fixture",
+    );
+    let job = mapping_value(
+        mapping_value(document.as_mapping().expect("workflow mapping"), "jobs")
+            .and_then(Value::as_mapping)
+            .expect("jobs mapping"),
+        "check",
+    )
+    .and_then(Value::as_mapping)
+    .expect("check job");
+    let runs_on = mapping_value(job, "runs-on").expect("runs-on value");
+    let expected = runner_environment_expectation(runs_on, None, &policy)
+        .expect("approved selector has a branch-matched expectation")
+        .predicate();
+    assert!(expected.contains("runner.environment=='github-hosted'"));
+    assert!(expected.contains("runner.environment=='self-hosted'"));
+    assert!(expected.contains("inputs.providers"));
+
+    let steps = format!(
+        "{}      - name: Always cleanup\n        if: ${{{{ always() && ({expected}) }}}}\n        run: echo cleanup\n",
+        runner_guard_with_condition(&format!("!({expected})"))
+    );
+    let guarded = runner_fixture(&format!(">-\n      ${{{{ {shape} }}}}"), &steps, "");
+    let audit = audit_runner_fixture(&guarded, &policy);
+    assert!(
+        audit.runners.is_empty(),
+        "approved dynamic shape: {:?}",
+        audit.runners
+    );
+
+    let unsupported_event = guarded.replace("on: push", "on: workflow_run");
+    let audit = audit_runner_fixture(&unsupported_event, &policy);
+    assert!(
+        audit
+            .runners
+            .iter()
+            .any(|finding| finding.contains("local-provider jobs require a trusted-event gate")),
+        "uncovered trigger falls through to local runner: {:?}",
+        audit.runners
+    );
+
+    let matrix_fields = format!(
+        "    if: ${{{{ {} }}}}\n    strategy:\n      matrix:\n        runner:\n          - >-\n            ${{{{ {shape} }}}}\n",
+        trusted_event_conjunct()
+    );
+    let matrix_workflow = runner_fixture("${{ matrix.runner }}", &steps, &matrix_fields)
+        .replace("on: push", "on: workflow_run");
+    let audit = audit_runner_fixture(&matrix_workflow, &policy);
+    assert!(
+        audit
+            .runners
+            .iter()
+            .any(|finding| finding.contains("local-provider jobs require a trusted-event gate")),
+        "matrix dynamic selector on an uncovered trigger must fail: {:?}",
+        audit.runners
+    );
+
+    let custom = shape.replace("velnor-target-mvp", "runner-private");
+    let invalid = runner_fixture(
+        &format!(">-\n      ${{{{ {custom} }}}}"),
+        &hosted_guard(),
+        "",
+    );
+    let audit = audit_runner_fixture(&invalid, &policy);
+    assert!(
+        audit.runners.iter().any(|finding| {
+            finding.contains("unresolved or dynamic runner label")
+                || finding.contains("one verified runner environment class")
+        }),
+        "custom dynamic selector must fail: {:?}",
+        audit.runners
+    );
+
+    let whitespace_in_selector = shape.replace("velnor-target-mvp", "velnor -target-mvp");
+    assert!(
+        approved_dynamic_runner_host_condition(&whitespace_in_selector, &policy).is_none(),
+        "whitespace inside a quoted selector must remain significant"
+    );
+}
+
+#[test]
+fn group_runners_and_remote_reusable_calls_fail_closed() {
+    let policy = runner_policy_fixture();
+    let grouped = runner_fixture(
+        "\n      group: hosted-looking-group\n      labels: ubuntu-24.04",
+        &hosted_guard(),
+        "",
+    );
+    let audit = audit_runner_fixture(&grouped, &policy);
+    assert!(
+        audit.runners.iter().any(|finding| {
+            finding.contains("one verified runner environment class")
+                || finding.contains("does not match any declared provider selector")
+        }),
+        "unknown group must fail: {:?}",
+        audit.runners
+    );
+
+    let remote = "name: Remote\non: push\njobs:\n  call:\n    uses: other-org/.github/workflows/ci.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+    let audit = audit_runner_fixture(remote, &policy);
+    assert!(
+        audit
+            .actions
+            .iter()
+            .any(|finding| finding.contains("audited local callee")),
+        "remote reusable workflow must fail: {:?}",
+        audit.actions
+    );
+}
+
+#[test]
+fn action_pin_audit_rejects_unreviewed_full_sha_and_accepts_reviewed_pin() {
+    let policy = runner_policy_fixture();
+    let approved = crate::s2::ActionPin::Checkout
+        .reference()
+        .split_once(" #")
+        .map_or(
+            crate::s2::ActionPin::Checkout.reference(),
+            |(reference, _)| reference,
+        );
+    let known_steps = format!(
+        "{}      - uses: {approved}\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n",
+        hosted_guard()
+    );
+    let known = audit_runner_fixture(&runner_fixture("ubuntu-24.04", &known_steps, ""), &policy);
+    assert!(
+        known.actions.is_empty(),
+        "reviewed action pin: {:?}",
+        known.actions
+    );
+
+    let unknown_steps = format!(
+        "{}      - uses: example/action@{PIN_B}\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n",
+        hosted_guard()
+    );
+    let unknown =
+        audit_runner_fixture(&runner_fixture("ubuntu-24.04", &unknown_steps, ""), &policy);
+    assert!(
+        unknown
+            .actions
+            .iter()
+            .any(|finding| finding.contains("lacks a reviewed pre-step safety contract")),
+        "unreviewed full-SHA action must fail: {:?}",
+        unknown.actions
+    );
+}
+
+#[test]
+fn local_action_audit_resolves_and_recursively_checks_composite_manifests() {
+    let reference = "./.github/actions/local";
+    let checkout = crate::s2::ActionPin::Checkout
+        .reference()
+        .split_once(" #")
+        .map_or(
+            crate::s2::ActionPin::Checkout.reference(),
+            |(reference, _)| reference,
+        );
+    let valid_manifest = format!(
+        "name: local\ndescription: local composite\nruns:\n  using: composite\n  steps:\n    - name: Nested reviewed action\n      uses: {checkout}\n"
+    );
+    let root = temporary_directory("safe-local-action");
+    must(
+        fs::create_dir_all(root.join(".github/workflows")),
+        "create local action test workflow directory",
+    );
+    must(
+        fs::create_dir_all(root.join(".github/actions/local")),
+        "create local action test action directory",
+    );
+    let workflow = with_hosted_guard(&format!(
+        "name: Local action\non: push\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: {reference}\n"
+    ));
+    write(&root.join(".github/workflows/local.yml"), &workflow);
+    write(
+        &root.join(".github/actions/local/action.yml"),
+        &valid_manifest,
+    );
+    let audit = must(audit_workflows(&root), "audit safe local action closure");
+    assert!(
+        audit.actions.is_empty(),
+        "safe composite: {:?}",
+        audit.actions
+    );
+    let _ = fs::remove_dir_all(&root);
+
+    for (case, manifest) in [
+        (
+            "missing",
+            None,
+        ),
+        (
+            "docker",
+            Some("name: local\nruns:\n  using: docker\n  image: Dockerfile\n".to_owned()),
+        ),
+        (
+            "pre-if",
+            Some(
+                "name: local\nruns:\n  using: composite\n  pre-if: always()\n  steps:\n    - run: echo unsafe\n      shell: bash\n"
+                    .to_owned(),
+            ),
+        ),
+        (
+            "nested-unknown",
+            Some(format!(
+                "name: local\nruns:\n  using: composite\n  steps:\n    - uses: example/action@{PIN_B}\n"
+            )),
+        ),
+        (
+            "malformed",
+            Some("runs: [not-a-mapping]\n".to_owned()),
+        ),
+    ] {
+        let root = temporary_directory(&format!("unsafe-local-action-{case}"));
+        must(
+            fs::create_dir_all(root.join(".github/workflows")),
+            "create unsafe local action workflow directory",
+        );
+        must(
+            fs::create_dir_all(root.join(".github/actions/local")),
+            "create unsafe local action directory",
+        );
+        write(
+            &root.join(".github/workflows/local.yml"),
+            &with_hosted_guard(&format!(
+                "name: Local action\non: push\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: {reference}\n"
+            )),
+        );
+        if let Some(manifest) = manifest {
+            write(&root.join(".github/actions/local/action.yml"), &manifest);
+        }
+        let audit = must(audit_workflows(&root), "audit unsafe local action");
+        assert!(
+            audit.actions.iter().any(|finding| {
+                finding.contains("local action failed the pre-step metadata contract")
+            }),
+            "{case} action metadata must fail: {:?}",
+            audit.actions
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    let root = temporary_directory("nested-local-action");
+    must(
+        fs::create_dir_all(root.join(".github/workflows")),
+        "create nested local action workflow directory",
+    );
+    must(
+        fs::create_dir_all(root.join(".github/actions/local")),
+        "create parent composite directory",
+    );
+    must(
+        fs::create_dir_all(root.join(".github/actions/child")),
+        "create nested composite directory",
+    );
+    write(
+        &root.join(".github/workflows/local.yml"),
+        &with_hosted_guard(&format!(
+            "name: Nested local action\non: push\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: {reference}\n"
+        )),
+    );
+    write(
+        &root.join(".github/actions/local/action.yml"),
+        "name: local\nruns:\n  using: composite\n  steps:\n    - uses: ./.github/actions/child\n",
+    );
+    write(
+        &root.join(".github/actions/child/action.yml"),
+        &format!(
+            "name: child\nruns:\n  using: composite\n  steps:\n    - uses: example/action@{PIN_B}\n"
+        ),
+    );
+    let audit = must(audit_workflows(&root), "audit nested local action closure");
+    assert!(
+        audit
+            .actions
+            .iter()
+            .any(|finding| { finding.contains("reviewed no-pre allowlist") }),
+        "nested local composites must recursively validate external refs: {:?}",
+        audit.actions
+    );
+    let _ = fs::remove_dir_all(&root);
 }
 
 /// The semantic rules pass on a tree whose trusted Velnor job carries the
@@ -1261,12 +2532,16 @@ fn every_workflow_gets_full_semantic_audit_checks() {
             "{base}\n[[static_files]]\nfile = \".github/workflows/ci-static.yml\"\nsource = \".github-gen/ci-static.yml\"\n"
         ),
     );
-    let unpinned = "name: Workflow\non:\n  workflow_dispatch:\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@v4\n";
-    write(&root.join(".github-gen/ci-static.yml"), unpinned);
-    write(&root.join(".github/workflows/ci-static.yml"), unpinned);
+    let unpinned = with_hosted_guard(
+        "name: Workflow\non:\n  workflow_dispatch:\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@v4\n",
+    );
+    write(&root.join(".github-gen/ci-static.yml"), &unpinned);
+    write(&root.join(".github/workflows/ci-static.yml"), &unpinned);
     write(
         &root.join(".github/workflows/ci-old.yml"),
-        "name: Old workflow\non:\n  pull_request_target:\n    types: [opened]\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@v4\n",
+        &with_hosted_guard(
+            "name: Old workflow\non:\n  pull_request_target:\n    types: [opened]\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@v4\n",
+        ),
     );
     write(
         &root.join(".github/workflows/ci-invalid.yml"),
@@ -1274,7 +2549,9 @@ fn every_workflow_gets_full_semantic_audit_checks() {
     );
     write(
         &root.join(POLICY_ENTRYPOINT),
-        "name: Policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\n  workflow_dispatch:\npermissions:\n  contents: read\njobs:\n  policy:\n    runs-on: ubuntu-24.04\n    permissions:\n      contents: read\n    steps:\n      - uses: actions/checkout@v4\n",
+        &with_hosted_guard(
+            "name: Policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\n  workflow_dispatch:\npermissions:\n  contents: read\njobs:\n  policy:\n    runs-on: ubuntu-24.04\n    permissions:\n      contents: read\n    steps:\n      - uses: actions/checkout@v4\n",
+        ),
     );
 
     let audit = must(audit_workflows(&root), "audit workflow tree");
@@ -1507,6 +2784,11 @@ fn provider_gate_admits_dispatch_on_any_ref() {
         is_generated_provider_gate(&manual, "velnor"),
         "provider gate admitted: {manual}"
     );
+    let malformed_literal = format!("${{{{ {} }}}}", trusted.replace("'Bot'", "'B ot'"));
+    assert!(
+        !is_generated_provider_gate(&malformed_literal, "velnor"),
+        "whitespace inside quoted literals must remain significant"
+    );
     // An input-matching gate is not generated: no input selects providers.
     let input_match = format!(
         "${{{{ ((github.event_name == 'workflow_dispatch' && contains(format(',{{0}},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && {trusted} }}}}",
@@ -1543,6 +2825,9 @@ fn trusted_conjunct_members_pass_and_near_misses_fail() {
         format!("${{{{ {trusted} && (needs.verify.outputs.mode == 'publish') || (github.event_name == 'push') }}}}"),
         // Dropped Bot clause: not the predicate.
         "${{ (!(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) }}".to_owned(),
+        // Whitespace inside literals changes the runtime event/type value.
+        format!("${{{{ ({}) }}}}", trusted.replace("'Bot'", "'B ot'")),
+        format!("${{{{ ({}) }}}}", trusted.replace("'pull_request'", "'pull_ request'")),
         // Double-wrapped: not the generated spelling.
         format!("${{{{ (({trusted})) && (needs.verify.outputs.mode == 'publish') }}}}"),
         // No trusted conjunct at all.
@@ -3078,30 +4363,24 @@ fn rendered_entrypoints_pass_the_legacy_space_marker_scan() {
 
 #[test]
 fn policy_sibling_setup_action_is_a_reviewed_local_path() {
-    assert!(
-        is_approved_local_action(crate::s2::VELNOR_WORKFLOW_POLICY_SETUP_ACTION),
-        "the owner policy job resolves its setup composite out of the sibling checkout"
-    );
-    assert!(
-        !is_approved_local_action("./policy-setup-action/.github/actions/anything-else"),
-        "the sibling allowance is the exact setup composite, never a second local path"
-    );
-    assert!(
-        !is_approved_local_action("./policy-setup-action/.github/workflows/ci-pr.yml"),
-        "the sibling checkout carries no reusable workflows"
-    );
-    assert!(
-        is_approved_local_action(crate::s2::VELNOR_WORKFLOW_SOURCE_SETUP_ACTION),
-        "the owner package publisher resolves setup from its exact source checkout"
-    );
-    assert!(
-        !is_approved_local_action("./source/.github/actions/anything-else"),
-        "the source checkout allowance is the exact setup composite"
-    );
-    assert!(
-        !is_approved_local_action("./other-source/.github/actions/setup-velnor-workflow"),
-        "other checkout paths are not implicitly trusted"
-    );
+    assert!(is_approved_local_action(
+        crate::s2::VELNOR_WORKFLOW_POLICY_SETUP_ACTION
+    ));
+    assert!(!is_approved_local_action(
+        "./policy-setup-action/.github/actions/anything-else"
+    ));
+    assert!(!is_approved_local_action(
+        "./policy-setup-action/.github/workflows/ci-pr.yml"
+    ));
+    assert!(is_approved_local_action(
+        crate::s2::VELNOR_WORKFLOW_SOURCE_SETUP_ACTION
+    ));
+    assert!(!is_approved_local_action(
+        "./source/.github/actions/anything-else"
+    ));
+    assert!(!is_approved_local_action(
+        "./other-source/.github/actions/setup-velnor-workflow"
+    ));
 }
 
 // ---------------------------------------------------------------------------

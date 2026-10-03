@@ -62,6 +62,8 @@ pub(crate) const GENERATION_CONFIG: &str = ".github-gen/velnor-workflow.toml";
 /// The runtime contract, kept beside the generation config for the Velnor
 /// lane fields the advisory audit needs.
 const RUNTIME_CONFIG: &str = ".github/ci/project.toml";
+const MAX_ACTION_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_TOTAL_ACTION_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 /// The base-owned policy entrypoint: the only workflow allowed to run on
 /// `pull_request_target`.
 const POLICY_ENTRYPOINT: &str = ".github/workflows/ci-policy.yml";
@@ -2832,11 +2834,31 @@ fn audit_entrypoint_privileges(
             }
             match mapping_value(job, "runs-on") {
                 Some(runs_on) => {
+                    match runner_environment_match(runs_on, None, velnor_policy) {
+                        Some(expected_environment) => {
+                            let mut findings = PolicyFindings::default();
+                            findings.job = Some(job_id.as_str().to_owned());
+                            audit_runner_environment_guard(
+                                job,
+                                Path::new(POLICY_ENTRYPOINT),
+                                &expected_environment,
+                                &mut findings,
+                            );
+                            audit.privileges.extend(findings.audit.runners);
+                        }
+                        None => audit.privileges.push(finding(&format!(
+                            "job {job_id} runs-on has no exact hosted/self-hosted runtime provenance contract"
+                        ))),
+                    }
                     let mut resolving = BTreeSet::new();
-                    let analysis = analyze_runner(runs_on, None, &mut resolving);
-                    if analysis.dynamic || analysis.invalid {
+                    let mut analysis = analyze_runner(runs_on, None, &mut resolving, velnor_policy);
+                    if is_configured_velnor_runner(runs_on, velnor_policy) {
+                        analysis.unverified = false;
+                        analysis.self_hosted = true;
+                    }
+                    if analysis.dynamic || analysis.invalid || analysis.unverified {
                         audit.privileges.push(finding(&format!(
-                            "job {job_id} runs-on must be static labels"
+                            "job {job_id} runs-on must use a supported GitHub-hosted label or the configured Velnor runner selector"
                         )));
                     } else if analysis.self_hosted {
                         let gated = mapping_value(job, "if")
@@ -3000,62 +3022,95 @@ fn contains_context_name(value: &str, context: &str) -> bool {
 fn contains_github_token_access(value: &str) -> bool {
     let normalized = value.to_ascii_lowercase();
     let bytes = normalized.as_bytes();
-    let mut offset = 0;
-    while let Some(relative) = normalized[offset..].find("github") {
-        let start = offset + relative;
+    for start in unquoted_identifier_offsets(&normalized, "github") {
         let end = start + "github".len();
-        if identifier_boundary(bytes, start, end) {
-            let next = skip_ascii_whitespace(bytes, end);
-            match bytes.get(next).copied() {
-                Some(b'[') => return true,
-                Some(b'.') => {
-                    let property = skip_ascii_whitespace(bytes, next + 1);
-                    if identifier_at(bytes, property, "token") {
-                        return true;
-                    }
+        let next = skip_ascii_whitespace(bytes, end);
+        match bytes.get(next).copied() {
+            Some(b'[') => return true,
+            Some(b'.') => {
+                let property = skip_ascii_whitespace(bytes, next + 1);
+                if identifier_at(bytes, property, "token") {
+                    return true;
                 }
-                _ if github_root_is_in_expression(&normalized, start) => return true,
-                _ => {}
             }
+            _ if github_root_is_in_expression(&normalized, start) => return true,
+            _ => {}
         }
-        offset = end;
     }
     contains_github_serialization(&normalized)
 }
 
-fn contains_github_serialization(value: &str) -> bool {
+fn unquoted_identifier_offsets(value: &str, identifier: &str) -> Vec<usize> {
     let bytes = value.as_bytes();
-    let mut offset = 0;
-    while let Some(relative) = value[offset..].find("tojson") {
-        let start = offset + relative;
-        let end = start + "tojson".len();
-        if !identifier_boundary(bytes, start, end) {
-            offset = end;
+    let mut offsets = Vec::new();
+    let mut in_string = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        if in_string {
+            if bytes[index] == b'\'' {
+                if bytes.get(index + 1) == Some(&b'\'') {
+                    index += 2;
+                    continue;
+                }
+                in_string = false;
+            }
+            index += 1;
             continue;
         }
+        if bytes[index] == b'\'' {
+            in_string = true;
+            index += 1;
+            continue;
+        }
+        let end = index + identifier.len();
+        if end <= bytes.len()
+            && &bytes[index..end] == identifier.as_bytes()
+            && identifier_boundary(bytes, index, end)
+        {
+            offsets.push(index);
+            index = end;
+        } else {
+            index += 1;
+        }
+    }
+    offsets
+}
+
+fn contains_github_serialization(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    for start in unquoted_identifier_offsets(value, "tojson") {
+        let end = start + "tojson".len();
         let open = skip_ascii_whitespace(bytes, end);
         if bytes.get(open) != Some(&b'(') {
-            offset = end;
             continue;
         }
         let mut depth = 1;
         let mut cursor = open + 1;
+        let mut in_string = false;
         while cursor < bytes.len() && depth > 0 {
-            match bytes[cursor] {
-                b'(' => depth += 1,
-                b')' => depth -= 1,
-                _ => {}
-            }
-            if depth > 0
-                && cursor + "github".len() <= bytes.len()
-                && &bytes[cursor..cursor + "github".len()] == b"github"
-                && identifier_boundary(bytes, cursor, cursor + "github".len())
-            {
-                return true;
+            if in_string {
+                if bytes[cursor] == b'\'' {
+                    if bytes.get(cursor + 1) == Some(&b'\'') {
+                        cursor += 2;
+                        continue;
+                    }
+                    in_string = false;
+                }
+            } else {
+                match bytes[cursor] {
+                    b'\'' => in_string = true,
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
             }
             cursor += 1;
         }
-        offset = end;
+        if depth == 0
+            && !unquoted_identifier_offsets(&value[open + 1..cursor - 1], "github").is_empty()
+        {
+            return true;
+        }
     }
     false
 }
@@ -3237,6 +3292,20 @@ fn canonical_api_step_findings(
         Vec::new()
     };
 
+    let expected_environment = mapping_value(job, "runs-on")
+        .and_then(|runs_on| runner_environment_match(runs_on, None, velnor_policy));
+    let expected = expected
+        .into_iter()
+        .map(|step| {
+            expected_environment
+                .as_deref()
+                .and_then(|expected_environment| {
+                    add_runner_environment_condition_to_step(&step, expected_environment)
+                })
+                .unwrap_or(step)
+        })
+        .collect::<Vec<_>>();
+
     let canonical_names = expected
         .iter()
         .filter_map(|step| {
@@ -3286,6 +3355,24 @@ fn canonical_api_step_findings(
         }
     }
     findings
+}
+
+fn add_runner_environment_condition_to_step(step: &Value, expected: &str) -> Option<Value> {
+    let mut step = step.as_mapping()?.clone();
+    let condition = mapping_value(&step, "if").and_then(Value::as_str);
+    let gated = condition.map_or_else(
+        || format!("${{{{ ({expected}) }}}}"),
+        |condition| {
+            let body = condition
+                .trim()
+                .strip_prefix("${{")
+                .and_then(|value| value.strip_suffix("}}"))
+                .map_or(condition.trim(), str::trim);
+            format!("${{{{ ({expected}) && ({body}) }}}}")
+        },
+    );
+    step.insert("if", Value::String(gated));
+    Some(Value::Mapping(step))
 }
 
 fn is_contents_read_only(permissions: Option<&Value>) -> bool {
@@ -3340,11 +3427,25 @@ struct PolicyFindings {
     audit: WorkflowAudit,
     /// The tree root: findings name workflows relative to it.
     root: PathBuf,
+    /// Workflow files collected before auditing begins. Local reusable
+    /// workflow calls are trusted only when their target is in this set.
+    audited_workflows: BTreeSet<PathBuf>,
     /// The job under inspection, so a finding names where it was made.
     job: Option<String>,
 }
 
 impl PolicyFindings {
+    fn is_audited_local_reusable(&self, value: &str) -> bool {
+        if !is_approved_local_reusable(value) {
+            return false;
+        }
+        let Some(name) = value.strip_prefix("./.github/workflows/") else {
+            return false;
+        };
+        self.audited_workflows
+            .contains(&self.root.join(".github/workflows").join(name))
+    }
+
     fn record(&mut self, rule: Rule, path: &Path, message: &str) {
         let path = path.strip_prefix(&self.root).unwrap_or(path).display();
         let line = match &self.job {
@@ -3408,6 +3509,7 @@ pub(crate) fn audit_workflows(root: &Path) -> Result<WorkflowAudit, GeneratorErr
         }
     }
     paths.sort();
+    findings.audited_workflows.extend(paths.iter().cloned());
     for path in paths {
         let is_policy_entrypoint = path == policy_entrypoint;
         let content = fs::read_to_string(&path)
@@ -3470,10 +3572,15 @@ fn is_static_self_hosted_runner(job: &Mapping, velnor_policy: &VelnorPolicyContr
         return false;
     };
     let mut resolving = BTreeSet::new();
-    let analysis = analyze_runner(runs_on, None, &mut resolving);
+    let mut analysis = analyze_runner(runs_on, None, &mut resolving, velnor_policy);
+    if is_configured_velnor_runner(runs_on, velnor_policy) {
+        analysis.unverified = false;
+        analysis.self_hosted = true;
+    }
     analysis.self_hosted
         && !analysis.dynamic
         && !analysis.invalid
+        && !analysis.unverified
         && (!velnor_policy.requires_approved_runner()
             || is_approved_velnor_runner(runs_on, velnor_policy))
 }
@@ -3486,6 +3593,19 @@ fn has_safe_runner_gate(
     if has_trusted_runner_gate(condition) {
         return true;
     }
+    // Schema-1 scheduled checks use the canonical lane admission predicate
+    // for Velnor jobs.  In the default trusted-only mode it admits only
+    // merge-queue evidence, default-branch push/schedule evidence, and a
+    // Velnor-selecting dispatch.  Keep this as an exact generated shape so
+    // broad self-hosted gates cannot pass the audit by mentioning a trusted
+    // event alongside an unsafe condition.
+    if is_generated_velnor_lane_gate(condition, velnor_policy) {
+        return is_static_self_hosted_runner(job, velnor_policy);
+    }
+    if is_generated_velnor_lanes_input_gate(condition, velnor_policy) {
+        return mapping_value(job, "runs-on")
+            .is_some_and(|runs_on| approved_lanes_runner(runs_on, velnor_policy).is_some());
+    }
     // Dual-lane automatic Velnor jobs admit same-repository pull_request plus
     // the default-branch push/schedule (and merge_group when emitted) plus a
     // lane-selecting dispatch on any ref: dispatch needs write access on a
@@ -3493,7 +3613,9 @@ fn has_safe_runner_gate(
     // (`TrustClass::derive`, `velnor_dispatch_selection_expression`).
     // That generated shape is trusted even when the advisory checkout lacks
     // `.github/ci/project.toml` and only carries `.github-gen`.
-    is_generated_velnor_pr_gate(condition, &velnor_policy.default_branch)
+    velnor_policy.pull_request_on_velnor
+        && matches!(velnor_policy.automatic.as_str(), "velnor" | "both")
+        && is_generated_velnor_pr_gate(condition, &velnor_policy.default_branch)
         && is_static_self_hosted_runner(job, velnor_policy)
 }
 
@@ -3514,6 +3636,40 @@ fn generation_workflow(root: &Path) -> Result<Option<toml::Value>, GeneratorErro
         GeneratorError::usage(format!("parse workflow config {}: {error}", path.display()))
     })?;
     Ok(value.get("workflow").cloned())
+}
+
+fn generation_revision(root: &Path) -> Result<Option<String>, GeneratorError> {
+    let path = root.join(GENERATION_CONFIG);
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(GeneratorError::io(
+                "read workflow generator pin",
+                &path,
+                &error,
+            ));
+        }
+    };
+    let value = toml::from_str::<toml::Value>(&content).map_err(|error| {
+        GeneratorError::usage(format!("parse workflow config {}: {error}", path.display()))
+    })?;
+    let revision = value
+        .get("generator")
+        .and_then(toml::Value::as_table)
+        .and_then(|generator| generator.get("revision"));
+    let Some(revision) = revision else {
+        return Ok(None);
+    };
+    let revision = revision.as_str().ok_or_else(|| {
+        GeneratorError::usage("[generator] revision must be a full commit SHA for action safety")
+    })?;
+    if !super::is_full_revision(revision) {
+        return Err(GeneratorError::usage(format!(
+            "[generator] revision must be a full commit SHA for action safety, got {revision:?}"
+        )));
+    }
+    Ok(Some(revision.to_owned()))
 }
 
 fn toml_string_array(
@@ -3560,7 +3716,10 @@ fn toml_bool(value: Option<&toml::Value>, field: &str) -> Result<Option<bool>, G
 #[derive(Clone, Debug, Default)]
 struct VelnorPolicyContract {
     runners: String,
+    automatic: String,
     default_branch: String,
+    generator_revision: Option<String>,
+    github_runner: String,
     velnor_labels: Vec<String>,
     velnor_runner_group: Option<String>,
     velnor_trusted_label: Option<String>,
@@ -3598,6 +3757,7 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
         Err(error) => return Err(GeneratorError::io("read workflow config", &path, &error)),
     };
     let generation = generation_workflow(root)?;
+    let generator_revision = generation_revision(root)?;
     if runtime.is_none() && generation.is_none() {
         return Ok(VelnorPolicyContract {
             default_branch: "main".to_owned(),
@@ -3623,6 +3783,17 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
         generation_workflow.and_then(|workflow| workflow.get("velnor_runner_group")),
         "[workflow] velnor_runner_group",
     )?;
+    let github_runner = match toml_string(
+        runtime_workflow.and_then(|workflow| workflow.get("github_runner")),
+        "[workflow] github_runner",
+    )? {
+        Some(runner) => runner,
+        None => toml_string(
+            generation_workflow.and_then(|workflow| workflow.get("github_runner")),
+            "[workflow] github_runner",
+        )?
+        .unwrap_or_else(|| "ubuntu-latest".to_owned()),
+    };
     let pull_request_on_velnor = toml_bool(
         generation_workflow.and_then(|workflow| workflow.get("pull_request_on_velnor")),
         "[workflow] pull_request_on_velnor",
@@ -3643,6 +3814,10 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
         })
         .unwrap_or_default()
         .to_owned();
+    let automatic = generation_workflow
+        .and_then(|workflow| workflow.get("automatic"))
+        .and_then(toml::Value::as_str)
+        .map_or_else(|| runners.clone(), str::to_owned);
     let default_branch = runtime
         .as_ref()
         .and_then(|value| value.get("default_branch"))
@@ -3656,7 +3831,10 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
         .to_owned();
     let policy = VelnorPolicyContract {
         runners,
+        automatic,
         default_branch,
+        generator_revision,
+        github_runner,
         velnor_labels: labels,
         velnor_runner_group: group,
         velnor_trusted_label,
@@ -3699,7 +3877,7 @@ fn normalize_gate_expression(value: &str) -> String {
 
 fn is_generated_velnor_pr_gate(value: &str, default_branch: &str) -> bool {
     let normalized = normalize_gate_expression(value);
-    let value = strip_reusable_unit_selector(&normalized).unwrap_or(&normalized);
+    let value = strip_reusable_unit_selector(&normalized).unwrap_or(normalized.as_str());
     if !runtime::valid_branch(default_branch) {
         return false;
     }
@@ -3744,6 +3922,459 @@ fn is_generated_velnor_pr_gate(value: &str, default_branch: &str) -> bool {
         })
 }
 
+/// The schema-1 Velnor lane admission shape when pull requests stay on the
+/// hosted lane.  This is deliberately an exact matcher for the expression
+/// emitted by the canonical `WorkflowIr::lane_admission_expression`: merge-group runs and
+/// default-branch push/schedule runs are trusted, while dispatch is trusted
+/// only when it selects Velnor (or both lanes).  The empty dispatch input is
+/// accepted only for dual-lane automatic mode, whose generated default is
+/// Velnor; single-lane Velnor mode emits the explicit choices only.
+fn is_generated_velnor_lane_gate(value: &str, velnor_policy: &VelnorPolicyContract) -> bool {
+    let normalized = normalize_gate_expression(value);
+    let normalized = strip_verifier_success_prerequisite(&normalized).unwrap_or(&normalized);
+    let value = strip_reusable_unit_selector(normalized).unwrap_or(normalized);
+    if !runtime::valid_branch(&velnor_policy.default_branch) {
+        return false;
+    }
+    let explicit_dispatch =
+        "github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')";
+    let default_dispatch =
+        "github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'||github.event.inputs.runner=='')";
+    if velnor_policy.automatic == "github" {
+        if velnor_policy.pull_request_on_velnor {
+            return false;
+        }
+        return value == explicit_dispatch || value == format!("({explicit_dispatch})");
+    }
+    if !matches!(velnor_policy.automatic.as_str(), "velnor" | "both") {
+        return false;
+    }
+    let trusted_automatic = format!(
+        "github.event_name=='merge_group'||(github.ref=='refs/heads/{}'&&(github.event_name=='push'||github.event_name=='schedule'))",
+        velnor_policy.default_branch
+    );
+    let automatic = if velnor_policy.pull_request_on_velnor {
+        format!(
+            "github.event_name=='pull_request'&&github.event.pull_request.head.repo.full_name==github.repository||{trusted_automatic}"
+        )
+    } else {
+        format!("({trusted_automatic})")
+    };
+    let combined = format!("{automatic}||({default_dispatch})");
+    value == combined || value == format!("({combined})")
+}
+
+/// The schema-1 lane-input admission shape: automatic Velnor trust events
+/// remain on the profile's default lane, while either workflow-dispatch lane
+/// is admitted and `runs-on` chooses hosted versus self-hosted execution.
+fn is_generated_velnor_lanes_input_gate(value: &str, velnor_policy: &VelnorPolicyContract) -> bool {
+    let normalized = normalize_gate_expression(value);
+    let normalized = strip_verifier_success_prerequisite(&normalized).unwrap_or(&normalized);
+    let value = strip_reusable_unit_selector(normalized).unwrap_or(normalized);
+    if !runtime::valid_branch(&velnor_policy.default_branch)
+        || velnor_policy.runners != "both"
+        || velnor_policy.automatic != "both"
+        || velnor_policy.velnor_runner_group.is_some()
+    {
+        return false;
+    }
+    let trusted_automatic = format!(
+        "github.event_name=='merge_group'||(github.ref=='refs/heads/{}'&&(github.event_name=='push'||github.event_name=='schedule'))",
+        velnor_policy.default_branch
+    );
+    let dispatch = "github.event_name=='workflow_dispatch'";
+    let automatic = if velnor_policy.pull_request_on_velnor {
+        format!(
+            "github.event_name=='pull_request'&&github.event.pull_request.head.repo.full_name==github.repository||{trusted_automatic}"
+        )
+    } else {
+        format!("({trusted_automatic})")
+    };
+    let combined = format!("{automatic}||({dispatch})");
+    value == combined || value == format!("({combined})")
+}
+
+/// Strict artifact verifiers add the producer's successful result as a
+/// conjunct around the same lane admission predicate.  Peel only that exact
+/// generated prerequisite; the lane expression below remains an exact match.
+fn strip_verifier_success_prerequisite(value: &str) -> Option<&str> {
+    let rest = value.strip_prefix("(needs.")?;
+    let marker = ".result=='success')&&(";
+    let separator = rest.find(marker)?;
+    let job_id = &rest[..separator];
+    let mut bytes = job_id.bytes();
+    if !bytes
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return None;
+    }
+    rest[separator + marker.len()..].strip_suffix(')')
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LanesRunnerDefault {
+    Github,
+    Velnor,
+}
+
+/// Recognize only the generic legacy `lanes_runs_on` expressions.  The
+/// hosted image and Velnor labels must come from the same configured policy,
+/// so arbitrary dynamic runners remain rejected.
+fn approved_lanes_runner(
+    value: &Value,
+    velnor_policy: &VelnorPolicyContract,
+) -> Option<LanesRunnerDefault> {
+    if velnor_policy.runners != "both" || !lanes_velnor_leg_is_safe(velnor_policy) {
+        return None;
+    }
+    let Value::String(value) = value else {
+        return None;
+    };
+    let normalized = normalize_runner_expression(value);
+    let hosted = crate::primitives::json_string(&velnor_policy.github_runner);
+    let labels = crate::primitives::lanes_labels_json(&velnor_policy.velnor_labels);
+    let velnor_default = format!(
+        "(github.event_name=='workflow_dispatch'&&inputs.lanes=='github')&&{hosted}||fromJSON('{labels}')"
+    );
+    let github_default = format!(
+        "(github.event_name=='workflow_dispatch'&&inputs.lanes=='velnor')&&fromJSON('{labels}')||{hosted}"
+    );
+    let orientation = if normalized == velnor_default {
+        LanesRunnerDefault::Velnor
+    } else if normalized == github_default {
+        LanesRunnerDefault::Github
+    } else {
+        return None;
+    };
+    // The closed expression can only select the configured Velnor pool or
+    // one supported hosted-label spelling. This allowlist validates routing
+    // vocabulary, not the actual runner instance; generated jobs still need
+    // the runtime `runner.environment` guard before repository code runs.
+    if !crate::s2::provider::is_known_github_hosted_label(&velnor_policy.github_runner) {
+        return None;
+    }
+    Some(orientation)
+}
+
+/// Expected runtime runner class for every runnable job in a rendered
+/// workflow. Label text defines routing vocabulary; this expression binds the
+/// selected leg to GitHub's per-step `runner.environment` classification.
+pub(crate) fn workflow_runner_environment_matches(
+    content: &str,
+    config: &ProjectConfig,
+) -> Result<BTreeMap<String, String>, GeneratorError> {
+    workflow_runner_environment_matches_with_action_files(content, config, &BTreeMap::new())
+}
+
+/// Classify a rendered workflow while checking local action references against
+/// the exact manifest bytes in the generated checkout snapshot.
+pub(crate) fn workflow_runner_environment_matches_with_action_files(
+    content: &str,
+    config: &ProjectConfig,
+    action_files: &BTreeMap<PathBuf, String>,
+) -> Result<BTreeMap<String, String>, GeneratorError> {
+    let parser = serde_yaml::ParserConfig::default()
+        .duplicate_key_policy(serde_yaml::DuplicateKeyPolicy::Error);
+    let document: Value = serde_yaml::from_str_with_config(content, &parser).map_err(|error| {
+        GeneratorError::usage(format!(
+            "cannot add runner provenance guard to workflow YAML: {error}"
+        ))
+    })?;
+    let jobs = document
+        .as_mapping()
+        .and_then(|workflow| mapping_value(workflow, "jobs"))
+        .and_then(Value::as_mapping)
+        .ok_or_else(|| {
+            GeneratorError::usage(
+                "cannot add runner provenance guards to a workflow without a `jobs` mapping",
+            )
+        })?;
+    if jobs.is_empty() {
+        return Err(GeneratorError::usage(
+            "cannot add runner provenance guards to a workflow with no jobs",
+        ));
+    }
+    let policy = VelnorPolicyContract {
+        runners: config.runners.as_str().to_owned(),
+        automatic: config.automatic.as_str().to_owned(),
+        default_branch: config.default_branch.clone(),
+        generator_revision: Some(config.workflow_revision.clone()),
+        github_runner: config.github_runner.clone(),
+        velnor_labels: config.velnor_labels.clone(),
+        velnor_runner_group: config.velnor_runner_group.clone(),
+        velnor_trusted_label: config.velnor_trusted_label.clone(),
+        pull_request_on_velnor: config.pull_request_on_velnor,
+    };
+    let action_manifests = action_manifests_from_files(action_files).map_err(|error| {
+        GeneratorError::usage(format!("cannot audit action manifests: {error}"))
+    })?;
+    let mut matches = BTreeMap::new();
+    for (job_id, value) in jobs {
+        let name = job_id;
+        let job = value.as_mapping().ok_or_else(|| {
+            GeneratorError::usage(format!("cannot guard malformed workflow job `{name}`"))
+        })?;
+        if let Some(uses) = mapping_value(job, "uses").and_then(Value::as_str) {
+            if !is_approved_local_reusable(uses) {
+                return Err(GeneratorError::usage(format!(
+                    "cannot guard remote reusable workflow job `{name}`: no audited runner provenance contract"
+                )));
+            }
+            continue;
+        }
+        validate_runner_guard_action_refs(name, job, &config.workflow_revision, &action_manifests)?;
+        let runs_on = mapping_value(job, "runs-on").ok_or_else(|| {
+            GeneratorError::usage(format!(
+                "cannot guard runnable workflow job `{name}` without `runs-on`"
+            ))
+        })?;
+        let matrix = mapping_value(job, "strategy")
+            .and_then(Value::as_mapping)
+            .and_then(|strategy| mapping_value(strategy, "matrix"))
+            .and_then(Value::as_mapping);
+        let expected = runner_environment_match(runs_on, matrix, &policy).ok_or_else(|| {
+            GeneratorError::usage(format!(
+                "cannot guard workflow job `{name}`: runner selector has no exact hosted/self-hosted provenance contract"
+            ))
+        })?;
+        matches.insert(name.to_owned(), expected);
+    }
+    Ok(matches)
+}
+
+fn validate_runner_guard_action_refs(
+    job_id: &str,
+    job: &Mapping,
+    generator_revision: &str,
+    local_manifests: &BTreeMap<String, String>,
+) -> Result<(), GeneratorError> {
+    let Some(steps) = mapping_value(job, "steps") else {
+        return Ok(());
+    };
+    let Some(steps) = steps.as_sequence() else {
+        return Err(GeneratorError::usage(format!(
+            "cannot guard malformed steps for workflow job `{job_id}`"
+        )));
+    };
+    let mut references = Vec::new();
+    for (index, step) in steps.iter().enumerate() {
+        let Some(step) = step.as_mapping() else {
+            return Err(GeneratorError::usage(format!(
+                "cannot guard malformed workflow job `{job_id}` step {index}"
+            )));
+        };
+        let Some(uses) = mapping_value(step, "uses") else {
+            continue;
+        };
+        let Some(reference) = uses.as_str() else {
+            return Err(GeneratorError::usage(format!(
+                "cannot guard workflow job `{job_id}` step {index}: `uses` must be a scalar action ref"
+            )));
+        };
+        references.push((index, reference.to_owned()));
+    }
+    let references = references
+        .into_iter()
+        .map(|(_, reference)| reference)
+        .collect::<Vec<_>>();
+    crate::primitives::action_guard::validate_action_references(
+        &references,
+        Some(generator_revision),
+        local_manifests,
+    )
+    .map_err(|error| {
+        GeneratorError::usage(format!(
+            "cannot guard workflow job `{job_id}`: action failed the pre-step metadata contract: {error}"
+        ))
+    })?;
+    Ok(())
+}
+
+fn action_manifests_from_files(
+    files: &BTreeMap<PathBuf, String>,
+) -> Result<BTreeMap<String, String>, String> {
+    let mut manifests = BTreeMap::new();
+    for (path, contents) in files {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !matches!(name, "action.yml" | "action.yaml") {
+            continue;
+        }
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        if parent.as_os_str().is_empty()
+            || parent.is_absolute()
+            || parent
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            continue;
+        }
+        let reference = format!("./{}", parent.to_string_lossy());
+        if manifests
+            .insert(reference.clone(), contents.clone())
+            .is_some()
+        {
+            return Err(format!(
+                "action directory has ambiguous action.yml and action.yaml: {reference}"
+            ));
+        }
+    }
+    Ok(manifests)
+}
+
+/// A match expression for the selected runner class. Unsupported selectors
+/// intentionally return `None`; the semantic audit rejects those jobs.
+fn runner_environment_match(
+    value: &Value,
+    matrix: Option<&Mapping>,
+    velnor_policy: &VelnorPolicyContract,
+) -> Option<String> {
+    if let Some(orientation) = approved_lanes_runner(value, velnor_policy) {
+        let hosted_branch = match orientation {
+            LanesRunnerDefault::Velnor => {
+                "github.event_name=='workflow_dispatch'&&inputs.lanes=='github'"
+            }
+            LanesRunnerDefault::Github => {
+                "!(github.event_name=='workflow_dispatch'&&inputs.lanes=='velnor')"
+            }
+        };
+        return Some(environment_match_for_hosted_branch(hosted_branch));
+    }
+    if let Some(label) = value.as_str() {
+        if let Some(field) = matrix_field_reference(label) {
+            return matrix_runner_environment_match(matrix, field, velnor_policy);
+        }
+        if let Some(hosted_branch) = approved_dynamic_runner_host_branch(label, velnor_policy) {
+            return Some(environment_match_for_hosted_branch(&hosted_branch));
+        }
+    }
+    match runner_environment_class(value, velnor_policy)? {
+        RunnerEnvironmentClass::GithubHosted => {
+            Some("runner.environment=='github-hosted'".to_owned())
+        }
+        RunnerEnvironmentClass::SelfHosted => Some("runner.environment=='self-hosted'".to_owned()),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunnerEnvironmentClass {
+    GithubHosted,
+    SelfHosted,
+}
+
+fn runner_environment_class(
+    value: &Value,
+    velnor_policy: &VelnorPolicyContract,
+) -> Option<RunnerEnvironmentClass> {
+    match value {
+        Value::String(label) => {
+            if is_configured_velnor_runner(value, velnor_policy) {
+                Some(RunnerEnvironmentClass::SelfHosted)
+            } else if crate::s2::provider::is_known_github_hosted_label(label) {
+                Some(RunnerEnvironmentClass::GithubHosted)
+            } else {
+                None
+            }
+        }
+        Value::Sequence(labels) => {
+            if is_configured_velnor_runner(value, velnor_policy) {
+                return Some(RunnerEnvironmentClass::SelfHosted);
+            }
+            labels
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<Vec<_>>>()?
+                .iter()
+                .all(|label| crate::s2::provider::is_known_github_hosted_label(label))
+                .then_some(RunnerEnvironmentClass::GithubHosted)
+        }
+        Value::Mapping(_) if is_configured_velnor_runner(value, velnor_policy) => {
+            Some(RunnerEnvironmentClass::SelfHosted)
+        }
+        Value::Tagged(tagged) => runner_environment_class(tagged.value(), velnor_policy),
+        Value::Mapping(_) | Value::Null | Value::Bool(_) | Value::Number(_) => None,
+    }
+}
+
+fn matrix_runner_environment_match(
+    matrix: Option<&Mapping>,
+    field: &str,
+    velnor_policy: &VelnorPolicyContract,
+) -> Option<String> {
+    let values = matrix_values(matrix, field)?;
+    let mut hosted = Vec::new();
+    let mut self_hosted = Vec::new();
+    for value in values {
+        let class = runner_environment_class(value, velnor_policy)?;
+        let selector = matrix_runner_value_selector(field, value)?;
+        match class {
+            RunnerEnvironmentClass::GithubHosted => hosted.push(selector),
+            RunnerEnvironmentClass::SelfHosted => self_hosted.push(selector),
+        }
+    }
+    hosted.sort();
+    hosted.dedup();
+    self_hosted.sort();
+    self_hosted.dedup();
+    match (hosted.is_empty(), self_hosted.is_empty()) {
+        (false, true) => Some("runner.environment=='github-hosted'".to_owned()),
+        (true, false) => Some("runner.environment=='self-hosted'".to_owned()),
+        (false, false) => Some(format!(
+            "(({})&&runner.environment=='github-hosted')||(({})&&runner.environment=='self-hosted')",
+            hosted.join("||"),
+            self_hosted.join("||"),
+        )),
+        (true, true) => None,
+    }
+}
+
+fn matrix_runner_value_selector(field: &str, value: &Value) -> Option<String> {
+    match value {
+        Value::String(label) => Some(format!("matrix.{field}=='{}'", label.replace('\'', "''"))),
+        Value::Sequence(_) => {
+            let json = serde_json::to_string(value).ok()?;
+            Some(format!(
+                "toJSON(matrix.{field})=='{}'",
+                json.replace('\'', "''")
+            ))
+        }
+        // Object ordering and the runner API's object normalization are not
+        // part of the selector contract. Do not guess for group mappings.
+        Value::Mapping(_) | Value::Tagged(_) | Value::Null | Value::Bool(_) | Value::Number(_) => {
+            None
+        }
+    }
+}
+
+fn approved_dynamic_runner_host_branch(
+    label: &str,
+    velnor_policy: &VelnorPolicyContract,
+) -> Option<String> {
+    let normalized = normalize_runner_expression(label);
+    if !is_approved_dynamic_runner_for_policy(label, velnor_policy) {
+        return None;
+    }
+    let (branch, _) = normalized.split_once(")&&'ubuntu-26.04'||fromJSON(")?;
+    Some(format!("{branch})"))
+}
+
+fn environment_match_for_hosted_branch(hosted_branch: &str) -> String {
+    format!(
+        "(({hosted_branch})&&runner.environment=='github-hosted')||(!({hosted_branch})&&runner.environment=='self-hosted')"
+    )
+}
+
+fn lanes_velnor_leg_is_safe(velnor_policy: &VelnorPolicyContract) -> bool {
+    !velnor_policy.velnor_labels.is_empty()
+        && velnor_policy.velnor_runner_group.is_none()
+        && (!velnor_policy.requires_approved_runner() || velnor_policy.approved_runner_configured())
+}
+
 fn inspect_jobs(
     value: &Value,
     path: &Path,
@@ -3773,8 +4404,254 @@ fn inspect_jobs(
             .and_then(Value::as_mapping);
         failures.job = Some(job_id.clone());
         audit_job_level_env(job, path, failures);
+        let runs_on = mapping_value(job, "runs-on");
+        let expected_environment =
+            runs_on.and_then(|runs_on| runner_environment_match(runs_on, matrix, velnor_policy));
+        if runs_on.is_some() && expected_environment.is_none() {
+            failures.record(
+                Rule::TrustedRunners,
+                path,
+                "runs-on has no exact hosted/self-hosted runtime provenance contract",
+            );
+        }
+        if let Some(expected_environment) = expected_environment.as_deref() {
+            audit_runner_environment_guard(job, path, expected_environment, failures);
+        }
+        if runs_on.is_none() && mapping_value(job, "steps").is_some() {
+            failures.record(
+                Rule::TrustedRunners,
+                path,
+                "runnable jobs must declare runs-on and carry a runner environment guard",
+            );
+        }
+        if mapping_value(job, "continue-on-error")
+            .is_some_and(|value| !matches!(value, Value::Bool(false)))
+            || mapping_value(job, "strategy")
+                .is_some_and(|strategy| contains_yaml_key(strategy, "continue-on-error"))
+        {
+            failures.record(
+                Rule::TrustedRunners,
+                path,
+                "job-level or matrix continue-on-error can hide runner provenance failure",
+            );
+        }
+        if mapping_value(job, "container").is_some() || mapping_value(job, "services").is_some() {
+            failures.record(
+                Rule::TrustedRunners,
+                path,
+                "jobs with container or services cannot prove runner provenance before execution",
+            );
+        }
+        if let Some(reusable) = mapping_value(job, "uses").and_then(Value::as_str)
+            && !failures.is_audited_local_reusable(reusable)
+        {
+            failures.record(
+                Rule::TrustedRunners,
+                path,
+                "remote reusable jobs need an independently audited runner environment guard contract",
+            );
+        }
         inspect_mapping(job, path, matrix, trusted_gate, velnor_policy, failures);
         failures.job = None;
+    }
+}
+
+fn audit_runner_environment_guard(
+    job: &Mapping,
+    path: &Path,
+    expected_environment: &str,
+    failures: &mut PolicyFindings,
+) {
+    let Some(steps) = mapping_value(job, "steps").and_then(Value::as_sequence) else {
+        failures.record(
+            Rule::TrustedRunners,
+            path,
+            "runner jobs must have an explicit first-step runner environment guard",
+        );
+        return;
+    };
+    let Some(guard) = steps.first().and_then(Value::as_mapping) else {
+        failures.record(
+            Rule::TrustedRunners,
+            path,
+            "runner jobs must start with the runner environment guard",
+        );
+        return;
+    };
+    let guard_if = mapping_value(guard, "if")
+        .and_then(Value::as_str)
+        .map(normalize_runner_expression);
+    let expected_mismatch = format!("!({expected_environment})");
+    let clean_guard_environment = crate::primitives::runner_guard::guard_environment_is_sanitized(
+        mapping_value(guard, "env"),
+    );
+    if mapping_value(guard, "id").and_then(Value::as_str) != Some("runner_provenance")
+        || mapping_value(guard, "name").and_then(Value::as_str) != Some("Verify runner environment")
+        || mapping_value(guard, "shell").and_then(Value::as_str)
+            != Some("bash --noprofile --norc -p -e -o pipefail {0}")
+        || mapping_value(guard, "working-directory").and_then(Value::as_str)
+            != Some(crate::primitives::runner_guard::GUARD_WORKING_DIRECTORY)
+        || !clean_guard_environment
+        || guard_if.as_deref() != Some(expected_mismatch.as_str())
+        || mapping_value(guard, "run")
+            .and_then(Value::as_str)
+            .is_none_or(|run| run.trim() != "((0))")
+        || mapping_value(guard, "continue-on-error").is_some()
+    {
+        failures.record(
+            Rule::TrustedRunners,
+            path,
+            "first runner environment guard must use the hardened Bash shell, clear inherited shell/loader variables, run from runner.temp, fail on a class mismatch, and cannot continue on error",
+        );
+    }
+    for step in steps.iter().skip(1) {
+        let Some(step) = step.as_mapping() else {
+            failures.record(
+                Rule::TrustedRunners,
+                path,
+                "every step after the runner environment guard must have an auditable condition",
+            );
+            continue;
+        };
+        if mapping_value(step, "id").and_then(Value::as_str) == Some("runner_provenance") {
+            failures.record(
+                Rule::TrustedRunners,
+                path,
+                "runner_provenance step id must be unique and first",
+            );
+        }
+        let condition = mapping_value(step, "if").and_then(Value::as_str);
+        if !condition.is_some_and(|condition| {
+            expression_has_top_level_conjunct(condition, expected_environment)
+        }) {
+            failures.record(
+                Rule::TrustedRunners,
+                path,
+                "every step after the runner environment guard must retain its expected runner.environment predicate",
+            );
+        }
+    }
+}
+
+fn expression_has_top_level_conjunct(expression: &str, expected: &str) -> bool {
+    let expression = normalize_runner_expression(expression);
+    let expected = normalize_runner_expression(expected);
+    let Some(disjunctions) = split_top_level_operator(&expression, "||") else {
+        return false;
+    };
+    if disjunctions.len() != 1 {
+        return false;
+    }
+    let Some(conjunctions) = split_top_level_operator(&expression, "&&") else {
+        return false;
+    };
+    conjunctions
+        .into_iter()
+        .any(|member| strip_expression_parentheses(member) == expected)
+}
+
+/// Split one top-level GitHub boolean operator while validating grouping and
+/// quoted strings. A provenance conjunct is only meaningful when `||` cannot
+/// escape it through operator precedence, so malformed expressions fail
+/// closed instead of being partially scanned.
+fn split_top_level_operator<'a>(expression: &'a str, operator: &str) -> Option<Vec<&'a str>> {
+    if !matches!(operator, "&&" | "||") {
+        return None;
+    }
+    let bytes = expression.as_bytes();
+    let mut members = Vec::new();
+    let mut start = 0;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if byte == b'\'' {
+                if bytes.get(index + 1) == Some(&b'\'') {
+                    index += 1;
+                } else {
+                    in_string = false;
+                }
+            }
+        } else if byte == b'\'' {
+            in_string = true;
+        } else if byte == b'(' {
+            depth += 1;
+        } else if byte == b')' {
+            if depth == 0 {
+                return None;
+            }
+            depth -= 1;
+        } else if depth == 0 && expression[index..].starts_with(operator) {
+            let member = expression[start..index].trim();
+            if member.is_empty() {
+                return None;
+            }
+            members.push(member);
+            index += operator.len() - 1;
+            start = index + 1;
+        }
+        index += 1;
+    }
+    let last = expression[start..].trim();
+    if in_string || depth != 0 || last.is_empty() {
+        return None;
+    }
+    members.push(last);
+    Some(members)
+}
+
+fn strip_expression_parentheses(mut expression: &str) -> &str {
+    loop {
+        let bytes = expression.as_bytes();
+        if bytes.first() != Some(&b'(') || bytes.last() != Some(&b')') {
+            return expression;
+        }
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut closes_at_end = true;
+        let mut index = 0;
+        while index < bytes.len() {
+            let byte = bytes[index];
+            if in_string {
+                if byte == b'\'' {
+                    if bytes.get(index + 1) == Some(&b'\'') {
+                        index += 1;
+                    } else {
+                        in_string = false;
+                    }
+                }
+            } else if byte == b'\'' {
+                in_string = true;
+            } else if byte == b'(' {
+                depth += 1;
+            } else if byte == b')' {
+                depth = depth.saturating_sub(1);
+                if depth == 0 && index + 1 != bytes.len() {
+                    closes_at_end = false;
+                    break;
+                }
+            }
+            index += 1;
+        }
+        if !closes_at_end {
+            return expression;
+        }
+        expression = &expression[1..expression.len() - 1];
+    }
+}
+
+fn contains_yaml_key(value: &Value, target: &str) -> bool {
+    match value {
+        Value::Mapping(mapping) => mapping
+            .iter()
+            .any(|(key, value)| key.as_str() == target || contains_yaml_key(value, target)),
+        Value::Sequence(sequence) => sequence
+            .iter()
+            .any(|value| contains_yaml_key(value, target)),
+        Value::Tagged(tagged) => contains_yaml_key(tagged.value(), target),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
     }
 }
 
@@ -3912,22 +4789,24 @@ fn inspect_mapping(
                     "pull_request_target is forbidden outside the policy entrypoint",
                 );
             }
-            "uses" => inspect_uses(value, path, failures),
+            "uses" => inspect_uses(value, path, velnor_policy, failures),
             "runs-on" => inspect_runner(value, path, matrix, trusted_gate, velnor_policy, failures),
             _ => inspect_yaml_value(value, path, matrix, trusted_gate, velnor_policy, failures),
         }
     }
 }
 
-fn inspect_uses(value: &Value, path: &Path, failures: &mut PolicyFindings) {
+fn inspect_uses(
+    value: &Value,
+    path: &Path,
+    velnor_policy: &VelnorPolicyContract,
+    failures: &mut PolicyFindings,
+) {
     let Some(action) = value.as_str() else {
         failures.record(Rule::ActionPins, path, "uses must be a scalar reference");
         return;
     };
-    if is_approved_local_reusable(action) {
-        return;
-    }
-    if is_approved_local_action(action) {
+    if failures.is_audited_local_reusable(action) {
         return;
     }
     let reference_path = action.split_once('@').map_or(action, |(path, _)| path);
@@ -3952,13 +4831,223 @@ fn inspect_uses(value: &Value, path: &Path, failures: &mut PolicyFindings) {
                 ),
             );
         }
-    } else if !is_full_sha_reference(action) {
+        return;
+    }
+
+    let local_action = is_local_action_reference(action);
+    if local_action && !is_approved_local_action(action) {
+        failures.record(
+            Rule::ActionPins,
+            path,
+            &format!("local action path is outside the audited action directories: {action}"),
+        );
+        return;
+    }
+    if !local_action && !is_full_sha_reference(action) {
         failures.record(
             Rule::ActionPins,
             path,
             &format!("action is not a full SHA pin: {action}"),
         );
+        return;
     }
+    if !local_action
+        && !super::is_runner_guard_safe_action_reference(
+            action,
+            velnor_policy.generator_revision.as_deref(),
+        )
+    {
+        failures.record(
+            Rule::ActionPins,
+            path,
+            &format!("action ref lacks a reviewed pre-step safety contract: {action}"),
+        );
+        return;
+    }
+    if let Err(error) = validate_workflow_action_reference(
+        action,
+        &failures.root,
+        velnor_policy.generator_revision.as_deref(),
+    ) {
+        failures.record(
+            Rule::ActionPins,
+            path,
+            &format!("action failed the pre-step metadata contract: {error}"),
+        );
+    }
+}
+
+fn validate_workflow_action_reference(
+    reference: &str,
+    root: &Path,
+    generator_revision: Option<&str>,
+) -> Result<(), String> {
+    let manifests = collect_action_manifests(root, &[reference.to_owned()])?;
+    crate::primitives::action_guard::validate_action_references(
+        &[reference.to_owned()],
+        generator_revision,
+        &manifests,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn collect_action_manifests(
+    root: &Path,
+    references: &[String],
+) -> Result<BTreeMap<String, String>, String> {
+    let mut manifests = BTreeMap::new();
+    let mut pending = references.to_vec();
+    let mut total_bytes = 0_u64;
+    let parser = serde_yaml::ParserConfig::default()
+        .duplicate_key_policy(serde_yaml::DuplicateKeyPolicy::Error);
+    while let Some(reference) = pending.pop() {
+        if manifests.contains_key(&reference) {
+            continue;
+        }
+        // A Velnor remote action is validated only from the exact embedded
+        // catalog. Candidate checkout files never supply or shadow its bytes.
+        if is_repo_owned_remote_action(&reference) {
+            continue;
+        }
+        let Some(path) = action_manifest_path(root, &reference)? else {
+            continue;
+        };
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("inspect action manifest {}: {error}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(format!(
+                "action manifest path is not a regular file: {}",
+                path.display()
+            ));
+        }
+        if metadata.len() > MAX_ACTION_MANIFEST_BYTES {
+            return Err(format!(
+                "action manifest {} exceeds {MAX_ACTION_MANIFEST_BYTES} bytes",
+                path.display()
+            ));
+        }
+        total_bytes = total_bytes
+            .checked_add(metadata.len())
+            .filter(|total| *total <= MAX_TOTAL_ACTION_MANIFEST_BYTES)
+            .ok_or_else(|| {
+                format!("local action manifests exceed {MAX_TOTAL_ACTION_MANIFEST_BYTES} bytes")
+            })?;
+        let contents = fs::read_to_string(&path)
+            .map_err(|error| format!("read action manifest {}: {error}", path.display()))?;
+        let document: Value = serde_yaml::from_str_with_config(&contents, &parser)
+            .map_err(|error| format!("parse action manifest {}: {error}", path.display()))?;
+        manifests.insert(reference, contents);
+        let Some(steps) = document
+            .as_mapping()
+            .and_then(|action| mapping_value(action, "runs"))
+            .and_then(Value::as_mapping)
+            .and_then(|runs| mapping_value(runs, "steps"))
+            .and_then(Value::as_sequence)
+        else {
+            continue;
+        };
+        for step in steps {
+            if let Some(nested) = step
+                .as_mapping()
+                .and_then(|step| mapping_value(step, "uses"))
+                .and_then(Value::as_str)
+                && is_local_action_reference(nested)
+            {
+                if pending.len() >= 10_000 {
+                    return Err("local composite action graph exceeds 10,000 references".to_owned());
+                }
+                pending.push(nested.to_owned());
+            }
+        }
+    }
+    Ok(manifests)
+}
+
+fn action_manifest_path(root: &Path, reference: &str) -> Result<Option<PathBuf>, String> {
+    let Some(relative) = reference.strip_prefix("./") else {
+        return Ok(None);
+    };
+    let checkout_root = root;
+    let action_directory = PathBuf::from(relative);
+    if action_directory.is_absolute()
+        || action_directory
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Ok(None);
+    }
+    let mut directory = checkout_root.to_path_buf();
+    for component in action_directory.components() {
+        let std::path::Component::Normal(part) = component else {
+            return Ok(None);
+        };
+        directory.push(part);
+        let metadata = match fs::symlink_metadata(&directory) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(format!(
+                    "inspect action directory {}: {error}",
+                    directory.display()
+                ));
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(format!(
+                "action directory is not a real directory: {}",
+                directory.display()
+            ));
+        }
+    }
+    let mut found = Vec::new();
+    for name in ["action.yml", "action.yaml"] {
+        let path = directory.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(format!(
+                    "action metadata path is not a regular file: {}",
+                    path.display()
+                ));
+            }
+            Ok(_) => found.push(path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "inspect action manifest {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    match found.as_slice() {
+        [] => Ok(None),
+        [path] => Ok(Some(path.clone())),
+        _ => Err(format!(
+            "action directory has ambiguous action.yml and action.yaml: {}",
+            directory.display()
+        )),
+    }
+}
+
+fn is_local_action_reference(reference: &str) -> bool {
+    reference.starts_with("./")
+        || reference.starts_with("../")
+        || reference.starts_with('/')
+        || reference
+            .as_bytes()
+            .get(1)
+            .is_some_and(|colon| reference.as_bytes()[0].is_ascii_alphabetic() && *colon == b':')
+}
+
+fn is_repo_owned_remote_action(reference: &str) -> bool {
+    let Some((path, revision)) = reference.rsplit_once('@') else {
+        return false;
+    };
+    !revision.is_empty()
+        && matches!(
+            path,
+            super::VELNOR_WORKFLOW_SETUP_ACTION | super::VELNOR_CI_REPORT_ACTION
+        )
 }
 
 fn is_approved_local_reusable(value: &str) -> bool {
@@ -3966,9 +5055,12 @@ fn is_approved_local_reusable(value: &str) -> bool {
         return false;
     };
     !name.is_empty()
-        && Path::new(name)
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("yml"))
+        && matches!(
+            Path::new(name)
+                .extension()
+                .and_then(|extension| extension.to_str()),
+            Some("yml" | "yaml")
+        )
         && !name.contains('/')
         && !name.contains('\\')
         && !name.contains("..")
@@ -3981,17 +5073,10 @@ fn is_full_sha_reference(value: &str) -> bool {
         .is_some_and(|(action, reference)| !action.is_empty() && super::is_full_revision(reference))
 }
 
-/// A repository-local composite action, pinned by the audited tree itself:
-/// the policy audits the pull-request head tree, so a tampered local action
-/// is reviewed code exactly like an inline `run:` step, and a tampered
-/// reference outside `.github/actions/` stays rejected below. The owner
-/// policy job's setup composite resolves out of its sibling checkout
-/// instead of the root (a root checkout would wipe `policy-checkout/`),
-/// so that exact reference is reviewed too — but no second sibling path.
+/// A repository-local composite action is reviewed from the audited tree,
+/// exactly like inline workflow code. Only paths beneath the runner-supported
+/// `.github/actions/` root are accepted.
 fn is_approved_local_action(value: &str) -> bool {
-    if value == super::VELNOR_WORKFLOW_POLICY_SETUP_ACTION {
-        return true;
-    }
     let Some(path) = value.strip_prefix("./.github/actions/") else {
         return false;
     };
@@ -4036,6 +5121,7 @@ struct RunnerAnalysis {
     self_hosted: bool,
     dynamic: bool,
     invalid: bool,
+    unverified: bool,
 }
 
 impl RunnerAnalysis {
@@ -4043,6 +5129,7 @@ impl RunnerAnalysis {
         self.self_hosted |= other.self_hosted;
         self.dynamic |= other.dynamic;
         self.invalid |= other.invalid;
+        self.unverified |= other.unverified;
     }
 }
 
@@ -4054,8 +5141,24 @@ fn inspect_runner(
     velnor_policy: &VelnorPolicyContract,
     failures: &mut PolicyFindings,
 ) {
+    let lane_runner = approved_lanes_runner(value, velnor_policy);
+    let approved_dynamic = value
+        .as_str()
+        .is_some_and(|label| is_approved_dynamic_runner_for_policy(label, velnor_policy));
     let mut resolving = BTreeSet::new();
-    let analysis = analyze_runner(value, matrix, &mut resolving);
+    let mut analysis = analyze_runner(value, matrix, &mut resolving, velnor_policy);
+    if is_configured_velnor_runner(value, velnor_policy) {
+        analysis.unverified = false;
+        analysis.self_hosted = true;
+    }
+    if lane_runner.is_some() {
+        // `lanes_runs_on` is a closed two-leg selector.  It may resolve to a
+        // hosted image or the configured Velnor labels, but its expression is
+        // still dynamic YAML and therefore needs this exact admission above.
+        analysis.dynamic = false;
+        analysis.invalid = false;
+        analysis.self_hosted = true;
+    }
     if analysis.invalid {
         failures.record(
             Rule::TrustedRunners,
@@ -4070,6 +5173,13 @@ fn inspect_runner(
             "runs-on contains an unresolved or dynamic runner label",
         );
     }
+    if analysis.unverified {
+        failures.record(
+            Rule::TrustedRunners,
+            path,
+            "runs-on must use a supported GitHub-hosted label or the exact configured Velnor runner selector",
+        );
+    }
     if analysis.self_hosted && !trusted_gate {
         failures.record(
             Rule::TrustedRunners,
@@ -4079,6 +5189,8 @@ fn inspect_runner(
     }
     if velnor_policy.requires_approved_runner()
         && analysis.self_hosted
+        && lane_runner.is_none()
+        && !(approved_dynamic && velnor_policy.approved_runner_configured())
         && !is_approved_velnor_runner(value, velnor_policy)
     {
         failures.record(
@@ -4153,10 +5265,20 @@ fn is_approved_dynamic_runner(label: &str) -> bool {
         .any(|shape| normalized == **shape)
 }
 
+fn is_approved_dynamic_runner_for_policy(label: &str, policy: &VelnorPolicyContract) -> bool {
+    if !is_approved_dynamic_runner(label) {
+        return false;
+    }
+    policy.github_runner == "ubuntu-26.04"
+        && policy.velnor_runner_group.is_none()
+        && policy.velnor_labels == ["self-hosted", "velnor-target-mvp"]
+}
+
 fn analyze_runner(
     value: &Value,
     matrix: Option<&Mapping>,
     resolving: &mut BTreeSet<String>,
+    velnor_policy: &VelnorPolicyContract,
 ) -> RunnerAnalysis {
     match value {
         Value::String(label) => {
@@ -4176,37 +5298,56 @@ fn analyze_runner(
                 };
                 let mut result = RunnerAnalysis::default();
                 for value in values {
-                    result.merge(analyze_runner(value, matrix, resolving));
+                    result.merge(analyze_runner(value, matrix, resolving, velnor_policy));
                 }
                 resolving.remove(field);
                 result
             } else if label.contains("${{") {
-                if is_approved_dynamic_runner(label) {
-                    RunnerAnalysis::default()
+                if is_approved_dynamic_runner_for_policy(label, velnor_policy) {
+                    RunnerAnalysis {
+                        self_hosted: true,
+                        ..RunnerAnalysis::default()
+                    }
                 } else {
                     RunnerAnalysis {
                         dynamic: true,
                         ..RunnerAnalysis::default()
                     }
                 }
+            } else if crate::s2::provider::is_known_github_hosted_label(label) {
+                RunnerAnalysis::default()
             } else if contains_self_hosted_label(label) {
                 RunnerAnalysis {
                     self_hosted: true,
+                    unverified: true,
                     ..RunnerAnalysis::default()
                 }
             } else {
-                RunnerAnalysis::default()
+                RunnerAnalysis {
+                    unverified: true,
+                    ..RunnerAnalysis::default()
+                }
             }
         }
         Value::Sequence(sequence) => {
+            if is_configured_velnor_runner(value, velnor_policy) {
+                return RunnerAnalysis {
+                    self_hosted: true,
+                    ..RunnerAnalysis::default()
+                };
+            }
             let mut result = RunnerAnalysis::default();
             for value in sequence {
-                result.merge(analyze_runner(value, matrix, resolving));
+                result.merge(analyze_runner(value, matrix, resolving, velnor_policy));
             }
             result
         }
         Value::Mapping(mapping) => {
             let mut result = RunnerAnalysis::default();
+            // GitHub allows runner groups to contain self-hosted machines.
+            // Only an exact, configured Velnor mapping establishes that this
+            // is the intended local pool; all other groups are unverified.
+            result.unverified = true;
             let Some(group) = mapping_value(mapping, "group") else {
                 return RunnerAnalysis {
                     invalid: true,
@@ -4221,9 +5362,15 @@ fn analyze_runner(
             for (key, value) in mapping {
                 match key.as_str() {
                     "group" => {}
-                    "labels" => result.merge(analyze_runner(value, matrix, resolving)),
+                    "labels" => {
+                        result.merge(analyze_runner(value, matrix, resolving, velnor_policy));
+                    }
                     _ => result.invalid = true,
                 }
+            }
+            if is_configured_velnor_runner(value, velnor_policy) {
+                result.unverified = false;
+                result.self_hosted = true;
             }
             result
         }
@@ -4231,8 +5378,66 @@ fn analyze_runner(
             invalid: true,
             ..RunnerAnalysis::default()
         },
-        Value::Tagged(tagged) => analyze_runner(tagged.value(), matrix, resolving),
+        Value::Tagged(tagged) => analyze_runner(tagged.value(), matrix, resolving, velnor_policy),
     }
+}
+
+/// Whether a static selector is exactly the Velnor pool declared by config.
+/// Labels that merely contain `self-hosted` or a Velnor-looking substring do
+/// not establish a local selector.
+fn is_configured_velnor_runner(value: &Value, velnor_policy: &VelnorPolicyContract) -> bool {
+    let (labels, group) = match value {
+        Value::String(label) if !label.contains("${{") => (Some(vec![label.as_str()]), None),
+        Value::Sequence(sequence) => (
+            sequence
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<Vec<_>>>()
+                .filter(|labels| labels.iter().all(|label| !label.contains("${{"))),
+            None,
+        ),
+        Value::Mapping(mapping) => {
+            let labels = mapping_value(mapping, "labels")
+                .and_then(Value::as_sequence)
+                .and_then(|sequence| {
+                    sequence
+                        .iter()
+                        .map(Value::as_str)
+                        .collect::<Option<Vec<_>>>()
+                })
+                .filter(|labels| labels.iter().all(|label| !label.contains("${{")));
+            let group = mapping_value(mapping, "group")
+                .and_then(Value::as_str)
+                .filter(|group| !group.is_empty() && !group.contains("${{"));
+            (labels, group)
+        }
+        Value::Tagged(tagged) => return is_configured_velnor_runner(tagged.value(), velnor_policy),
+        Value::String(_) => return false,
+        Value::Null | Value::Bool(_) | Value::Number(_) => return false,
+    };
+    let Some(mut labels) = labels else {
+        return false;
+    };
+    if labels.is_empty() || group != velnor_policy.velnor_runner_group.as_deref() {
+        return false;
+    }
+    let mut configured = velnor_policy
+        .velnor_labels
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if configured.is_empty() {
+        return false;
+    }
+    if let Some(trusted_label) = velnor_policy.velnor_trusted_label.as_deref()
+        && labels.len() == configured.len() + 1
+        && labels.last().copied() == Some(trusted_label)
+    {
+        labels.pop();
+    }
+    labels.sort_unstable();
+    configured.sort_unstable();
+    labels == configured
 }
 
 fn matrix_field_reference(value: &str) -> Option<&str> {

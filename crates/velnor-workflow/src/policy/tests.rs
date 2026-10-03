@@ -3,6 +3,7 @@
     reason = "tests need setup failures to name their root cause"
 )]
 
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -757,7 +758,7 @@ fn pin_monotonic_admits_an_unchanged_inherited_pin_and_refuses_a_regression() {
 // The entrypoint
 // ---------------------------------------------------------------------------
 
-fn hosted_entrypoint(revision: &str) -> String {
+fn hosted_project_config(revision: &str) -> ProjectConfig {
     let fixture = temporary_directory("entrypoint-fixture");
     write(
         &fixture.join("Cargo.toml"),
@@ -774,7 +775,162 @@ fn hosted_entrypoint(revision: &str) -> String {
     let _ = fs::remove_dir_all(fixture);
     let mut config = ProjectConfig::from(shape);
     revision.clone_into(&mut config.workflow_revision);
-    crate::render_policy_entrypoint(&config)
+    config
+}
+
+fn hosted_entrypoint(revision: &str) -> String {
+    let config = hosted_project_config(revision);
+    let workflow = crate::render_policy_entrypoint(&config);
+    let expected = must(
+        super::workflow_runner_environment_matches(&workflow, &config),
+        "resolve policy-entrypoint runner environment",
+    );
+    must(
+        crate::primitives::runner_guard::transform_workflow(&workflow, &expected),
+        "guard generated policy entrypoint",
+    )
+}
+
+#[test]
+fn generator_runner_contract_api_rejects_duplicate_yaml_keys() {
+    let config = hosted_project_config(PIN_A);
+    let workflow = "name: Duplicate\non: push\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    runs-on: ubuntu-26.04\n    steps:\n      - run: echo ok\n";
+    let error = must_fail(
+        super::workflow_runner_environment_matches(workflow, &config),
+        "duplicate workflow key",
+    )
+    .to_string();
+    assert!(error.contains("duplicate"), "{error}");
+}
+
+fn workflow_using_action(reference: &str) -> String {
+    format!(
+        "name: Action guard\non: push\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: {reference}\n"
+    )
+}
+
+#[test]
+fn generation_action_discovery_checks_unknown_and_local_action_metadata() {
+    let config = hosted_project_config(crate::SOURCE_REVISION);
+    let unknown = must_fail(
+        workflow_runner_environment_matches(
+            &workflow_using_action(&format!("example/action@{PIN_B}")),
+            &config,
+        ),
+        "unknown full-SHA action",
+    )
+    .to_string();
+    assert!(unknown.contains("reviewed no-pre allowlist"), "{unknown}");
+
+    for (case, manifest, expected) in [
+        (
+            "pre-hook",
+            "runs:\n  using: composite\n  pre: before.sh\n  steps:\n    - run: echo ok\n      shell: bash\n",
+            "forbidden preparation hook",
+        ),
+        (
+            "docker",
+            "runs:\n  using: docker\n  image: Dockerfile\n",
+            "only composite actions are allowed",
+        ),
+    ] {
+        let action_files = BTreeMap::from([(
+            PathBuf::from(".github/actions/local/action.yml"),
+            manifest.to_owned(),
+        )]);
+        let error = must_fail(
+            workflow_runner_environment_matches_with_action_files(
+                &workflow_using_action("./.github/actions/local"),
+                &config,
+                &action_files,
+            ),
+            case,
+        )
+        .to_string();
+        assert!(error.contains(expected), "{case}: {error}");
+    }
+}
+
+#[test]
+fn semantic_action_audit_uses_audited_local_bytes_and_fixed_remote_catalog() {
+    let root = temporary_directory("action-audit-root");
+    let local = "./.github/actions/local";
+    let mut failures = PolicyFindings {
+        root: root.clone(),
+        ..PolicyFindings::default()
+    };
+    write(
+        &root.join(".github/actions/local/action.yml"),
+        "runs:\n  using: composite\n  pre-if: always()\n  steps:\n    - run: echo unsafe\n      shell: bash\n",
+    );
+    inspect_uses(
+        &Value::String(local.to_owned()),
+        Path::new(".github/workflows/ci-action.yml"),
+        &VelnorPolicyContract::default(),
+        &mut failures,
+    );
+    assert!(
+        failures.audit.actions.iter().any(|finding| {
+            finding.contains("pre-step metadata contract")
+                && finding.contains("forbidden preparation hook")
+        }),
+        "local manifest must be validated recursively: {:?}",
+        failures.audit.actions
+    );
+
+    let remote = format!(
+        "{}@{}",
+        crate::VELNOR_WORKFLOW_SETUP_ACTION,
+        crate::primitives::action_guard::TRUSTED_VELNOR_ACTION_REVISION
+    );
+    let candidate_remote_manifest = root.join(".github/actions/setup-velnor-workflow/action.yml");
+    write(
+        &candidate_remote_manifest,
+        "runs:\n  using: composite\n  steps:\n    - run: echo candidate\n      shell: bash\n",
+    );
+    let mut failures = PolicyFindings {
+        root: root.clone(),
+        ..PolicyFindings::default()
+    };
+    inspect_uses(
+        &Value::String(remote),
+        Path::new(".github/workflows/ci-action.yml"),
+        &VelnorPolicyContract::default(),
+        &mut failures,
+    );
+    assert!(
+        failures.audit.actions.is_empty(),
+        "a same-path candidate file cannot alter the immutable remote action: {:?}",
+        failures.audit.actions
+    );
+
+    let candidate_revision = PIN_B;
+    let candidate_remote = format!(
+        "{}@{candidate_revision}",
+        crate::VELNOR_WORKFLOW_SETUP_ACTION
+    );
+    let mut policy = VelnorPolicyContract::default();
+    policy.generator_revision = Some(candidate_revision.to_owned());
+    let mut failures = PolicyFindings {
+        root: root.clone(),
+        ..PolicyFindings::default()
+    };
+    inspect_uses(
+        &Value::String(candidate_remote),
+        Path::new(".github/workflows/ci-action.yml"),
+        &policy,
+        &mut failures,
+    );
+    assert!(
+        failures
+            .audit
+            .actions
+            .iter()
+            .any(|finding| { finding.contains("reviewed pre-step safety contract") }),
+        "candidate generator revision cannot bless a remote ref: {:?}",
+        failures.audit.actions
+    );
+    let _ = fs::remove_dir_all(root);
 }
 
 fn entrypoint_tree(name: &str, entrypoint: &str) -> PathBuf {
@@ -1128,6 +1284,14 @@ fn entrypoint_audit_names_each_escalation() {
 
 #[test]
 fn entrypoint_audit_rejects_obfuscated_github_token_access() {
+    assert!(!super::contains_github_token_access(
+        "${{ runner.environment == 'github-hosted' }}"
+    ));
+    assert!(!super::contains_github_token_access(
+        "${{ github.event_name == 'pull_request' }}"
+    ));
+    assert!(super::contains_github_token_access("${{ toJSON(github) }}"));
+
     let clean = hosted_entrypoint(PIN_A);
     let cases = [
         (
@@ -1287,6 +1451,164 @@ fn velnor_entrypoint_is_gated_and_never_builds_the_pin() {
 // Semantic rules over a synthetic tree
 // ---------------------------------------------------------------------------
 
+#[test]
+fn hosted_runner_labels_use_exact_supported_vocabulary() {
+    for label in ["ubuntu-24.04", "ubuntu-26.04", "xcode-27"] {
+        assert!(
+            crate::s2::provider::is_known_github_hosted_label(label),
+            "documented hosted label {label:?} stays supported"
+        );
+    }
+    for label in ["ubuntu-private", "ubuntu-fleet", "self-hosted"] {
+        assert!(
+            !crate::s2::provider::is_known_github_hosted_label(label),
+            "custom/self-hosted label {label:?} must not be classified as hosted"
+        );
+    }
+}
+
+#[test]
+fn runner_analysis_requires_exact_velnor_pool_for_local_identity() {
+    let policy = VelnorPolicyContract {
+        velnor_labels: vec!["self-hosted".to_owned(), "velnor-target-mvp".to_owned()],
+        velnor_runner_group: Some("velnor-pool".to_owned()),
+        ..VelnorPolicyContract::default()
+    };
+    let configured: Value =
+        serde_yaml::from_str("group: velnor-pool\nlabels: [self-hosted, velnor-target-mvp]\n")
+            .expect("valid configured Velnor runner");
+    assert!(is_configured_velnor_runner(&configured, &policy));
+    let mut resolving = BTreeSet::new();
+    let analysis = analyze_runner(&configured, None, &mut resolving, &policy);
+    assert!(analysis.self_hosted);
+    assert!(!analysis.unverified);
+    assert!(!analysis.invalid);
+
+    for text in [
+        "group: other-pool\nlabels: [ubuntu-24.04]\n",
+        "group: velnor-pool\nlabels: [ubuntu-private]\n",
+        "group: velnor-pool\nlabels: [self-hosted]\n",
+    ] {
+        let value: Value = serde_yaml::from_str(text).expect("valid runner-group mapping");
+        let mut resolving = BTreeSet::new();
+        let analysis = analyze_runner(&value, None, &mut resolving, &policy);
+        assert!(analysis.unverified, "{text}");
+        assert!(!is_configured_velnor_runner(&value, &policy), "{text}");
+    }
+}
+
+#[test]
+fn static_runner_audit_rejects_custom_and_self_hosted_labels_but_keeps_official_labels() {
+    for label in ["ubuntu-private", "self-hosted"] {
+        let workflow =
+            gated_trusted_job().replace("runs-on: ubuntu-24.04", &format!("runs-on: {label}"));
+        let root = velnor_tree("static-runner-rejected", &workflow);
+        let audit = must(audit_workflows(&root), "audit static runner label");
+        assert!(
+            !audit.runners.is_empty(),
+            "unconfigured runner label {label:?} must fail closed"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    for label in ["ubuntu-24.04", "ubuntu-26.04", "xcode-27"] {
+        let workflow =
+            gated_trusted_job().replace("runs-on: ubuntu-24.04", &format!("runs-on: {label}"));
+        let root = velnor_tree("static-runner-supported", &workflow);
+        let audit = must(
+            audit_workflows(&root),
+            "audit supported hosted runner label",
+        );
+        assert!(
+            audit.runners.is_empty(),
+            "supported exact label {label:?} must remain accepted: {:?}",
+            audit.runners
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn runner_environment_gate_rejects_top_level_or_bypass_and_accepts_wrapped_or() {
+    let workflow = gated_trusted_job();
+    let unsafe_condition = workflow.replace(
+        "if: '${{ runner.environment == ''github-hosted'' }}'",
+        "if: '${{ runner.environment == ''github-hosted'' && false || always() }}'",
+    );
+    let root = velnor_tree("runner-gate-top-level-or-bypass", &unsafe_condition);
+    let audit = must(audit_workflows(&root), "audit runner gate with OR bypass");
+    assert!(
+        !audit.runners.is_empty(),
+        "top-level OR must not bypass the runner environment predicate"
+    );
+    let _ = fs::remove_dir_all(root);
+
+    let safe_condition = workflow.replace(
+        "if: '${{ runner.environment == ''github-hosted'' }}'",
+        "if: '${{ (runner.environment == ''github-hosted'') && (false || always()) }}'",
+    );
+    let root = velnor_tree("runner-gate-wrapped-or", &safe_condition);
+    let audit = must(audit_workflows(&root), "audit wrapped runner gate");
+    assert!(
+        audit.runners.is_empty(),
+        "a parenthesized original expression stays behind the environment conjunct: {:?}",
+        audit.runners
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn lanes_runner_requires_known_host_and_safe_velnor_leg() {
+    let labels = vec!["self-hosted".to_owned(), "velnor-target-mvp".to_owned()];
+    let selector = |hosted: &str, labels: &[String]| {
+        Value::String(format!(
+            "(github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor') && fromJSON('{}') || {}",
+            crate::primitives::lanes_labels_json(labels),
+            crate::primitives::json_string(hosted),
+        ))
+    };
+    let contract =
+        |github_runner: &str, labels: Vec<String>, pull_request_on_velnor| VelnorPolicyContract {
+            runners: "both".to_owned(),
+            automatic: "both".to_owned(),
+            default_branch: "main".to_owned(),
+            generator_revision: None,
+            github_runner: github_runner.to_owned(),
+            velnor_labels: labels,
+            velnor_runner_group: None,
+            velnor_trusted_label: None,
+            pull_request_on_velnor,
+        };
+
+    let approved = contract("ubuntu-24.04", labels.clone(), true);
+    assert!(lanes_velnor_leg_is_safe(&approved));
+    let xcode = contract("xcode-27", labels.clone(), true);
+    assert!(lanes_velnor_leg_is_safe(&xcode));
+    assert_eq!(
+        approved_lanes_runner(&selector("xcode-27", &labels), &xcode),
+        Some(LanesRunnerDefault::Github),
+        "the exact documented Xcode hosted label remains recognized"
+    );
+
+    for github_runner in ["ubuntu-private", "ubuntu-fleet", "self-hosted"] {
+        let unproven = contract(github_runner, labels.clone(), true);
+        assert_eq!(
+            approved_lanes_runner(&selector(github_runner, &labels), &unproven),
+            None,
+            "runner label {github_runner:?} must not make the two-branch selector trusted"
+        );
+    }
+
+    let unapproved = vec!["self-hosted".to_owned(), "example-pool".to_owned()];
+    let unapproved_contract = contract("ubuntu-24.04", unapproved.clone(), true);
+    assert_eq!(
+        approved_lanes_runner(&selector("ubuntu-24.04", &unapproved), &unapproved_contract),
+        None,
+        "PR-enabled lane selectors must validate their Velnor branch too"
+    );
+    assert!(!lanes_velnor_leg_is_safe(&unapproved_contract));
+}
+
 /// The approved Velnor labels as a TOML array literal.
 fn approved_labels_toml() -> String {
     crate::estate::approved_velnor_runner_labels()
@@ -1325,9 +1647,97 @@ const TRUSTED_LABEL: &str = "example-trusted-hosts";
 /// trusted events.
 fn gated_trusted_job() -> String {
     let labels = crate::estate::approved_velnor_runner_labels().join(", ");
+    let guard_environment = crate::primitives::runner_guard::GUARD_SANITIZED_ENVIRONMENT
+        .iter()
+        .map(|key| format!("          {key}: ''\n"))
+        .collect::<String>();
     format!(
-        "name: CI / PR\non:\n  pull_request:\njobs:\n  ci-required:\n    name: ci-required\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo ok\n  velnor-docker:\n    name: Docker\n    if: ${{{{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}}}\n    runs-on: [{labels}, {TRUSTED_LABEL}]\n    steps:\n      - run: echo trusted\n"
+        "name: CI / PR\non:\n  pull_request:\njobs:\n  ci-required:\n    name: ci-required\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Verify runner environment\n        id: runner_provenance\n        if: '${{{{ !(runner.environment == ''github-hosted'') }}}}'\n        run: ((0))\n        shell: 'bash --noprofile --norc -p -e -o pipefail {{0}}'\n        working-directory: {guard_working_directory}\n        env:\n{guard_environment}      - run: echo ok\n        if: '${{{{ runner.environment == ''github-hosted'' }}}}'\n  velnor-docker:\n    name: Docker\n    if: ${{{{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}}}\n    runs-on: [{labels}, {TRUSTED_LABEL}]\n    steps:\n      - name: Verify runner environment\n        id: runner_provenance\n        if: '${{{{ !(runner.environment == ''self-hosted'') }}}}'\n        run: ((0))\n        shell: 'bash --noprofile --norc -p -e -o pipefail {{0}}'\n        working-directory: {guard_working_directory}\n        env:\n{guard_environment}      - run: echo trusted\n        if: '${{{{ runner.environment == ''self-hosted'' }}}}'\n",
+        guard_environment = guard_environment,
+        guard_working_directory = crate::primitives::runner_guard::GUARD_WORKING_DIRECTORY,
     )
+}
+
+#[test]
+fn runner_environment_audit_rejects_guard_shell_and_pre_step_container_bypasses() {
+    let workflow = gated_trusted_job();
+    for (field, value) in [
+        ("shell", "'true {0}'"),
+        ("container", "alpine:latest"),
+        ("services", "{db: {image: postgres:latest}}"),
+    ] {
+        let unsafe_workflow = if field == "shell" {
+            workflow.replace(
+                "shell: 'bash --noprofile --norc -p -e -o pipefail {0}'",
+                &format!("shell: {value}"),
+            )
+        } else {
+            workflow.replace(
+                "    runs-on: ubuntu-24.04",
+                &format!("    {field}: {value}\n    runs-on: ubuntu-24.04"),
+            )
+        };
+        let root = velnor_tree("runner-pre-step-bypass", &unsafe_workflow);
+        let audit = must(audit_workflows(&root), "audit pre-step bypass");
+        assert!(
+            !audit.runners.is_empty(),
+            "unsafe {field} must fail hosted runner proof"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    let hostile_defaults = workflow
+        .replace(
+            "name: CI / PR\n",
+            "name: CI / PR\ndefaults:\n  run:\n    shell: 'bash {0} || true'\n    working-directory: /tmp/untrusted-cwd\nenv:\n  BASH_ENV: /tmp/untrusted-startup\n  SHELLOPTS: noexec\n",
+        )
+        .replace(
+            "    runs-on: ubuntu-24.04",
+            "    defaults:\n      run:\n        shell: 'bash {0} || true'\n        working-directory: /tmp/job-cwd\n    env:\n      BASH_ENV: /tmp/job-startup\n      BASHOPTS: expand_aliases\n      LD_PRELOAD: /tmp/payload.so\n      DYLD_INSERT_LIBRARIES: /tmp/payload.dylib\n      PATH: /tmp/attacker-bin\n    runs-on: ubuntu-24.04",
+        );
+    let root = velnor_tree("runner-step-overrides-hostile-defaults", &hostile_defaults);
+    let audit = must(audit_workflows(&root), "audit step-local guard overrides");
+    assert!(
+        audit.runners.is_empty(),
+        "step-local shell, loader, PATH, and working-directory overrides protect the guard: {:?}",
+        audit.runners
+    );
+    let _ = fs::remove_dir_all(root);
+
+    let guard_env_block = format!(
+        "        env:\n{}",
+        crate::primitives::runner_guard::GUARD_SANITIZED_ENVIRONMENT
+            .iter()
+            .map(|key| format!("          {key}: ''\n"))
+            .collect::<String>()
+    );
+    for unsafe_workflow in [
+        workflow.replace("BASH_ENV: ''", "BASH_ENV: /tmp/runner-startup"),
+        workflow.replace("SHELLOPTS: ''", "SHELLOPTS: noexec"),
+        workflow.replace("BASHOPTS: ''", "BASHOPTS: expand_aliases"),
+        workflow.replace("LD_PRELOAD: ''", "LD_PRELOAD: /tmp/payload.so"),
+        workflow.replace(
+            "DYLD_INSERT_LIBRARIES: ''",
+            "DYLD_INSERT_LIBRARIES: /tmp/payload.dylib",
+        ),
+        workflow.replace("PATH: ''", "PATH: /tmp/attacker-bin"),
+        workflow.replace("LD_PRELOAD: ''\n", ""),
+        workflow.replace("DYLD_INSERT_LIBRARIES: ''\n", ""),
+        workflow.replace(&guard_env_block, ""),
+        workflow.replace(
+            "working-directory: ${{ runner.temp }}",
+            "working-directory: ${{ github.workspace }}",
+        ),
+        workflow.replace("run: ((0))", "run: exit 1"),
+    ] {
+        let root = velnor_tree("runner-bash-env-bypass", &unsafe_workflow);
+        let audit = must(audit_workflows(&root), "audit runner guard contract");
+        assert!(
+            !audit.runners.is_empty(),
+            "the provenance guard must clear inherited BASH_ENV"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 /// The semantic rules pass on a tree whose trusted Velnor job carries the
@@ -1479,6 +1889,68 @@ fn static_and_policy_workflows_are_audited_with_all_other_workflows() {
         audit.actions
     );
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn local_reusable_workflows_require_exact_lowercase_extensions_and_audited_targets() {
+    for reference in [
+        "./.github/workflows/ci-child.yml",
+        "./.github/workflows/ci-child.yaml",
+    ] {
+        assert!(is_approved_local_reusable(reference), "{reference}");
+    }
+    for reference in [
+        "./.github/workflows/ci-child.YML",
+        "./.github/workflows/ci-child.YAML",
+        "./.github/workflows/ci-child.json",
+    ] {
+        assert!(!is_approved_local_reusable(reference), "{reference}");
+    }
+
+    for (name, reference, target_file, expected_valid) in [
+        (
+            "local-reusable-yml-target",
+            "./.github/workflows/ci-child.yml",
+            Some("ci-child.yml"),
+            true,
+        ),
+        (
+            "local-reusable-yaml-target",
+            "./.github/workflows/ci-child.yaml",
+            Some("ci-child.yaml"),
+            true,
+        ),
+        (
+            "local-reusable-missing-target",
+            "./.github/workflows/ci-missing.yml",
+            None,
+            false,
+        ),
+        (
+            "local-reusable-unenumerated-target",
+            "./.github/workflows/ci-child.YML",
+            Some("ci-child.YML"),
+            false,
+        ),
+    ] {
+        let caller =
+            format!("name: Caller\non:\n  pull_request:\njobs:\n  call:\n    uses: {reference}\n");
+        let root = velnor_tree(name, &caller);
+        if let Some(target_file) = target_file {
+            write(
+                &root.join(".github/workflows").join(target_file),
+                "name: Child\non:\n  workflow_call:\njobs: {}\n",
+            );
+        }
+        let audit = must(audit_workflows(&root), "audit local reusable workflow");
+        assert_eq!(
+            audit.runners.is_empty(),
+            expected_valid,
+            "{name}: {:?}",
+            audit.runners
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 #[cfg(unix)]
@@ -3168,18 +3640,23 @@ fn rendered_entrypoints_pass_the_legacy_space_marker_scan() {
 }
 
 #[test]
-fn policy_sibling_setup_action_is_a_reviewed_local_path() {
-    assert!(
-        is_approved_local_action(crate::VELNOR_WORKFLOW_POLICY_SETUP_ACTION),
-        "the owner policy job resolves its setup composite out of the sibling checkout"
+fn policy_setup_action_uses_catalog_pin_not_local_checkout_alias() {
+    let action = crate::workflow_setup_action_uses(crate::workflow_setup_action_repository(), "deadbeef");
+    assert_eq!(
+        action,
+        format!(
+            "{}@{}",
+            crate::VELNOR_WORKFLOW_SETUP_ACTION,
+            crate::primitives::action_guard::TRUSTED_VELNOR_ACTION_REVISION
+        )
     );
     assert!(
-        !is_approved_local_action("./policy-setup-action/.github/actions/anything-else"),
-        "the sibling allowance is the exact setup composite, never a second local path"
+        !is_approved_local_action("./policy-setup-action/.github/actions/setup-velnor-workflow"),
+        "the generated policy no longer uses an unsupported sibling checkout alias"
     );
     assert!(
-        !is_approved_local_action("./policy-setup-action/.github/workflows/ci-pr.yml"),
-        "the sibling checkout carries no reusable workflows"
+        is_approved_local_action("./.github/actions/example"),
+        "other supported workspace-local actions remain auditable from the tree"
     );
 }
 

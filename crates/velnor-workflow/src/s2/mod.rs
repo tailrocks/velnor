@@ -2043,9 +2043,9 @@ fn validate_visibility_selector_identities(
         && let Some(selector) = config.selectors.get(&provider::ProviderId::GithubHosted)
     {
         for label in &selector.runs_on {
-            if !provider::is_github_owned_label(label) {
+            if !provider::is_known_github_hosted_label(label) {
                 return Err(GeneratorError::usage(format!(
-                    "contradictory runner selection: [workflow.selectors.github-hosted] runs_on carries {label:?}, which is not a GitHub-owned label (ubuntu-*|macos-*|windows-*); hosted selectors must stay GitHub-owned so a hosted-only tree cannot route onto caller-managed runners, but {evidence_note}"
+                    "contradictory runner selection: [workflow.selectors.github-hosted] runs_on carries unsupported label {label:?}; hosted selectors must use the exact supported GitHub-hosted label vocabulary so unknown custom labels cannot route a hosted-only tree onto caller-managed runners, but {evidence_note}"
                 )));
             }
         }
@@ -4635,9 +4635,8 @@ pub(crate) fn validate_hosted_mr_boxington_store_budget(
 /// so the rule fails on any job whose only checkout is `fetch-depth: 1`.
 /// Full history is a property of running the validator, checked here over
 /// every rendered workflow rather than remembered by each job's checkout. A
-/// shallow supplemental checkout may coexist — today only the owner policy
-/// job's sparse base-tree setup-action checkout — but the audited checkout
-/// itself must be full.
+/// shallow supplemental checkout may coexist, but the audited checkout itself
+/// must be full.
 ///
 /// # Errors
 /// Returns a usage error naming the workflow and job whose checkout is
@@ -7327,6 +7326,7 @@ fn generated_files_with_surface(
     for owned in &config.static_files {
         files.insert(PathBuf::from(&owned.path), owned.content.clone());
     }
+    add_runner_environment_guards(&mut files, &config)?;
     validate_ruleset_required_status_checks(&config, &files)?;
     validate_hosted_mr_boxington_store_budget(&files)?;
     validate_policy_jobs_check_out_full_history(&files)?;
@@ -7337,6 +7337,28 @@ fn generated_files_with_surface(
     // generator's 8 MiB ceiling before it can fail every run at startup.
     template_memory::validate_template_memory(&files)?;
     Ok(files)
+}
+
+fn add_runner_environment_guards(
+    files: &mut BTreeMap<PathBuf, String>,
+    config: &ProjectConfig,
+) -> Result<(), GeneratorError> {
+    let local_action_manifests = policy::runner_guard_action_manifest_snapshot(files)?;
+    for (path, content) in files.iter_mut() {
+        if path.parent() != Some(Path::new(".github/workflows"))
+            || !matches!(
+                path.extension().and_then(|value| value.to_str()),
+                Some("yml" | "yaml")
+            )
+        {
+            continue;
+        }
+        let expected =
+            policy::workflow_runner_environment_matches(content, config, &local_action_manifests)?;
+        *content = crate::primitives::runner_guard::transform_workflow(content, &expected)
+            .map_err(GeneratorError::usage)?;
+    }
+    Ok(())
 }
 
 /// Composite actions the generator always emits; repository `static_files`
@@ -20286,16 +20308,9 @@ lockfile = true
         }
     }
 
-    /// The owner policy job runs the setup action from its own checkout
-    /// (`./…`) while checking the repository out only under
-    /// `policy-checkout/`: without a second checkout the setup step's `uses:`
-    /// cannot resolve and the job dies at setup. The sparse checkout ahead of
-    /// it provisions exactly the composite action directory from the BASE
-    /// tree under the sibling `policy-setup-action/` — never the PR head,
-    /// and never resolved out of `policy-checkout/`, either of which would
-    /// execute fork-controlled action code under `pull_request_target`.
-    /// Consumers pin the published action and the Velnor lane provisions its
-    /// slot, so neither carries this checkout.
+    /// The owner policy job and every consumer use a reviewed action source.
+    /// The policy job resolves the owner action from the BASE tree's sibling
+    /// checkout, never from the audited PR tree.
     #[test]
     fn owner_policy_job_checks_out_base_setup_action_before_setup() {
         let owner = hosted_policy_job("abc123");
@@ -20328,22 +20343,13 @@ lockfile = true
             block.contains("path: policy-setup-action\n"),
             "the sibling checkout lands beside the audited tree, never at the root: {owner}"
         );
-        assert!(
-            !block.contains("head.sha"),
-            "the sibling checkout never names the PR head: {owner}"
-        );
+        assert!(!block.contains("head.sha"), "{owner}");
         assert!(
             block.contains("sparse-checkout: .github/actions/setup-velnor-workflow\n"),
             "the sibling checkout provisions exactly the composite directory: {owner}"
         );
-        assert!(
-            block.contains("fetch-depth: 1\n"),
-            "the sibling checkout is shallow: {owner}"
-        );
-        assert!(
-            block.contains("persist-credentials: false\n"),
-            "the sibling checkout persists no credentials: {owner}"
-        );
+        assert!(block.contains("fetch-depth: 1\n"), "{owner}");
+        assert!(block.contains("persist-credentials: false\n"), "{owner}");
         assert!(
             !owner.contains("policy-checkout/.github/actions"),
             "the setup action never resolves out of the audited tree: {owner}"

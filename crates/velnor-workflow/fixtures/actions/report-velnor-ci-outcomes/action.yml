@@ -25,9 +25,11 @@ inputs:
     required: false
     default: ""
   cache_rustup_primary:
+    description: Primary cache key used by the Rustup restore step
     required: false
     default: ""
   cache_rustup_matched:
+    description: Cache key matched by the Rustup restore step
     required: false
     default: ""
   cache_mold_outcome:
@@ -35,9 +37,11 @@ inputs:
     required: false
     default: ""
   cache_mold_primary:
+    description: Primary cache key used by the mold restore step
     required: false
     default: ""
   cache_mold_matched:
+    description: Cache key matched by the mold restore step
     required: false
     default: ""
   cache_cargo_outcome:
@@ -45,9 +49,11 @@ inputs:
     required: false
     default: ""
   cache_cargo_primary:
+    description: Primary cache key used by the Cargo restore step
     required: false
     default: ""
   cache_cargo_matched:
+    description: Cache key matched by the Cargo restore step
     required: false
     default: ""
   cache_mbx_outcome:
@@ -55,9 +61,11 @@ inputs:
     required: false
     default: ""
   cache_mbx_hit:
+    description: Exact-key match signal from the MBX cache restore (`true` or `false`)
     required: false
     default: ""
   cache_mbx_primary:
+    description: Primary archive key used by the MBX cache restore
     required: false
     default: ""
   cache_mbx_matched:
@@ -69,42 +77,54 @@ inputs:
     required: false
     default: ""
   cache_docker_seed_primary:
+    description: Primary cache key used by the Docker seed restore step
     required: false
     default: ""
   cache_docker_seed_matched:
+    description: Cache key matched by the Docker seed restore step
     required: false
     default: ""
   # Verification/save signals. No generator step renders these yet; they stay
   # empty until a verification/save producer exists, and the classifier treats
   # empty as unobserved rather than as a negative.
   cache_rustup_verified:
+    description: Whether the Rustup cache passed verification (`true` or `false`); empty means unobserved
     required: false
     default: ""
   cache_rustup_saved:
+    description: Whether the Rustup cache was saved (`true` or `false`); empty means unobserved
     required: false
     default: ""
   cache_mold_verified:
+    description: Whether the mold cache passed verification (`true` or `false`); empty means unobserved
     required: false
     default: ""
   cache_mold_saved:
+    description: Whether the mold cache was saved (`true` or `false`); empty means unobserved
     required: false
     default: ""
   cache_cargo_verified:
+    description: Whether the Cargo cache passed verification (`true` or `false`); empty means unobserved
     required: false
     default: ""
   cache_cargo_saved:
+    description: Whether the Cargo cache was saved (`true` or `false`); empty means unobserved
     required: false
     default: ""
   cache_mbx_verified:
+    description: Whether the MBX cache passed verification (`true` or `false`); empty means unobserved
     required: false
     default: ""
   cache_mbx_saved:
+    description: Whether the MBX cache was saved (`true` or `false`); empty means unobserved
     required: false
     default: ""
   cache_docker_seed_verified:
+    description: Whether the Docker seed cache passed verification (`true` or `false`); empty means unobserved
     required: false
     default: ""
   cache_docker_seed_saved:
+    description: Whether the Docker seed cache was saved (`true` or `false`); empty means unobserved
     required: false
     default: ""
 

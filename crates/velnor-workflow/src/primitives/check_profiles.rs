@@ -584,9 +584,28 @@ fn artifact_verifier_job_id(profile_id: &str) -> String {
 fn profile_admission_expression(
     config: &ProjectConfig,
     profile: &CheckProfileSpec,
+    dispatch_runs_on: Option<&str>,
 ) -> Option<String> {
-    (profile.runner == "velnor")
-        .then(|| WorkflowIr::from_config(config).lane_admission_expression(LaneAdmission::Velnor))
+    (profile.runner == "velnor").then(|| {
+        if dispatch_runs_on.is_none() {
+            return WorkflowIr::from_config(config)
+                .lane_admission_expression(LaneAdmission::Velnor);
+        }
+        // `lanes_input` declares one dispatch input that selects the
+        // executor.  The default leg still runs the profile on its normal
+        // automatic trusted events, while either dispatch choice is valid:
+        // `lanes_runs_on` routes `github` to the hosted runner and `velnor`
+        // to the self-hosted labels.  Force the IR to include the Velnor
+        // automatic arm even when the repository's ordinary lane setting is
+        // GitHub-only; lanes_input's static default owns automatic events.
+        let mut lane_config = config.clone();
+        lane_config.automatic = RunnerMode::Velnor;
+        let expression = WorkflowIr::from_config(&lane_config)
+            .lane_admission_expression(LaneAdmission::Velnor)
+            .replace("github.event.inputs.runner", "github.event.inputs.lanes");
+        let dispatch = "github.event_name == 'workflow_dispatch' && (github.event.inputs.lanes == 'velnor' || github.event.inputs.lanes == 'both' || github.event.inputs.lanes == '')";
+        expression.replace(dispatch, "github.event_name == 'workflow_dispatch'")
+    })
 }
 
 fn render_profile_job_with_selected_profiles(
@@ -616,7 +635,7 @@ fn render_profile_job_with_selected_profiles(
             .join(", ");
         let _ = writeln!(output, "    needs: [{needs}]");
     }
-    if let Some(admission) = profile_admission_expression(config, profile) {
+    if let Some(admission) = profile_admission_expression(config, profile, dispatch_runs_on) {
         let _ = writeln!(output, "    if: ${{{{ ({admission}) }}}}");
     }
     if profile.artifacts_required {
@@ -685,7 +704,7 @@ fn render_artifact_verifier_job(
     );
     let _ = writeln!(output, "    needs: [{}]", profile.id);
     let result_condition = format!("needs.{}.result == 'success'", profile.id);
-    let condition = profile_admission_expression(config, profile).map_or_else(
+    let condition = profile_admission_expression(config, profile, dispatch_runs_on).map_or_else(
         || result_condition.clone(),
         |admission| format!("({result_condition}) && ({admission})"),
     );
@@ -1020,6 +1039,18 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    fn add_runner_environment_guards(config: &ProjectConfig, workflow: &str) -> String {
+        let expected = must(
+            crate::policy::workflow_runner_environment_matches(workflow, config),
+            "classify rendered workflow runners",
+        );
+        must(
+            crate::primitives::runner_guard::transform_workflow(workflow, &expected),
+            "guard rendered workflow runners",
+        )
+    }
+
     #[test]
     fn required_and_advisory_jobs_split_continue_on_error() {
         let smoke = profile("smoke");
@@ -1255,6 +1286,126 @@ mod tests {
             verifier.contains("path=\"$root/target/ci-evidence/rollup.json\""),
             "the verifier checks the preserved relative path: {verifier}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn required_artifact_velnor_producer_and_verifier_pass_legacy_policy() {
+        let mut strict = profile("strict");
+        strict.runner = "velnor".to_owned();
+        strict.artifacts = vec!["target/ci-evidence/rollup.json".to_owned()];
+        strict.artifacts_required = true;
+        let mut consumer = profile("consumer");
+        consumer.needs = vec!["strict".to_owned()];
+        let config = profile_config(vec![strict, consumer]);
+        let map = args_for("");
+        let selected = must(
+            select_profiles(&config.check_profiles, &Args(&map), "scheduled-checks"),
+            "select producer and consumer",
+        );
+        let workflow = add_runner_environment_guards(&config, &render(&config, None, &selected));
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-legacy-artifact-policy-{}",
+            crate::unique_suffix()
+        ));
+        must(
+            fs::create_dir_all(root.join(".github/workflows")),
+            "create policy workflow directory",
+        );
+        must(
+            fs::create_dir_all(root.join(".github-gen")),
+            "create generation config directory",
+        );
+        must(
+            fs::write(
+                root.join(".github-gen/velnor-workflow.toml"),
+                "[workflow]\nrunners = \"both\"\nautomatic = \"both\"\ngithub_runner = \"ubuntu-24.04\"\ndefault_branch = \"main\"\nvelnor_labels = [\"self-hosted\", \"example-lane\"]\n",
+            ),
+            "write generation config",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/scheduled-daily.yml"),
+                &workflow,
+            ),
+            "write rendered scheduled workflow",
+        );
+        let audit = must(
+            crate::policy::audit_workflows(&root),
+            "audit rendered legacy scheduled workflow",
+        );
+        assert!(
+            audit.runners.is_empty(),
+            "rendered Velnor producer/verifier must satisfy trusted-runner policy: {:?}\n{workflow}",
+            audit.runners
+        );
+        must(fs::remove_dir_all(root), "remove policy workflow directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn required_artifact_velnor_producer_and_verifier_pass_legacy_policy_with_pull_request() {
+        let mut strict = profile("strict");
+        strict.runner = "velnor".to_owned();
+        strict.artifacts = vec!["target/ci-evidence/rollup.json".to_owned()];
+        strict.artifacts_required = true;
+        let mut consumer = profile("consumer");
+        consumer.needs = vec!["strict".to_owned()];
+        let mut config = profile_config(vec![strict, consumer]);
+        config.pull_request_on_velnor = true;
+        config.velnor_labels = crate::estate::approved_velnor_runner_labels()
+            .iter()
+            .map(|label| (*label).to_owned())
+            .collect();
+        let map = args_for("");
+        let selected = must(
+            select_profiles(&config.check_profiles, &Args(&map), "scheduled-checks"),
+            "select producer and consumer",
+        );
+        let workflow = add_runner_environment_guards(&config, &render(&config, None, &selected));
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-legacy-artifact-policy-pr-{}",
+            crate::unique_suffix()
+        ));
+        must(
+            fs::create_dir_all(root.join(".github/workflows")),
+            "create policy workflow directory",
+        );
+        must(
+            fs::create_dir_all(root.join(".github-gen")),
+            "create generation config directory",
+        );
+        let labels = crate::estate::approved_velnor_runner_labels()
+            .iter()
+            .map(|label| format!("\"{label}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        must(
+            fs::write(
+                root.join(".github-gen/velnor-workflow.toml"),
+                format!(
+                    "[workflow]\nrunners = \"both\"\nautomatic = \"both\"\ngithub_runner = \"ubuntu-24.04\"\ndefault_branch = \"main\"\npull_request_on_velnor = true\nvelnor_labels = [{labels}]\n"
+                ),
+            ),
+            "write generation config",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/scheduled-daily.yml"),
+                &workflow,
+            ),
+            "write rendered scheduled workflow",
+        );
+        let audit = must(
+            crate::policy::audit_workflows(&root),
+            "audit rendered PR-enabled scheduled workflow",
+        );
+        assert!(
+            audit.runners.is_empty(),
+            "rendered PR-enabled Velnor producer/verifier must satisfy trusted-runner policy: {:?}\n{workflow}",
+            audit.runners
+        );
+        must(fs::remove_dir_all(root), "remove policy workflow directory");
     }
 
     #[test]
@@ -2173,6 +2324,482 @@ branches = ["main"]"#,
             2,
             "every job dispatches across lanes: {workflow}"
         );
+        let admission = profile_admission_expression(
+            &config,
+            &config.check_profiles[0],
+            Some("dispatch-runs-on"),
+        )
+        .expect("Velnor profiles have a lane admission gate");
+        assert_eq!(
+            workflow
+                .matches(&format!("if: ${{{{ ({admission}) }}}}"))
+                .count(),
+            2,
+            "every Velnor job keeps automatic admission and accepts either dispatch lane: {workflow}"
+        );
+        assert!(
+            !admission.contains("github.event.inputs."),
+            "lanes dispatch admission is unconditional because runs-on selects the lane: {admission}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lanes_input_velnor_gate_fails_without_runner_provenance() {
+        let mut fleet = profile("fleet");
+        fleet.runner = "velnor".to_owned();
+        fleet.artifacts = vec!["target/ci-evidence/rollup.json".to_owned()];
+        fleet.artifacts_required = true;
+        let config = profile_config(vec![fleet]);
+        let automatic_name = "both";
+        let map = args_for("lanes_input = true");
+        let selected = select_all(&config, &Args(&map));
+        let workflow = must(
+            render_with_lanes(&config, &selected),
+            "render the Velnor lanes file",
+        );
+        let admission = profile_admission_expression(
+            &config,
+            &config.check_profiles[0],
+            Some("dispatch-runs-on"),
+        )
+        .expect("Velnor profiles have a lane admission gate");
+        assert!(admission.contains("github.event_name=='merge_group'"));
+        assert!(admission.contains("github.ref=='refs/heads/main'"));
+        assert!(admission.contains("github.event_name == 'workflow_dispatch'"));
+        assert!(
+            !admission.contains("github.event.inputs."),
+            "dispatch lane is selected by runs-on: {admission}"
+        );
+        assert!(
+                workflow.contains(
+                    "inputs.lanes == 'github') && \"ubuntu-24.04\" || fromJSON('[\"self-hosted\",\"example-lane\"]')"
+                ),
+                "github dispatch selects hosted and every other dispatch selects Velnor: {workflow}"
+            );
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-lanes-policy-{automatic_name}-{}",
+            crate::unique_suffix()
+        ));
+        must(
+            fs::create_dir_all(root.join(".github/workflows")),
+            "create policy workflow directory",
+        );
+        must(
+            fs::create_dir_all(root.join(".github-gen")),
+            "create generation config directory",
+        );
+        must(
+                fs::write(
+                    root.join(".github-gen/velnor-workflow.toml"),
+                    format!(
+                        "[workflow]\nrunners = \"both\"\nautomatic = \"{automatic_name}\"\ngithub_runner = \"ubuntu-24.04\"\ndefault_branch = \"main\"\nvelnor_labels = [\"self-hosted\", \"example-lane\"]\n"
+                    ),
+                ),
+                "write generation config",
+            );
+        must(
+            fs::write(
+                root.join(".github/workflows/scheduled-daily.yml"),
+                &workflow,
+            ),
+            "write rendered lanes workflow",
+        );
+        let audit = must(
+            crate::policy::audit_workflows(&root),
+            "audit rendered lanes workflow",
+        );
+        assert!(
+            !audit.runners.is_empty(),
+            "a generated lane selector must fail closed without verified runner provenance: {:?}\n{workflow}",
+            audit.runners
+        );
+
+        let gate_line = format!("    if: ${{{{ ({admission}) }}}}\n");
+        let pr_admission = format!(
+                "github.event_name=='pull_request'&&github.event.pull_request.head.repo.full_name==github.repository||{admission}"
+            );
+        let pr_workflow = workflow.replacen(
+            &gate_line,
+            &format!("    if: ${{{{ ({pr_admission}) }}}}\n"),
+            1,
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/scheduled-daily.yml"),
+                &pr_workflow,
+            ),
+            "write pull-request admission variant",
+        );
+        let pr_audit = must(
+            crate::policy::audit_workflows(&root),
+            "audit pull-request admission variant",
+        );
+        assert!(
+            !pr_audit.runners.is_empty(),
+            "pull-request admission must fail when pull_request_on_velnor=false: {pr_audit:?}"
+        );
+
+        let ungated_workflow = workflow.replacen(&gate_line, "", 1);
+        must(
+            fs::write(
+                root.join(".github/workflows/scheduled-daily.yml"),
+                &ungated_workflow,
+            ),
+            "write missing admission variant",
+        );
+        let ungated_audit = must(
+            crate::policy::audit_workflows(&root),
+            "audit missing admission variant",
+        );
+        assert!(
+            !ungated_audit.runners.is_empty(),
+            "an ungated Velnor job must fail trusted-runner policy: {ungated_audit:?}"
+        );
+
+        let dispatch_only_workflow = workflow.replacen(
+            &gate_line,
+            "    if: ${{ github.event_name == 'workflow_dispatch' }}\n",
+            1,
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/scheduled-daily.yml"),
+                &dispatch_only_workflow,
+            ),
+            "write overbroad admission variant",
+        );
+        let dispatch_only_audit = must(
+            crate::policy::audit_workflows(&root),
+            "audit overbroad admission variant",
+        );
+        assert!(
+                !dispatch_only_audit.runners.is_empty(),
+                "dispatch-only admission must fail without automatic trust events: {dispatch_only_audit:?}"
+            );
+        must(fs::remove_dir_all(root), "remove policy workflow directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lanes_input_pull_request_velnor_gate_fails_without_runner_provenance() {
+        let mut fleet = profile("fleet");
+        fleet.runner = "velnor".to_owned();
+        fleet.artifacts = vec!["target/ci-evidence/rollup.json".to_owned()];
+        fleet.artifacts_required = true;
+        let mut config = profile_config(vec![fleet]);
+        config.pull_request_on_velnor = true;
+        config.velnor_labels = crate::estate::approved_velnor_runner_labels()
+            .iter()
+            .map(|label| (*label).to_owned())
+            .collect();
+        let map = args_for("lanes_input = true");
+        let selected = select_all(&config, &Args(&map));
+        let workflow = must(
+            render_with_lanes(&config, &selected),
+            "render the PR-enabled Velnor lanes file",
+        );
+        let admission = profile_admission_expression(
+            &config,
+            &config.check_profiles[0],
+            Some("dispatch-runs-on"),
+        )
+        .expect("Velnor profiles have a lane admission gate");
+        assert!(
+            admission.starts_with(
+                "github.event_name=='pull_request'&&github.event.pull_request.head.repo.full_name==github.repository||github.event_name=='merge_group'||"
+            ),
+            "PR admission must stay flattened like the canonical IR: {admission}"
+        );
+        assert!(admission.contains("github.ref=='refs/heads/main'"));
+        assert!(
+            admission.ends_with(" || (github.event_name == 'workflow_dispatch')"),
+            "{admission}"
+        );
+        assert!(!admission.contains("github.event.inputs."), "{admission}");
+        assert!(workflow.contains("fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]')"));
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-lanes-policy-pr-{}",
+            crate::unique_suffix()
+        ));
+        must(
+            fs::create_dir_all(root.join(".github/workflows")),
+            "create policy workflow directory",
+        );
+        must(
+            fs::create_dir_all(root.join(".github-gen")),
+            "create generation config directory",
+        );
+        must(
+            fs::write(
+                root.join(".github-gen/velnor-workflow.toml"),
+                "[workflow]\nrunners = \"both\"\nautomatic = \"both\"\ngithub_runner = \"ubuntu-24.04\"\ndefault_branch = \"main\"\npull_request_on_velnor = true\nvelnor_labels = [\"self-hosted\", \"velnor-target-mvp\"]\n",
+            ),
+            "write generation config",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/scheduled-daily.yml"),
+                &workflow,
+            ),
+            "write rendered PR-enabled lanes workflow",
+        );
+        let audit = must(
+            crate::policy::audit_workflows(&root),
+            "audit rendered PR-enabled lanes workflow",
+        );
+        assert!(
+            !audit.runners.is_empty(),
+            "an exact PR gate cannot prove the selector's configured GitHub runner pool: {:?}\n{workflow}",
+            audit.runners
+        );
+
+        let self_hosted_fallback = workflow.replace("\"ubuntu-24.04\"", "\"self-hosted\"");
+        must(
+            fs::write(
+                root.join(".github-gen/velnor-workflow.toml"),
+                "[workflow]\nrunners = \"both\"\nautomatic = \"both\"\ngithub_runner = \"self-hosted\"\ndefault_branch = \"main\"\npull_request_on_velnor = true\nvelnor_labels = [\"self-hosted\", \"velnor-target-mvp\"]\n",
+            ),
+            "write unsafe PR-enabled hosted fallback config",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/scheduled-daily.yml"),
+                &self_hosted_fallback,
+            ),
+            "write unsafe PR-enabled hosted fallback workflow",
+        );
+        let fallback_audit = must(
+            crate::policy::audit_workflows(&root),
+            "audit unsafe PR-enabled hosted fallback",
+        );
+        assert!(
+            !fallback_audit.runners.is_empty(),
+            "a PR-enabled gate cannot make an unproven self-hosted fallback safe: {fallback_audit:?}"
+        );
+        must(fs::remove_dir_all(root), "remove policy workflow directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lanes_input_hosted_default_runner_requires_verified_provenance() {
+        let fleet = profile("fleet");
+        let config = profile_config(vec![fleet]);
+        let map = args_for("lanes_input = true");
+        let selected = select_all(&config, &Args(&map));
+        let raw_workflow = must(
+            render_with_lanes(&config, &selected),
+            "render the hosted-default lanes file",
+        );
+        let workflow = add_runner_environment_guards(&config, &raw_workflow);
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-hosted-lanes-policy-{}",
+            crate::unique_suffix()
+        ));
+        must(
+            fs::create_dir_all(root.join(".github/workflows")),
+            "create policy workflow directory",
+        );
+        must(
+            fs::create_dir_all(root.join(".github-gen")),
+            "create generation config directory",
+        );
+        must(
+            fs::write(
+                root.join(".github-gen/velnor-workflow.toml"),
+                "[workflow]\nrunners = \"both\"\nautomatic = \"both\"\ngithub_runner = \"ubuntu-24.04\"\ndefault_branch = \"main\"\nvelnor_labels = [\"self-hosted\", \"example-lane\"]\n",
+            ),
+            "write generation config",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/scheduled-daily.yml"),
+                &raw_workflow,
+            ),
+            "write unguarded hosted-default lanes workflow",
+        );
+        let audit = must(
+            crate::policy::audit_workflows(&root),
+            "audit unguarded hosted-default lanes workflow",
+        );
+        assert!(
+            audit
+                .runners
+                .iter()
+                .any(|finding| finding.contains("first runner environment guard")),
+            "an official-looking label without the generated runtime guard is insufficient: {:?}\n{raw_workflow}",
+            audit.runners
+        );
+
+        must(
+            fs::write(
+                root.join(".github/workflows/scheduled-daily.yml"),
+                &workflow,
+            ),
+            "write guarded hosted-default lanes workflow",
+        );
+        let guarded_audit = must(
+            crate::policy::audit_workflows(&root),
+            "audit guarded hosted-default lanes workflow",
+        );
+        assert!(
+            !guarded_audit.runners.iter().any(|finding| {
+                finding.contains("runner environment guard")
+                    || finding.contains("runner.environment predicate")
+                    || finding.contains("unresolved or dynamic runner label")
+                    || finding.contains("no exact hosted/self-hosted runtime provenance contract")
+            }),
+            "the canonical configured selector and inserted guard must be recognized: {:?}\n{workflow}",
+            guarded_audit.runners
+        );
+
+        let xcode_workflow = raw_workflow.replace("\"ubuntu-24.04\"", "\"xcode-27\"");
+        let mut xcode_config = config.clone();
+        xcode_config.github_runner = "xcode-27".to_owned();
+        let xcode_workflow = add_runner_environment_guards(&xcode_config, &xcode_workflow);
+        must(
+            fs::write(
+                root.join(".github-gen/velnor-workflow.toml"),
+                "[workflow]\nrunners = \"both\"\nautomatic = \"both\"\ngithub_runner = \"xcode-27\"\ndefault_branch = \"main\"\nvelnor_labels = [\"self-hosted\", \"example-lane\"]\n",
+            ),
+            "write documented xcode runner config",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/scheduled-daily.yml"),
+                &xcode_workflow,
+            ),
+            "write documented xcode runner workflow",
+        );
+        let xcode_audit = must(
+            crate::policy::audit_workflows(&root),
+            "audit guarded documented xcode runner workflow",
+        );
+        assert!(
+            !xcode_audit.runners.iter().any(|finding| {
+                finding.contains("runner environment guard")
+                    || finding.contains("runner.environment predicate")
+                    || finding.contains("unresolved or dynamic runner label")
+                    || finding.contains("no exact hosted/self-hosted runtime provenance contract")
+            }),
+            "a configured xcode-27 selector with the runtime guard is recognized: {:?}\n{xcode_workflow}",
+            xcode_audit.runners
+        );
+
+        must(
+            fs::write(
+                root.join(".github-gen/velnor-workflow.toml"),
+                "[workflow]\nrunners = \"both\"\nautomatic = \"both\"\ngithub_runner = \"ubuntu-24.04\"\ndefault_branch = \"main\"\nvelnor_labels = [\"self-hosted\", \"example-lane\"]\n",
+            ),
+            "restore hosted generation config",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/scheduled-daily.yml"),
+                &workflow,
+            ),
+            "restore hosted-default lanes workflow",
+        );
+
+        must(
+            fs::write(
+                root.join(".github-gen/velnor-workflow.toml"),
+                "[workflow]\nrunners = \"both\"\nautomatic = \"both\"\ngithub_runner = \"ubuntu-24.04\"\ndefault_branch = \"main\"\nvelnor_runner_group = \"velnor-trusted\"\nvelnor_labels = [\"self-hosted\", \"example-lane\"]\n",
+            ),
+            "write grouped generation config",
+        );
+        let grouped_audit = must(
+            crate::policy::audit_workflows(&root),
+            "audit grouped hosted-default lanes workflow",
+        );
+        assert!(
+            !grouped_audit.runners.is_empty(),
+            "a configured Velnor runner group must not use the dynamic selector shortcut: {:?}",
+            grouped_audit.runners
+        );
+
+        let self_hosted_workflow = raw_workflow.replace("\"ubuntu-24.04\"", "\"self-hosted\"");
+        must(
+            fs::write(
+                root.join(".github-gen/velnor-workflow.toml"),
+                "[workflow]\nrunners = \"both\"\nautomatic = \"both\"\ngithub_runner = \"self-hosted\"\ndefault_branch = \"main\"\nvelnor_labels = [\"self-hosted\", \"example-lane\"]\n",
+            ),
+            "write self-hosted hosted-runner config",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/scheduled-daily.yml"),
+                &self_hosted_workflow,
+            ),
+            "write self-hosted hosted-runner workflow",
+        );
+        let self_hosted_audit = must(
+            crate::policy::audit_workflows(&root),
+            "audit self-hosted hosted-runner workflow",
+        );
+        assert!(
+            !self_hosted_audit.runners.is_empty(),
+            "a self-hosted github_runner must not bypass the safe gate: {:?}",
+            self_hosted_audit.runners
+        );
+
+        let custom_label_workflow = raw_workflow.replace("\"ubuntu-24.04\"", "\"ubuntu-private\"");
+        must(
+            fs::write(
+                root.join(".github-gen/velnor-workflow.toml"),
+                "[workflow]\nrunners = \"both\"\nautomatic = \"both\"\ngithub_runner = \"ubuntu-private\"\ndefault_branch = \"main\"\nvelnor_labels = [\"self-hosted\", \"example-lane\"]\n",
+            ),
+            "write arbitrary hosted-prefix config",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/scheduled-daily.yml"),
+                &custom_label_workflow,
+            ),
+            "write arbitrary hosted-prefix workflow",
+        );
+        let custom_label_audit = must(
+            crate::policy::audit_workflows(&root),
+            "audit arbitrary hosted-prefix workflow",
+        );
+        assert!(
+            !custom_label_audit.runners.is_empty(),
+            "an arbitrary ubuntu-prefixed label must not get the hosted shortcut: {:?}",
+            custom_label_audit.runners
+        );
+
+        let unsafe_runner = raw_workflow.replace(
+            "(github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor') && fromJSON('[\"self-hosted\",\"example-lane\"]') || \"ubuntu-24.04\"",
+            "(github.event_name == 'workflow_dispatch' && inputs.lanes == 'unknown') && fromJSON('[\"self-hosted\",\"example-lane\"]') || \"ubuntu-24.04\"",
+        );
+        must(
+            fs::write(
+                root.join(".github-gen/velnor-workflow.toml"),
+                "[workflow]\nrunners = \"both\"\nautomatic = \"both\"\ngithub_runner = \"ubuntu-24.04\"\ndefault_branch = \"main\"\nvelnor_labels = [\"self-hosted\", \"example-lane\"]\n",
+            ),
+            "restore hosted generation config",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/scheduled-daily.yml"),
+                &unsafe_runner,
+            ),
+            "write modified dynamic runner selector",
+        );
+        let unsafe_audit = must(
+            crate::policy::audit_workflows(&root),
+            "audit modified dynamic runner selector",
+        );
+        assert!(
+            unsafe_audit.runners.iter().any(|finding| {
+                finding.contains("runs-on contains an unresolved or dynamic runner label")
+            }),
+            "a modified lane selector must remain unresolved and fail closed: {:?}",
+            unsafe_audit.runners
+        );
+        must(fs::remove_dir_all(root), "remove policy workflow directory");
     }
 
     #[test]

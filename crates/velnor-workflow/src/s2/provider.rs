@@ -489,12 +489,38 @@ pub(crate) fn control_plane_provider(universe: &ProviderSet) -> ProviderId {
     }
 }
 
-/// A GitHub-owned execution label: inherently hosted, never a trust fact.
-/// Hosted selectors must use these exclusively; anything else in a hosted
-/// selector could route a hosted-only tree onto caller-managed runners.
+/// A runner label in the supported GitHub-hosted vocabulary.
+///
+/// This exact list constrains configured hosted selectors and rejects
+/// lookalike custom labels such as `ubuntu-private`. It describes the label
+/// vocabulary only; GitHub permits self-hosted runners to carry custom labels,
+/// so this is not evidence about the machine that receives a job.
 #[must_use]
-pub(crate) fn is_github_owned_label(label: &str) -> bool {
-    label.starts_with("ubuntu-") || label.starts_with("macos-") || label.starts_with("windows-")
+pub(crate) fn is_known_github_hosted_label(label: &str) -> bool {
+    matches!(
+        label,
+        "ubuntu-slim"
+            | "ubuntu-22.04"
+            | "ubuntu-22.04-arm"
+            | "ubuntu-24.04"
+            | "ubuntu-24.04-arm"
+            | "ubuntu-26.04"
+            | "ubuntu-26.04-arm"
+            | "ubuntu-latest"
+            | "windows-2022"
+            | "windows-2025-vs2026"
+            | "windows-11-arm"
+            | "windows-11-vs2026-arm"
+            | "windows-2025"
+            | "windows-latest"
+            | "macos-14"
+            | "macos-15"
+            | "macos-15-intel"
+            | "macos-26"
+            | "macos-26-intel"
+            | "macos-latest"
+            | "xcode-27"
+    )
 }
 
 /// Stable plan digest over sorted unit IDs × sorted providers × exclusion
@@ -872,6 +898,47 @@ mod tests {
     #![expect(clippy::panic, reason = "a test whose setup fails should panic loudly")]
 
     use super::*;
+
+    #[test]
+    fn hosted_label_vocabulary_is_exact() {
+        for label in [
+            "ubuntu-slim",
+            "ubuntu-22.04",
+            "ubuntu-22.04-arm",
+            "ubuntu-24.04",
+            "ubuntu-24.04-arm",
+            "ubuntu-26.04",
+            "ubuntu-26.04-arm",
+            "ubuntu-latest",
+            "windows-2022",
+            "windows-2025",
+            "windows-2025-vs2026",
+            "windows-latest",
+            "windows-11-arm",
+            "windows-11-vs2026-arm",
+            "macos-14",
+            "macos-15",
+            "macos-15-intel",
+            "macos-26",
+            "macos-26-intel",
+            "macos-latest",
+            "xcode-27",
+        ] {
+            assert!(is_known_github_hosted_label(label), "{label:?}");
+        }
+        for label in [
+            "ubuntu-private",
+            "ubuntu-custom",
+            "macos-private",
+            "macos-custom",
+            "windows-private",
+            "windows-custom",
+            "self-hosted",
+            "custom-linux",
+        ] {
+            assert!(!is_known_github_hosted_label(label), "{label:?}");
+        }
+    }
 
     fn must_fail<T>(result: Result<T, GeneratorError>, context: &str) -> String {
         match result {

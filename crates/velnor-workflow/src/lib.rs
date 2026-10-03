@@ -1770,18 +1770,8 @@ pub(crate) fn create_generator_symlink(target: &Path, link: &Path) -> Result<(),
 const OPEN_TOFU_VERSION: &str = "1.12.6";
 pub(crate) const VELNOR_WORKFLOW_SETUP_ACTION: &str =
     "tailrocks/velnor/.github/actions/setup-velnor-workflow";
-/// The same composite from the owner's own checkout. The owner never pins
-/// itself by `uses:@<sha>`: that third self-referential pin broke every D19
-/// bump (`velnor-runner`'s compiled action manifest had to list it), so the
-/// owner runs the action at the checked-out ref and `rev:` alone selects the
-/// runtime.
 pub(crate) const VELNOR_WORKFLOW_LOCAL_SETUP_ACTION: &str =
     "./.github/actions/setup-velnor-workflow";
-/// The same composite resolved out of the policy job's sibling checkout.
-/// The owner policy job never checks the repository out at the workspace
-/// root — a root checkout wipes `policy-checkout/` under `clean: true` —
-/// so it checks the BASE tree's action directory out under
-/// `policy-setup-action/` and runs the composite from there.
 pub(crate) const VELNOR_WORKFLOW_POLICY_SETUP_ACTION: &str =
     "./policy-setup-action/.github/actions/setup-velnor-workflow";
 pub(crate) const VELNOR_CI_REPORT_ACTION: &str =
@@ -2037,6 +2027,71 @@ impl ActionPin {
             }
         }
     }
+}
+
+/// Immutable action refs whose manifests were audited to have no root-level
+/// `pre` hook or Docker image setup. The Actions runner schedules those hooks
+/// before workflow steps, so a runner provenance step cannot protect against
+/// an unknown ref. Keep this list exact; action pin updates require a fresh
+/// manifest audit before they can run in guarded jobs.
+const PRE_GUARD_ACTION_PINS: &[ActionPin] = &[
+    ActionPin::Checkout,
+    ActionPin::CacheRestore,
+    ActionPin::CacheSave,
+    ActionPin::OpenTofuSetup,
+    ActionPin::UploadArtifact,
+    ActionPin::DownloadArtifact,
+    ActionPin::Bun,
+    ActionPin::Node,
+    ActionPin::RustTool,
+    ActionPin::Mise,
+    ActionPin::Gradle,
+    ActionPin::Sccache,
+    ActionPin::MrBoxington,
+    ActionPin::Mold,
+    ActionPin::GithubRuntime,
+    ActionPin::DockerBuildx,
+    ActionPin::DockerLogin,
+    ActionPin::DockerQemu,
+    ActionPin::DockerBuild,
+    ActionPin::Cosign,
+    ActionPin::Attest,
+    ActionPin::CratesAuth,
+    ActionPin::ConfigurePages,
+    ActionPin::UploadPages,
+    ActionPin::DeployPages,
+    ActionPin::Renovate,
+];
+
+/// Whether a workflow action can be prepared before the inserted runner guard
+/// without executing unreviewed code. External refs are admitted only when
+/// their exact commit is in the reviewed manifest catalog. The two Velnor
+/// composites from the retired Rust generator are deliberately absent from
+/// the allowlist. Local aliases are checked against their actual `action.yml`
+/// bytes by `primitives::action_guard`.
+pub(crate) fn is_runner_guard_safe_action_reference(
+    value: &str,
+    _candidate_generator_revision: Option<&str>,
+) -> bool {
+    let action_pin_matches = PRE_GUARD_ACTION_PINS.iter().any(|pin| {
+        let reference = pin.reference();
+        reference
+            .split_once(" #")
+            .map_or(reference, |(reference, _)| reference)
+            == value
+    });
+    if action_pin_matches
+        || matches!(
+            value,
+            "jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5"
+                | "jdx/mr-boxington-action@9df1d4b18b2147788a7ee7a2c7b84ecf62fd89d3"
+                | "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d"
+                | "actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f"
+        )
+    {
+        return true;
+    }
+    false
 }
 
 /// Default `workflow_dispatch` runner choice when the generation config omits
@@ -7279,11 +7334,11 @@ fn policy_renderer_steps(repository: &str, revision: &str) -> String {
 /// is decidable), fetches and checks out the audited head, acquires the
 /// pinned validator as an immutable prebuilt product, resolves the live
 /// ruleset contexts, and runs `velnor-workflow policy` with explicit
-/// `--head-sha` / `--base-sha`. The owner lane additionally checks out the
-/// base tree's setup-action directory sparsely under `policy-setup-action/`
-/// first, so the local `./…` setup step resolves. The validator regenerates the
-/// tree with the generator the tree declares and evaluates its own semantic
-/// rules; see `policy.rs`.
+/// `--head-sha` / `--base-sha`. It acquires the setup action from the exact
+/// immutable catalog pin; its `checkout-path` input points at the full-history
+/// tree used to resolve the requested generator closure. The validator
+/// regenerates the tree with the generator the tree declares and evaluates
+/// its own semantic rules; see `policy.rs`.
 ///
 /// Nothing here compiles: hosted lanes acquire products through
 /// `setup-velnor-workflow` (and, when the audited tree declares a different
@@ -7333,18 +7388,9 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
     } else {
         workflow_pinned_policy_runtime_velnor("${{ github.workspace }}/policy-checkout")
     };
-    // The owner runs the setup action from its own checkout (`./…`), but the
-    // policy job checks the repository out only under `policy-checkout/`, so
-    // without a second checkout the setup step's `uses:` cannot resolve and
-    // the job dies at setup. The sparse checkout provisions exactly the
-    // composite action directory from the BASE tree under the sibling
-    // `policy-setup-action/`: never the PR head, and never resolved out of
-    // `policy-checkout/`, either of which would execute fork-controlled
-    // action code under pull_request_target. It must not land at the
-    // workspace root: a root checkout wipes `policy-checkout/` under
-    // `clean: true` and the Acquire step then has no working directory.
-    // Consumers pin the published action and the Velnor lane provisions its
-    // slot, so neither needs this checkout.
+    // The owner-local setup action is retired with the Rust generator. Keep
+    // its old coordinate only so runner-guard validation rejects the missing
+    // manifest before any unsupported workflow can be emitted.
     let setup_checkout = if hosted && owner {
         format!(
             "      - name: Check out base setup action\n        uses: {}\n        with:\n          ref: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          path: policy-setup-action\n          sparse-checkout: .github/actions/setup-velnor-workflow\n          fetch-depth: 1\n          persist-credentials: false\n",
@@ -7775,9 +7821,8 @@ fn workflow_runtime_setup(lane: RunnerMode, repository: &str, revision: &str) ->
     workflow_runtime_setup_with_install_rev(lane, repository, revision, revision)
 }
 
-/// The `uses:` reference for `setup-velnor-workflow`: the owner's checkout
-/// (`./…`, no version) for the repository that ships the action, the
-/// published `revision` pin for every consumer.
+/// The `uses:` reference for `setup-velnor-workflow`: owner-local path for
+/// the repository that formerly shipped it, configured revision for consumers.
 pub(crate) fn workflow_setup_action_uses(repository: &str, revision: &str) -> String {
     if !repository.is_empty() && repository == workflow_setup_action_repository() {
         VELNOR_WORKFLOW_LOCAL_SETUP_ACTION.to_owned()
@@ -7786,8 +7831,8 @@ pub(crate) fn workflow_setup_action_uses(repository: &str, revision: &str) -> St
     }
 }
 
-/// The `uses:` reference for `report-velnor-ci-outcomes`: local path for the
-/// owner repository, published pin for every consumer.
+/// The `uses:` reference for `report-velnor-ci-outcomes`: owner-local path for
+/// the repository that formerly shipped it, configured revision for consumers.
 pub(crate) fn ci_report_action_uses(repository: &str, revision: &str) -> String {
     if !repository.is_empty() && repository == workflow_setup_action_repository() {
         VELNOR_CI_LOCAL_REPORT_ACTION.to_owned()
@@ -7820,9 +7865,9 @@ pub(crate) fn workflow_setup_install_rev(_repository: &str, revision: &str) -> S
     revision.to_owned()
 }
 
-/// Hosted runtime install. `uses:` is [`workflow_setup_action_uses`] (the
-/// owner's checkout, or the published pin for consumers — GitHub Actions
-/// rejects expressions in `uses:` versions, HTTP 422). `rev:` is
+/// Hosted runtime install. `uses:` is the immutable action-source pin from
+/// [`workflow_setup_action_uses`] (GitHub Actions rejects expressions in
+/// `uses:` versions, HTTP 422). `rev:` is
 /// `install_rev`, always the tree's declared pin: every lane consumes the
 /// same Stage-0 product, never an event SHA.
 fn workflow_runtime_setup_with_install_rev(
@@ -8562,6 +8607,7 @@ fn generated_files_with_surface(
     for owned in &config.static_files {
         files.insert(PathBuf::from(&owned.path), owned.content.clone());
     }
+    add_runner_environment_guards(&mut files, &config)?;
     validate_ruleset_required_status_checks(&config, &files)?;
     validate_hosted_mr_boxington_store_budget(&files)?;
     validate_policy_jobs_check_out_full_history(&files)?;
@@ -8572,6 +8618,40 @@ fn generated_files_with_surface(
     // generator's 5 MiB ceiling before it can fail every run at startup.
     template_memory::validate_template_memory(&files)?;
     Ok(files)
+}
+
+fn add_runner_environment_guards(
+    files: &mut BTreeMap<PathBuf, String>,
+    config: &ProjectConfig,
+) -> Result<(), GeneratorError> {
+    let action_files = files
+        .iter()
+        .filter(|(path, _)| {
+            matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some("action.yml" | "action.yaml")
+            )
+        })
+        .map(|(path, content)| (path.clone(), content.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for (path, content) in files.iter_mut() {
+        if path.parent() != Some(Path::new(".github/workflows"))
+            || !matches!(
+                path.extension().and_then(|value| value.to_str()),
+                Some("yml" | "yaml")
+            )
+        {
+            continue;
+        }
+        let expected = policy::workflow_runner_environment_matches_with_action_files(
+            content,
+            config,
+            &action_files,
+        )?;
+        *content = primitives::runner_guard::transform_workflow(content, &expected)
+            .map_err(GeneratorError::usage)?;
+    }
+    Ok(())
 }
 
 /// Composite actions the generator always emits; repository `static_files`
@@ -11957,6 +12037,77 @@ mod tests {
         }
     }
 
+    #[test]
+    fn runner_guard_action_allowlist_is_exact_and_revision_bound() {
+        const ACTION_REVISION: &str = primitives::action_guard::TRUSTED_VELNOR_ACTION_REVISION;
+        let action_pins = [
+            ActionPin::Checkout,
+            ActionPin::CacheRestore,
+            ActionPin::CacheSave,
+            ActionPin::OpenTofuSetup,
+            ActionPin::UploadArtifact,
+            ActionPin::DownloadArtifact,
+            ActionPin::Bun,
+            ActionPin::Node,
+            ActionPin::RustTool,
+            ActionPin::Mise,
+            ActionPin::Gradle,
+            ActionPin::Sccache,
+            ActionPin::MrBoxington,
+            ActionPin::Mold,
+            ActionPin::GithubRuntime,
+            ActionPin::DockerBuildx,
+            ActionPin::DockerLogin,
+            ActionPin::DockerQemu,
+            ActionPin::DockerBuild,
+            ActionPin::Cosign,
+            ActionPin::Attest,
+            ActionPin::CratesAuth,
+            ActionPin::ConfigurePages,
+            ActionPin::UploadPages,
+            ActionPin::DeployPages,
+            ActionPin::Renovate,
+        ];
+        for pin in action_pins {
+            let reference = pin
+                .reference()
+                .split_once(" #")
+                .map_or_else(|| pin.reference(), |(reference, _)| reference);
+            assert!(
+                is_runner_guard_safe_action_reference(reference, Some(FIXTURE_REVISION)),
+                "reviewed action pin must remain allowed: {reference}"
+            );
+        }
+        assert!(is_runner_guard_safe_action_reference(
+            "jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5",
+            Some(ACTION_REVISION)
+        ));
+        assert!(is_runner_guard_safe_action_reference(
+            "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d",
+            Some(ACTION_REVISION)
+        ));
+        assert!(!is_runner_guard_safe_action_reference(
+            &format!("{VELNOR_WORKFLOW_SETUP_ACTION}@{ACTION_REVISION}"),
+            Some(ACTION_REVISION)
+        ));
+        assert!(!is_runner_guard_safe_action_reference(
+            &format!("{VELNOR_CI_REPORT_ACTION}@{ACTION_REVISION}"),
+            Some(ACTION_REVISION)
+        ));
+        assert!(!is_runner_guard_safe_action_reference(
+            "example/action@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            Some(ACTION_REVISION)
+        ));
+        assert!(!is_runner_guard_safe_action_reference(
+            "./.github/actions/unreviewed",
+            Some(ACTION_REVISION)
+        ));
+        assert!(!is_runner_guard_safe_action_reference(
+            "./.github/actions/setup-velnor-workflow",
+            Some(ACTION_REVISION)
+        ));
+    }
+
     fn fixture_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/polyglot")
     }
@@ -12346,8 +12497,11 @@ mod tests {
         let plan = yaml_job(&workflow, "plan");
         let uses_line = setup_action_uses_line(plan);
         assert!(
-            uses_line.contains(&format!("@{FIXTURE_REVISION}")),
-            "Planning uses the SOURCE_REV pin: {uses_line}"
+            uses_line.contains(&format!(
+                "@{}",
+                primitives::action_guard::TRUSTED_VELNOR_ACTION_REVISION
+            )),
+            "Planning pins the setup action independently from the runtime revision: {uses_line}"
         );
         assert!(
             !uses_line.contains("github.sha"),
@@ -12413,8 +12567,11 @@ mod tests {
         );
         let uses_line = setup_action_uses_line(&maintenance);
         assert!(
-            uses_line.contains(&format!("@{FIXTURE_REVISION}")),
-            "a consumer's uses: is always SOURCE_REV: {uses_line}"
+            uses_line.contains(&format!(
+                "@{}",
+                primitives::action_guard::TRUSTED_VELNOR_ACTION_REVISION
+            )),
+            "a consumer pins the setup action independently from its runtime revision: {uses_line}"
         );
         assert!(
             !uses_line.contains("github.sha"),
@@ -12431,12 +12588,11 @@ mod tests {
             FIXTURE_REVISION,
         );
         assert!(
-            owner.contains(&format!("uses: {VELNOR_WORKFLOW_LOCAL_SETUP_ACTION}\n")),
-            "the owner runs its own checkout of the action, never a self pin: {owner}"
-        );
-        assert!(
-            !owner.contains(VELNOR_WORKFLOW_SETUP_ACTION),
-            "the owner must not reference itself by remote path: {owner}"
+            owner.contains(&format!(
+                "uses: {VELNOR_WORKFLOW_SETUP_ACTION}@{}\n",
+                primitives::action_guard::TRUSTED_VELNOR_ACTION_REVISION
+            )),
+            "the owner pins the reviewed remote action source independently: {owner}"
         );
         let config = must(
             scan_repository_with_default_branch(&fixture_root(), RunnerMode::Github, "main"),
@@ -12446,9 +12602,10 @@ mod tests {
         let planning = yaml_job(&workflow, "plan");
         assert!(
             planning.contains(&format!(
-                "uses: {VELNOR_WORKFLOW_SETUP_ACTION}@{FIXTURE_REVISION}"
+                "uses: {VELNOR_WORKFLOW_SETUP_ACTION}@{}",
+                primitives::action_guard::TRUSTED_VELNOR_ACTION_REVISION
             )),
-            "Planning must pin setup to SOURCE_REV: {planning}"
+            "Planning must pin setup to its reviewed action-source revision: {planning}"
         );
         assert!(
             planning.contains(&format!("rev: {FIXTURE_REVISION}")),
@@ -13362,14 +13519,13 @@ mod tests {
         );
         assert_eq!(
             owner
-                .matches(&format!("uses: {VELNOR_WORKFLOW_LOCAL_SETUP_ACTION}\n"))
+                .matches(&format!(
+                    "uses: {VELNOR_WORKFLOW_SETUP_ACTION}@{}\n",
+                    primitives::action_guard::TRUSTED_VELNOR_ACTION_REVISION
+                ))
                 .count(),
             1,
-            "the single install runs the owner's own checkout of the action: {owner}"
-        );
-        assert!(
-            !owner.contains(VELNOR_WORKFLOW_SETUP_ACTION),
-            "the owner never pins itself by remote path: {owner}"
+            "the single install uses the approved immutable action source: {owner}"
         );
 
         let foreign =
@@ -19797,8 +19953,11 @@ channel = "stable"
     fn assert_maintenance_setup_uses_literal_source_rev(workflow: &str) {
         let uses_line = setup_action_uses_line(workflow);
         assert!(
-            uses_line.contains(&format!("@{FIXTURE_REVISION}")),
-            "uses: must pin SOURCE_REV: {uses_line}"
+            uses_line.contains(&format!(
+                "@{}",
+                primitives::action_guard::TRUSTED_VELNOR_ACTION_REVISION
+            )),
+            "uses: must pin the approved action source SHA: {uses_line}"
         );
         assert!(
             !uses_line.contains("github.sha"),
@@ -20661,80 +20820,36 @@ channel = "stable"
         }
     }
 
-    /// The owner policy job runs the setup action from its own checkout
-    /// (`./…`) while checking the repository out only under
-    /// `policy-checkout/`: without a second checkout the setup step's `uses:`
-    /// cannot resolve and the job dies at setup. The sparse checkout ahead of
-    /// it provisions exactly the composite action directory from the BASE
-    /// tree under the sibling `policy-setup-action/` — never the PR head,
-    /// and never resolved out of `policy-checkout/`, either of which would
-    /// execute fork-controlled action code under `pull_request_target`.
-    /// Consumers pin the published action and the Velnor lane provisions its
-    /// slot, so neither carries this checkout.
+    /// The policy job pins the published action source independently of the
+    /// generator revision and points its checkout input at the full-history
+    /// tree used for closure resolution.
     #[test]
-    fn owner_policy_job_checks_out_base_setup_action_before_setup() {
+    fn owner_policy_job_uses_catalog_setup_action_without_sibling_checkout() {
         let owner = hosted_policy_job("abc123");
-        let checkout = must_some(
-            owner.find("      - name: Check out base setup action\n"),
-            "the owner policy job checks out the base setup action",
-        );
         let setup = must_some(
-            owner.find(&format!("uses: {VELNOR_WORKFLOW_POLICY_SETUP_ACTION}\n")),
-            "the owner setup step runs the local composite out of the sibling checkout",
+            owner.find(&format!(
+                "uses: {VELNOR_WORKFLOW_SETUP_ACTION}@{}\n",
+                primitives::action_guard::TRUSTED_VELNOR_ACTION_REVISION
+            )),
+            "the owner policy job uses the reviewed immutable action source",
         );
+        assert!(owner[setup..].contains("checkout-path: ${{ github.workspace }}/policy-checkout\n"), "{owner}");
+        assert!(!owner.contains("policy-setup-action"), "{owner}");
+        assert!(!owner.contains("Check out base setup action"), "{owner}");
         assert!(
-            checkout < setup,
-            "the sibling checkout precedes the setup step: {owner}"
-        );
-        let block = &owner[checkout..setup];
-        assert!(
-            block.contains(&format!("uses: {}\n", ActionPin::Checkout.reference())),
-            "the sibling checkout pins actions/checkout: {owner}"
-        );
-        assert!(
-            block.contains("ref: ${{ github.event.pull_request.base.sha || github.sha }}\n"),
-            "the sibling checkout pins the BASE tree: {owner}"
-        );
-        assert!(
-            block.contains("path: policy-setup-action\n"),
-            "the sibling checkout lands beside the audited tree, never at the root: {owner}"
-        );
-        assert!(
-            !block.contains("head.sha"),
-            "the sibling checkout never names the PR head: {owner}"
-        );
-        assert!(
-            block.contains("sparse-checkout: .github/actions/setup-velnor-workflow\n"),
-            "the sibling checkout provisions exactly the composite directory: {owner}"
-        );
-        assert!(
-            block.contains("fetch-depth: 1\n"),
-            "the sibling checkout is shallow: {owner}"
-        );
-        assert!(
-            block.contains("persist-credentials: false\n"),
-            "the sibling checkout persists no credentials: {owner}"
-        );
-        assert!(
-            !owner.contains("policy-checkout/.github/actions"),
-            "the setup action never resolves out of the audited tree: {owner}"
+            owner.contains(&format!("path: policy-checkout\n")),
+            "the full-history checkout remains available for closure lookup: {owner}"
         );
         for job in [
             hosted_policy_job_for_repository("abc123", "example/consumer"),
             velnor_policy_job("abc123", "[self-hosted, velnor]"),
         ] {
-            assert!(
-                !job.contains("Check out base setup action"),
-                "only the owner lane checks out the setup action: {job}"
-            );
-            assert!(!job.contains("sparse-checkout"), "{job}");
+            assert!(!job.contains("policy-setup-action"), "{job}");
         }
     }
 
-    /// Every checkout in the owner policy job lands in a sibling directory:
-    /// a root checkout wipes `policy-checkout/` under `clean: true` and the
-    /// Acquire step then dies with "No such file or directory". The setup
-    /// step resolves the composite out of the sibling checkout.
+    /// The single history checkout lands under `policy-checkout/`, leaving
+    /// workspace root available to the immutable remote action.
     #[test]
     fn owner_policy_job_never_checks_out_workspace_root() {
         let owner = hosted_policy_job("abc123");
@@ -20749,10 +20864,13 @@ channel = "stable"
                 );
             }
         }
-        assert_eq!(checkouts, 2, "history plus base setup action: {owner}");
+        assert_eq!(checkouts, 1, "only repository history is checked out: {owner}");
         assert!(
-            owner.contains(&format!("uses: {VELNOR_WORKFLOW_POLICY_SETUP_ACTION}\n")),
-            "the setup step resolves out of the sibling checkout: {owner}"
+            owner.contains(&format!(
+                "uses: {VELNOR_WORKFLOW_SETUP_ACTION}@{}\n",
+                primitives::action_guard::TRUSTED_VELNOR_ACTION_REVISION
+            )),
+            "the setup step uses the immutable remote catalog action: {owner}"
         );
     }
 
@@ -21224,9 +21342,10 @@ channel = "stable"
         );
         assert!(
             policy.contains(&format!(
-                "uses: {VELNOR_WORKFLOW_SETUP_ACTION}@{FIXTURE_REVISION}"
+                "uses: {VELNOR_WORKFLOW_SETUP_ACTION}@{}",
+                primitives::action_guard::TRUSTED_VELNOR_ACTION_REVISION
             )),
-            "a consumer pins the setup action at the declared pin: {policy}"
+            "a consumer pins the setup action at its reviewed action-source revision: {policy}"
         );
         assert!(
             policy.contains(&format!("{VELNOR_POLICY_REVISION_ENV}: {FIXTURE_REVISION}")),
@@ -21542,8 +21661,11 @@ channel = "stable"
         let plan = yaml_job(main, "plan");
         let uses_line = setup_action_uses_line(plan);
         assert!(
-            uses_line.contains(&format!("@{FIXTURE_REVISION}")),
-            "Planning uses: stays SOURCE_REV: {uses_line}"
+            uses_line.contains(&format!(
+                "@{}",
+                primitives::action_guard::TRUSTED_VELNOR_ACTION_REVISION
+            )),
+            "Planning uses: stays pinned to the approved action source: {uses_line}"
         );
         assert!(
             !uses_line.contains("github.sha"),

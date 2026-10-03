@@ -10,6 +10,7 @@
 //! only through the scan (`RepositoryShape`) and the repo-owned config, which
 //! is what makes one primitive able to render any repository's surface.
 
+pub(crate) mod action_guard;
 mod aggregate;
 mod cache;
 pub(crate) mod check_profiles;
@@ -22,6 +23,7 @@ pub(crate) mod prepared_tools;
 mod regen;
 pub(crate) mod release;
 pub(crate) mod renovate;
+pub(crate) mod runner_guard;
 pub(crate) mod runtime_products;
 pub(crate) mod snapshot;
 pub(crate) mod watch;
