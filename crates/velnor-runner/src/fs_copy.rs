@@ -2515,11 +2515,11 @@ fn open_source_file_nonblocking_no_follow_at(
 }
 
 #[cfg(unix)]
-fn same_file_identity(
-    left_device: u64,
-    left_inode: u64,
-    right_device: u64,
-    right_inode: u64,
+fn same_file_identity<Device: PartialEq, Inode: PartialEq>(
+    left_device: Device,
+    left_inode: Inode,
+    right_device: Device,
+    right_inode: Inode,
 ) -> bool {
     left_device == right_device && left_inode == right_inode
 }
