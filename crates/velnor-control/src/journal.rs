@@ -10133,7 +10133,7 @@ mod tests {
                                 .unwrap();
                         }
                     }
-                    6 | 7 | 8 | 9 | 10 => {}
+                    6..=10 => {}
                     _ => unreachable!(),
                 }
                 conn.pragma_update(None, "user_version", version).unwrap();
@@ -10314,7 +10314,7 @@ mod tests {
         let service_instance = "service-one";
         let filesystem_id = "dev:42";
         let slot_id = slot("scope-1");
-        let mut journal = Journal::open_for_service_instance(&path, service_instance).unwrap();
+        let journal = Journal::open_for_service_instance(&path, service_instance).unwrap();
         let first_nonce = journal
             .issue_disk_pressure_launch(service_instance, &slot_id, r#gen(), 100)
             .unwrap();
@@ -10343,7 +10343,7 @@ mod tests {
         assert!(first.reclaim_attempted);
 
         drop(journal);
-        let mut reopened = Journal::open_for_service_instance(&path, service_instance).unwrap();
+        let reopened = Journal::open_for_service_instance(&path, service_instance).unwrap();
         let relaunch_error = reopened
             .issue_disk_pressure_launch(service_instance, &slot_id, r#gen(), 120)
             .unwrap_err();
@@ -10383,7 +10383,7 @@ mod tests {
         assert_eq!(draining.drain_deadline_unix, 190);
 
         drop(reopened);
-        let mut reopened =
+        let reopened =
             Journal::open_for_service_instance(dir.join("journal.db"), service_instance).unwrap();
         reopened
             .advance_disk_pressure_roots(service_instance, &sample, 60, 30, 189)
@@ -10396,7 +10396,7 @@ mod tests {
         assert!(!still_draining.terminal);
         drop(reopened);
 
-        let mut reopened =
+        let reopened =
             Journal::open_for_service_instance(dir.join("journal.db"), service_instance).unwrap();
         reopened
             .advance_disk_pressure_roots(service_instance, &sample, 60, 30, 190)
@@ -10571,7 +10571,7 @@ mod tests {
                 controller
                     .advance_disk_pressure_roots(service, &low, 60, 30, 100)
                     .unwrap();
-                let mut worker = Journal::open_for_launch(
+                let worker = Journal::open_for_launch(
                     dir.join("journal.db"),
                     service,
                     &slot_id,
@@ -10650,7 +10650,7 @@ mod tests {
 
     #[test]
     fn pinned_identity_merges_unknown_root_deadline_and_delays_first_reclaim() {
-        let (dir, mut controller) = open_pressure_tmp("pressure-unpinnable-to-device");
+        let (dir, controller) = open_pressure_tmp("pressure-unpinnable-to-device");
         let service = "service-one";
         let unknown_root = "root:config";
         let filesystem_id = "unix-device:2a";
@@ -11002,7 +11002,7 @@ mod tests {
         let nonce = controller
             .issue_disk_pressure_launch(service, &slot_id, generation, 100)
             .unwrap();
-        let mut worker = Journal::open_for_launch(
+        let worker = Journal::open_for_launch(
             dir.join("journal.db"),
             service,
             &slot_id,
@@ -12237,7 +12237,7 @@ mod tests {
         let service_instance = "service-one";
         let slot_id = slot("scope-1");
         let generation = r#gen();
-        let mut journal = Journal::open_for_service_instance(&path, service_instance).unwrap();
+        let journal = Journal::open_for_service_instance(&path, service_instance).unwrap();
         let first_nonce = journal
             .issue_disk_pressure_launch(service_instance, &slot_id, generation, 100)
             .unwrap();
@@ -12273,7 +12273,7 @@ mod tests {
         assert!(first_observations[1].1.episode.is_none());
 
         drop(journal);
-        let mut reopened = Journal::open_for_service_instance(&path, service_instance).unwrap();
+        let reopened = Journal::open_for_service_instance(&path, service_instance).unwrap();
         let relaunch_error = reopened
             .issue_disk_pressure_launch(service_instance, &slot_id, generation, 120)
             .unwrap_err();
