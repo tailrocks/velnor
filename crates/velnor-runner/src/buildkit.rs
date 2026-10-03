@@ -5349,7 +5349,7 @@ mod tests {
         let pressure_lock_error = with_attested_domain_builder_with(
             &domain,
             &builder,
-            |_, _, _| Err(anyhow::anyhow!("lock uncertainty")),
+            |_, _, _| -> Result<()> { Err(anyhow::anyhow!("lock uncertainty")) },
             |_, _| panic!("must not inspect without the volume lock"),
             |_, _, _, _| panic!("must not inspect the container without the lock"),
             |_, _, _, _, _| {
