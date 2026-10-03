@@ -19,10 +19,11 @@ Cache GC classes have one path expression in the shared store catalog. Their
 writers and cache collectors resolve through it, so a store cannot be written
 at one path and reclaimed at another. Stable workspaces live in per-slot work
 roots outside the keyed cache namespace. Git mirrors live in their own class
-under that namespace and appear in `storage status`, but use separate locking
-and ref-retention rules and are not reclaimed by cache GC. Docker storage is
-measured separately where available and is not reclaimed by Velnor's cache
-catalog.
+under that namespace, appear in `storage status` and `cache du`, and use
+separate locking and ref-retention rules. Cache GC applies its age and
+overall-size policy, with per-repository leases protecting live use. Docker
+storage is measured separately where available and is not reclaimed by
+Velnor's cache catalog.
 
 With packaged storage rooted at `/var`, trust-scoped classes use the sibling
 namespace `/var/cache/velnor/v1__trust_scope_v1/trust-scope-v1-<digest>/`.
@@ -246,9 +247,17 @@ not scrub bytes.
 
 `velnorctl storage paths` lists the configured cache, library, run, and log
 roots. `velnorctl storage status` recursively sizes direct class directories
-under each keyed trust namespace in the cache root, including `git-mirrors`.
-It omits the shared artifact root, host-global GHA cache, Docker/BuildKit, and
-per-slot stable workspaces. `velnorctl cache du` reports cache-GC roots,
-including artifacts and host-global `gha-cache`, plus a separate Docker usage
-estimate when measurable; it omits stable workspaces and Git mirrors.
+under each keyed trust namespace derived as a sibling of the cache root,
+including `git-mirrors`, and separately sizes the canonical host-global
+`gha-cache` root in full, including tenant data and stable lock metadata. For
+`gha-cache`, `velnorctl cache du` reports the tenant subtree and GC evaluates
+tenant directories as candidates, so neither covers root-level stable lock
+metadata. `storage status` omits the shared artifact root, Docker/BuildKit,
+and per-slot stable workspaces. `velnorctl cache du` sizes artifacts,
+Git-mirror roots, per-slot stable-workspace roots, and the tenant subtree of
+the canonical host-global `gha-cache` root; it also reports Docker usage
+separately when measurable. Stable-workspace roots appear in `cache du` but
+are excluded from ordinary `cache gc`; disk-pressure reclaim may consider an
+idle, unleased workspace only when its separate pressure and filesystem gates
+pass.
 `velnorctl storage explain-pressure` is not available.
