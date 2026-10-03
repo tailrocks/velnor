@@ -63,7 +63,10 @@ fn postinst_removes_the_stale_quota_dropin_and_never_writes_one() {
 
     // The stale drop-in from older packages is deleted, never recreated.
     assert!(postinst.contains("remove_stale_jobs_cpu_quota_dropin"));
-    assert!(postinst.contains("rm -f \"$JOBS_SLICE_DROPIN\""));
+    assert!(postinst.contains("mv \"$JOBS_SLICE_DROPIN\" \"$JOBS_SLICE_DROPIN_BACKUP\""));
+    assert!(postinst.contains("restore_stale_jobs_cpu_quota_dropin"));
+    assert!(postinst.contains("ln -T -- \"$backup\" \"$destination\""));
+    assert!(postinst.contains("rm -- \"$backup\""));
     assert!(postinst.contains("systemctl daemon-reload"));
     // After reload, every effective ceiling property must read infinity.
     for property in [
@@ -199,6 +202,220 @@ fn stale_quota_dropin_removal_executes_and_is_idempotent() {
         assert!(!dropin.exists());
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+#[test]
+fn postinst_restores_exact_dropin_when_a_later_proof_fails() {
+    use std::process::Command;
+
+    let postinst = include_str!("../debian/postinst");
+    let function_start = postinst
+        .find("remove_stale_jobs_cpu_quota_dropin()")
+        .unwrap();
+    let function_end = postinst[function_start..]
+        .find("\nrequire_package_transaction_lock()")
+        .map(|offset| function_start + offset)
+        .unwrap();
+    let functions = &postinst[function_start..function_end];
+
+    let dir = temp_dir("postinst-restore");
+    let dropin = dir.join("10-host-cpu.conf");
+    let expected = b"[Slice]\nCPUQuota=1520%\n";
+    std::fs::write(&dropin, expected).unwrap();
+    let script = format!(
+        "set -eu\nfail() {{ echo \"$1\" >&2; exit 1; }}\nsystemctl() {{ [ \"$*\" = 'daemon-reload' ]; }}\nJOBS_SLICE_DROPIN_DIR=\"$TEST_DROPIN_DIR\"\nJOBS_SLICE_DROPIN=\"$TEST_DROPIN_DIR/10-host-cpu.conf\"\n{functions}\nremove_stale_jobs_cpu_quota_dropin\nexit 42\n"
+    );
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .env("TEST_DROPIN_DIR", &dir)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert_eq!(std::fs::read(&dropin).unwrap(), expected);
+    assert!(
+        String::from_utf8_lossy(&output.stdout).is_empty(),
+        "restoring stale drop-in should not print secrets or file bytes"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn postinst_preserves_backup_if_dropin_appears_during_restore() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let postinst = include_str!("../debian/postinst");
+    let function_start = postinst
+        .find("remove_stale_jobs_cpu_quota_dropin()")
+        .unwrap();
+    let function_end = postinst[function_start..]
+        .find("\nrequire_package_transaction_lock()")
+        .map(|offset| function_start + offset)
+        .unwrap();
+    let functions = &postinst[function_start..function_end];
+
+    let dir = temp_dir("postinst-raced-restore");
+    let dropin = dir.join("10-host-cpu.conf");
+    let original = b"[Slice]\nCPUQuota=1520%\n";
+    let concurrent = b"[Slice]\nCPUWeight=200\n";
+    std::fs::write(&dropin, original).unwrap();
+
+    let shim_dir = dir.join("bin");
+    std::fs::create_dir(&shim_dir).unwrap();
+    let ln_shim = shim_dir.join("ln");
+    std::fs::write(
+        &ln_shim,
+        r##"#!/bin/sh
+set -eu
+if [ "${1:-}" = -T ] && [ "${2:-}" = -- ] && [ "${4:-}" = "$TEST_DROPIN_PATH" ]; then
+  printf '%s' "$TEST_CONCURRENT_DROPIN_CONTENT" > "$TEST_DROPIN_PATH"
+fi
+PATH=$TEST_REAL_PATH
+export PATH
+if [ "$TEST_LN_STYLE" = gnu ]; then
+  exec ln "$@"
+fi
+exec ln "$3" "$4"
+"##,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&ln_shim).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&ln_shim, permissions).unwrap();
+
+    let real_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut path_entries = vec![shim_dir];
+    path_entries.extend(std::env::split_paths(&real_path));
+    let test_path = std::env::join_paths(path_entries).unwrap();
+    let prefix = r##"set -eu
+fail() { echo "$1" >&2; exit 1; }
+systemctl() { [ "$*" = 'daemon-reload' ]; }
+stat() {
+  if [ "$TEST_STAT_STYLE" = bsd ]; then
+    command stat -f "$2" "$3"
+  else
+    command stat "$@"
+  fi
+}
+JOBS_SLICE_DROPIN_DIR="$TEST_DROPIN_DIR"
+JOBS_SLICE_DROPIN="$TEST_DROPIN_DIR/10-host-cpu.conf"
+"##;
+    let script = [
+        prefix,
+        functions,
+        "\nremove_stale_jobs_cpu_quota_dropin\nexit 42\n",
+    ]
+    .concat();
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .env("TEST_DROPIN_DIR", &dir)
+        .env("TEST_DROPIN_PATH", &dropin)
+        .env(
+            "TEST_CONCURRENT_DROPIN_CONTENT",
+            String::from_utf8_lossy(concurrent).as_ref(),
+        )
+        .env("TEST_REAL_PATH", &real_path)
+        .env(
+            "TEST_LN_STYLE",
+            if cfg!(target_os = "linux") {
+                "gnu"
+            } else {
+                "bsd"
+            },
+        )
+        .env(
+            "TEST_STAT_STYLE",
+            if cfg!(target_os = "macos") {
+                "bsd"
+            } else {
+                "gnu"
+            },
+        )
+        .env("PATH", test_path)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(42));
+    assert_eq!(std::fs::read(&dropin).unwrap(), concurrent);
+    let backups: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".10-host-cpu.conf.velnor-backup-")
+        })
+        .collect();
+    assert_eq!(
+        backups.len(),
+        1,
+        "the staged backup must remain on collision"
+    );
+    assert_eq!(std::fs::read(&backups[0]).unwrap(), original);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("preserving the staged backup"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn postinst_preserves_replaced_dropin_backup() {
+    use std::process::Command;
+
+    let postinst = include_str!("../debian/postinst");
+    let function_start = postinst
+        .find("remove_stale_jobs_cpu_quota_dropin()")
+        .unwrap();
+    let function_end = postinst[function_start..]
+        .find("\nrequire_package_transaction_lock()")
+        .map(|offset| function_start + offset)
+        .unwrap();
+    let functions = &postinst[function_start..function_end];
+
+    let dir = temp_dir("postinst-replaced-backup");
+    let dropin = dir.join("10-host-cpu.conf");
+    let operator_file = dir.join("operator.conf");
+    std::fs::write(&dropin, b"[Slice]\nCPUQuota=1520%\n").unwrap();
+    std::fs::write(&operator_file, b"operator data\n").unwrap();
+    let script = format!(
+        "set -eu\nfail() {{ echo \"$1\" >&2; exit 1; }}\nsystemctl() {{ [ \"$*\" = 'daemon-reload' ]; }}\nJOBS_SLICE_DROPIN_DIR=\"$TEST_DROPIN_DIR\"\nJOBS_SLICE_DROPIN=\"$TEST_DROPIN_DIR/10-host-cpu.conf\"\n{functions}\nremove_stale_jobs_cpu_quota_dropin\nrm \"$JOBS_SLICE_DROPIN_BACKUP\"\nln -s \"$TEST_OPERATOR_FILE\" \"$JOBS_SLICE_DROPIN_BACKUP\"\nexit 0\n"
+    );
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .env("TEST_DROPIN_DIR", &dir)
+        .env("TEST_OPERATOR_FILE", &operator_file)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert_eq!(
+        std::fs::symlink_metadata(&dropin).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound,
+        "destination must remain absent when the staged backup identity changes"
+    );
+    let backups: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".10-host-cpu.conf.velnor-backup-")
+        })
+        .collect();
+    assert_eq!(backups.len(), 1, "replacement backup symlink must remain");
+    assert!(std::fs::symlink_metadata(&backups[0])
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(std::fs::read_link(&backups[0]).unwrap(), operator_file);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("identity changed; preserving it"));
+    assert!(stderr.contains("failed to restore"));
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

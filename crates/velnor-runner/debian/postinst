@@ -69,8 +69,8 @@ restore_stale_jobs_cpu_quota_dropin() {
     fi
     if [ "$status" -ne 0 ]; then
       if [ ! -e "$JOBS_SLICE_DROPIN" ] && [ ! -L "$JOBS_SLICE_DROPIN" ]; then
-        mv "$backup" "$JOBS_SLICE_DROPIN" \
-          || echo "velnor-runner postinst: failed to restore $JOBS_SLICE_DROPIN" >&2
+        restore_staged_jobs_cpu_quota_dropin_no_clobber "$backup" "$JOBS_SLICE_DROPIN" \
+          || echo "velnor-runner postinst: failed to restore $JOBS_SLICE_DROPIN; preserving the staged backup" >&2
         systemctl daemon-reload \
           || echo "velnor-runner postinst: failed to reload restored jobs-slice drop-in" >&2
       else
@@ -83,6 +83,24 @@ restore_stale_jobs_cpu_quota_dropin() {
     fi
   fi
   exit "$status"
+}
+
+restore_staged_jobs_cpu_quota_dropin_no_clobber() {
+  backup="$1"
+  destination="$2"
+
+  # A same-directory hard link arbitrates destination creation atomically;
+  # coreutils ln -T treats a newly appeared directory as the destination too.
+  [ ! -L "$backup" ] && [ -f "$backup" ] \
+    && [ "$(stat -c '%d:%i' "$backup" 2>/dev/null || true)" = "${JOBS_SLICE_DROPIN_IDENTITY:-}" ] \
+    || return 1
+  ln -T -- "$backup" "$destination" || return 1
+  [ ! -L "$destination" ] && [ -f "$destination" ] \
+    && [ "$(stat -c '%d:%i' "$destination" 2>/dev/null || true)" = "${JOBS_SLICE_DROPIN_IDENTITY:-}" ] \
+    && [ "$(stat -c '%d:%i' "$backup" 2>/dev/null || true)" = "${JOBS_SLICE_DROPIN_IDENTITY:-}" ] \
+    || return 1
+  rm -- "$backup" || return 1
+  [ ! -e "$backup" ] && [ ! -L "$backup" ]
 }
 
 verify_jobs_slice_has_no_resource_ceilings() {
