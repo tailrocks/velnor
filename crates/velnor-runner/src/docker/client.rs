@@ -1494,6 +1494,21 @@ pub(crate) enum DockerContainerRmReconciliation {
     Present(ContainerState),
 }
 
+fn settle_container_rm_reconciliation(
+    engine_key: &str,
+    id: &str,
+    state: Option<ContainerState>,
+) -> Result<DockerContainerRmReconciliation> {
+    match state {
+        None => {
+            set_container_rm_quarantined(engine_key, id, false)?;
+            Ok(DockerContainerRmReconciliation::Absent)
+        }
+        Some(ContainerState::Removing) => Ok(DockerContainerRmReconciliation::Removing),
+        Some(state) => Ok(DockerContainerRmReconciliation::Present(state)),
+    }
+}
+
 /// Owns the Engine claim and durable in-doubt marker around one direct rm
 /// dispatch. Dropping an unsettled ticket deliberately leaves the marker set.
 pub(crate) struct DockerContainerRmTicket {
@@ -1521,11 +1536,6 @@ impl DockerContainerRmTicket {
         Ok(true)
     }
 
-    /// A successful exact-ID `docker rm` is definitive completion.
-    pub(crate) fn complete_success(self) -> Result<()> {
-        set_container_rm_quarantined(&self.engine_key, &self.id, false)
-    }
-
     /// `docker rm <immutable-id>` answered not found, proving that exact ID
     /// absent. This ticket can only be prepared for one immutable selector.
     pub(crate) fn complete_not_found(self) -> Result<()> {
@@ -1545,14 +1555,8 @@ impl DockerContainerRmTicket {
                 timeout,
             )));
         }
-        match inspect_docker_rm_state(&self.rm_args, &self.id, timeout)? {
-            None => {
-                set_container_rm_quarantined(&self.engine_key, &self.id, false)?;
-                Ok(DockerContainerRmReconciliation::Absent)
-            }
-            Some(ContainerState::Removing) => Ok(DockerContainerRmReconciliation::Removing),
-            Some(state) => Ok(DockerContainerRmReconciliation::Present(state)),
-        }
+        let state = inspect_docker_rm_state(&self.rm_args, &self.id, timeout)?;
+        settle_container_rm_reconciliation(&self.engine_key, &self.id, state)
     }
 }
 
@@ -2075,7 +2079,29 @@ pub(crate) fn host_call_bounded(args: &[String], timeout: Duration) -> Result<St
         match host_call_bounded_unclaimed(&execution_args, remaining) {
             Ok(output) => {
                 for id in &marked_ids {
-                    set_container_rm_quarantined(engine_key, id, false)?;
+                    let inspect_budget = timeout.saturating_sub(started.elapsed());
+                    if inspect_budget.is_zero() {
+                        return Err(anyhow::Error::new(crate::docker::DockerTimeout::new(
+                            op, timeout,
+                        ))
+                        .context(format!(
+                            "reconcile immutable container {id} after successful Docker rm"
+                        )));
+                    }
+                    let state = resolve_container_state_cli(&execution_args, id, inspect_budget)
+                        .with_context(|| {
+                            format!("reconcile immutable container {id} after successful Docker rm")
+                        })?;
+                    match settle_container_rm_reconciliation(engine_key, id, state)? {
+                        DockerContainerRmReconciliation::Absent => {}
+                        DockerContainerRmReconciliation::Removing => {
+                            // Keep the marker until a later exact-ID inspect
+                            // proves the converging removal is complete.
+                        }
+                        DockerContainerRmReconciliation::Present(state) => anyhow::bail!(
+                            "Docker rm reported success but immutable container {id} remains in {state:?} state; refusing to clear its quarantine"
+                        ),
+                    }
                 }
                 if !missing_selectors.is_empty() {
                     return Err(anyhow::Error::new(NotFound {
@@ -2855,6 +2881,34 @@ impl<'r> Docker<'r> {
         }
     }
 
+    fn settle_successful_container_remove(
+        &mut self,
+        engine_key: &str,
+        id: &str,
+        rm_args: &[String],
+        timeout: Duration,
+        outcome: RemoveOutcome,
+    ) -> Result<RemoveOutcome> {
+        if timeout.is_zero() {
+            return Err(anyhow::Error::new(crate::docker::DockerTimeout::new(
+                crate::docker::classify(rm_args),
+                timeout,
+            )));
+        }
+        match self.inspect_remove_state_with_timeout(id, timeout) {
+            Ok(state) => match settle_container_rm_reconciliation(engine_key, id, state)? {
+                DockerContainerRmReconciliation::Absent => Ok(outcome),
+                DockerContainerRmReconciliation::Removing => Ok(RemoveOutcome::Removed),
+                DockerContainerRmReconciliation::Present(state) => Err(anyhow::anyhow!(
+                    "Docker rm reported success but immutable container {id} remains in {state:?} state; its quarantine remains active"
+                )),
+            },
+            Err(error) => Err(error).context(format!(
+                "reconcile immutable container {id} after successful Docker rm; its quarantine remains active"
+            )),
+        }
+    }
+
     /// Resolved id of one image reference.
     pub(crate) fn image_id(&mut self, reference: &str) -> Result<String> {
         if let Some(id) = self
@@ -3123,8 +3177,18 @@ impl<'r> Docker<'r> {
         );
         match api_attempt {
             Some(Ok(outcome)) => {
-                set_container_rm_quarantined(&rm_claim.engine_key, &id, false)?;
-                return Ok(outcome);
+                if outcome == RemoveOutcome::AlreadyRemoved {
+                    set_container_rm_quarantined(&rm_claim.engine_key, &id, false)?;
+                    return Ok(outcome);
+                }
+                let inspect_budget = operation_deadline.saturating_duration_since(Instant::now());
+                return self.settle_successful_container_remove(
+                    &rm_claim.engine_key,
+                    &id,
+                    &immutable_rm_args,
+                    inspect_budget,
+                    outcome,
+                );
             }
             Some(Err(error)) if error.label() == "connect" => {
                 // A connect failure cannot have dispatched the request.
@@ -3201,8 +3265,14 @@ impl<'r> Docker<'r> {
             cli_dispatch_budget,
         ) {
             Ok(_) => {
-                set_container_rm_quarantined(&rm_claim.engine_key, &id, false)?;
-                Ok(RemoveOutcome::Removed)
+                let inspect_budget = operation_deadline.saturating_duration_since(Instant::now());
+                self.settle_successful_container_remove(
+                    &rm_claim.engine_key,
+                    &id,
+                    &immutable_rm_args,
+                    inspect_budget,
+                    RemoveOutcome::Removed,
+                )
             }
             Err(error) if is_not_found(&error) => {
                 set_container_rm_quarantined(&rm_claim.engine_key, &id, false)?;
@@ -4630,10 +4700,16 @@ mod tests {
     }
 
     fn lifecycle_mock(connections: usize) -> MockEngine {
+        let inspect_calls = Arc::new(AtomicUsize::new(0));
+        let inspect_calls_server = Arc::clone(&inspect_calls);
         MockEngine::serve(
-            |request| {
+            move |request| {
                 if request.contains("GET /containers/") {
-                    json_response(&rm_inspect_document("created"))
+                    if inspect_calls_server.fetch_add(1, Ordering::SeqCst) == 0 {
+                        json_response(&rm_inspect_document("created"))
+                    } else {
+                        error_response("404 Not Found", API_NO_SUCH)
+                    }
                 } else {
                     status_response("204 No Content")
                 }
@@ -4693,6 +4769,76 @@ mod tests {
         let engine_key =
             docker_engine_key(&container_remove_args(RM_FULL_ID, true, false)).unwrap();
         set_container_rm_quarantined(&engine_key, RM_FULL_ID, false).unwrap();
+    }
+
+    #[test]
+    fn remove_success_stays_quarantined_until_exact_id_is_absent() {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let requests_server = Arc::clone(&requests);
+        let inspect_count = Arc::new(AtomicUsize::new(0));
+        let inspect_count_server = Arc::clone(&inspect_count);
+        let mock = MockEngine::serve(
+            move |request| {
+                requests_server
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(request.lines().next().unwrap_or_default().to_string());
+                if request.contains("DELETE /containers/") {
+                    status_response("204 No Content")
+                } else {
+                    match inspect_count_server.fetch_add(1, Ordering::SeqCst) {
+                        0 => json_response(&rm_inspect_document("created")),
+                        // DELETE returned success, but the exact ID still
+                        // exists. The marker must survive a later caller.
+                        1 => json_response(&rm_inspect_document("created")),
+                        2 => json_response(&rm_inspect_document("removing")),
+                        _ => error_response("404 Not Found", API_NO_SUCH),
+                    }
+                }
+            },
+            5,
+        );
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _scope = begin_job("lifecycle-remove-success-present-quarantine");
+        let mut runner = ScriptRunner::scripted_host(Vec::new());
+        let first_error = Docker::job(&mut runner)
+            .container_remove("mutable-name", true, false)
+            .expect_err("successful response with a present exact ID stays uncertain");
+        assert!(first_error
+            .to_string()
+            .contains("quarantine remains active"));
+
+        let args = container_remove_args(RM_FULL_ID, true, false);
+        let engine_key = docker_engine_key(&args).unwrap();
+        assert!(container_rm_is_quarantined(&engine_key, RM_FULL_ID).unwrap());
+        assert_eq!(
+            Docker::job(&mut runner)
+                .container_remove(RM_FULL_ID, true, false)
+                .expect("Removing exact ID is already converging"),
+            RemoveOutcome::Removed
+        );
+        assert!(container_rm_is_quarantined(&engine_key, RM_FULL_ID).unwrap());
+        assert_eq!(
+            Docker::job(&mut runner)
+                .container_remove(RM_FULL_ID, true, false)
+                .expect("exact-ID absence clears the quarantine"),
+            RemoveOutcome::AlreadyRemoved
+        );
+        assert!(!container_rm_is_quarantined(&engine_key, RM_FULL_ID).unwrap());
+        let requests = requests
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| {
+                    request.contains(&format!("DELETE /containers/{RM_FULL_ID}?force=1"))
+                })
+                .count(),
+            1,
+            "the present-object quarantine must suppress another DELETE"
+        );
     }
 
     #[test]
@@ -4812,7 +4958,15 @@ mod tests {
         let rm_args = container_remove_args(RM_FULL_ID, true, false);
         let engine_key = docker_engine_key(&rm_args).unwrap();
         let mut runner = QuarantineCheckingRunner {
-            results: vec![ok(&format!("{RM_FULL_ID}\n")), ok("svc\n")].into(),
+            results: vec![
+                ok(&format!("{RM_FULL_ID}\n")),
+                ok("svc\n"),
+                failed(
+                    1,
+                    &format!("Error response from daemon: No such container: {RM_FULL_ID}\n"),
+                ),
+            ]
+            .into(),
             seen_args: Vec::new(),
             engine_key: engine_key.clone(),
             id: RM_FULL_ID.to_string(),
@@ -4821,13 +4975,14 @@ mod tests {
             .container_remove("mutable-name", true, false)
             .expect("definite connect failure safely falls back under the same claim");
         assert_eq!(outcome, RemoveOutcome::Removed);
-        assert_eq!(runner.seen_args.len(), 2);
+        assert_eq!(runner.seen_args.len(), 3);
         assert_eq!(runner.seen_args[1], rm_args);
+        assert_eq!(runner.seen_args[2], exit_info_args(RM_FULL_ID));
         assert!(!container_rm_is_quarantined(&engine_key, RM_FULL_ID).unwrap());
     }
 
     #[test]
-    fn rm_ticket_holds_marker_until_exact_id_is_absent_or_success_is_definitive() {
+    fn rm_ticket_success_keeps_quarantine_until_exact_id_is_absent() {
         let state_reads = Arc::new(AtomicUsize::new(0));
         let state_reads_server = Arc::clone(&state_reads);
         let mock = MockEngine::serve(
@@ -4839,7 +4994,7 @@ mod tests {
                     _ => error_response("404 Not Found", API_NO_SUCH),
                 }
             },
-            3,
+            4,
         );
         let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
         let _scope = begin_job("rm-ticket-exact-id-reconcile");
@@ -4853,6 +5008,8 @@ mod tests {
         assert!(IN_FLIGHT_CONTAINER_RM
             .owned_by_current_thread(&engine_key)
             .unwrap());
+        // Simulate docker rm reporting success. Its first exact-ID probe
+        // still sees the object, so the durable marker must remain.
         let mut ticket = ticket;
         assert!(matches!(
             ticket
@@ -4874,13 +5031,52 @@ mod tests {
         ));
         assert!(!container_rm_is_quarantined(&engine_key, RM_FULL_ID).unwrap());
 
-        let ticket = match prepare_docker_container_rm(&args, Duration::from_secs(5)).unwrap() {
+        let mut ticket = match prepare_docker_container_rm(&args, Duration::from_secs(5)).unwrap() {
             DockerContainerRmPreparation::Dispatch(ticket) => ticket,
             _ => panic!("an absent ID can be dispatched as a new operation"),
         };
         assert!(container_rm_is_quarantined(&engine_key, RM_FULL_ID).unwrap());
-        ticket.complete_success().unwrap();
+        assert!(matches!(
+            ticket
+                .reconcile_after_dispatch(Duration::from_secs(5))
+                .unwrap(),
+            DockerContainerRmReconciliation::Absent
+        ));
         assert!(!container_rm_is_quarantined(&engine_key, RM_FULL_ID).unwrap());
+    }
+
+    #[test]
+    fn successful_remove_settlement_clears_only_for_absent_exact_id() {
+        let mock = MockEngine::serve(|_| Vec::new(), 0);
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let id = format!(
+            "{:064x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let args = container_remove_args(&id, true, false);
+        let engine_key = docker_engine_key(&args).unwrap();
+        set_container_rm_quarantined(&engine_key, &id, true).unwrap();
+
+        assert!(matches!(
+            settle_container_rm_reconciliation(&engine_key, &id, Some(ContainerState::Removing))
+                .unwrap(),
+            DockerContainerRmReconciliation::Removing
+        ));
+        assert!(container_rm_is_quarantined(&engine_key, &id).unwrap());
+        assert!(matches!(
+            settle_container_rm_reconciliation(&engine_key, &id, Some(ContainerState::Created))
+                .unwrap(),
+            DockerContainerRmReconciliation::Present(ContainerState::Created)
+        ));
+        assert!(container_rm_is_quarantined(&engine_key, &id).unwrap());
+        assert!(matches!(
+            settle_container_rm_reconciliation(&engine_key, &id, None).unwrap(),
+            DockerContainerRmReconciliation::Absent
+        ));
+        assert!(!container_rm_is_quarantined(&engine_key, &id).unwrap());
     }
 
     #[test]
@@ -4916,7 +5112,8 @@ mod tests {
                 DockerContainerRmPreparation::Dispatch(ticket) => ticket,
                 _ => panic!("proven pre-delete rejection should allow a forced retry"),
             };
-        forced_ticket.complete_success().unwrap();
+        assert!(container_rm_is_quarantined(&engine_key, &id).unwrap());
+        drop(forced_ticket);
 
         let ambiguous_id = "b".repeat(64);
         let ambiguous_args = container_remove_args(&ambiguous_id, false, false);
@@ -4936,6 +5133,7 @@ mod tests {
             .unwrap());
         assert!(container_rm_is_quarantined(&engine_key, &ambiguous_id).unwrap());
         drop(ambiguous_ticket);
+        set_container_rm_quarantined(&engine_key, &id, false).unwrap();
         set_container_rm_quarantined(&engine_key, &ambiguous_id, false).unwrap();
     }
 
@@ -4951,12 +5149,16 @@ mod tests {
                 ok("svc\n"),
                 ok(&format!("{RM_FULL_ID}\n")),
                 ok("svc\n"),
+                failed(
+                    1,
+                    &format!("Error response from daemon: No such container: {RM_FULL_ID}\n"),
+                ),
             ]);
             let values = {
                 let mut docker = Docker::job(&mut runner);
                 lifecycle_sequence(&mut docker).expect("cli cycle serves")
             };
-            assert_eq!(runner.calls.load(Ordering::SeqCst), 4);
+            assert_eq!(runner.calls.load(Ordering::SeqCst), 5);
             assert_eq!(
                 *runner
                     .seen_args
@@ -4967,13 +5169,14 @@ mod tests {
                     container_stop_args("svc", Some(5)),
                     container_id_args("svc"),
                     container_remove_args(RM_FULL_ID, true, false),
+                    exit_info_args(RM_FULL_ID),
                 ]
             );
             values
         };
 
         // After: engine on, the same outcomes with no runner call at all.
-        let mock = lifecycle_mock(4);
+        let mock = lifecycle_mock(5);
         let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
         let _scope = begin_job("lifecycle-api");
         let mut runner = ScriptRunner::scripted_host(Vec::new());
@@ -4988,7 +5191,7 @@ mod tests {
         );
         let counts = snapshot();
         assert_eq!(counts.api_calls, 4);
-        assert_eq!(counts.api_fallbacks, 0);
+        assert_eq!(counts.api_fallbacks, 1);
         assert_eq!(api_values, cli_values, "transports must agree exactly");
         assert_eq!(
             api_values,
@@ -5357,7 +5560,7 @@ mod tests {
                         error_response("404 Not Found", API_NO_SUCH)
                     }
                 },
-                3,
+                4,
             );
             let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
             let _scope = begin_job("lifecycle-race-remove");
@@ -5383,7 +5586,7 @@ mod tests {
             assert!(outcomes.contains(&RemoveOutcome::AlreadyRemoved));
             let counts = snapshot();
             assert_eq!(counts.api_calls, 2);
-            assert_eq!(counts.api_fallbacks, 1);
+            assert_eq!(counts.api_fallbacks, 2);
         }
     }
 
