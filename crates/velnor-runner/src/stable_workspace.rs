@@ -27,13 +27,13 @@
 //! directories, so no slot identity has to be derived from anywhere):
 //!
 //! ```text
-//! <slot-work-dir>/stable-workspaces/<scope>/<repository-id>/workspace
+//! <slot-work-dir>/stable-workspaces__trust_scope_v1/<scope-key>/<repository-id>/workspace
 //! ```
 //!
-//! * `<scope>` is the job's admitted trust scope, sanitized for the
-//!   filesystem. Fork-PR and unknown jobs land under the untrusted floor,
-//!   exactly like the compiler stores, so an untrusted job can neither read
-//!   nor poison a trusted workspace.
+//! * `<scope>` is the stable filesystem key of the job's admitted trust scope.
+//!   Fork-PR and unknown jobs land under the untrusted floor, exactly like the
+//!   compiler stores, so an untrusted job can neither read nor poison a
+//!   trusted workspace.
 //! * `<repository-id>` is the numeric `github.repository_id`, mirroring the
 //!   compiler-store namespacing. Jobs without a valid id fall back to an
 //!   ephemeral workspace rather than sharing one.
@@ -72,7 +72,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// Leaf directory holding every stable workspace of one slot.
-pub(crate) const STABLE_WORKSPACES_DIR: &str = "stable-workspaces";
+pub(crate) const STABLE_WORKSPACES_DIR: &str = "stable-workspaces__trust_scope_v1";
 
 /// LRU marker inside each scope directory. Its mtime is the scope's
 /// last-use clock, refreshed by every allocation that lands on the scope.
@@ -111,11 +111,9 @@ pub(crate) fn resolve(
     trust_scope: &str,
     repository_id: u64,
 ) -> StableWorkspace {
-    let scope =
-        crate::container::sanitize_store_key(crate::trust_scope::normalize_scope(trust_scope));
     let scope_dir = slot_work_dir
         .join(STABLE_WORKSPACES_DIR)
-        .join(scope)
+        .join(crate::trust_scope::filesystem_key(trust_scope))
         .join(repository_id.to_string());
     StableWorkspace {
         workspace: scope_dir.join("workspace"),
@@ -499,8 +497,8 @@ mod tests {
         let stable = resolve(&slot, "trusted", 41);
         assert_eq!(
             stable.workspace,
-            slot.join("stable-workspaces")
-                .join("trusted")
+            slot.join(STABLE_WORKSPACES_DIR)
+                .join(crate::trust_scope::filesystem_key("trusted"))
                 .join("41")
                 .join("workspace")
         );
@@ -524,12 +522,14 @@ mod tests {
     }
 
     #[test]
-    fn scope_segment_is_sanitized_and_fail_closed() {
+    fn scope_segment_is_collision_resistant_and_fail_closed() {
         let slot = slot_root("scope");
         let traversal = resolve(&slot, "../../etc", 7);
         assert_eq!(
             traversal.scope_dir,
-            slot.join(STABLE_WORKSPACES_DIR).join(".._.._etc").join("7")
+            slot.join(STABLE_WORKSPACES_DIR)
+                .join(crate::trust_scope::filesystem_key("../../etc"))
+                .join("7")
         );
         assert!(traversal
             .scope_dir
@@ -538,9 +538,35 @@ mod tests {
         assert_eq!(
             blank.scope_dir,
             slot.join(STABLE_WORKSPACES_DIR)
-                .join(crate::trust_scope::FAIL_CLOSED)
+                .join(crate::trust_scope::filesystem_key(
+                    crate::trust_scope::FAIL_CLOSED
+                ))
                 .join("7")
         );
+        assert_ne!(
+            resolve(&slot, "public/forks", 7).scope_dir,
+            resolve(&slot, "public_forks", 7).scope_dir
+        );
+        fs::remove_dir_all(&slot).ok();
+    }
+
+    #[test]
+    fn encoded_scope_cannot_alias_an_old_raw_scope_component() {
+        let slot = slot_root("raw-key-alias");
+        let encoded_scope = crate::trust_scope::filesystem_key("trusted");
+        let current = resolve(&slot, "trusted", 41);
+        let old_alias = slot
+            .join("stable-workspaces")
+            .join(crate::container::sanitize_store_key(&encoded_scope))
+            .join("41");
+
+        assert_eq!(
+            crate::container::sanitize_store_key(&encoded_scope),
+            encoded_scope
+        );
+        assert_ne!(current.scope_dir, old_alias);
+        assert!(!current.scope_dir.starts_with(&old_alias));
+        assert!(!old_alias.starts_with(&current.scope_dir));
         fs::remove_dir_all(&slot).ok();
     }
 

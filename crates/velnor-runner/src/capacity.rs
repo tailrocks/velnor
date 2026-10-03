@@ -16,6 +16,11 @@ const DOCKER_LIFECYCLE_RETRY: Duration = Duration::from_millis(25);
 /// turns an unbounded fan-out into 10–70s tail latency, so a wait past one
 /// second means a peer is holding every slot through a slow mutation.
 const DOCKER_LIFECYCLE_TELEMETRY_AFTER: Duration = Duration::from_secs(1);
+// Flat leases used sanitized scope text as their filename. The versioned
+// sibling prevents any new hashed component from matching that old grammar.
+// Supported package upgrades drain every Velnor service before replacing the
+// binary, so readers do not need a compatibility scan of the old root.
+const SCOPE_LEASE_ROOT: &str = "leases__trust_scope_v1";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct LeaseRecord {
@@ -175,10 +180,10 @@ impl StoreBudgetPolicy {
     /// holds `pr_cargo_store_bytes` (D18, [`crate::storage::seed_cargo_store`]).
     ///
     /// The seeded `pr` Cargo store counts against the same number as the
-    /// compiler stores: the seed may bring it up to
-    /// [`Self::compiler_store_budget_bytes`] and no further, saturating at
-    /// zero. One bound for every store class the daemon itself grows, derived
-    /// from the admission policy that already promises each slot its peak.
+    /// compiler stores. Each seed pass applies the remaining allowance as a
+    /// best-effort cap when its size measurements succeed, saturating at zero.
+    /// One bound for every store class the daemon itself grows, derived from
+    /// the admission policy that already promises each slot its peak.
     pub fn cargo_seed_headroom_bytes(&self, pr_cargo_store_bytes: u64) -> u64 {
         self.compiler_store_budget_bytes()
             .saturating_sub(pr_cargo_store_bytes)
@@ -660,13 +665,11 @@ impl ScopeLease {
         stale_after: Duration,
     ) -> Result<Self> {
         let _coordinator = FilesystemCoordinator::lock_shared(run_root)?;
-        let dir = run_root
-            .join("leases")
-            .join(crate::container::sanitize_store_key(class));
+        let dir = scope_lease_root(run_root).join(crate::container::sanitize_store_key(class));
         fs::create_dir_all(&dir)?;
         let path = dir.join(format!(
             "{}.json",
-            crate::container::sanitize_store_key(scope)
+            crate::trust_scope::filesystem_key(scope)
         ));
         if path.exists() && lease_is_stale(&path, stale_after)? {
             fs::remove_file(&path)
@@ -705,7 +708,7 @@ fn lease_is_stale(path: &Path, stale_after: Duration) -> Result<bool> {
 }
 
 pub fn active_scopes(run_root: &Path, stale_after: Duration) -> Result<BTreeSet<String>> {
-    let root = run_root.join("leases");
+    let root = scope_lease_root(run_root);
     let mut active = BTreeSet::new();
     if !root.exists() {
         return Ok(active);
@@ -728,6 +731,10 @@ pub fn active_scopes(run_root: &Path, stale_after: Duration) -> Result<BTreeSet<
         }
     }
     Ok(active)
+}
+
+fn scope_lease_root(run_root: &Path) -> PathBuf {
+    run_root.join(SCOPE_LEASE_ROOT)
 }
 
 #[derive(Debug)]
@@ -981,6 +988,54 @@ mod tests {
             active_scopes(&root, Duration::from_secs(60)).unwrap(),
             BTreeSet::from(["cargo/cache".into(), "mise/cache".into()])
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn trust_key_lease_is_disjoint_from_a_valid_old_raw_scope() {
+        let root = root("lease-key-collision");
+        let trust_key = crate::trust_scope::filesystem_key("trusted");
+        // This is the exact old collision: a valid raw scope had the same
+        // spelling as the new hashed key for `trusted`, so both flat lease
+        // grammars would publish the same filename under the old lease root.
+        let raw_old_scope = trust_key.clone();
+        let new_scope = "trusted";
+        let legacy_root = root.join("leases");
+        let old_path = legacy_root.join("actions-cache").join(format!(
+            "{}.json",
+            crate::container::sanitize_store_key(&raw_old_scope)
+        ));
+        fs::create_dir_all(old_path.parent().unwrap()).unwrap();
+        fs::write(
+            &old_path,
+            serde_json::to_vec(&LeaseRecord {
+                scope: raw_old_scope,
+                pid: std::process::id(),
+                // A supported package upgrade drains old writers first; this
+                // is a stale pre-rotation record left on disk after upgrade.
+                created_unix: 0,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let lease = ScopeLease::acquire(&root, "actions-cache", new_scope, Duration::from_secs(60))
+            .unwrap();
+        let versioned_root = scope_lease_root(&root);
+        assert_eq!(old_path.file_name(), lease.path.file_name());
+        assert_ne!(lease.path, old_path);
+        assert!(lease.path.starts_with(&versioned_root));
+        assert!(!lease.path.starts_with(&legacy_root));
+        assert!(!old_path.starts_with(&versioned_root));
+        assert!(
+            old_path.is_file(),
+            "flat pre-rotation lease remains untouched"
+        );
+        assert_eq!(
+            active_scopes(&root, Duration::from_secs(60)).unwrap(),
+            BTreeSet::from([format!("actions-cache/{new_scope}")])
+        );
+        drop(lease);
         fs::remove_dir_all(root).unwrap();
     }
 

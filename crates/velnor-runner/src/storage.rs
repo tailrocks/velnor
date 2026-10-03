@@ -1,11 +1,81 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
+
+#[cfg(unix)]
+use std::{io::Read, path::Component};
 
 use anyhow::{Context, Result};
 
 use crate::args::{StorageArgs, StorageCommand};
+
+#[cfg(unix)]
+const BUILDKIT_STORAGE_ID_FILE: &str = ".velnor-buildkit-storage-id";
+#[cfg(unix)]
+const BUILDKIT_STORAGE_ID_LOCK_FILE: &str = ".velnor-buildkit-storage-id.lock";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SelectedRunnerStorageLayout {
+    layout: StorageLayout,
+    /// Explicit base supplied by the daemon for a generated multi-slot worker.
+    buildkit_identity_root: Option<PathBuf>,
+}
+
+static SELECTED_RUNNER_STORAGE_LAYOUT: OnceLock<SelectedRunnerStorageLayout> = OnceLock::new();
+const LEGACY_TRUST_SCOPE_SUFFIX: &str = "__trust_scope_v1";
+
+/// Storage layout selected for this runner process.
+///
+/// Runner entry points select the layout before starting job execution. Keeping
+/// that choice process-local lets downstream facilities use explicit per-slot
+/// config layouts as well as the canonical packaged layout.
+pub fn selected_layout() -> Option<StorageLayout> {
+    SELECTED_RUNNER_STORAGE_LAYOUT
+        .get()
+        .map(|selected| selected.layout.clone())
+}
+
+/// Resolve this process's storage layout using the runner's selected layout
+/// before ambient environment configuration. Runner pressure and maintenance
+/// paths must stay in the same domain chosen at startup.
+pub(crate) fn selected_or_resolved_layout() -> Option<StorageLayout> {
+    selected_layout().or_else(StorageLayout::resolve)
+}
+
+/// Install the runner's chosen layout and optional shared BuildKit identity
+/// root. The override is supplied only by daemon slot workers with a known
+/// shared config base; path spelling alone never establishes that relationship.
+pub(crate) fn install_selected_layout(
+    layout: StorageLayout,
+    buildkit_identity_root: Option<PathBuf>,
+) -> Result<()> {
+    let selected = SelectedRunnerStorageLayout {
+        layout,
+        buildkit_identity_root,
+    };
+    match SELECTED_RUNNER_STORAGE_LAYOUT.set(selected.clone()) {
+        Ok(()) => Ok(()),
+        Err(_) if SELECTED_RUNNER_STORAGE_LAYOUT.get() == Some(&selected) => Ok(()),
+        Err(_) => anyhow::bail!(
+            "runner process already selected a different storage layout: {:?}",
+            SELECTED_RUNNER_STORAGE_LAYOUT
+                .get()
+                .map(|selected| &selected.layout)
+        ),
+    }
+}
+
+fn selected_buildkit_identity_root(
+    selected: Option<&SelectedRunnerStorageLayout>,
+    layout: &StorageLayout,
+) -> PathBuf {
+    let override_root = selected
+        .filter(|selected| &selected.layout == layout)
+        .and_then(|selected| selected.buildkit_identity_root.as_deref());
+    layout.buildkit_identity_root_for_override(override_root)
+}
 
 pub fn run(args: StorageArgs) -> Result<()> {
     let layout = match StorageLayout::resolve() {
@@ -93,10 +163,162 @@ impl StorageLayout {
     }
 
     pub fn cache_class(&self, trust_scope: &str, class: &str) -> PathBuf {
-        self.cache_root
-            .join(crate::container::sanitize_store_key(trust_scope))
-            .join(class)
+        crate::trust_scope::filesystem_key_path(&self.cache_root, trust_scope).join(class)
     }
+
+    /// Durable root selected for the BuildKit storage domain.
+    ///
+    /// A process-selected root override is honored only for the exact selected
+    /// layout. Standalone layouts always use their own `lib_root`, even when
+    /// its spelling resembles a generated daemon slot path.
+    pub fn buildkit_identity_root(&self) -> PathBuf {
+        selected_buildkit_identity_root(SELECTED_RUNNER_STORAGE_LAYOUT.get(), self)
+    }
+
+    pub(crate) fn buildkit_identity_root_for_override(
+        &self,
+        override_root: Option<&Path>,
+    ) -> PathBuf {
+        let root = override_root
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.lib_root.clone());
+        normalize_buildkit_identity_root(&root, cfg!(target_os = "macos"))
+    }
+}
+
+fn normalize_buildkit_identity_root(root: &Path, macos: bool) -> PathBuf {
+    if macos && let Ok(remainder) = root.strip_prefix("/var") {
+        return Path::new("/private/var").join(remainder);
+    }
+    root.to_path_buf()
+}
+
+/// Load or atomically initialize the durable identity for a BuildKit storage
+/// root. Existing malformed or unsafe identity entries fail closed; they are
+/// never replaced with a new identity.
+pub fn ensure_buildkit_storage_identity(root: &Path) -> Result<String> {
+    #[cfg(unix)]
+    {
+        ensure_buildkit_storage_identity_unix(root)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        anyhow::bail!(
+            "durable BuildKit storage identity requires Unix no-follow filesystem support"
+        )
+    }
+}
+
+#[cfg(unix)]
+fn ensure_buildkit_storage_identity_unix(root: &Path) -> Result<String> {
+    if !root.is_absolute() {
+        anyhow::bail!(
+            "BuildKit storage identity root must be absolute: {}",
+            root.display()
+        );
+    }
+    if root
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        anyhow::bail!(
+            "BuildKit storage identity root is not normalized: {}",
+            root.display()
+        );
+    }
+    let directory = crate::fs_copy::NoFollowDestinationDir::open_or_create_absolute_no_follow(root)
+        .with_context(|| {
+            format!(
+                "securely open or create BuildKit storage identity root {}",
+                root.display()
+            )
+        })?;
+
+    // The lock has a stable pathname and lives beside the identity. O_NOFOLLOW
+    // rejects a substituted symlink, O_NONBLOCK makes a substituted FIFO safe
+    // to inspect. Opening relative to the secured directory keeps lock and
+    // identity operations on the same inode even if the path is renamed.
+    let lock = directory
+        .open_or_create_lock_file(std::ffi::OsStr::new(BUILDKIT_STORAGE_ID_LOCK_FILE))
+        .context("open BuildKit storage identity lock")?;
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)
+        .context("serialize BuildKit storage identity initialization")?;
+    directory
+        .sync_directory()
+        .context("sync BuildKit storage identity root before inspection")?;
+
+    let identity_path = Path::new(BUILDKIT_STORAGE_ID_FILE);
+    if let Some(mut identity_file) = directory
+        .open_relative_file_if_exists(identity_path)
+        .context("inspect existing BuildKit storage identity")?
+    {
+        return read_buildkit_storage_identity(&mut identity_file);
+    }
+
+    let identity = uuid::Uuid::new_v4().hyphenated().to_string();
+    let (mut staged, staged_name) = directory
+        .create_temporary_file(".velnor-buildkit-storage-id")
+        .context("stage BuildKit storage identity")?;
+    use std::io::Write as _;
+    let stage_result = (|| -> Result<()> {
+        writeln!(staged, "{identity}").context("write staged BuildKit storage identity")?;
+        staged
+            .sync_all()
+            .context("sync staged BuildKit storage identity")?;
+        Ok(())
+    })();
+    drop(staged);
+    if let Err(error) = stage_result {
+        let _ = directory.remove_tree_entry(&staged_name);
+        return Err(error);
+    }
+    if let Err(error) = directory.publish_temporary_file_no_replace(
+        &staged_name,
+        std::ffi::OsStr::new(BUILDKIT_STORAGE_ID_FILE),
+    ) {
+        let _ = directory.remove_tree_entry(&staged_name);
+        return Err(error).context("publish BuildKit storage identity");
+    }
+    directory
+        .sync_directory()
+        .context("sync BuildKit storage identity directory")?;
+
+    let mut identity_file = directory
+        .open_relative_file(identity_path)
+        .context("reopen published BuildKit storage identity")?;
+    read_buildkit_storage_identity(&mut identity_file)
+}
+
+#[cfg(unix)]
+fn read_buildkit_storage_identity(file: &mut fs::File) -> Result<String> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = file
+        .metadata()
+        .context("inspect BuildKit storage identity file")?;
+    if metadata.nlink() != 1 || metadata.mode() & 0o077 != 0 {
+        anyhow::bail!("BuildKit storage identity is hard-linked or accessible to group/other");
+    }
+
+    let mut contents = String::new();
+    (&mut *file)
+        .take(38)
+        .read_to_string(&mut contents)
+        .context("read BuildKit storage identity")?;
+    if contents.len() != 36 && contents.len() != 37 {
+        anyhow::bail!("BuildKit storage identity has invalid length");
+    }
+    let value = contents.strip_suffix('\n').unwrap_or(&contents);
+    if value.contains('\n') || value.contains('\r') {
+        anyhow::bail!("BuildKit storage identity has invalid line endings or extra data");
+    }
+    let parsed = uuid::Uuid::parse_str(value).context("parse BuildKit storage identity UUID")?;
+    let canonical = parsed.hyphenated().to_string();
+    if value != canonical {
+        anyhow::bail!("BuildKit storage identity is not a canonical UUID");
+    }
+    Ok(canonical)
 }
 
 /// Resolve the root of a trust-partitioned store class.
@@ -104,16 +326,16 @@ impl StorageLayout {
 /// `trust_scope` is the scope in effect for the caller: the job's admitted
 /// scope on the execution path, the pool scope or the untrusted floor on the
 /// GC path. There is no ambient read here — a caller that guessed would hand
-/// one job's stores to another class. In the legacy layout the root carries
-/// no trust segment (trust appends below it, per store); in the canonical
-/// layout the root is namespaced by the scope.
+/// one job's stores to another class. In the legacy layout the trust store
+/// uses a versioned sibling root; in the canonical layout it uses the
+/// versioned sibling of the cache root.
 pub fn cache_class_path(
     legacy_work_root: &Path,
     trust_scope: &str,
     class: &str,
     legacy_name: &str,
 ) -> PathBuf {
-    let layout = StorageLayout::resolve();
+    let layout = selected_or_resolved_layout();
     cache_class_path_with_layout(
         legacy_work_root,
         trust_scope,
@@ -130,12 +352,13 @@ pub fn cache_class_path_with_layout(
     legacy_name: &str,
     layout: Option<&StorageLayout>,
 ) -> PathBuf {
-    let legacy = legacy_work_root.join(legacy_name);
+    let legacy = legacy_store_root(legacy_work_root, legacy_name);
     let Some(layout) = layout else {
         return legacy;
     };
-    let canonical = layout.cache_class(crate::trust_scope::normalize_scope(trust_scope), class);
-    prefer_canonical_or_existing_legacy(canonical, legacy)
+    // Canonical configuration is an explicit storage cutover. Never read an
+    // old work-root tree as a fallback when its canonical class is absent.
+    layout.cache_class(crate::trust_scope::normalize_scope(trust_scope), class)
 }
 
 /// Resolve a trust-scoped store path below its class root, without consulting
@@ -148,7 +371,7 @@ pub fn cache_class_path_for_trust(
     class: &str,
     legacy_name: &str,
 ) -> PathBuf {
-    let layout = StorageLayout::resolve();
+    let layout = selected_or_resolved_layout();
     cache_class_path_for_trust_with_layout(
         legacy_work_root,
         trust_scope,
@@ -165,21 +388,21 @@ pub fn cache_class_path_for_trust_with_layout(
     legacy_name: &str,
     layout: Option<&StorageLayout>,
 ) -> PathBuf {
-    let trust = crate::container::sanitize_store_key(trust_scope);
-    let legacy = legacy_work_root.join(legacy_name).join(&trust);
+    let trust_key = crate::trust_scope::filesystem_key(trust_scope);
+    let legacy = legacy_store_root(legacy_work_root, legacy_name).join(&trust_key);
     let Some(layout) = layout else {
         return legacy;
     };
-    let canonical = layout.cache_class(&trust, class);
-    prefer_canonical_or_existing_legacy(canonical, legacy)
+    layout.cache_class(trust_scope, class)
 }
 
-pub fn prefer_canonical_or_existing_legacy(canonical: PathBuf, legacy: PathBuf) -> PathBuf {
-    if canonical.exists() || !legacy.exists() {
-        canonical
-    } else {
-        legacy
-    }
+/// Versioned sibling root for a legacy store family. Keeping new stores beside
+/// the old fixed root makes their path grammar disjoint from old
+/// `<root>/<sanitized-scope>/...` layouts.
+pub(crate) fn legacy_store_root(legacy_work_root: &Path, legacy_name: &str) -> PathBuf {
+    let mut name = std::ffi::OsString::from(legacy_name);
+    name.push(LEGACY_TRUST_SCOPE_SUFFIX);
+    legacy_work_root.join(name)
 }
 
 /// Prefix of the temporary name a seed copy is written under, beside its
@@ -510,11 +733,8 @@ fn seed_file(src: &Path, dest: &Path) -> std::io::Result<Option<u64>> {
 }
 
 pub fn append_legacy_trust(root: PathBuf, trust_scope: &str) -> PathBuf {
-    if root
-        .file_name()
-        .is_some_and(|name| name.to_string_lossy().starts_with("_velnor_"))
-    {
-        root.join(crate::container::sanitize_store_key(trust_scope))
+    if is_legacy_store_family_root(&root) {
+        versioned_legacy_root(&root).join(crate::trust_scope::filesystem_key(trust_scope))
     } else {
         root
     }
@@ -546,15 +766,29 @@ pub fn gc_scope_below_root(store: &Path, class_root: &Path) -> Result<String> {
 }
 
 pub fn child_with_legacy_trust(root: PathBuf, child: &str, trust_scope: &str) -> PathBuf {
-    let child = root.join(child);
-    if root
-        .file_name()
-        .is_some_and(|name| name.to_string_lossy().starts_with("_velnor_"))
-    {
-        child.join(crate::container::sanitize_store_key(trust_scope))
+    if is_legacy_store_family_root(&root) {
+        versioned_legacy_root(&root)
+            .join(child)
+            .join(crate::trust_scope::filesystem_key(trust_scope))
     } else {
-        child
+        root.join(child)
     }
+}
+
+fn is_legacy_store_family_root(root: &Path) -> bool {
+    root.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("_velnor_"))
+}
+
+fn versioned_legacy_root(root: &Path) -> PathBuf {
+    let Some(name) = root.file_name().and_then(|name| name.to_str()) else {
+        return root.to_path_buf();
+    };
+    if name.ends_with(LEGACY_TRUST_SCOPE_SUFFIX) {
+        return root.to_path_buf();
+    }
+    root.with_file_name(format!("{name}{LEGACY_TRUST_SCOPE_SUFFIX}"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -566,11 +800,12 @@ pub struct CatalogEntry {
 
 pub fn catalog(layout: &StorageLayout) -> Result<Vec<CatalogEntry>> {
     let mut entries = Vec::new();
-    if !layout.cache_root.exists() {
+    let trust_root = crate::trust_scope::filesystem_key_namespace(&layout.cache_root);
+    if !trust_root.exists() {
         return Ok(entries);
     }
-    for trust in fs::read_dir(&layout.cache_root)
-        .with_context(|| format!("read {}", layout.cache_root.display()))?
+    for trust in
+        fs::read_dir(&trust_root).with_context(|| format!("read {}", trust_root.display()))?
     {
         let trust = trust?.path();
         if !trust.is_dir() {
@@ -636,23 +871,254 @@ mod tests {
         assert_eq!(layout.run_root, Path::new("/run/velnor"));
         assert_eq!(layout.log_root, Path::new("/var/log/velnor"));
         assert_ne!(layout.lib_root, Path::new("/root/.velnor/runner"));
+        let expected_identity_root = if cfg!(target_os = "macos") {
+            Path::new("/private/var/lib/velnor")
+        } else {
+            Path::new("/var/lib/velnor")
+        };
+        assert_eq!(layout.buildkit_identity_root(), expected_identity_root);
     }
 
     #[test]
-    fn legacy_store_remains_readable_until_migrated() {
-        let root = std::env::temp_dir().join(format!("velnor-storage-{}", uuid::Uuid::new_v4()));
-        let legacy = root.join("legacy");
-        let canonical = root.join("canonical");
-        fs::create_dir_all(&legacy).unwrap();
+    fn macos_buildkit_identity_normalizes_only_the_var_component() {
         assert_eq!(
-            prefer_canonical_or_existing_legacy(canonical.clone(), legacy.clone()),
-            legacy
+            normalize_buildkit_identity_root(Path::new("/var/lib/velnor"), true),
+            Path::new("/private/var/lib/velnor")
         );
-        fs::create_dir_all(&canonical).unwrap();
         assert_eq!(
-            prefer_canonical_or_existing_legacy(canonical.clone(), legacy),
-            canonical
+            normalize_buildkit_identity_root(Path::new("/var"), true),
+            Path::new("/private/var")
         );
+        assert_eq!(
+            normalize_buildkit_identity_root(Path::new("/various/lib/velnor"), true),
+            Path::new("/various/lib/velnor")
+        );
+        assert_eq!(
+            normalize_buildkit_identity_root(Path::new("/var/lib/velnor"), false),
+            Path::new("/var/lib/velnor")
+        );
+    }
+
+    #[test]
+    fn slot_looking_standalone_config_keeps_its_own_identity_root() {
+        let layout = StorageLayout {
+            cache_root: PathBuf::from("/config/slots/slot-2/cache"),
+            lib_root: PathBuf::from("/config/slots/slot-2"),
+            run_root: PathBuf::from("/config/run"),
+            log_root: PathBuf::from("/config/slots/slot-2/logs"),
+            mode: "explicit-config",
+        };
+        assert_eq!(
+            layout.buildkit_identity_root(),
+            PathBuf::from("/config/slots/slot-2")
+        );
+
+        let selected = SelectedRunnerStorageLayout {
+            layout: layout.clone(),
+            buildkit_identity_root: Some(PathBuf::from("/config")),
+        };
+        assert_eq!(
+            selected_buildkit_identity_root(Some(&selected), &layout),
+            PathBuf::from("/config")
+        );
+
+        let lookalike = StorageLayout {
+            cache_root: PathBuf::from("/config/slots/slot-3/cache"),
+            lib_root: PathBuf::from("/config/slots/slot-3"),
+            run_root: PathBuf::from("/config/run"),
+            log_root: PathBuf::from("/config/slots/slot-3/logs"),
+            mode: "explicit-config",
+        };
+        assert_eq!(
+            selected_buildkit_identity_root(Some(&selected), &lookalike),
+            PathBuf::from("/config/slots/slot-3")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_and_parented_buildkit_identity_roots_fail_before_creation() {
+        let relative = PathBuf::from(format!(
+            ".velnor-relative-buildkit-identity-{}",
+            uuid::Uuid::new_v4()
+        ));
+        assert!(ensure_buildkit_storage_identity(&relative).is_err());
+        assert!(!relative.exists());
+
+        let base = seed_root("buildkit-identity-parent-component");
+        let parented = base.join("must-not-create").join("..").join("identity");
+        assert!(ensure_buildkit_storage_identity(&parented).is_err());
+        assert!(!base.join("must-not-create").exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn buildkit_storage_identity_is_stable_and_scoped_by_root() {
+        let first = seed_root("buildkit-identity-first");
+        let second = seed_root("buildkit-identity-second");
+
+        let first_id = ensure_buildkit_storage_identity(&first).unwrap();
+        assert_eq!(ensure_buildkit_storage_identity(&first).unwrap(), first_id);
+        assert_ne!(ensure_buildkit_storage_identity(&second).unwrap(), first_id);
+
+        fs::remove_dir_all(first).unwrap();
+        fs::remove_dir_all(second).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn buildkit_storage_identity_creates_missing_root_without_following_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let base = seed_root("buildkit-identity-missing-root");
+        let missing = base.join("created").join("lib");
+        let id = ensure_buildkit_storage_identity(&missing).unwrap();
+        assert_eq!(ensure_buildkit_storage_identity(&missing).unwrap(), id);
+        assert!(missing.join(BUILDKIT_STORAGE_ID_FILE).is_file());
+
+        let target = base.join("target");
+        fs::create_dir(&target).unwrap();
+        let linked = base.join("linked");
+        symlink(&target, &linked).unwrap();
+        assert!(ensure_buildkit_storage_identity(&linked).is_err());
+        assert!(!target.join(BUILDKIT_STORAGE_ID_FILE).exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_buildkit_identity_initializers_share_one_uuid() {
+        let root = seed_root("buildkit-identity-concurrent");
+        let workers = 12;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(workers));
+        let handles = (0..workers)
+            .map(|_| {
+                let root = root.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    ensure_buildkit_storage_identity(&root).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let ids = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(ids.len(), 1, "concurrent initializers diverged: {ids:?}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_or_unsafe_buildkit_identity_fails_closed() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let malformed_root = seed_root("buildkit-identity-malformed");
+        let malformed_identity = malformed_root.join(BUILDKIT_STORAGE_ID_FILE);
+        fs::write(&malformed_identity, b"not-a-uuid\n").unwrap();
+        fs::set_permissions(&malformed_identity, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(ensure_buildkit_storage_identity(&malformed_root).is_err());
+        assert_eq!(fs::read(malformed_identity).unwrap(), b"not-a-uuid\n");
+        fs::remove_dir_all(malformed_root).unwrap();
+
+        let symlink_root = seed_root("buildkit-identity-symlink");
+        let outside = symlink_root.join("outside");
+        fs::write(&outside, b"keep me").unwrap();
+        symlink(&outside, symlink_root.join(BUILDKIT_STORAGE_ID_FILE)).unwrap();
+        assert!(ensure_buildkit_storage_identity(&symlink_root).is_err());
+        assert_eq!(fs::read(outside).unwrap(), b"keep me");
+        fs::remove_dir_all(symlink_root).unwrap();
+
+        let fifo_root = seed_root("buildkit-identity-fifo");
+        create_fifo(&fifo_root.join(BUILDKIT_STORAGE_ID_FILE));
+        assert!(ensure_buildkit_storage_identity(&fifo_root).is_err());
+        fs::remove_dir_all(fifo_root).unwrap();
+
+        let lock_symlink_root = seed_root("buildkit-identity-lock-symlink");
+        let lock_outside = lock_symlink_root.join("outside-lock");
+        fs::write(&lock_outside, b"keep lock target").unwrap();
+        symlink(
+            &lock_outside,
+            lock_symlink_root.join(BUILDKIT_STORAGE_ID_LOCK_FILE),
+        )
+        .unwrap();
+        assert!(ensure_buildkit_storage_identity(&lock_symlink_root).is_err());
+        assert_eq!(fs::read(lock_outside).unwrap(), b"keep lock target");
+        fs::remove_dir_all(lock_symlink_root).unwrap();
+
+        let lock_fifo_root = seed_root("buildkit-identity-lock-fifo");
+        create_fifo(&lock_fifo_root.join(BUILDKIT_STORAGE_ID_LOCK_FILE));
+        assert!(ensure_buildkit_storage_identity(&lock_fifo_root).is_err());
+        fs::remove_dir_all(lock_fifo_root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_or_permissive_buildkit_identity_fails_closed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let linked_root = seed_root("buildkit-identity-hardlink");
+        let linked_identity = linked_root.join(BUILDKIT_STORAGE_ID_FILE);
+        fs::write(
+            &linked_identity,
+            format!("{}\n", uuid::Uuid::new_v4().hyphenated()),
+        )
+        .unwrap();
+        fs::set_permissions(&linked_identity, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::hard_link(&linked_identity, linked_root.join("identity-copy")).unwrap();
+        assert!(ensure_buildkit_storage_identity(&linked_root).is_err());
+        fs::remove_dir_all(linked_root).unwrap();
+
+        let permissive_root = seed_root("buildkit-identity-permissive");
+        let permissive_identity = permissive_root.join(BUILDKIT_STORAGE_ID_FILE);
+        fs::write(
+            &permissive_identity,
+            format!("{}\n", uuid::Uuid::new_v4().hyphenated()),
+        )
+        .unwrap();
+        fs::set_permissions(&permissive_identity, fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(ensure_buildkit_storage_identity(&permissive_root).is_err());
+        fs::remove_dir_all(permissive_root).unwrap();
+    }
+
+    #[test]
+    fn canonical_layout_never_falls_back_to_versioned_legacy_stores() {
+        let root = seed_root("canonical-no-legacy-fallback");
+        let work_root = root.join("work");
+        let layout = StorageLayout::from_prefix(&root.join("canonical"));
+        let scope = "pool/a";
+        let trust_key = crate::trust_scope::filesystem_key(scope);
+
+        let legacy_plain = legacy_store_root(&work_root, "_velnor_mbx");
+        let legacy_trust = legacy_store_root(&work_root, "_velnor_mbx").join(&trust_key);
+        fs::create_dir_all(&legacy_plain).unwrap();
+        fs::create_dir_all(&legacy_trust).unwrap();
+
+        let plain = cache_class_path_with_layout(
+            &work_root,
+            scope,
+            "compiler/mbx",
+            "_velnor_mbx",
+            Some(&layout),
+        );
+        let trust_specific = cache_class_path_for_trust_with_layout(
+            &work_root,
+            scope,
+            "compiler/mbx",
+            "_velnor_mbx",
+            Some(&layout),
+        );
+
+        assert_eq!(plain, layout.cache_class(scope, "compiler/mbx"));
+        assert_eq!(trust_specific, layout.cache_class(scope, "compiler/mbx"));
+        assert_ne!(plain, legacy_plain);
+        assert_ne!(trust_specific, legacy_trust);
+        assert!(!plain.exists());
+        assert!(!trust_specific.exists());
+        assert!(legacy_plain.is_dir());
+        assert!(legacy_trust.is_dir());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -664,6 +1130,16 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[cfg(unix)]
+    fn create_fifo(path: &Path) {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `path` is a valid NUL-terminated path and mkfifo only creates
+        // one test fixture entry with the requested mode.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
     }
 
     fn write(root: &Path, relative: &str, contents: &[u8]) -> PathBuf {
@@ -946,12 +1422,144 @@ mod tests {
     fn catalog_reports_class_bytes() {
         let root = std::env::temp_dir().join(format!("velnor-catalog-{}", uuid::Uuid::new_v4()));
         let layout = StorageLayout::from_prefix(&root);
-        let class = layout.cache_root.join("trusted/targets");
+        let trust_key = crate::trust_scope::filesystem_key("trusted");
+        let class = layout.cache_class("trusted", "targets");
         fs::create_dir_all(&class).unwrap();
         fs::write(class.join("artifact"), b"1234").unwrap();
         let entries = catalog(&layout).unwrap();
-        assert_eq!(entries[0].class, "trusted/targets");
+        assert_eq!(entries[0].class, format!("{trust_key}/targets"));
         assert_eq!(entries[0].bytes, 4);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn trust_store_paths_use_distinct_keys_in_canonical_and_legacy_layouts() {
+        let root = seed_root("trust-keys");
+        let layout = StorageLayout::from_prefix(&root.join("canonical"));
+        let work_root = root.join("work");
+        let scopes = [
+            "pool/a".to_owned(),
+            "pool_a".to_owned(),
+            "Pool_A".to_owned(),
+            format!("{}a", "x".repeat(160)),
+            format!("{}b", "x".repeat(160)),
+        ];
+
+        let canonical_roots = scopes
+            .iter()
+            .map(|scope| layout.cache_class(scope, "compiler/mbx"))
+            .collect::<Vec<_>>();
+        let legacy_roots = scopes
+            .iter()
+            .map(|scope| {
+                cache_class_path_for_trust_with_layout(
+                    &work_root,
+                    scope,
+                    "compiler/mbx",
+                    "_velnor_mbx",
+                    None,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for index in 0..scopes.len() {
+            for other in index + 1..scopes.len() {
+                assert_ne!(canonical_roots[index], canonical_roots[other]);
+                assert_ne!(legacy_roots[index], legacy_roots[other]);
+            }
+            assert_eq!(
+                canonical_roots[index],
+                crate::trust_scope::filesystem_key_path(&layout.cache_root, &scopes[index])
+                    .join("compiler/mbx")
+            );
+            assert_eq!(
+                legacy_roots[index],
+                legacy_store_root(&work_root, "_velnor_mbx")
+                    .join(crate::trust_scope::filesystem_key(&scopes[index]))
+            );
+        }
+
+        let old_alias = work_root
+            .join("_velnor_mbx")
+            .join(crate::container::sanitize_store_key("pool/a"));
+        fs::create_dir_all(&old_alias).unwrap();
+        let fresh = cache_class_path_for_trust_with_layout(
+            &work_root,
+            "pool/a",
+            "compiler/mbx",
+            "_velnor_mbx",
+            Some(&layout),
+        );
+        assert_eq!(fresh, layout.cache_class("pool/a", "compiler/mbx"));
+        assert_ne!(fresh, old_alias);
+        assert!(
+            old_alias.is_dir(),
+            "the old ambiguous directory is left alone"
+        );
+
+        let appended = append_legacy_trust(work_root.join("_velnor_caches"), "pool/a");
+        assert_eq!(
+            appended,
+            legacy_store_root(&work_root, "_velnor_caches")
+                .join(crate::trust_scope::filesystem_key("pool/a"))
+        );
+        let child = child_with_legacy_trust(work_root.join("_velnor_mise"), "installs", "pool/a");
+        assert_eq!(
+            child,
+            legacy_store_root(&work_root, "_velnor_mise")
+                .join("installs")
+                .join(crate::trust_scope::filesystem_key("pool/a"))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_scope_equal_to_another_scope_key_cannot_reuse_old_layout_data() {
+        let root = seed_root("scope-key-alias");
+        let layout = StorageLayout::from_prefix(&root.join("canonical"));
+        let work_root = root.join("work");
+        let raw_scope = crate::trust_scope::filesystem_key("pool/a");
+        let old_component = crate::container::sanitize_store_key(&raw_scope);
+        let old_canonical = layout
+            .cache_root
+            .join(&old_component)
+            .join("compiler/mbx/42");
+        let old_legacy = work_root
+            .join("_velnor_mbx")
+            .join(&old_component)
+            .join("42");
+        fs::create_dir_all(&old_canonical).unwrap();
+        fs::write(old_canonical.join("ambiguous.rlib"), b"old canonical data").unwrap();
+        fs::create_dir_all(&old_legacy).unwrap();
+        fs::write(old_legacy.join("ambiguous.rlib"), b"old legacy data").unwrap();
+
+        let canonical = layout.cache_class(&raw_scope, "compiler/mbx").join("42");
+        let legacy = cache_class_path_for_trust_with_layout(
+            &work_root,
+            &raw_scope,
+            "compiler/mbx",
+            "_velnor_mbx",
+            None,
+        )
+        .join("42");
+
+        assert_eq!(old_component, raw_scope);
+        assert_ne!(canonical, old_canonical);
+        assert_ne!(legacy, old_legacy);
+        assert!(!canonical.starts_with(&old_canonical));
+        assert!(!old_canonical.starts_with(&canonical));
+        assert!(!legacy.starts_with(&old_legacy));
+        assert!(!old_legacy.starts_with(&legacy));
+        assert!(!canonical.exists());
+        assert!(!legacy.exists());
+        assert_eq!(
+            fs::read(old_canonical.join("ambiguous.rlib")).unwrap(),
+            b"old canonical data"
+        );
+        assert_eq!(
+            fs::read(old_legacy.join("ambiguous.rlib")).unwrap(),
+            b"old legacy data"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

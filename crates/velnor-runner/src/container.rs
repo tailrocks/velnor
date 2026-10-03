@@ -2077,7 +2077,10 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("acme/repo".into()),
             store_trust_scope: "trusted".to_owned(),
-            mbx_store_host: Some(work.join("_velnor_mbx/trusted")),
+            mbx_store_host: Some(
+                crate::storage::legacy_store_root(&work, "_velnor_mbx")
+                    .join(crate::trust_scope::filesystem_key("trusted")),
+            ),
             sccache_store_host: None,
         }
     }
@@ -2356,7 +2359,9 @@ mod tests {
     fn explicit_sccache_is_mutually_exclusive_with_mbx() {
         let mut job = spec();
         job.mbx_store_host = None;
-        let sccache_store = job.temp_host.join("_velnor_sccache/trusted");
+        let shared_root = daemon_store_root(&job.temp_host);
+        let sccache_store = crate::storage::legacy_store_root(&shared_root, "_velnor_sccache")
+            .join(crate::trust_scope::filesystem_key("trusted"));
         job.sccache_store_host = Some(sccache_store.clone());
         let prepared = job.start_args().unwrap();
         let args = rendered(&prepared);
@@ -2487,23 +2492,26 @@ mod tests {
 
         assert_eq!(
             cargo_executable_store_host(temp, "trusted", "ChainArgos/java-monorepo"),
-            PathBuf::from(
-                "/var/lib/velnor/work/_velnor_cargo/bin/trusted/ChainArgos_java-monorepo"
-            )
+            crate::storage::legacy_store_root(Path::new("/var/lib/velnor/work"), "_velnor_cargo")
+                .join("bin")
+                .join(crate::trust_scope::filesystem_key("trusted"))
+                .join("ChainArgos_java-monorepo")
         );
         assert_eq!(
             mise_executable_store_host(temp, "trusted", "ChainArgos/java-monorepo"),
-            PathBuf::from(
-                "/var/lib/velnor/work/_velnor_mise/installs/trusted/ChainArgos_java-monorepo"
-            )
+            crate::storage::legacy_store_root(Path::new("/var/lib/velnor/work"), "_velnor_mise")
+                .join("installs")
+                .join(crate::trust_scope::filesystem_key("trusted"))
+                .join("ChainArgos_java-monorepo")
         );
         // Plan 008: the persistent mise binary store is a distinct `binaries`
         // subdir under the same trust/repository boundary as `installs`.
         assert_eq!(
             mise_binary_store_host(temp, "trusted", "ChainArgos/java-monorepo"),
-            PathBuf::from(
-                "/var/lib/velnor/work/_velnor_mise/binaries/trusted/ChainArgos_java-monorepo"
-            )
+            crate::storage::legacy_store_root(Path::new("/var/lib/velnor/work"), "_velnor_mise")
+                .join("binaries")
+                .join(crate::trust_scope::filesystem_key("trusted"))
+                .join("ChainArgos_java-monorepo")
         );
         assert_ne!(
             mise_binary_store_host(temp, "trusted", "ChainArgos/java-monorepo"),
@@ -2531,15 +2539,18 @@ mod tests {
 
         assert_eq!(
             cargo_store_host(temp, "trusted").join("registry/cache"),
-            PathBuf::from("/var/lib/velnor/work/_velnor_cargo/registry/cache")
+            crate::storage::legacy_store_root(Path::new("/var/lib/velnor/work"), "_velnor_cargo")
+                .join("registry/cache")
         );
         assert_eq!(
             cargo_store_host(temp, "trusted").join("git/db"),
-            PathBuf::from("/var/lib/velnor/work/_velnor_cargo/git/db")
+            crate::storage::legacy_store_root(Path::new("/var/lib/velnor/work"), "_velnor_cargo")
+                .join("git/db")
         );
         assert_eq!(
             mise_store_host(temp, "trusted").join("cache"),
-            PathBuf::from("/var/lib/velnor/work/_velnor_mise/cache")
+            crate::storage::legacy_store_root(Path::new("/var/lib/velnor/work"), "_velnor_mise")
+                .join("cache")
         );
     }
 
@@ -2758,9 +2769,11 @@ mod tests {
         other_slot.temp_host = "/var/lib/velnor/work/slot-4/job-c/temp".into();
         other_slot.slot_store_key = Some(slot_store_key(4));
 
-        let expected = PathBuf::from(
-            "/var/lib/velnor/work/_velnor_mise/installs/trusted/acme_repo/slots/slot-3",
-        );
+        let expected =
+            crate::storage::legacy_store_root(Path::new("/var/lib/velnor/work"), "_velnor_mise")
+                .join("installs")
+                .join(crate::trust_scope::filesystem_key("trusted"))
+                .join("acme_repo/slots/slot-3");
         assert_eq!(first.mise_executable_store_host(), expected);
         assert_eq!(same_slot.mise_executable_store_host(), expected);
         // Materializing the command writes an env file, so root this half of
@@ -2776,9 +2789,10 @@ mod tests {
         assert!(rendered(&warm.start_args().unwrap()).contains(&expected_mount));
         assert_eq!(
             other_slot.mise_executable_store_host(),
-            PathBuf::from(
-                "/var/lib/velnor/work/_velnor_mise/installs/trusted/acme_repo/slots/slot-4"
-            )
+            crate::storage::legacy_store_root(Path::new("/var/lib/velnor/work"), "_velnor_mise",)
+                .join("installs")
+                .join(crate::trust_scope::filesystem_key("trusted"))
+                .join("acme_repo/slots/slot-4")
         );
         assert_ne!(
             first.mise_executable_store_host(),
@@ -3129,7 +3143,10 @@ mod tests {
         spec.home_host = root.join("runner/work/job-1/home");
         spec.actions_host = root.join("runner/work/job-1/actions");
         spec.tools_host = root.join("runner/work/job-1/tools");
-        spec.mbx_store_host = Some(root.join("runner/work/_velnor_mbx/trusted"));
+        spec.mbx_store_host = Some(
+            crate::storage::legacy_store_root(&root.join("runner/work"), "_velnor_mbx")
+                .join(crate::trust_scope::filesystem_key("trusted")),
+        );
         spec.docker_host_work_dir = Some("/daemon/work".into());
 
         let prepared = spec.start_args().unwrap();
@@ -3139,7 +3156,11 @@ mod tests {
         assert!(args.contains(&"/daemon/work/job-1/temp:/__t".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp:/daemon/work/job-1/temp".into()));
         assert!(args.contains(&"/daemon/work/job-1/workspace:/daemon/work/job-1/workspace".into()));
-        assert!(args.contains(&"/daemon/work/_velnor_mbx/trusted:/var/cache/mbx".into()));
+        let expected_mbx_mount = format!(
+            "/daemon/work/_velnor_mbx__trust_scope_v1/{}:/var/cache/mbx",
+            crate::trust_scope::filesystem_key("trusted")
+        );
+        assert!(args.contains(&expected_mbx_mount));
         assert!(args.contains(&"/daemon/work/job-1/home:/github/home".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp/_github_workflow:/github/workflow".into()));
         assert!(args.contains(&"/daemon/work/job-1/actions:/__a:ro".into()));
@@ -3173,7 +3194,10 @@ mod tests {
         let mut spec = spec();
         spec.workspace_host = root.join("runner/work/slot-1/job-1/workspace");
         spec.temp_host = root.join("runner/work/slot-1/job-1/temp");
-        spec.mbx_store_host = Some(root.join("runner/work/_velnor_mbx/trusted"));
+        spec.mbx_store_host = Some(
+            crate::storage::legacy_store_root(&root.join("runner/work"), "_velnor_mbx")
+                .join(crate::trust_scope::filesystem_key("trusted")),
+        );
         spec.docker_host_work_dir = Some("/daemon/work".into());
 
         assert_eq!(
@@ -3182,7 +3206,8 @@ mod tests {
         );
         assert_eq!(
             spec.docker_host_path(spec.mbx_store_host.as_ref().unwrap()),
-            PathBuf::from("/daemon/work/_velnor_mbx/trusted")
+            PathBuf::from("/daemon/work/_velnor_mbx__trust_scope_v1")
+                .join(crate::trust_scope::filesystem_key("trusted"))
         );
         assert_eq!(
             spec.docker_lease_paths().unwrap().daemon_visible.parent(),

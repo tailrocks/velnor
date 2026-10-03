@@ -258,7 +258,9 @@ mod tests {
         let job = job_with_steps(serde_json::json!([]));
         assert_eq!(
             store_host(&job, temp, "trusted"),
-            PathBuf::from("/var/lib/velnor/work/_velnor_sccache/trusted/42")
+            PathBuf::from("/var/lib/velnor/work/_velnor_sccache__trust_scope_v1")
+                .join(crate::trust_scope::filesystem_key("trusted"))
+                .join("42")
         );
         // A sibling slot resolves the same daemon-shared store.
         let slot2 = Path::new("/var/lib/velnor/work/slot-2/job/temp");
