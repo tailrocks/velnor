@@ -3690,10 +3690,14 @@ pub(crate) fn valid_check_profile_task(task: &str) -> bool {
 /// artifacts are rendered into a shell preflight and then uploaded as a
 /// literal, so every slash-separated visible component must start with an
 /// ASCII letter or digit and continue with ASCII letters, digits, `_`, `-`,
-/// or `.`. Legacy best-effort artifacts retain their broader path contract.
+/// or `.` without ending in `.` (which aliases the same name on Windows).
+/// Legacy best-effort artifacts retain their broader path contract.
 fn valid_check_profile_artifact_path(path: &str) -> bool {
     let mut saw_component = false;
     for component in path.split('/') {
+        if component.ends_with('.') {
+            return false;
+        }
         let mut bytes = component.bytes();
         if !bytes
             .next()
@@ -7950,6 +7954,23 @@ mod tests {
             );
             assert!(error.to_string().contains("collides"), "{error}");
         }
+
+        let windows_alias = must_fail(
+            config_for(&check_profile_config(
+                "[[check_profile]]\nid = \"strict\"\ntasks = [\"check-strict\"]\n\
+                 artifacts_required = true\nartifacts = [\"target/report\", \"target/report.\"]\n",
+            ))
+            .validate(&[], &[], &BTreeSet::new()),
+            "required artifact paths must reject Windows trailing-period aliases",
+        );
+        assert!(
+            windows_alias.to_string().contains("target/report."),
+            "{windows_alias}"
+        );
+        assert!(
+            windows_alias.to_string().contains("required artifact"),
+            "{windows_alias}"
+        );
 
         for artifact in [
             "target/*.json",
