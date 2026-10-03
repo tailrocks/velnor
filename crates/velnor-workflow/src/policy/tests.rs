@@ -2646,7 +2646,7 @@ fn required_artifact_workflow_level_mutations(canonical: &str) {
                     .as_mapping_mut()
                     .unwrap_or_else(|| panic!("workflow mapping exists"))
                     .insert("env".to_owned(), Value::Mapping(env));
-            }),
+            }) as Box<dyn Fn(&mut Value)>,
         ),
         (
             "workflow-permissions",
