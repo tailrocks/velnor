@@ -1263,26 +1263,7 @@ mod tests {
         assert!(!workflow.contains("if: always()"), "{workflow}");
     }
 
-    #[test]
-    fn required_artifacts_verify_the_uploaded_id_before_consumers() {
-        let mut strict = profile("strict");
-        strict.runner = "velnor".to_owned();
-        strict.artifacts = vec![
-            "target/ci-evidence/rollup.json".to_owned(),
-            "target/ci-evidence/rollup.md".to_owned(),
-        ];
-        strict.artifacts_required = true;
-        let mut consumer = profile("consumer");
-        consumer.needs = vec!["strict".to_owned()];
-        let config = profile_config(vec![strict, consumer]);
-        let admission = WorkflowIr::from_config(&config)
-            .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
-        let map = args_for("");
-        let selected = must(
-            select_profiles(&config.check_profiles, &Args(&map), "scheduled-checks"),
-            "select producer and consumer",
-        );
-        let workflow = render(&config, None, &selected);
+    fn assert_required_artifact_workflow_links(workflow: &str, admission: &str) {
         assert!(
             workflow.contains(&format!("if: ${{{{ {admission} }}}}")),
             "the Velnor artifact producer uses canonical provider admission: {workflow}"
@@ -1338,6 +1319,9 @@ mod tests {
             ),
             "consumers wait for verification: {workflow}"
         );
+    }
+
+    fn assert_required_artifact_verifier(workflow: &str) {
         let verifier_start = must_some(
             workflow.find("  verify-strict-artifacts:"),
             "find verifier job",
@@ -1387,6 +1371,30 @@ mod tests {
             verifier.contains("path=\"$root/target/ci-evidence/rollup.json\""),
             "the verifier checks the preserved relative path: {verifier}"
         );
+    }
+
+    #[test]
+    fn required_artifacts_verify_the_uploaded_id_before_consumers() {
+        let mut strict = profile("strict");
+        strict.runner = "velnor".to_owned();
+        strict.artifacts = vec![
+            "target/ci-evidence/rollup.json".to_owned(),
+            "target/ci-evidence/rollup.md".to_owned(),
+        ];
+        strict.artifacts_required = true;
+        let mut consumer = profile("consumer");
+        consumer.needs = vec!["strict".to_owned()];
+        let config = profile_config(vec![strict, consumer]);
+        let admission = WorkflowIr::from_config(&config)
+            .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
+        let map = args_for("");
+        let selected = must(
+            select_profiles(&config.check_profiles, &Args(&map), "scheduled-checks"),
+            "select producer and consumer",
+        );
+        let workflow = render(&config, None, &selected);
+        assert_required_artifact_workflow_links(&workflow, &admission);
+        assert_required_artifact_verifier(&workflow);
     }
 
     #[test]
