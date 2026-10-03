@@ -2379,8 +2379,9 @@ mod runner_lane_tests {
     use super::{
         collect_manifests, command_digest_for_revision, expand_affected_units,
         expected_work_plan_digest, plan_providers_for_value, push_framed_strings,
-        tests::selection_config, watched_units, CiUnit, PlannedUnit, Scope, ValidationPhase,
-        COMMAND_DIGEST_DOMAIN, HEX_DIGITS,
+        tests::{must, selection_config},
+        watched_units, CiUnit, PlannedUnit, Scope, ValidationPhase, COMMAND_DIGEST_DOMAIN,
+        HEX_DIGITS,
     };
     use crate::s2::provider::ProviderId;
     use sha2::{Digest, Sha256};
@@ -2564,28 +2565,32 @@ mod runner_lane_tests {
         );
 
         let config = selection_config();
-        let plan_a = expected_work_plan_digest(
-            &[PlannedUnit {
-                unit_id: "app".to_owned(),
-                providers: BTreeSet::from([ProviderId::GithubHosted]),
-                command_digest: baseline.clone(),
-            }],
-            &config,
-            "base-sha",
-            "head-sha",
-        )
-        .expect("the baseline command identity must produce a plan identity");
-        let plan_b = expected_work_plan_digest(
-            &[PlannedUnit {
-                unit_id: "app".to_owned(),
-                providers: BTreeSet::from([ProviderId::GithubHosted]),
-                command_digest: command_digest_for_revision(&unit, Scope::Affected, "pin-b"),
-            }],
-            &config,
-            "base-sha",
-            "head-sha",
-        )
-        .expect("the changed command identity must produce a plan identity");
+        let plan_a = must(
+            expected_work_plan_digest(
+                &[PlannedUnit {
+                    unit_id: "app".to_owned(),
+                    providers: BTreeSet::from([ProviderId::GithubHosted]),
+                    command_digest: baseline.clone(),
+                }],
+                &config,
+                "base-sha",
+                "head-sha",
+            ),
+            "the baseline command identity must produce a plan identity",
+        );
+        let plan_b = must(
+            expected_work_plan_digest(
+                &[PlannedUnit {
+                    unit_id: "app".to_owned(),
+                    providers: BTreeSet::from([ProviderId::GithubHosted]),
+                    command_digest: command_digest_for_revision(&unit, Scope::Affected, "pin-b"),
+                }],
+                &config,
+                "base-sha",
+                "head-sha",
+            ),
+            "the changed command identity must produce a plan identity",
+        );
         assert_eq!(plan_a.len(), 64, "strict plan identity remains SHA-256");
         assert_ne!(
             plan_a, plan_b,
@@ -5613,7 +5618,7 @@ pub(crate) mod tests {
         clippy::panic,
         reason = "tests need setup failures to name their root cause"
     )]
-    fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
+    pub(super) fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
         match result {
             Ok(value) => value,
             Err(error) => panic!("{context}: {error}"),

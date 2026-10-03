@@ -5697,8 +5697,9 @@ mod tests {
             valid.replace(",\"head_sha\":\"head-sha\"", ""),
             valid.replace("\"head_sha\":\"head-sha\"", "\"head_sha\":\"\""),
         ] {
-            let error = canonical_expected_plan_digest_from_json(&malformed)
-                .expect_err("unbound or wrong-schema plan must fail closed");
+            let Err(error) = canonical_expected_plan_digest_from_json(&malformed) else {
+                return Err("unbound or wrong-schema plan must fail closed".to_owned());
+            };
             assert!(
                 error.contains("schema 2")
                     || error.contains("base_sha")
@@ -5708,13 +5709,12 @@ mod tests {
         }
 
         let dispatch = valid.replace("\"base_sha\":\"base-sha\"", "\"base_sha\":\"\"");
-        canonical_expected_plan_digest_from_json(&dispatch)
-            .expect("workflow_dispatch may carry an explicitly empty base SHA");
+        canonical_expected_plan_digest_from_json(&dispatch)?;
         Ok(())
     }
 
     #[test]
-    fn schema_two_alone_selects_strict_aggregate_validation() {
+    fn schema_two_alone_selects_strict_aggregate_validation() -> Result<(), String> {
         let expected = r#"{
             "schema": 2,
             "base_sha": "base-sha",
@@ -5723,12 +5723,14 @@ mod tests {
             "prerequisites": {"rust-alpha": []}
         }"#;
         let results = r#"{"schema": 2, "results": []}"#;
-        let error = aggregate_files(expected, results, "base-sha", "head-sha")
-            .expect_err("schema 2 must not fall back to legacy aggregation");
+        let Err(error) = aggregate_files(expected, results, "base-sha", "head-sha") else {
+            return Err("schema 2 must not fall back to legacy aggregation".to_owned());
+        };
         assert!(
             error.contains("platform") || error.contains("command_digest"),
             "schema-2 strict validation was not selected: {error}"
         );
+        Ok(())
     }
 
     #[test]
@@ -5744,25 +5746,29 @@ mod tests {
         let legacy = aggregate_files(legacy_expected, legacy_results, "base-sha", "head-sha")?;
         assert!(legacy.passed, "legacy pair must retain legacy aggregation");
 
-        let mixed_error = aggregate_files(
+        let Err(mixed_error) = aggregate_files(
             legacy_expected,
             r#"{"schema":2,"results":[]}"#,
             "base-sha",
             "head-sha",
-        )
-        .expect_err("schema-2 results must not pair with legacy expected work");
+        ) else {
+            return Err("schema-2 results must not pair with legacy expected work".to_owned());
+        };
         assert!(
             mixed_error.contains("expected-work") && mixed_error.contains("schema 2"),
             "mixed-schema error must identify the missing strict expected schema: {mixed_error}"
         );
 
-        let row_identity_error = aggregate_files(
+        let Err(row_identity_error) = aggregate_files(
             legacy_expected,
             r#"{"results":[{"unit":"rust-alpha","lane":"github","outcome":"success","plan_digest":"stale"}]}"#,
             "base-sha",
             "head-sha",
-        )
-        .expect_err("row-level plan identity must not pair with legacy expected work");
+        ) else {
+            return Err(
+                "row-level plan identity must not pair with legacy expected work".to_owned(),
+            );
+        };
         assert!(
             row_identity_error.contains("expected-work") && row_identity_error.contains("schema 2"),
             "row identity must select strict mode: {row_identity_error}"
@@ -5803,9 +5809,11 @@ mod tests {
             "schema-2 pair must retain strict aggregation"
         );
 
-        let reverse_error =
+        let Err(reverse_error) =
             aggregate_files(&strict_expected, legacy_results, "base-sha", "head-sha")
-                .expect_err("schema-2 expected work must not pair with legacy results");
+        else {
+            return Err("schema-2 expected work must not pair with legacy results".to_owned());
+        };
         assert!(
             reverse_error.contains("results") && reverse_error.contains("schema 2"),
             "reverse mixed-schema error must identify results: {reverse_error}"
@@ -5814,31 +5822,33 @@ mod tests {
     }
 
     #[test]
-    fn non_root_prerequisite_cycle_is_rejected() {
+    fn non_root_prerequisite_cycle_is_rejected() -> Result<(), String> {
         let prerequisites = BTreeMap::from([
             ("A".to_owned(), vec!["B".to_owned()]),
             ("B".to_owned(), vec!["C".to_owned()]),
             ("C".to_owned(), vec!["B".to_owned()]),
         ]);
-        let error = transitive_prerequisites("A", &prerequisites)
-            .expect_err("a cycle below the root must fail closed");
+        let Err(error) = transitive_prerequisites("A", &prerequisites) else {
+            return Err("a cycle below the root must fail closed".to_owned());
+        };
         assert!(error.contains("`B`"), "unexpected cycle error: {error}");
+        Ok(())
     }
 
     #[test]
-    fn diamond_prerequisites_are_closed_without_recursion() {
+    fn diamond_prerequisites_are_closed_without_recursion() -> Result<(), String> {
         let prerequisites = BTreeMap::from([
             ("A".to_owned(), vec!["B".to_owned(), "C".to_owned()]),
             ("B".to_owned(), vec!["D".to_owned()]),
             ("C".to_owned(), vec!["D".to_owned()]),
             ("D".to_owned(), Vec::new()),
         ]);
-        let closure = transitive_prerequisites("A", &prerequisites)
-            .expect("a shared diamond prerequisite is not a cycle");
+        let closure = transitive_prerequisites("A", &prerequisites)?;
         assert_eq!(
             closure,
             BTreeSet::from(["B".to_owned(), "C".to_owned(), "D".to_owned()])
         );
+        Ok(())
     }
 
     #[test]
@@ -5893,8 +5903,18 @@ mod tests {
             command_digests: BTreeMap::from([("swift-app".to_owned(), "command-7".to_owned())]),
             platforms: BTreeMap::from([("swift-app".to_owned(), Platform::MacosArm64)]),
         };
-        let verdict =
-            aggregate_files_with_identity(&expected, &result, "base-sha", "head-sha", &run)?;
+        schema2_results_accept_and_reject_outcomes(&expected, &result, &run)?;
+        schema2_results_reject_identity_mismatches(&expected, &result, &run)?;
+        schema2_results_reject_plan_mismatches(&expected, &result, &canonical, &run)?;
+        Ok(())
+    }
+
+    fn schema2_results_accept_and_reject_outcomes(
+        expected: &str,
+        result: &str,
+        run: &RunIdentity,
+    ) -> Result<(), String> {
+        let verdict = aggregate_files_with_identity(expected, result, "base-sha", "head-sha", run)?;
         assert!(
             verdict.passed,
             "planned skip should satisfy identity and aggregate: {verdict:?}"
@@ -5902,22 +5922,33 @@ mod tests {
 
         let cancelled = result.replace("\"outcome\": \"skipped\"", "\"outcome\": \"cancelled\"");
         let verdict =
-            aggregate_files_with_identity(&expected, &cancelled, "base-sha", "head-sha", &run)?;
+            aggregate_files_with_identity(expected, &cancelled, "base-sha", "head-sha", run)?;
         assert!(!verdict.passed, "cancelled work must fail the aggregate");
+        Ok(())
+    }
 
+    fn schema2_results_reject_identity_mismatches(
+        expected: &str,
+        result: &str,
+        run: &RunIdentity,
+    ) -> Result<(), String> {
         let stale_attempt = result.replace("\"run_attempt\": \"2\"", "\"run_attempt\": \"1\"");
-        let error =
-            aggregate_files_with_identity(&expected, &stale_attempt, "base-sha", "head-sha", &run)
-                .expect_err("stale attempts must fail closed");
+        let Err(error) =
+            aggregate_files_with_identity(expected, &stale_attempt, "base-sha", "head-sha", run)
+        else {
+            return Err("stale attempts must fail closed".to_owned());
+        };
         assert!(error.contains("stale-attempt"), "unexpected error: {error}");
 
         let forged_digest = result.replace(
             "\"command_digest\": \"command-7\"",
             "\"command_digest\": \"plan-7\"",
         );
-        let error =
-            aggregate_files_with_identity(&expected, &forged_digest, "base-sha", "head-sha", &run)
-                .expect_err("forged command digests must fail closed");
+        let Err(error) =
+            aggregate_files_with_identity(expected, &forged_digest, "base-sha", "head-sha", run)
+        else {
+            return Err("forged command digests must fail closed".to_owned());
+        };
         assert!(
             error.contains("identity-mismatch"),
             "unexpected error: {error}"
@@ -5927,56 +5958,70 @@ mod tests {
             "\"platform\": \"macos-arm64\"",
             "\"platform\": \"linux-x64\"",
         );
-        let error =
-            aggregate_files_with_identity(&expected, &wrong_platform, "base-sha", "head-sha", &run)
-                .expect_err("wrong platforms must fail closed");
+        let Err(error) =
+            aggregate_files_with_identity(expected, &wrong_platform, "base-sha", "head-sha", run)
+        else {
+            return Err("wrong platforms must fail closed".to_owned());
+        };
         assert!(error.contains("platform"), "unexpected error: {error}");
 
         let missing_identity = result.replace("\"run_id\": \"run-7\",\n                ", "");
-        let error = aggregate_files_with_identity(
-            &expected,
-            &missing_identity,
-            "base-sha",
-            "head-sha",
-            &run,
-        )
-        .expect_err("missing identity must fail closed");
+        let Err(error) =
+            aggregate_files_with_identity(expected, &missing_identity, "base-sha", "head-sha", run)
+        else {
+            return Err("missing identity must fail closed".to_owned());
+        };
         assert!(error.contains("run_id"), "unexpected error: {error}");
 
         let wrong_source =
             result.replace("\"head_sha\": \"head-sha\"", "\"head_sha\": \"other-head\"");
-        let error =
-            aggregate_files_with_identity(&expected, &wrong_source, "base-sha", "head-sha", &run)
-                .expect_err("source SHA mismatches must fail closed");
+        let Err(error) =
+            aggregate_files_with_identity(expected, &wrong_source, "base-sha", "head-sha", run)
+        else {
+            return Err("source SHA mismatches must fail closed".to_owned());
+        };
         assert!(error.contains("head SHA"), "unexpected error: {error}");
+        Ok(())
+    }
 
+    fn schema2_results_reject_plan_mismatches(
+        expected: &str,
+        result: &str,
+        canonical: &str,
+        run: &RunIdentity,
+    ) -> Result<(), String> {
         let missing_plan = expected.replace(&format!("\"plan_digest\": \"{canonical}\",\n"), "");
-        let error =
-            aggregate_files_with_identity(&missing_plan, &result, "base-sha", "head-sha", &run)
-                .expect_err("missing expected plan identity must fail closed");
+        let Err(error) =
+            aggregate_files_with_identity(&missing_plan, result, "base-sha", "head-sha", run)
+        else {
+            return Err("missing expected plan identity must fail closed".to_owned());
+        };
         assert!(error.contains("plan_digest"), "unexpected error: {error}");
 
         let forged_plan = expected.replace(
             "\"command_digest\": \"command-7\"",
             "\"command_digest\": \"forged-command\"",
         );
-        let error =
-            aggregate_files_with_identity(&forged_plan, &result, "base-sha", "head-sha", &run)
-                .expect_err("forged expected-plan fields must fail canonical binding");
+        let Err(error) =
+            aggregate_files_with_identity(&forged_plan, result, "base-sha", "head-sha", run)
+        else {
+            return Err("forged expected-plan fields must fail canonical binding".to_owned());
+        };
         assert!(
             error.contains("canonical expected-plan digest"),
             "unexpected error: {error}"
         );
 
-        let forged_artifact_digest = expected.replace(&canonical, "forged-plan");
-        let error = aggregate_files_with_identity(
+        let forged_artifact_digest = expected.replace(canonical, "forged-plan");
+        let Err(error) = aggregate_files_with_identity(
             &forged_artifact_digest,
-            &result,
+            result,
             "base-sha",
             "head-sha",
-            &run,
-        )
-        .expect_err("forged artifact plan digest must fail canonical binding");
+            run,
+        ) else {
+            return Err("forged artifact plan digest must fail canonical binding".to_owned());
+        };
         assert!(
             error.contains("canonical expected-plan digest"),
             "unexpected error: {error}"
@@ -5986,34 +6031,42 @@ mod tests {
             "\"outcome\": \"skipped\",",
             "\"outcome\": \"success\",\n                \"reused_from\": \"producer-7\",",
         );
-        let error = aggregate_files_with_identity(&expected, &reused, "base-sha", "head-sha", &run)
-            .expect_err("strict live aggregation must reject reused_from");
+        let Err(error) =
+            aggregate_files_with_identity(expected, &reused, "base-sha", "head-sha", run)
+        else {
+            return Err("strict live aggregation must reject reused_from".to_owned());
+        };
         assert!(error.contains("reused_from"), "unexpected error: {error}");
 
         let wrong_provider = result.replace(
             "\"provider\": \"github-hosted\"",
             "\"provider\": \"velnor\"",
         );
-        let error =
-            aggregate_files_with_identity(&expected, &wrong_provider, "base-sha", "head-sha", &run)
-                .expect_err("lane/provider mismatch must fail closed");
+        let Err(error) =
+            aggregate_files_with_identity(expected, &wrong_provider, "base-sha", "head-sha", run)
+        else {
+            return Err("lane/provider mismatch must fail closed".to_owned());
+        };
         assert!(error.contains("provider"), "unexpected error: {error}");
 
         let missing_schema = expected.replace("\"schema\": 2,\n", "");
-        let error =
-            aggregate_files_with_identity(&missing_schema, &result, "base-sha", "head-sha", &run)
-                .expect_err("strict expected work must declare schema 2");
+        let Err(error) =
+            aggregate_files_with_identity(&missing_schema, result, "base-sha", "head-sha", run)
+        else {
+            return Err("strict expected work must declare schema 2".to_owned());
+        };
         assert!(error.contains("schema 2"), "unexpected error: {error}");
 
         let missing_expected_platform = expected.replace("\"platform\": \"macos-arm64\",\n", "");
-        let error = aggregate_files_with_identity(
+        let Err(error) = aggregate_files_with_identity(
             &missing_expected_platform,
-            &result,
+            result,
             "base-sha",
             "head-sha",
-            &run,
-        )
-        .expect_err("missing expected platform must fail closed");
+            run,
+        ) else {
+            return Err("missing expected platform must fail closed".to_owned());
+        };
         assert!(error.contains("platform"), "unexpected error: {error}");
         Ok(())
     }

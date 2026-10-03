@@ -799,8 +799,7 @@ mod tests {
         assert_eq!(files, vec!["tracked.txt".to_owned()]);
     }
 
-    #[test]
-    fn ownership_sidecar_excludes_only_recorded_outputs() {
+    fn ownership_fixture() -> PathBuf {
         let root = scratch("ownership-aware-github");
         must(
             fs::create_dir_all(root.join(".github/ci")),
@@ -839,19 +838,34 @@ mod tests {
             fs::write(root.join("state/cache.env"), "MANUAL=1\n"),
             "write manual cache config",
         );
+        write_ownership_sidecar(
+            &root,
+            &[".github/workflows/generated.yml", "state/cache.env"],
+        );
+        root
+    }
+
+    fn write_ownership_sidecar(root: &Path, outputs: &[&str]) {
+        let outputs = outputs
+            .iter()
+            .map(|path| format!("{path}\t0000000000000000"))
+            .collect::<Vec<_>>()
+            .join("\n");
         must(
             fs::write(
                 root.join(crate::s2::OWNERSHIP_STATE),
                 format!(
-                    "# Generated ownership state; do not edit.\nschema = 2\n[inputs]\nconfig\t0000000000000000\nscan\t0000000000000000\ngenerator\t{}\n[outputs]\n.github/workflows/generated.yml\t0000000000000000\nstate/cache.env\t0000000000000000\n",
+                    "# Generated ownership state; do not edit.\nschema = 2\n[inputs]\nconfig\t0000000000000000\nscan\t0000000000000000\ngenerator\t{}\n[outputs]\n{outputs}\n",
                     crate::s2::GENERATOR_REVISION
                 ),
             ),
             "write ownership sidecar",
         );
+    }
 
+    fn assert_initial_ownership_scan_keeps_inputs(root: &Path) {
         let files = must(
-            repository_files(&root, &[]),
+            repository_files(root, &[]),
             "scan ownership-aware repository",
         );
         assert!(files.contains(&".github/workflows/handwritten.yml".to_owned()));
@@ -861,6 +875,12 @@ mod tests {
         // dynamic path therefore remains an input until the convergence pass.
         assert!(files.contains(&".github/workflows/Generated.yml".to_owned()));
         assert!(!files.contains(&crate::s2::OWNERSHIP_STATE.to_owned()));
+    }
+
+    #[test]
+    fn ownership_sidecar_excludes_only_recorded_outputs() {
+        let root = ownership_fixture();
+        assert_initial_ownership_scan_keeps_inputs(&root);
 
         let verified = BTreeSet::from([PathBuf::from(".github/workflows/generated.yml")]);
         let files = must(
@@ -903,16 +923,7 @@ mod tests {
             "a trusted generated alias is excluded from scanner inputs"
         );
 
-        must(
-            fs::write(
-                root.join(crate::s2::OWNERSHIP_STATE),
-                format!(
-                    "# Generated ownership state; do not edit.\nschema = 2\n[inputs]\nconfig\t0000000000000000\nscan\t0000000000000000\ngenerator\t{}\n[outputs]\n.github/workflows/generated.yml\t0000000000000000\n",
-                    crate::s2::GENERATOR_REVISION
-                ),
-            ),
-            "record fleet config as generated",
-        );
+        write_ownership_sidecar(&root, &[".github/workflows/generated.yml"]);
         let files = must(
             repository_files(&root, &[]),
             "scan after fleet config ownership is recorded",
