@@ -564,7 +564,7 @@ const VOLUME_LOCK_RETRY: Duration = Duration::from_millis(10);
 /// Resource identifiers are added only after a successful create response and
 /// are shared by all connections belonging to this one job lease.
 #[derive(Clone)]
-struct DockerLeasePolicy {
+pub(crate) struct DockerLeasePolicy {
     resources: Arc<Mutex<OwnedDockerResources>>,
     persistent_builder_requests_changed: Arc<Condvar>,
     #[cfg(unix)]
@@ -1382,7 +1382,7 @@ impl DockerLeasePolicy {
         Self::new_with_volume_lock_root(job_container, None)
     }
 
-    fn new_with_volume_lock_root(
+    pub(crate) fn new_with_volume_lock_root(
         job_container: &str,
         volume_lock_root: Option<PathBuf>,
     ) -> Result<Self> {
@@ -3036,7 +3036,10 @@ impl DockerLeasePolicy {
     /// Acquire all named-volume locks in lexical order. The guards are held
     /// by the request loop until Docker replies and ownership observation has
     /// completed, closing the inspect→operation replacement window.
-    fn lock_volume_names(&self, names: &BTreeSet<String>) -> Result<VolumeOperationLocks> {
+    pub(crate) fn lock_volume_names(
+        &self,
+        names: &BTreeSet<String>,
+    ) -> Result<VolumeOperationLocks> {
         if names.is_empty() {
             return Ok(VolumeOperationLocks::default());
         }
