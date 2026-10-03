@@ -117,10 +117,14 @@ Jobs run unbounded. No Docker `--cpus`/`--memory`/cpuset flag, no
 `velnor-jobs.slice` CPU/RAM ceiling, and no compiler partition
 (`CARGO_BUILD_JOBS`, `MAKEFLAGS`, `MBX_SCHEDULER_*`) is ever imposed:
 every container sees the whole machine, and builders size themselves.
-Workflow `container.options` quota flags are stripped at admission and
-again at emission; nested creates through the job lease proxy are
-stripped the same way. `velnor-jobs.slice` exists for identity and
-cleanup ancestry only.
+For Native jobs, workflow `container.options` quota flags are stripped at
+admission and again at emission. User-supplied outer job/service volume,
+host-mount, and socket options
+(`-v`/`--volume`, `--mount`, `--volumes-from`, `--volume-driver`,
+`--volume-opt`, and `--use-api-socket`) are also removed; runner-owned mounts
+are constructed separately. Nested creates through the job lease proxy have
+their own option filter. `velnor-jobs.slice` exists for identity and cleanup
+ancestry only.
 
 Concurrency is capped by one host-wide `max_jobs=N` permit ledger, shared by
 the native and Scale Set lanes. Separately, disk pressure blocks admission

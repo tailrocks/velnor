@@ -16,11 +16,12 @@ limit” means the reviewed implementation does not prove the stronger property.
 - Trust scope is operator configuration, never job payload. Absent or blank
   values resolve to `untrusted`. Capability gates trim the value and compare
   `trusted` case-insensitively; only that match grants trusted capabilities.
-  The Docker backend passes the host Docker socket into trusted jobs on
-  supported Linux hosts; Velnor suppresses that raw socket mount on macOS until
-  a VM-reachable per-job lease proxy exists. Other trusted capabilities are
-  privileged container and service options, host port publishing, BuildKit
-  secrets, and the right to run a job carrying user secrets. Other non-empty
+  The Docker backend's runner-owned mount passes the host Docker socket into
+  trusted jobs on supported Linux hosts; Velnor suppresses that mount on macOS
+  until a VM-reachable per-job lease proxy exists. Other trusted capabilities
+  are privileged container and service options subject to the option filter,
+  host port publishing, BuildKit secrets, and the right to run a job carrying
+  user secrets. Other non-empty
   values, including `release` and custom labels, retain distinct store
   namespaces without those capabilities. One write-once resolution serves
   both binaries, so a flag and environment variable cannot disagree and let a
@@ -50,13 +51,20 @@ limit” means the reviewed implementation does not prove the stronger property.
   `crates/velnor-runner/src/execution/docker.rs:1-17`,
   `crates/velnor-runner/debian/velnor-daemon.service:62-64`
 
-- The Docker lease proxy injects ownership labels and cgroup parents and
-  rejects privileged mode, host binds, capabilities, and devices by default.
-  This is ownership/reclaim control, not full Docker Engine authorization or
-  tenant isolation. `VELNOR_ALLOW_PRIVILEGED_OPTIONS=true` can widen options for
-  trusted jobs and must be treated as an explicit host-trust decision.
+- Native outer job and service containers are created by the host daemon,
+  outside the per-job Docker lease. Velnor strips user-supplied volume-backed,
+  host-path, and API-socket options
+  (`-v`/`--volume`, `--mount`, `--volumes-from`, `--volume-driver`,
+  `--volume-opt`, and `--use-api-socket`) before launch; runner-owned mounts are
+  constructed separately. The Docker lease proxy injects ownership labels and
+  cgroup parents and rejects privileged mode, host binds, capabilities, and
+  devices by default for nested requests. This is ownership/reclaim control,
+  not full Docker Engine authorization or tenant isolation.
+  `VELNOR_ALLOW_PRIVILEGED_OPTIONS=true` can widen other container options for
+  trusted jobs, but cannot pass these mount/socket flags through.
   `crates/velnor-runner/src/docker_lease.rs:1125-1303`,
-  `crates/velnor-runner/src/github_adapter.rs:686-840`
+  `crates/velnor-runner/src/github_adapter.rs:686-840`,
+  `crates/velnor-runner/src/container.rs:104-169`
 
 ## Data classes and handling
 

@@ -239,6 +239,13 @@ even after the final claim. If cancellation skips that post action, teardown
 releases the claim and stops the daemon when it was the final holder. The
 builder and state volume remain for horizon cleanup.
 
+User-supplied outer job/service container options cannot add volume-backed or
+host-path mounts or Docker API socket access. Velnor removes `-v`/`--volume`,
+`--mount`, `--volumes-from`, `--volume-driver`, `--volume-opt`, and
+`--use-api-socket` options before launch; runner-owned workspace, cache, tool,
+and eligible Linux host-socket mounts are constructed separately. Other
+options still follow the trust-path filter.
+
 #### Dual-lane cache transport
 
 Generated CI runs the same verification units on two lanes. Cache **keys**

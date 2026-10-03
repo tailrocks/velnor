@@ -79,14 +79,19 @@ validation must be `strict`. Organization and enterprise scopes require an
 explicit runner group and a matching desired routing policy.
 
 `VELNOR_TRUST_SCOPE` defaults to `untrusted` and fails closed. A node upgraded
-from a build that defaulted to `trusted` loses the host Docker socket mount on
-supported Linux Docker hosts,
-privileged container and service options, host port publishing, and the right
+from a build that defaulted to `trusted` loses the runner-owned host Docker
+socket mount on supported Linux Docker hosts, privileged container and service
+options allowed by the trusted-path filter, host port publishing, and the right
 to run a job carrying user secrets. Its stores now resolve in the `untrusted`
 keyed namespace; old raw-scope paths under `v1` are not reused, so the first
 job may start cold. Set
 `VELNOR_TRUST_SCOPE=trusted` explicitly if that is what the pool is for. See
 [Trust scope](/reference/trust-scope).
+
+Native trusted status does not allow workflows to add volume-backed or
+host-path mounts or socket access through outer job/service options. Velnor
+strips those user-supplied options; runner-owned mounts are constructed
+separately.
 
 On macOS, Velnor still needs the Docker daemon and its host socket to run job
 containers, but it does not pass the raw host socket into job containers.

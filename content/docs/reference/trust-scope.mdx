@@ -48,14 +48,23 @@ and a fork or unknown job gets the untrusted column on every pool.
 | Capability | untrusted path | trusted pool + trusted job |
 | --- | --- | --- |
 | Host Docker socket mounted into a Docker-backend job | refused | allowed on supported Linux hosts; suppressed on macOS until a VM-reachable per-job lease proxy exists |
-| Privileged job-container options | refused | allowed |
-| Privileged service containers | refused | allowed |
+| Privileged job-container options | refused | allowed subject to the option filter below |
+| Privileged service-container options | refused | allowed subject to the option filter below |
 | Host port publishing | refused | allowed |
 | A job carrying GitHub user secrets | job refused before execution | allowed |
 | BuildKit secrets for `docker/build-push-action` | refused | allowed |
 
 A job that arrives with user secrets on the untrusted path is refused by
 name before any side effect, not silently stripped.
+
+For Native jobs, trusted scope does not allow a workflow to add volume-backed
+or host-path mounts, or Docker API socket access, through outer job or service
+container options. Velnor strips user-supplied `-v`/`--volume`, `--mount`,
+`--volumes-from`, `--volume-driver`, `--volume-opt`, and `--use-api-socket`
+options before launch, regardless of trust scope. Runner-owned
+workspace, cache, tool, and eligible Linux host-socket mounts are constructed
+separately; the socket mount remains limited to trusted jobs on supported Linux
+hosts.
 
 ## Store partitioning
 
