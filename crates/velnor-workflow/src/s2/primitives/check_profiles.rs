@@ -466,7 +466,7 @@ fn render_checks_file(
     }
     for profile in profiles {
         if profile.artifacts_required {
-            render_artifact_verifier_job(&mut output, config, profile)?;
+            render_artifact_verifier_job(&mut output, config, profile);
         }
     }
     Ok(output)
@@ -591,7 +591,7 @@ fn render_artifact_verifier_job(
     output: &mut String,
     config: &ProjectConfig,
     profile: &CheckProfileSpec,
-) -> Result<(), GeneratorError> {
+) {
     let job_id = artifact_verifier_job_id(&profile.id);
     let _ = writeln!(output, "  {job_id}:");
     let _ = writeln!(
@@ -658,7 +658,6 @@ fn render_artifact_verifier_job(
             "          path=\"$root/{artifact}\"\n          for prefix in {prefixes}; do\n            if [[ -L \"$prefix\" ]]; then\n              echo \"downloaded required artifact path is a symlink: $prefix\" >&2\n              exit 1\n            fi\n          done\n          if [[ -f \"$path\" && -s \"$path\" ]]; then\n            :\n          else\n            echo \"downloaded required artifact is missing or empty: $path\" >&2\n            exit 1\n          fi"
         );
     }
-    Ok(())
 }
 
 /// The `runs-on` for one profile: the hosted selector, the fixed
