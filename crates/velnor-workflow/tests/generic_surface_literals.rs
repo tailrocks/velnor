@@ -81,6 +81,10 @@ const ADMITTED_FILES: &[&str] = &[
     "AGENTS.md",
 ];
 
+const RUNNER_SELECTOR_FIXTURE_PATH: &str = "src/s2/policy/tests.rs";
+const RUNNER_SELECTOR_FIXTURE_LITERAL: &str = "velnor-target-mvp";
+const RUNNER_SELECTOR_FIXTURE_LINE: &str = r#"            "\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"velnor-target-mvp\"]\n","#;
+
 /// The `termrock` toolkit enters the crate as a dev-dependency of the TUI; the
 /// dependency URL is generator identity, the same class as the generator's own
 /// distribution paths. Everything else in the manifest is scanned like code.
@@ -161,6 +165,37 @@ fn is_admitted_literal_site(literal: &str, line: &str) -> bool {
     literal == "velnor-trusted" && line.contains("verify-velnor-trusted")
 }
 
+fn is_admitted_runner_selector_line(root: &Path, path: &Path, line: &str) -> bool {
+    path == root.join(RUNNER_SELECTOR_FIXTURE_PATH) && line == RUNNER_SELECTOR_FIXTURE_LINE
+}
+
+/// The Velnor policy fixtures need its canonical selector to pass config
+/// validation. Admit only that exact fixture line; every other occurrence
+/// remains subject to the repository deny list.
+fn source_for_deny_scan(root: &Path, path: &Path, source: &str) -> String {
+    if path != root.join(RUNNER_SELECTOR_FIXTURE_PATH) {
+        return source.to_owned();
+    }
+    assert_eq!(
+        source.matches(RUNNER_SELECTOR_FIXTURE_LITERAL).count(),
+        1,
+        "the Velnor selector fixture must have exactly one literal occurrence"
+    );
+    assert_eq!(
+        source
+            .lines()
+            .filter(|line| is_admitted_runner_selector_line(root, path, line))
+            .count(),
+        1,
+        "the Velnor selector literal must stay on its exact fixture line"
+    );
+    source.replacen(
+        RUNNER_SELECTOR_FIXTURE_LITERAL,
+        "__admitted_runner_selector__",
+        1,
+    )
+}
+
 /// Remove the admitted dependency declarations from `Cargo.toml` before the
 /// scan; what is left is scanned whole like every other file.
 fn cargo_toml_scan_text(root: &Path) -> Option<String> {
@@ -195,7 +230,17 @@ fn generic_modules_never_name_a_repository() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
     let mut bare_slug_sites = Vec::new();
-    for path in scanned_files(root) {
+    let files = scanned_files(root);
+    let selector_fixture_path = root.join(RUNNER_SELECTOR_FIXTURE_PATH);
+    assert!(
+        files.contains(&selector_fixture_path),
+        "the Velnor selector fixture must remain under the deny-list scan"
+    );
+    assert!(
+        !admitted(root, &selector_fixture_path),
+        "the Velnor selector fixture must not bypass the deny-list scan"
+    );
+    for path in files {
         if admitted(root, &path) {
             continue;
         }
@@ -205,7 +250,8 @@ fn generic_modules_never_name_a_repository() {
             std::fs::read_to_string(&path).unwrap_or_default()
         };
         // Whole-file scan: catches split and concatenated literals.
-        let normalized = normalized_for_deny_scan(&source);
+        let source_for_scan = source_for_deny_scan(root, &path, &source);
+        let normalized = normalized_for_deny_scan(&source_for_scan);
         for literal in DENY_LIST {
             if normalized.contains(&normalized_text(literal)) {
                 offenders.push(format!(
@@ -217,7 +263,12 @@ fn generic_modules_never_name_a_repository() {
         // Line scan: names the exact offending site when the literal is whole.
         for (number, line) in source.lines().enumerate() {
             for literal in DENY_LIST {
-                if line.contains(literal) && !is_admitted_literal_site(literal, line) {
+                let admitted_runner_selector = *literal == RUNNER_SELECTOR_FIXTURE_LITERAL
+                    && is_admitted_runner_selector_line(root, &path, line);
+                if line.contains(literal)
+                    && !is_admitted_literal_site(literal, line)
+                    && !admitted_runner_selector
+                {
                     offenders.push(format!(
                         "{}:{} names `{literal}`",
                         path.display(),
