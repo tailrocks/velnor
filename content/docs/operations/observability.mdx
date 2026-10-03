@@ -36,7 +36,6 @@ velnorctl capabilities check JOB_MESSAGE.json
 velnorctl run list
 velnorctl run view RUN_ID
 velnorctl run watch RUN_ID
-velnorctl run logs RUN_ID
 ```
 
 These are read-only views. `velnorctl top TARGET` requires one of `host`,
@@ -105,11 +104,11 @@ does not provide a separate dashboard correlation view.
 `velnorctl events` reads a bounded event stream. Watches retain at most 4,096
 items. Event cursors are opaque and expire; resnapshot before continuing.
 
-The production control API's local-log endpoint is unsupported and
-`velnorctl logs` returns HTTP 501 until durable log access is wired. Runner
-forensic files are `lifecycle.log`, `broker.log`, `registry.log`, and
-`daemon.log`; each has an active file and one rotated `.1` generation. These
-writers are best effort.
+The production control API's local-log endpoint is unsupported;
+`velnorctl logs` and `velnorctl run logs RUN_ID` return HTTP 501. Use GitHub
+job logs for output. Runner forensic files are `lifecycle.log`, `broker.log`,
+`registry.log`, and `daemon.log`; each has an active file and one rotated `.1`
+generation. These writers are best effort.
 
 GitHub receives separate log forms: live masked lines over the Results Service
 WebSocket, uploaded step/job blobs, and timeline feed updates. Runner forensic

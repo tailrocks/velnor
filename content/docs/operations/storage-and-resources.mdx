@@ -80,7 +80,7 @@ current rustup toolchains are not written to that host store.
 | `caches` root: `actions/cache`, Playwright, Bun, npm, Terraform plugin cache | yes | trust scope + sanitized `github.repository` slug; `actions/cache` adds its compatibility version and key |
 | mbx cache + managed targets | per-slot subtrees | trust scope + numeric `github.repository_id` |
 | sccache store | yes | trust scope + numeric `github.repository_id` |
-| `gha-cache` service data | per host | repository/ref/trust identity, then cache key |
+| `gha-cache` service data | per host | repository, ref, optional normalized `base_ref`, and trust identity; then cache key |
 | artifacts | per run | `GITHUB_RUN_ID-GITHUB_RUN_ATTEMPT` (`local-1` fallback) |
 | Stable workspace | per-slot | admitted trust scope + numeric `github.repository_id` |
 

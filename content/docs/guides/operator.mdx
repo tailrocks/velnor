@@ -204,8 +204,10 @@ Workflow-run reads are:
 velnorctl run list
 velnorctl run view RUN_ID
 velnorctl run watch RUN_ID
-velnorctl run logs RUN_ID
 ```
+
+Local run-log reads are unavailable in production: `velnorctl run logs RUN_ID`
+returns HTTP 501. Use GitHub job logs for output.
 
 Local status reports stored identity, labels, V2 state, and credential
 presence. It is not a systemd liveness check:

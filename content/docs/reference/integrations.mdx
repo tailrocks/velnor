@@ -22,7 +22,7 @@ offers and delegates acquired jobs to the official Actions runner.
 | Actions cache | Native Velnor runner ↔ GitHub cache service when the job provides the cache endpoint and credentials. |
 | Repository Git service | Native Velnor runner → GitHub or an approved mirror: checkout over HTTPS Git. |
 | OIDC/repository APIs | Native Velnor adapters use credentials and endpoints supplied by the acquired job. |
-| Docker Engine | Native Docker backend → local host Docker socket. |
+| Docker Engine | Native Docker backend → host socket; lease mediation and job socket access are Linux-only. macOS withholds it until a VM-reachable proxy exists. |
 | Firecracker/jailer | Native MicroVM backend → local jailed VMM API and guest via AF_VSOCK. |
 | Scale Set session | Scale Set adapter ↔ GitHub: poll offers, acknowledge messages, and acquire eligible work. |
 | Scale Set job protocol | Official Actions runner ↔ GitHub: handle the acquired job session, cancellation, progress, logs, and completion. |
@@ -128,7 +128,14 @@ runner paired with private per-worker DinD rather than these Native backends.
 
 ### Docker
 
-The Docker backend requires the host Docker socket and a verified cgroup/systemd boundary. A per-job lease proxy applies ownership labels and rejects privileged, host-bind, and device escapes outside the permitted trust boundary. Cancellation signals containers; removal of job, action, and service containers is teardown's job.
+The Docker backend requires the host Docker socket and a verified
+cgroup/systemd boundary. On supported Linux hosts, a per-job lease proxy
+mediates the socket, applies ownership labels, and rejects privileged,
+host-bind, and device escapes outside the permitted trust boundary. On macOS,
+Velnor uses the local socket to manage containers but withholds it from job
+containers until a VM-reachable lease proxy exists, so in-job Docker API
+clients have no endpoint. Cancellation signals containers; removal of job,
+action, and service containers is teardown's job.
 
 ### MicroVM
 
@@ -156,7 +163,7 @@ their paired private DinD daemon and the official runner protocol.
 | Component | Current boundary |
 | --- | --- |
 | Git | HTTPS smart protocol v2; optional bare mirrors use locking and do not persist checkout credentials. |
-| Native Docker | Local Unix socket, mediated by Velnor's per-job lease boundary. |
+| Native Docker | On supported Linux hosts, the per-job lease boundary mediates the local Unix socket. macOS does not pass its socket into job containers until a VM-reachable proxy exists. |
 | Native Firecracker | Local jailed Unix API socket; artifacts and versions are verified before use. |
 | Scale Set worker | Official Actions runner container paired with its private per-worker DinD daemon. |
 | Native guest agent | AF_VSOCK protocol for identity, plan delivery, stdio, telemetry, results, cancellation, and teardown. |
