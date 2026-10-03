@@ -2,10 +2,11 @@
 //!
 //! The base branch's `ci-policy.yml` runs this subcommand under
 //! `pull_request_target` with the binary the base branch pins, against the
-//! pull request's tree. The validator therefore never compares that tree
-//! against its own rendering or against pin literals compiled into itself —
-//! a generator change would then be unable to pass the check it must change.
-//! Instead it separates two questions:
+//! pull request's tree. Generated-tree drift is checked against the generator
+//! declared by that tree, so a generator change can pass the check it must
+//! change. Narrow security contracts, such as required-artifact profile jobs,
+//! are also bound to the trusted in-process renderer that defines them.
+//! The validator separates two questions:
 //!
 //! * **Is the tree generated?** The tree declares the generator that rendered
 //!   it (`[generator] revision` in `.github-gen/velnor-workflow.toml`, the
@@ -546,6 +547,11 @@ fn semantic_rules(
         "workflow-structure",
         "every workflow parses as GitHub would run it",
         audit.structure,
+    ));
+    report.rules.push(RuleReport::from_findings(
+        "required-artifact-verifiers",
+        "required-artifact jobs use the canonical hosted verifier and every configured consumer waits for it",
+        audit.required_artifacts,
     ));
     report.rules.push(required_checks(
         root,
@@ -3385,6 +3391,7 @@ pub(crate) struct WorkflowAudit {
     pub(crate) runners: Vec<String>,
     pub(crate) actions: Vec<String>,
     pub(crate) structure: Vec<String>,
+    pub(crate) required_artifacts: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -3393,6 +3400,7 @@ enum Rule {
     TrustedRunners,
     ActionPins,
     Structure,
+    RequiredArtifacts,
 }
 
 /// Findings recorded while auditing one tree.
@@ -3417,6 +3425,7 @@ impl PolicyFindings {
             Rule::TrustedRunners => self.audit.runners.push(line),
             Rule::ActionPins => self.audit.actions.push(line),
             Rule::Structure => self.audit.structure.push(line),
+            Rule::RequiredArtifacts => self.audit.required_artifacts.push(line),
         }
     }
 }
@@ -3436,6 +3445,7 @@ pub(crate) fn audit_workflows(root: &Path) -> Result<WorkflowAudit, GeneratorErr
         .map_err(|error| GeneratorError::io("read workflow directory", &workflows, &error))?;
     let policy_entrypoint = workflows.join("ci-policy.yml");
     let velnor_policy = configured_velnor_policy(root)?;
+    let check_profiles = configured_check_profiles(root)?;
     let mut findings = PolicyFindings {
         root: root.to_path_buf(),
         ..PolicyFindings::default()
@@ -3446,6 +3456,7 @@ pub(crate) fn audit_workflows(root: &Path) -> Result<WorkflowAudit, GeneratorErr
     let parser = serde_yaml::ParserConfig::default()
         .duplicate_key_policy(serde_yaml::DuplicateKeyPolicy::Error);
     let mut paths = Vec::new();
+    let mut documents = Vec::new();
     for entry in entries {
         let path = entry
             .map_err(|error| GeneratorError::usage(format!("read workflow entry: {error}")))?
@@ -3494,8 +3505,576 @@ pub(crate) fn audit_workflows(root: &Path) -> Result<WorkflowAudit, GeneratorErr
             &velnor_policy,
             &mut findings,
         );
+        documents.push((path, workflow.clone()));
     }
+    audit_required_artifact_verifiers(&check_profiles, &documents, &mut findings);
     Ok(findings.audit)
+}
+
+fn artifact_verifier_job_id(profile_id: &str) -> String {
+    format!("verify-{profile_id}-artifacts")
+}
+
+fn audit_required_artifact_verifiers(
+    config: &CheckProfilesPolicy,
+    documents: &[(PathBuf, Mapping)],
+    failures: &mut PolicyFindings,
+) {
+    let config_path = Path::new(GENERATION_CONFIG);
+    for finding in &config.findings {
+        failures.record(Rule::RequiredArtifacts, config_path, finding);
+    }
+    let required = config
+        .profiles
+        .iter()
+        .filter(|profile| profile.artifacts_required)
+        .collect::<Vec<_>>();
+    if required.is_empty() {
+        return;
+    }
+    let mut audited_workflows = BTreeSet::new();
+    for profile in &required {
+        audit_required_artifact_profile(
+            profile,
+            config,
+            documents,
+            &mut audited_workflows,
+            failures,
+        );
+    }
+}
+
+fn audit_required_artifact_profile(
+    profile: &CheckProfilePolicy,
+    config: &CheckProfilesPolicy,
+    documents: &[(PathBuf, Mapping)],
+    audited_workflows: &mut BTreeSet<PathBuf>,
+    failures: &mut PolicyFindings,
+) {
+    audit_required_artifact_workflow(profile, config, documents, audited_workflows, failures);
+    let producer_path = audit_required_artifact_producer(profile, config, documents, failures);
+    audit_required_artifact_profile_ancestors(profile, config, documents, producer_path, failures);
+    let verifier_id = artifact_verifier_job_id(&profile.id);
+    let verifier_path =
+        audit_required_artifact_verifier(profile, &verifier_id, config, documents, failures);
+    audit_required_artifact_consumers(
+        profile,
+        &verifier_id,
+        producer_path,
+        verifier_path,
+        config,
+        documents,
+        failures,
+    );
+}
+
+fn audit_required_artifact_workflow(
+    profile: &CheckProfilePolicy,
+    config: &CheckProfilesPolicy,
+    documents: &[(PathBuf, Mapping)],
+    audited_workflows: &mut BTreeSet<PathBuf>,
+    failures: &mut PolicyFindings,
+) {
+    let Some((expected_path, _)) = config
+        .rendered_jobs
+        .as_ref()
+        .and_then(|jobs| jobs.get(&profile.id))
+    else {
+        return;
+    };
+    if !audited_workflows.insert(expected_path.clone()) {
+        return;
+    }
+    let expected_workflow = config
+        .rendered_workflows
+        .as_ref()
+        .and_then(|workflows| workflows.get(expected_path));
+    let actual_workflow = documents
+        .iter()
+        .find(|(path, _)| path == expected_path)
+        .map(|(_, workflow)| workflow);
+    if expected_workflow.is_none() || actual_workflow != expected_workflow {
+        failures.record(
+            Rule::RequiredArtifacts,
+            expected_path,
+            "scheduled-check workflow does not match the trusted renderer's complete workflow document",
+        );
+    }
+}
+
+fn audit_required_artifact_producer<'a>(
+    profile: &CheckProfilePolicy,
+    config: &CheckProfilesPolicy,
+    documents: &'a [(PathBuf, Mapping)],
+    failures: &mut PolicyFindings,
+) -> Option<&'a Path> {
+    let config_path = Path::new(GENERATION_CONFIG);
+    let producer_jobs = find_workflow_jobs(documents, &profile.id, config.rendered_jobs.as_ref());
+    match producer_jobs.as_slice() {
+        [] => {
+            failures.record(
+                Rule::RequiredArtifacts,
+                config_path,
+                &format!(
+                    "required-artifact profile `{}` is missing its producer job",
+                    profile.id
+                ),
+            );
+            None
+        }
+        [(path, job)] => {
+            if !canonical_rendered_profile_job_matches(
+                job,
+                path,
+                &profile.id,
+                config.rendered_jobs.as_ref(),
+            ) {
+                failures.job = Some(profile.id.clone());
+                failures.record(
+                    Rule::RequiredArtifacts,
+                    path,
+                    &format!(
+                        "producer profile `{}` does not match the trusted renderer's complete scheduled-check job",
+                        profile.id
+                    ),
+                );
+                failures.job = None;
+            }
+            Some(*path)
+        }
+        many => {
+            failures.record(
+                Rule::RequiredArtifacts,
+                many[0].0,
+                &format!(
+                    "required-artifact profile `{}` appears in {} workflow jobs; its producer is ambiguous",
+                    profile.id,
+                    many.len()
+                ),
+            );
+            None
+        }
+    }
+}
+
+fn audit_required_artifact_verifier<'a>(
+    profile: &CheckProfilePolicy,
+    verifier_id: &str,
+    config: &CheckProfilesPolicy,
+    documents: &'a [(PathBuf, Mapping)],
+    failures: &mut PolicyFindings,
+) -> Option<&'a Path> {
+    let config_path = Path::new(GENERATION_CONFIG);
+    let verifier_jobs = find_workflow_jobs(documents, verifier_id, config.rendered_jobs.as_ref());
+    match verifier_jobs.as_slice() {
+        [] => {
+            failures.record(
+                Rule::RequiredArtifacts,
+                config_path,
+                &format!(
+                    "required-artifact profile `{}` is missing verifier job `{verifier_id}` (missing or renamed)",
+                    profile.id
+                ),
+            );
+            None
+        }
+        [(path, job)] => {
+            if !canonical_rendered_profile_job_matches(
+                job,
+                path,
+                verifier_id,
+                config.rendered_jobs.as_ref(),
+            ) {
+                failures.job = Some(verifier_id.to_owned());
+                failures.record(
+                    Rule::RequiredArtifacts,
+                    path,
+                    "verifier does not match the trusted renderer's complete fail-closed artifact-verifier job",
+                );
+                failures.job = None;
+            }
+            Some(*path)
+        }
+        many => {
+            failures.record(
+                Rule::RequiredArtifacts,
+                many[0].0,
+                &format!(
+                    "required-artifact profile `{}` has {} verifier jobs named `{verifier_id}`; exactly one is allowed",
+                    profile.id,
+                    many.len()
+                ),
+            );
+            None
+        }
+    }
+}
+
+fn audit_required_artifact_consumers(
+    profile: &CheckProfilePolicy,
+    verifier_id: &str,
+    producer_path: Option<&Path>,
+    verifier_path: Option<&Path>,
+    config: &CheckProfilesPolicy,
+    documents: &[(PathBuf, Mapping)],
+    failures: &mut PolicyFindings,
+) {
+    let config_path = Path::new(GENERATION_CONFIG);
+    let same_producer_workflow = producer_path
+        .zip(verifier_path)
+        .is_some_and(|(producer, verifier)| producer == verifier);
+    if let Some(path) = verifier_path.filter(|_| producer_path.is_some() && !same_producer_workflow)
+    {
+        failures.record(
+            Rule::RequiredArtifacts,
+            path,
+            &format!(
+                "verifier `{verifier_id}` is not in producer `{}`'s workflow",
+                profile.id
+            ),
+        );
+    }
+    let downstream_profiles =
+        configured_profile_dependency_descendants(&profile.id, &config.profiles);
+    for consumer in config
+        .profiles
+        .iter()
+        .filter(|consumer| downstream_profiles.contains(&consumer.id))
+    {
+        let consumer_jobs =
+            find_workflow_jobs(documents, &consumer.id, config.rendered_jobs.as_ref());
+        match consumer_jobs.as_slice() {
+            [] => failures.record(
+                Rule::RequiredArtifacts,
+                config_path,
+                &format!(
+                    "downstream consumer profile `{}` depends on required-artifact profile `{}` but its job is missing",
+                    consumer.id, profile.id
+                ),
+            ),
+            [(path, job)] => {
+                let same_workflow = same_producer_workflow
+                    && verifier_path.is_some_and(|verifier| verifier == *path);
+                if !same_workflow
+                    || !canonical_rendered_profile_job_matches(
+                        job,
+                        path,
+                        &consumer.id,
+                        config.rendered_jobs.as_ref(),
+                    )
+                {
+                    failures.job = Some(consumer.id.clone());
+                    failures.record(
+                        Rule::RequiredArtifacts,
+                        path,
+                        &format!(
+                            "downstream consumer `{}` does not match the trusted renderer's complete scheduled-check job or is outside verifier `{verifier_id}`'s producer workflow",
+                            consumer.id
+                        ),
+                    );
+                    failures.job = None;
+                }
+            }
+            many => failures.record(
+                Rule::RequiredArtifacts,
+                many[0].0,
+                &format!(
+                    "downstream consumer profile `{}` appears in {} workflow jobs; its verifier dependency is ambiguous",
+                    consumer.id,
+                    many.len()
+                ),
+            ),
+        }
+    }
+}
+
+/// Return every configured profile whose dependency closure includes the
+/// required-artifact producer. These jobs inherit the verifier's failure
+/// through their dependency chain, so each must retain the renderer's
+/// implicit-success or explicit admission condition.
+fn configured_profile_dependency_descendants(
+    producer_id: &str,
+    profiles: &[CheckProfilePolicy],
+) -> BTreeSet<String> {
+    let mut descendants = BTreeSet::new();
+    loop {
+        let newly_reachable = profiles
+            .iter()
+            .filter(|profile| {
+                profile.id != producer_id
+                    && !descendants.contains(&profile.id)
+                    && profile.needs.iter().any(|dependency| {
+                        dependency == producer_id || descendants.contains(dependency)
+                    })
+            })
+            .map(|profile| profile.id.clone())
+            .collect::<Vec<_>>();
+        if newly_reachable.is_empty() {
+            break;
+        }
+        descendants.extend(newly_reachable);
+    }
+    descendants
+}
+
+/// Keep every configured job between its required-artifact producer and
+/// GitHub's implicit `success()` gate renderer-exact. A skipped or
+/// continue-on-error ancestor would otherwise skip or falsely admit the
+/// producer while leaving its direct `needs` unchanged.
+fn audit_required_artifact_profile_ancestors(
+    producer: &CheckProfilePolicy,
+    config: &CheckProfilesPolicy,
+    documents: &[(PathBuf, Mapping)],
+    producer_path: Option<&Path>,
+    failures: &mut PolicyFindings,
+) {
+    let (ancestor_ids, findings) =
+        configured_profile_dependency_ancestors(&producer.id, &producer.needs, &config.profiles);
+    for finding in findings {
+        failures.record(
+            Rule::RequiredArtifacts,
+            Path::new(GENERATION_CONFIG),
+            &finding,
+        );
+    }
+    for ancestor in config
+        .profiles
+        .iter()
+        .filter(|candidate| ancestor_ids.contains(&candidate.id))
+    {
+        audit_required_artifact_ancestor(
+            producer,
+            ancestor,
+            config,
+            documents,
+            producer_path,
+            failures,
+        );
+    }
+}
+
+fn audit_required_artifact_ancestor(
+    producer: &CheckProfilePolicy,
+    ancestor: &CheckProfilePolicy,
+    config: &CheckProfilesPolicy,
+    documents: &[(PathBuf, Mapping)],
+    producer_path: Option<&Path>,
+    failures: &mut PolicyFindings,
+) {
+    let jobs = find_workflow_jobs(documents, &ancestor.id, config.rendered_jobs.as_ref());
+    match jobs.as_slice() {
+        [] => failures.record(
+            Rule::RequiredArtifacts,
+            Path::new(GENERATION_CONFIG),
+            &format!(
+                "required-artifact producer `{}` depends on configured profile `{}` but its workflow job is missing",
+                producer.id, ancestor.id
+            ),
+        ),
+        [(path, job)] => audit_unique_artifact_ancestor(
+            producer,
+            ancestor,
+            config,
+            producer_path,
+            path,
+            job,
+            failures,
+        ),
+        many => failures.record(
+            Rule::RequiredArtifacts,
+            many[0].0,
+            &format!(
+                "configured ancestor profile `{}` appears in {} workflow jobs; its producer dependency is ambiguous",
+                ancestor.id,
+                many.len()
+            ),
+        ),
+    }
+}
+
+fn audit_unique_artifact_ancestor(
+    producer: &CheckProfilePolicy,
+    ancestor: &CheckProfilePolicy,
+    config: &CheckProfilesPolicy,
+    producer_path: Option<&Path>,
+    path: &Path,
+    job: &Mapping,
+    failures: &mut PolicyFindings,
+) {
+    if producer_path.is_some_and(|producer_path| producer_path != path) {
+        failures.job = Some(ancestor.id.clone());
+        failures.record(
+            Rule::RequiredArtifacts,
+            path,
+            &format!(
+                "configured ancestor profile `{}` is outside producer `{}`'s workflow",
+                ancestor.id, producer.id
+            ),
+        );
+        failures.job = None;
+    }
+
+    if !canonical_rendered_profile_job_matches(
+        job,
+        path,
+        &ancestor.id,
+        config.rendered_jobs.as_ref(),
+    ) {
+        failures.job = Some(ancestor.id.clone());
+        failures.record(
+            Rule::RequiredArtifacts,
+            path,
+            &format!(
+                "configured ancestor profile `{}` does not match the trusted renderer's complete scheduled-check job",
+                ancestor.id
+            ),
+        );
+        failures.job = None;
+    }
+}
+
+fn configured_profile_dependency_ancestors(
+    producer_id: &str,
+    dependencies: &[String],
+    profiles: &[CheckProfilePolicy],
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    fn visit(
+        profile_id: &str,
+        producer_id: &str,
+        profiles: &[CheckProfilePolicy],
+        active: &mut Vec<String>,
+        complete: &mut BTreeSet<String>,
+        ancestors: &mut BTreeSet<String>,
+        findings: &mut BTreeSet<String>,
+    ) {
+        if let Some(cycle_start) = active.iter().position(|id| id == profile_id) {
+            let mut cycle = active[cycle_start..].join(" -> ");
+            cycle.push_str(" -> ");
+            cycle.push_str(profile_id);
+            findings.insert(format!(
+                "required-artifact producer `{producer_id}` has a cyclic configured dependency chain `{cycle}`"
+            ));
+            return;
+        }
+        if complete.contains(profile_id) {
+            return;
+        }
+
+        let matches = profiles
+            .iter()
+            .filter(|profile| profile.id == profile_id)
+            .collect::<Vec<_>>();
+        let profile = match matches.as_slice() {
+            [] => {
+                findings.insert(format!(
+                    "required-artifact producer `{producer_id}` depends on unconfigured profile `{profile_id}`"
+                ));
+                complete.insert(profile_id.to_owned());
+                return;
+            }
+            [profile] => *profile,
+            many => {
+                findings.insert(format!(
+                    "required-artifact producer `{producer_id}` depends on ambiguous profile `{profile_id}` declared {} times",
+                    many.len()
+                ));
+                complete.insert(profile_id.to_owned());
+                return;
+            }
+        };
+
+        ancestors.insert(profile_id.to_owned());
+        active.push(profile_id.to_owned());
+        for dependency in &profile.needs {
+            visit(
+                dependency,
+                producer_id,
+                profiles,
+                active,
+                complete,
+                ancestors,
+                findings,
+            );
+        }
+        active.pop();
+        complete.insert(profile_id.to_owned());
+    }
+
+    let mut ancestors = BTreeSet::new();
+    let mut findings = BTreeSet::new();
+    let mut active = Vec::new();
+    let mut complete = BTreeSet::new();
+    for dependency in dependencies {
+        visit(
+            dependency,
+            producer_id,
+            profiles,
+            &mut active,
+            &mut complete,
+            &mut ancestors,
+            &mut findings,
+        );
+    }
+    (ancestors, findings)
+}
+
+/// Compare a candidate profile or verifier job with the trusted in-process
+/// renderer's complete mapping and scheduled-workflow path. This binds every
+/// renderer-controlled field, including setup, task order, status gates,
+/// failure handling, dependencies, artifact tails, and job execution context.
+fn canonical_rendered_profile_job_matches(
+    job: &Mapping,
+    path: &Path,
+    job_id: &str,
+    rendered_jobs: Option<&RenderedProfileJobs>,
+) -> bool {
+    rendered_jobs
+        .and_then(|jobs| jobs.get(job_id))
+        .is_some_and(|(expected_path, expected_job)| {
+            expected_path.as_path() == path && expected_job == job
+        })
+}
+
+#[cfg(test)]
+fn canonical_profile_task_step(task: &str) -> Value {
+    let mut step = Mapping::new();
+    step.insert("name".to_owned(), Value::String(format!("Run {task}")));
+    step.insert("run".to_owned(), Value::String(format!("mise run {task}")));
+    Value::Mapping(step)
+}
+
+fn find_workflow_jobs<'a>(
+    documents: &'a [(PathBuf, Mapping)],
+    wanted: &str,
+    rendered_jobs: Option<&RenderedProfileJobs>,
+) -> Vec<(&'a Path, &'a Mapping)> {
+    let Some((expected_path, _)) = rendered_jobs.and_then(|jobs| jobs.get(wanted)) else {
+        return Vec::new();
+    };
+    documents
+        .iter()
+        .filter_map(|(path, workflow)| {
+            if path != expected_path {
+                return None;
+            }
+            let jobs = mapping_value(workflow, "jobs")?.as_mapping()?;
+            jobs.iter().find_map(|(job_id, value)| {
+                (job_id.as_str() == wanted)
+                    .then(|| value.as_mapping().map(|job| (path.as_path(), job)))
+                    .flatten()
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn yaml_string(value: &str) -> Value {
+    Value::String(value.to_owned())
+}
+
+#[cfg(test)]
+fn insert_yaml(mapping: &mut Mapping, key: &str, value: Value) {
+    mapping.insert(key.to_owned(), value);
 }
 
 fn inspect_workflow(
@@ -3650,6 +4229,284 @@ fn generation_workflow(root: &Path) -> Result<Option<toml::Value>, GeneratorErro
         GeneratorError::usage(format!("parse workflow config {}: {error}", path.display()))
     })?;
     Ok(value.get("workflow").cloned())
+}
+
+#[derive(Clone, Debug)]
+struct CheckProfilePolicy {
+    id: String,
+    needs: Vec<String>,
+    artifacts_required: bool,
+    artifacts: Vec<String>,
+}
+
+type RenderedProfileJobs = BTreeMap<String, (PathBuf, Mapping)>;
+type RenderedProfileWorkflows = BTreeMap<PathBuf, Mapping>;
+type TrustedCheckProfileRender = (
+    BTreeMap<PathBuf, String>,
+    RenderedProfileJobs,
+    RenderedProfileWorkflows,
+);
+
+#[derive(Clone, Debug, Default)]
+struct CheckProfilesPolicy {
+    profiles: Vec<CheckProfilePolicy>,
+    rendered_jobs: Option<RenderedProfileJobs>,
+    rendered_workflows: Option<RenderedProfileWorkflows>,
+    findings: Vec<String>,
+}
+
+/// Read the artifact-relevant declarations. Expected job mappings come from
+/// the trusted S2 scanner and renderer, so this audit shares their selected
+/// profile set, dependency remapping, runner context, and every emitted field.
+fn configured_check_profiles(root: &Path) -> Result<CheckProfilesPolicy, GeneratorError> {
+    let path = root.join(GENERATION_CONFIG);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(CheckProfilesPolicy::default());
+        }
+        Err(error) => return Err(GeneratorError::io("read generation config", &path, &error)),
+    };
+    let config = config::parse(&path, &bytes)?;
+    let required_ids = config
+        .check_profiles()
+        .iter()
+        .filter(|row| row.artifacts_required())
+        .filter_map(|row| row.id())
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    let mut policy = CheckProfilesPolicy::default();
+    let mut ids = BTreeSet::new();
+    for row in config.check_profiles() {
+        add_configured_check_profile(row, &required_ids, &mut ids, &mut policy);
+    }
+    audit_artifact_verifier_id_collisions(&policy.profiles, &ids, &mut policy.findings);
+    if !required_ids.is_empty() {
+        match trusted_check_profile_render(root) {
+            Ok((_, jobs, workflows)) => {
+                policy.rendered_jobs = Some(jobs);
+                policy.rendered_workflows = Some(workflows);
+            }
+            Err(error) => policy.findings.push(format!(
+                "{GENERATION_CONFIG}: trusted renderer could not resolve scheduled-check jobs: {error}"
+            )),
+        }
+    }
+    Ok(policy)
+}
+
+fn add_configured_check_profile(
+    row: &config::CheckProfileSection,
+    required_ids: &BTreeSet<String>,
+    ids: &mut BTreeSet<String>,
+    policy: &mut CheckProfilesPolicy,
+) {
+    let id = row.id().unwrap_or_default().to_owned();
+    let is_artifact_consumer = row
+        .needs()
+        .unwrap_or_default()
+        .iter()
+        .any(|dependency| required_ids.contains(dependency));
+    let is_artifact_related = row.artifacts_required() || is_artifact_consumer;
+    let valid_id = valid_policy_check_profile_id(&id);
+    if !valid_id && is_artifact_related {
+        policy.findings.push(format!(
+            "{GENERATION_CONFIG}: check profile id `{id}` is not a safe generated job id"
+        ));
+    }
+    if !valid_id {
+        return;
+    }
+    if !ids.insert(id.clone()) && (is_artifact_related || required_ids.contains(&id)) {
+        policy.findings.push(format!(
+            "{GENERATION_CONFIG}: check profile id `{id}` is declared more than once"
+        ));
+    }
+    let profile = CheckProfilePolicy {
+        id,
+        needs: row.needs().unwrap_or_default().to_vec(),
+        artifacts_required: row.artifacts_required(),
+        artifacts: row.artifacts().unwrap_or_default().to_vec(),
+    };
+    if profile.artifacts_required {
+        audit_required_profile_artifact_declarations(
+            &profile,
+            row.timeout_minutes(),
+            &mut policy.findings,
+        );
+    }
+    policy.profiles.push(profile);
+}
+
+fn audit_required_profile_artifact_declarations(
+    profile: &CheckProfilePolicy,
+    timeout_minutes: Option<i64>,
+    findings: &mut Vec<String>,
+) {
+    if timeout_minutes.is_some_and(|timeout| timeout <= 0 || u32::try_from(timeout).is_err()) {
+        findings.push(format!(
+            "{GENERATION_CONFIG}: required-artifact profile `{}` has an invalid timeout",
+            profile.id
+        ));
+    }
+    if profile.artifacts.is_empty() {
+        findings.push(format!(
+            "{GENERATION_CONFIG}: required-artifact profile `{}` must declare files",
+            profile.id
+        ));
+    }
+    for (index, artifact) in profile.artifacts.iter().enumerate() {
+        if !valid_policy_artifact_path(artifact) {
+            findings.push(format!(
+                "{GENERATION_CONFIG}: required-artifact profile `{}` has unsafe path `{artifact}`",
+                profile.id
+            ));
+        }
+        if profile.artifacts[..index]
+            .iter()
+            .any(|other| policy_artifact_paths_collide(other, artifact))
+        {
+            findings.push(format!(
+                "{GENERATION_CONFIG}: required-artifact profile `{}` has colliding path `{artifact}`",
+                profile.id
+            ));
+        }
+    }
+}
+
+fn audit_artifact_verifier_id_collisions(
+    profiles: &[CheckProfilePolicy],
+    ids: &BTreeSet<String>,
+    findings: &mut Vec<String>,
+) {
+    for profile in profiles.iter().filter(|profile| profile.artifacts_required) {
+        let verifier_id = artifact_verifier_job_id(&profile.id);
+        if ids.contains(&verifier_id) {
+            findings.push(format!(
+                "{GENERATION_CONFIG}: required-artifact profile `{}` collides with profile job `{verifier_id}`",
+                profile.id
+            ));
+        }
+    }
+}
+
+/// Render checked-in configuration through trusted S2 code only, then parse
+/// each declared scheduled-checks output with duplicate-key rejection. The
+/// declaration's complete selected profile set determines rendered `needs`.
+fn trusted_check_profile_render(root: &Path) -> Result<TrustedCheckProfileRender, GeneratorError> {
+    let scanned = super::scan_target(root, None, "main")?;
+    let surface = super::primitives::generate(
+        root,
+        &scanned.shape,
+        &scanned.config,
+        scanned.generation.as_ref(),
+    )?;
+    let mut rendered_jobs = BTreeMap::new();
+    let mut rendered_workflows = BTreeMap::new();
+    let Some(generation) = scanned.generation.as_ref() else {
+        return Ok((surface.files, rendered_jobs, rendered_workflows));
+    };
+    let parser = serde_yaml::ParserConfig::default()
+        .duplicate_key_policy(serde_yaml::DuplicateKeyPolicy::Error);
+    for declaration in generation
+        .declare()
+        .iter()
+        .filter(|row| row.primitive() == super::primitives::SCHEDULED_CHECKS)
+    {
+        let file = declaration.file().ok_or_else(|| {
+            GeneratorError::usage(
+                "scheduled-checks declaration is missing its rendered workflow file",
+            )
+        })?;
+        let relative_path = PathBuf::from(".github/workflows").join(file);
+        let content = surface.files.get(&relative_path).ok_or_else(|| {
+            GeneratorError::usage(format!(
+                "trusted scheduled-check renderer did not emit {}",
+                relative_path.display()
+            ))
+        })?;
+        let document: Value =
+            serde_yaml::from_str_with_config(content, &parser).map_err(|error| {
+                GeneratorError::usage(format!(
+                    "parse trusted scheduled-check workflow {}: {error}",
+                    relative_path.display()
+                ))
+            })?;
+        let workflow = document.as_mapping().ok_or_else(|| {
+            GeneratorError::usage(format!(
+                "trusted scheduled-check workflow {} is not a mapping",
+                relative_path.display()
+            ))
+        })?;
+        let jobs = mapping_value(workflow, "jobs")
+            .and_then(Value::as_mapping)
+            .ok_or_else(|| {
+                GeneratorError::usage(format!(
+                    "trusted scheduled-check workflow {} has no jobs mapping",
+                    relative_path.display()
+                ))
+            })?;
+        let absolute_path = root.join(&relative_path);
+        if rendered_workflows
+            .insert(absolute_path.clone(), workflow.clone())
+            .is_some()
+        {
+            return Err(GeneratorError::usage(format!(
+                "trusted scheduled-check workflows contain duplicate path {}",
+                relative_path.display()
+            )));
+        }
+        for (job_id, value) in jobs {
+            let job_id = job_id.as_str();
+            let job = value.as_mapping().ok_or_else(|| {
+                GeneratorError::usage(format!(
+                    "trusted scheduled-check job `{job_id}` is not a mapping"
+                ))
+            })?;
+            if rendered_jobs
+                .insert(job_id.to_owned(), (absolute_path.clone(), job.clone()))
+                .is_some()
+            {
+                return Err(GeneratorError::usage(format!(
+                    "trusted scheduled-check jobs contain duplicate id `{job_id}`"
+                )));
+            }
+        }
+    }
+    Ok((surface.files, rendered_jobs, rendered_workflows))
+}
+
+fn valid_policy_check_profile_id(id: &str) -> bool {
+    let mut bytes = id.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn valid_policy_artifact_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.split('/').all(|component| {
+            let mut bytes = component.bytes();
+            !component.ends_with('.')
+                && bytes
+                    .next()
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric())
+                && bytes
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        })
+}
+
+fn policy_artifact_paths_collide(left: &str, right: &str) -> bool {
+    let left = left.to_ascii_lowercase();
+    let right = right.to_ascii_lowercase();
+    left == right
+        || right
+            .strip_prefix(&left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || left
+            .strip_prefix(&right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn toml_string_array(

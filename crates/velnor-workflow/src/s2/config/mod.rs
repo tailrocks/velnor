@@ -3690,10 +3690,14 @@ pub(crate) fn valid_check_profile_task(task: &str) -> bool {
 /// artifacts are rendered into a shell preflight and then uploaded as a
 /// literal, so every slash-separated visible component must start with an
 /// ASCII letter or digit and continue with ASCII letters, digits, `_`, `-`,
-/// or `.`. Legacy best-effort artifacts retain their broader path contract.
+/// or `.` without ending in `.` (which aliases the same name on Windows).
+/// Legacy best-effort artifacts retain their broader path contract.
 fn valid_check_profile_artifact_path(path: &str) -> bool {
     let mut saw_component = false;
     for component in path.split('/') {
+        if component.ends_with('.') {
+            return false;
+        }
         let mut bytes = component.bytes();
         if !bytes
             .next()
@@ -3707,6 +3711,23 @@ fn valid_check_profile_artifact_path(path: &str) -> bool {
         saw_component = true;
     }
     saw_component
+}
+
+/// Whether two strict required-artifact paths would address the same staged
+/// file or one path's parent directory. Compare ASCII case-insensitively so
+/// declarations cannot alias on case-insensitive filesystems. Staging a file
+/// and a descendant under that file cannot produce a deterministic tree, so
+/// reject both forms.
+fn check_profile_artifact_paths_collide(left: &str, right: &str) -> bool {
+    let left = left.to_ascii_lowercase();
+    let right = right.to_ascii_lowercase();
+    left == right
+        || right
+            .strip_prefix(&left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || left
+            .strip_prefix(&right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 /// Whether `key` is a valid environment threshold name: a shell identifier the
@@ -4118,6 +4139,17 @@ impl RepoGenerationConfig {
             }
         }
         for row in &self.check_profile {
+            if row.artifacts_required == Some(true) {
+                let id = row.id.as_deref().unwrap_or_default();
+                let verifier_id = format!("verify-{id}-artifacts");
+                if ids.contains(verifier_id.as_str()) {
+                    return Err(GeneratorError::usage(format!(
+                        "[[check_profile]] {id} requires generated verifier job `{verifier_id}`, but that id is already a check profile; rename one profile"
+                    )));
+                }
+            }
+        }
+        for row in &self.check_profile {
             let id = row.id.as_deref().unwrap_or_default();
             validate_check_profile_row(self, row, id, &ids, mise_lock_keys)?;
         }
@@ -4255,12 +4287,22 @@ fn validate_check_profile_result(
                 "[[check_profile]] {id} sets `artifacts_required = true` with an empty `artifacts`; name every required file"
             )));
         }
+        let mut declared: BTreeSet<String> = BTreeSet::new();
         for artifact in artifacts {
             if !valid_check_profile_artifact_path(artifact) {
                 return Err(GeneratorError::usage(format!(
                     "[[check_profile]] {id} required artifact `{artifact}` must be one non-empty relative literal file path without traversal, globs, or shell syntax"
                 )));
             }
+            if declared
+                .iter()
+                .any(|other| check_profile_artifact_paths_collide(other, artifact))
+            {
+                return Err(GeneratorError::usage(format!(
+                    "[[check_profile]] {id} required artifact `{artifact}` collides with another declared path; paths must name distinct files without file/descendant prefixes"
+                )));
+            }
+            declared.insert(artifact.clone());
         }
     }
     for (key, value) in &row.env {
@@ -7866,6 +7908,20 @@ mod tests {
         );
         assert!(valid.check_profiles()[0].artifacts_required());
 
+        let collision = must_fail(
+            config_for(&check_profile_config(
+                "[[check_profile]]\nid = \"strict\"\ntasks = [\"check-strict\"]\n\
+                 artifacts_required = true\nartifacts = [\"target/evidence.json\"]\n\n\
+                 [[check_profile]]\nid = \"verify-strict-artifacts\"\ntasks = [\"check-verifier\"]\n",
+            ))
+            .validate(&[], &[], &BTreeSet::new()),
+            "generated verifier job ids must not collide with profile jobs",
+        );
+        assert!(
+            collision.to_string().contains("generated verifier job"),
+            "{collision}"
+        );
+
         for (declaration, expected) in [
             ("artifacts_required = true\n", "declares no `artifacts`"),
             (
@@ -7882,6 +7938,39 @@ mod tests {
             );
             assert!(error.to_string().contains(expected), "{error}");
         }
+
+        for artifacts in [
+            "target/evidence.json\", \"target/evidence.json",
+            "target/evidence\", \"target/evidence/rollup.json",
+            "target/Evidence.json\", \"target/evidence.json",
+            "target/evidence\", \"TARGET/EVIDENCE/rollup.json",
+        ] {
+            let error = must_fail(
+                config_for(&check_profile_config(&format!(
+                    "[[check_profile]]\nid = \"strict\"\ntasks = [\"check-strict\"]\nartifacts_required = true\nartifacts = [\"{artifacts}\"]\n"
+                )))
+                .validate(&[], &[], &BTreeSet::new()),
+                "required artifact paths must not collide",
+            );
+            assert!(error.to_string().contains("collides"), "{error}");
+        }
+
+        let windows_alias = must_fail(
+            config_for(&check_profile_config(
+                "[[check_profile]]\nid = \"strict\"\ntasks = [\"check-strict\"]\n\
+                 artifacts_required = true\nartifacts = [\"target/report\", \"target/report.\"]\n",
+            ))
+            .validate(&[], &[], &BTreeSet::new()),
+            "required artifact paths must reject Windows trailing-period aliases",
+        );
+        assert!(
+            windows_alias.to_string().contains("target/report."),
+            "{windows_alias}"
+        );
+        assert!(
+            windows_alias.to_string().contains("required artifact"),
+            "{windows_alias}"
+        );
 
         for artifact in [
             "target/*.json",
