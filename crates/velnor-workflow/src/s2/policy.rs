@@ -547,6 +547,11 @@ fn semantic_rules(
         "every workflow parses as GitHub would run it",
         audit.structure,
     ));
+    report.rules.push(RuleReport::from_findings(
+        "required-artifact-verifiers",
+        "required-artifact jobs use the canonical hosted verifier and every configured consumer waits for it",
+        audit.required_artifacts,
+    ));
     report.rules.push(required_checks(
         root,
         declared,
@@ -3385,6 +3390,7 @@ pub(crate) struct WorkflowAudit {
     pub(crate) runners: Vec<String>,
     pub(crate) actions: Vec<String>,
     pub(crate) structure: Vec<String>,
+    pub(crate) required_artifacts: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -3393,6 +3399,7 @@ enum Rule {
     TrustedRunners,
     ActionPins,
     Structure,
+    RequiredArtifacts,
 }
 
 /// Findings recorded while auditing one tree.
@@ -3417,6 +3424,7 @@ impl PolicyFindings {
             Rule::TrustedRunners => self.audit.runners.push(line),
             Rule::ActionPins => self.audit.actions.push(line),
             Rule::Structure => self.audit.structure.push(line),
+            Rule::RequiredArtifacts => self.audit.required_artifacts.push(line),
         }
     }
 }
@@ -3436,6 +3444,7 @@ pub(crate) fn audit_workflows(root: &Path) -> Result<WorkflowAudit, GeneratorErr
         .map_err(|error| GeneratorError::io("read workflow directory", &workflows, &error))?;
     let policy_entrypoint = workflows.join("ci-policy.yml");
     let velnor_policy = configured_velnor_policy(root)?;
+    let check_profiles = configured_check_profiles(root)?;
     let mut findings = PolicyFindings {
         root: root.to_path_buf(),
         ..PolicyFindings::default()
@@ -3446,6 +3455,7 @@ pub(crate) fn audit_workflows(root: &Path) -> Result<WorkflowAudit, GeneratorErr
     let parser = serde_yaml::ParserConfig::default()
         .duplicate_key_policy(serde_yaml::DuplicateKeyPolicy::Error);
     let mut paths = Vec::new();
+    let mut documents = Vec::new();
     for entry in entries {
         let path = entry
             .map_err(|error| GeneratorError::usage(format!("read workflow entry: {error}")))?
@@ -3494,8 +3504,344 @@ pub(crate) fn audit_workflows(root: &Path) -> Result<WorkflowAudit, GeneratorErr
             &velnor_policy,
             &mut findings,
         );
+        documents.push((path, workflow.clone()));
     }
+    audit_required_artifact_verifiers(&check_profiles, &documents, &mut findings);
     Ok(findings.audit)
+}
+
+fn artifact_verifier_job_id(profile_id: &str) -> String {
+    format!("verify-{profile_id}-artifacts")
+}
+
+fn audit_required_artifact_verifiers(
+    config: &CheckProfilesPolicy,
+    documents: &[(PathBuf, Mapping)],
+    failures: &mut PolicyFindings,
+) {
+    let config_path = Path::new(GENERATION_CONFIG);
+    for finding in &config.findings {
+        failures.record(Rule::RequiredArtifacts, config_path, finding);
+    }
+    let required = config
+        .profiles
+        .iter()
+        .filter(|profile| profile.artifacts_required)
+        .collect::<Vec<_>>();
+    if required.is_empty() {
+        return;
+    }
+    for profile in &required {
+        let producer_jobs = find_workflow_jobs(documents, &profile.id);
+        let producer_path = match producer_jobs.as_slice() {
+            [] => {
+                failures.record(
+                    Rule::RequiredArtifacts,
+                    config_path,
+                    &format!(
+                        "required-artifact profile `{}` is missing its producer job",
+                        profile.id
+                    ),
+                );
+                None
+            }
+            [(path, _)] => Some(*path),
+            many => {
+                failures.record(
+                    Rule::RequiredArtifacts,
+                    many[0].0,
+                    &format!(
+                        "required-artifact profile `{}` appears in {} workflow jobs; its producer is ambiguous",
+                        profile.id,
+                        many.len()
+                    ),
+                );
+                None
+            }
+        };
+        let verifier_id = artifact_verifier_job_id(&profile.id);
+        let verifier_jobs = find_workflow_jobs(documents, &verifier_id);
+        let verifier_path = match verifier_jobs.as_slice() {
+            [] => {
+                failures.record(
+                    Rule::RequiredArtifacts,
+                    config_path,
+                    &format!(
+                        "required-artifact profile `{}` is missing verifier job `{verifier_id}` (missing or renamed)",
+                        profile.id
+                    ),
+                );
+                None
+            }
+            [(path, job)] => {
+                if canonical_artifact_verifier_job(profile, &config.automatic_providers)
+                    .is_some_and(|expected| &expected != *job)
+                {
+                    failures.job = Some(verifier_id.clone());
+                    failures.record(
+                        Rule::RequiredArtifacts,
+                        path,
+                        "verifier does not match the canonical fail-closed hosted artifact verifier",
+                    );
+                    failures.job = None;
+                }
+                Some(*path)
+            }
+            many => {
+                failures.record(
+                    Rule::RequiredArtifacts,
+                    many[0].0,
+                    &format!(
+                        "required-artifact profile `{}` has {} verifier jobs named `{verifier_id}`; exactly one is allowed",
+                        profile.id,
+                        many.len()
+                    ),
+                );
+                None
+            }
+        };
+        let same_producer_workflow = producer_path
+            .zip(verifier_path)
+            .is_some_and(|(producer, verifier)| producer == verifier);
+        if producer_path.is_some() && verifier_path.is_some() && !same_producer_workflow {
+            if let Some(path) = verifier_path {
+                failures.record(
+                    Rule::RequiredArtifacts,
+                    path,
+                    &format!(
+                        "verifier `{verifier_id}` is not in producer `{}`'s workflow",
+                        profile.id
+                    ),
+                );
+            }
+        }
+        for consumer in config.profiles.iter().filter(|consumer| {
+            consumer
+                .needs
+                .iter()
+                .any(|dependency| dependency == &profile.id)
+        }) {
+            let consumer_jobs = find_workflow_jobs(documents, &consumer.id);
+            match consumer_jobs.as_slice() {
+                [] => failures.record(
+                    Rule::RequiredArtifacts,
+                    config_path,
+                    &format!(
+                        "consumer profile `{}` needs required-artifact profile `{}` but its job is missing",
+                        consumer.id, profile.id
+                    ),
+                ),
+                [(path, job)] => {
+                    let needs_verifier = mapping_value(job, "needs")
+                        .and_then(Value::as_sequence)
+                        .is_some_and(|needs| {
+                            needs
+                                .iter()
+                                .any(|need| need.as_str() == Some(verifier_id.as_str()))
+                        });
+                    let same_workflow = same_producer_workflow
+                        && verifier_path.is_some_and(|verifier| verifier == *path);
+                    if !needs_verifier || !same_workflow {
+                        failures.job = Some(consumer.id.clone());
+                        failures.record(
+                            Rule::RequiredArtifacts,
+                            path,
+                            &format!(
+                                "consumer needs required-artifact profile `{}` without waiting for verifier `{verifier_id}` in the producer workflow",
+                                profile.id
+                            ),
+                        );
+                        failures.job = None;
+                    }
+                }
+                many => failures.record(
+                    Rule::RequiredArtifacts,
+                    many[0].0,
+                    &format!(
+                        "consumer profile `{}` appears in {} workflow jobs; its verifier dependency is ambiguous",
+                        consumer.id,
+                        many.len()
+                    ),
+                ),
+            }
+        }
+    }
+}
+
+fn find_workflow_jobs<'a>(
+    documents: &'a [(PathBuf, Mapping)],
+    wanted: &str,
+) -> Vec<(&'a Path, &'a Mapping)> {
+    documents
+        .iter()
+        .filter_map(|(path, workflow)| {
+            let jobs = mapping_value(workflow, "jobs")?.as_mapping()?;
+            jobs.iter().find_map(|(job_id, value)| {
+                (job_id.as_str() == Some(wanted))
+                    .then(|| value.as_mapping().map(|job| (path.as_path(), job)))
+                    .flatten()
+            })
+        })
+        .collect()
+}
+
+fn canonical_artifact_verifier_job(
+    profile: &CheckProfilePolicy,
+    automatic_providers: &[String],
+) -> Option<Mapping> {
+    if profile
+        .artifacts
+        .iter()
+        .any(|artifact| !valid_policy_artifact_path(artifact))
+    {
+        return None;
+    }
+    let producer = &profile.id;
+    let verifier_if = if profile.runner == "velnor" {
+        let result = format!("needs.{producer}.result == 'success'");
+        let trusted = super::TRUSTED_EVENT_EXPRESSION;
+        let admission = if automatic_providers
+            .iter()
+            .any(|provider| provider == "velnor")
+        {
+            format!("({trusted})")
+        } else {
+            format!("(github.event_name == 'workflow_dispatch') && ({trusted})")
+        };
+        format!("({result}) && {admission}")
+    } else {
+        format!("needs.{producer}.result == 'success'")
+    };
+    let verifier_root = format!(
+        "${{{{ runner.temp }}}}/velnor-required-artifacts-${{{{ github.run_id }}}}-{producer}"
+    );
+    let shell_root = format!("$RUNNER_TEMP/velnor-required-artifacts-$GITHUB_RUN_ID-{producer}");
+
+    let mut job = Mapping::new();
+    insert_yaml(
+        &mut job,
+        "name",
+        yaml_string(&format!("Verify {producer} artifacts")),
+    );
+    insert_yaml(
+        &mut job,
+        "needs",
+        Value::Sequence(vec![yaml_string(producer)]),
+    );
+    insert_yaml(
+        &mut job,
+        "if",
+        yaml_string(&format!("${{{{ {verifier_if} }}}}")),
+    );
+    insert_yaml(&mut job, "runs-on", yaml_string("ubuntu-latest"));
+    insert_yaml(
+        &mut job,
+        "timeout-minutes",
+        Value::Number(serde_yaml::Number::from(profile.timeout_minutes)),
+    );
+    let mut outputs = Mapping::new();
+    insert_yaml(
+        &mut outputs,
+        "artifact_id",
+        yaml_string(&format!("${{{{ needs.{producer}.outputs.artifact_id }}}}")),
+    );
+    insert_yaml(&mut job, "outputs", Value::Mapping(outputs));
+    let mut permissions = Mapping::new();
+    insert_yaml(&mut permissions, "actions", yaml_string("read"));
+    insert_yaml(&mut job, "permissions", Value::Mapping(permissions));
+
+    let mut steps = Vec::with_capacity(4);
+    let guard = "set -euo pipefail\nif [[ \"${VERIFIER_RUNNER_ENVIRONMENT:-}\" != \"github-hosted\" ]]; then\n  echo \"artifact verifier requires a GitHub-hosted runner\" >&2\n  exit 1\nfi\n";
+    let mut guard_step = Mapping::new();
+    insert_yaml(
+        &mut guard_step,
+        "name",
+        yaml_string("Require GitHub-hosted runner"),
+    );
+    insert_yaml(&mut guard_step, "shell", yaml_string("bash"));
+    let mut guard_env = Mapping::new();
+    insert_yaml(&mut guard_env, "BASH_ENV", yaml_string("/dev/null"));
+    insert_yaml(
+        &mut guard_env,
+        "VERIFIER_RUNNER_ENVIRONMENT",
+        yaml_string("${{ runner.environment }}"),
+    );
+    insert_yaml(&mut guard_step, "env", Value::Mapping(guard_env));
+    insert_yaml(&mut guard_step, "run", yaml_string(guard));
+    steps.push(Value::Mapping(guard_step));
+    let clear =
+        format!("set -euo pipefail\nroot=\"{shell_root}\"\nrm -rf \"$root\"\nmkdir -p \"$root\"\n");
+    steps.push(canonical_bash_step("Clear verifier workspace", &clear));
+    let mut download = Mapping::new();
+    insert_yaml(
+        &mut download,
+        "name",
+        yaml_string(&format!("Download immutable {producer} artifact")),
+    );
+    insert_yaml(
+        &mut download,
+        "uses",
+        yaml_string(super::ActionPin::DownloadArtifact.reference()),
+    );
+    let mut with = Mapping::new();
+    insert_yaml(
+        &mut with,
+        "artifact-ids",
+        yaml_string(&format!("${{{{ needs.{producer}.outputs.artifact_id }}}}")),
+    );
+    insert_yaml(&mut with, "path", yaml_string(&verifier_root));
+    insert_yaml(&mut download, "with", Value::Mapping(with));
+    steps.push(Value::Mapping(download));
+    let verify = canonical_artifact_path_check(profile, &shell_root);
+    steps.push(canonical_bash_step(
+        &format!("Verify downloaded {producer} artifacts"),
+        &verify,
+    ));
+    insert_yaml(&mut job, "steps", Value::Sequence(steps));
+    Some(job)
+}
+
+fn canonical_bash_step(name: &str, run: &str) -> Value {
+    let mut step = Mapping::new();
+    insert_yaml(&mut step, "name", yaml_string(name));
+    let mut env = Mapping::new();
+    insert_yaml(&mut env, "BASH_ENV", yaml_string("/dev/null"));
+    insert_yaml(&mut step, "shell", yaml_string("bash"));
+    insert_yaml(&mut step, "env", Value::Mapping(env));
+    insert_yaml(&mut step, "run", yaml_string(run));
+    Value::Mapping(step)
+}
+
+fn canonical_artifact_path_check(profile: &CheckProfilePolicy, shell_root: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut script = format!("set -euo pipefail\nroot=\"{shell_root}\"\n");
+    for artifact in &profile.artifacts {
+        let prefixes = artifact
+            .split('/')
+            .scan(String::new(), |prefix, component| {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(component);
+                Some(format!("\"$root/{prefix}\""))
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let _ = writeln!(
+            script,
+            "path=\"$root/{artifact}\"\nfor prefix in {prefixes}; do\n  if [[ -L \"$prefix\" ]]; then\n    echo \"downloaded required artifact path is a symlink: $prefix\" >&2\n    exit 1\n  fi\ndone\nif [[ -f \"$path\" && -s \"$path\" ]]; then\n  :\nelse\n  echo \"downloaded required artifact is missing or empty: $path\" >&2\n  exit 1\nfi"
+        );
+    }
+    script
+}
+
+fn yaml_string(value: &str) -> Value {
+    Value::String(value.to_owned())
+}
+
+fn insert_yaml(mapping: &mut Mapping, key: &str, value: Value) {
+    mapping.insert(yaml_string(key), value);
 }
 
 fn inspect_workflow(
@@ -3650,6 +3996,246 @@ fn generation_workflow(root: &Path) -> Result<Option<toml::Value>, GeneratorErro
         GeneratorError::usage(format!("parse workflow config {}: {error}", path.display()))
     })?;
     Ok(value.get("workflow").cloned())
+}
+
+#[derive(Clone, Debug)]
+struct CheckProfilePolicy {
+    id: String,
+    runner: String,
+    needs: Vec<String>,
+    artifacts_required: bool,
+    artifacts: Vec<String>,
+    timeout_minutes: u32,
+    advisory: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CheckProfilesPolicy {
+    profiles: Vec<CheckProfilePolicy>,
+    automatic_providers: Vec<String>,
+    findings: Vec<String>,
+}
+
+/// Read check-profile declarations from the candidate's typed config. The
+/// artifact policy uses only facts the renderer consumes, then validates the
+/// exact-path contract again before those facts can authorize a verifier.
+fn configured_check_profiles(root: &Path) -> Result<CheckProfilesPolicy, GeneratorError> {
+    let path = root.join(GENERATION_CONFIG);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(CheckProfilesPolicy::default());
+        }
+        Err(error) => return Err(GeneratorError::io("read generation config", &path, &error)),
+    };
+    let config = config::parse(&path, &bytes)?;
+    let mut policy = CheckProfilesPolicy::default();
+    let required_ids = config
+        .check_profiles()
+        .iter()
+        .filter(|row| row.artifacts_required())
+        .filter_map(|row| row.id())
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    let mut ids = BTreeSet::new();
+    for row in config.check_profiles() {
+        let id = row.id().unwrap_or_default().to_owned();
+        let is_artifact_consumer = row
+            .needs()
+            .unwrap_or_default()
+            .iter()
+            .any(|dependency| required_ids.contains(dependency));
+        let is_artifact_related = row.artifacts_required() || is_artifact_consumer;
+        if !valid_policy_check_profile_id(&id) {
+            if is_artifact_related {
+                policy.findings.push(format!(
+                    "{GENERATION_CONFIG}: check profile id `{id}` is not a safe generated job id"
+                ));
+            }
+            continue;
+        }
+        if !ids.insert(id.clone()) && (is_artifact_related || required_ids.contains(&id)) {
+            policy.findings.push(format!(
+                "{GENERATION_CONFIG}: check profile id `{id}` is declared more than once"
+            ));
+        }
+        let profile = CheckProfilePolicy {
+            id,
+            runner: row.runner().unwrap_or("github").to_owned(),
+            needs: row.needs().unwrap_or_default().to_vec(),
+            artifacts_required: row.artifacts_required(),
+            artifacts: row.artifacts().unwrap_or_default().to_vec(),
+            timeout_minutes: row
+                .timeout_minutes()
+                .and_then(|timeout| u32::try_from(timeout).ok())
+                .unwrap_or(
+                    super::primitives::check_profiles::DEFAULT_CHECK_PROFILE_TIMEOUT_MINUTES,
+                ),
+            advisory: row.status() == Some("advisory"),
+        };
+        if profile.artifacts_required {
+            if !matches!(profile.runner.as_str(), "github" | "macos" | "velnor") {
+                policy.findings.push(format!(
+                    "{GENERATION_CONFIG}: required-artifact profile `{}` has unsupported runner `{}`",
+                    profile.id, profile.runner
+                ));
+            }
+            if row
+                .timeout_minutes()
+                .is_some_and(|timeout| timeout <= 0 || u32::try_from(timeout).is_err())
+            {
+                policy.findings.push(format!(
+                    "{GENERATION_CONFIG}: required-artifact profile `{}` has an invalid timeout",
+                    profile.id
+                ));
+            }
+            if profile.advisory {
+                policy.findings.push(format!(
+                    "{GENERATION_CONFIG}: required-artifact profile `{}` cannot be advisory",
+                    profile.id
+                ));
+            }
+            if row
+                .status()
+                .is_some_and(|status| !matches!(status, "required" | "advisory"))
+            {
+                policy.findings.push(format!(
+                    "{GENERATION_CONFIG}: required-artifact profile `{}` has invalid status `{}`",
+                    profile.id,
+                    row.status().unwrap_or_default()
+                ));
+            }
+            if profile.artifacts.is_empty() {
+                policy.findings.push(format!(
+                    "{GENERATION_CONFIG}: required-artifact profile `{}` must declare files",
+                    profile.id
+                ));
+            }
+            for (index, artifact) in profile.artifacts.iter().enumerate() {
+                if !valid_policy_artifact_path(artifact) {
+                    policy.findings.push(format!(
+                        "{GENERATION_CONFIG}: required-artifact profile `{}` has unsafe path `{artifact}`",
+                        profile.id
+                    ));
+                }
+                if profile.artifacts[..index]
+                    .iter()
+                    .any(|other| policy_artifact_paths_collide(other, artifact))
+                {
+                    policy.findings.push(format!(
+                        "{GENERATION_CONFIG}: required-artifact profile `{}` has colliding path `{artifact}`",
+                        profile.id
+                    ));
+                }
+            }
+            if profile
+                .artifacts
+                .iter()
+                .any(|artifact| !valid_policy_artifact_path(artifact))
+            {
+                // Do not let an unsafe config path become input to the
+                // expected shell body below. The config finding already
+                // rejects this candidate.
+                policy.profiles.push(profile);
+                continue;
+            }
+        }
+        policy.profiles.push(profile);
+    }
+    if policy
+        .profiles
+        .iter()
+        .any(|profile| profile.artifacts_required && profile.runner == "velnor")
+    {
+        policy.automatic_providers =
+            configured_rendered_automatic_providers(root, &config, &mut policy.findings)?;
+    }
+    for profile in policy
+        .profiles
+        .iter()
+        .filter(|profile| profile.artifacts_required)
+    {
+        let verifier_id = artifact_verifier_job_id(&profile.id);
+        if ids.contains(&verifier_id) {
+            policy.findings.push(format!(
+                "{GENERATION_CONFIG}: required-artifact profile `{}` collides with profile job `{verifier_id}`",
+                profile.id
+            ));
+        }
+    }
+    Ok(policy)
+}
+
+/// Resolve the provider admission input the base renderer uses for a Velnor
+/// profile. Rendering starts with validated visibility evidence and forces
+/// both the provider universe and automatic set to that visibility's
+/// singleton. Runtime `project.toml` is an output of rendering, so it cannot
+/// authorize a different verifier condition.
+fn configured_rendered_automatic_providers(
+    root: &Path,
+    generation: &config::RepoGenerationConfig,
+    findings: &mut Vec<String>,
+) -> Result<Vec<String>, GeneratorError> {
+    let evidence = crate::visibility::load(root)?;
+    crate::visibility::check_slug_binding(&evidence, generation.repository())?;
+    let expected = super::provider::ProviderSet::from([if evidence.visibility.is_public() {
+        super::provider::ProviderId::GithubHosted
+    } else {
+        super::provider::ProviderId::Velnor
+    }]);
+    for (field, declared) in [
+        ("[workflow] providers", generation.providers()),
+        (
+            "[workflow] automatic_providers",
+            generation.automatic_providers(),
+        ),
+    ] {
+        let Some(declared) = declared else {
+            continue;
+        };
+        let selected = super::provider::parse_provider_set(declared, field)?;
+        if selected != expected {
+            findings.push(format!(
+                "{GENERATION_CONFIG}: {field} conflicts with the validated visibility-based runner policy"
+            ));
+        }
+    }
+    Ok(expected
+        .iter()
+        .map(|provider| provider.as_str().to_owned())
+        .collect())
+}
+
+fn valid_policy_check_profile_id(id: &str) -> bool {
+    let mut bytes = id.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn valid_policy_artifact_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.split('/').all(|component| {
+            let mut bytes = component.bytes();
+            bytes
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphanumeric())
+                && bytes
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        })
+}
+
+fn policy_artifact_paths_collide(left: &str, right: &str) -> bool {
+    let left = left.to_ascii_lowercase();
+    let right = right.to_ascii_lowercase();
+    left == right
+        || right
+            .strip_prefix(&left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || left
+            .strip_prefix(&right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn toml_string_array(
