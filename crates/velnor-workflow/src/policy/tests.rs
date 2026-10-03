@@ -1417,7 +1417,9 @@ fn append_required_artifact_mise_tasks(root: &Path, tasks: &[&str]) {
     );
     declarations.push('\n');
     for task in tasks {
-        declarations.push_str(&format!("[tasks.{task}]\nrun = \"true\"\n\n"));
+        declarations.push_str("[tasks.");
+        declarations.push_str(task);
+        declarations.push_str("]\nrun = \"true\"\n\n");
     }
     write(&path, &declarations);
 }
