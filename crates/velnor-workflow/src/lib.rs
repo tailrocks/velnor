@@ -3532,6 +3532,69 @@ pub(crate) fn static_source_paths_alias(left: &Path, right: &Path) -> Result<boo
     static_source_paths_share_file_identity(left, right)
 }
 
+/// Whether two output spellings resolve to the same on-disk regular file.
+/// Missing paths and paths through symlinked or non-directory ancestors do
+/// not prove an alias: ownership rows can outlive their files.
+pub(crate) fn filesystem_files_alias_on_disk(
+    root: &Path,
+    left: &Path,
+    right: &Path,
+) -> Result<bool, GeneratorError> {
+    fn existing_regular_file(
+        root: &Path,
+        relative: &Path,
+    ) -> Result<Option<PathBuf>, GeneratorError> {
+        let components = relative.components().collect::<Vec<_>>();
+        if components.is_empty()
+            || components
+                .iter()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(GeneratorError::usage(format!(
+                "refusing unsafe generated path: {}",
+                relative.display()
+            )));
+        }
+
+        let mut path = root.to_path_buf();
+        for component in components.iter().take(components.len() - 1) {
+            path.push(component.as_os_str());
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_dir() => (),
+                Ok(_) => return Ok(None),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => {
+                    return Err(GeneratorError::io(
+                        "inspect generated output alias ancestor",
+                        &path,
+                        &error,
+                    ));
+                }
+            }
+        }
+
+        path.push(components[components.len() - 1].as_os_str());
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => Ok(Some(path)),
+            Ok(_) => Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(GeneratorError::io(
+                "inspect generated output alias",
+                &path,
+                &error,
+            )),
+        }
+    }
+
+    let Some(left) = existing_regular_file(root, left)? else {
+        return Ok(false);
+    };
+    let Some(right) = existing_regular_file(root, right)? else {
+        return Ok(false);
+    };
+    static_source_paths_share_file_identity(&left, &right)
+}
+
 /// Check static-source membership against the scanner's path set.
 ///
 /// Exact normalized spelling is authoritative and fast. If a scanner path is
@@ -10184,24 +10247,6 @@ fn plan_generated_write_with_options(
     )
 }
 
-#[cfg(any(feature = "tui", test))]
-pub(crate) fn plan_generated_write_with_static_sources(
-    root: &Path,
-    files: &BTreeMap<PathBuf, String>,
-    symlinks: &BTreeMap<PathBuf, PathBuf>,
-    inputs: &GenerationInputs,
-    static_sources: &StaticSourceSnapshot,
-) -> Result<GeneratedWritePlan, GeneratorError> {
-    plan_generated_write_with_static_sources_and_options(
-        root,
-        files,
-        symlinks,
-        inputs,
-        static_sources,
-        false,
-    )
-}
-
 #[expect(
     clippy::too_many_lines,
     reason = "write-plan assembly binds all current outputs and unknown tree entries"
@@ -10252,7 +10297,7 @@ fn plan_generated_write_with_static_sources_and_options(
         OwnershipStateFile::Present(state) => Some(state),
         OwnershipStateFile::Absent | OwnershipStateFile::ForeignSchema { .. } => None,
     };
-    validate_output_path_relations(files, symlinks)?;
+    validate_output_path_relations(root, files, symlinks, ownership.map(|state| &state.outputs))?;
     // Both ownership proofs always run: chaining them with `||` would skip
     // the symlink proof — and its refusals — whenever the file proof
     // reports a refresh (which `--force` implies via adopt).
@@ -10387,8 +10432,10 @@ fn plan_generated_write_with_static_sources_and_options(
 }
 
 fn validate_output_path_relations(
+    root: &Path,
     files: &BTreeMap<PathBuf, String>,
     symlinks: &BTreeMap<PathBuf, PathBuf>,
+    recorded: Option<&BTreeMap<PathBuf, u64>>,
 ) -> Result<(), GeneratorError> {
     let mut current = files.keys().chain(symlinks.keys()).collect::<Vec<_>>();
     current.sort();
@@ -10411,6 +10458,38 @@ fn validate_output_path_relations(
                     left.display(),
                     right.display()
                 )));
+            }
+        }
+        if let Some(recorded) = recorded {
+            // A case-only rename may read as the same preimage on a
+            // case-insensitive filesystem, while the old spelling is still
+            // classified as unknown and force-removable. Refuse only when
+            // both spellings resolve to the same on-disk file; a stale
+            // ownership row alone does not prove an alias.
+            let Some(left_text) = left.to_str() else {
+                return Err(GeneratorError::usage(
+                    "generated output paths must be valid UTF-8".to_owned(),
+                ));
+            };
+            for previous in recorded.keys() {
+                if *left == previous {
+                    continue;
+                }
+                let Some(previous_text) = previous.to_str() else {
+                    return Err(GeneratorError::usage(
+                        "recorded output paths must be valid UTF-8".to_owned(),
+                    ));
+                };
+                if crate::path_spellings_overlap(left_text, previous_text) {
+                    if !crate::filesystem_files_alias_on_disk(root, left, previous)? {
+                        continue;
+                    }
+                    return Err(GeneratorError::usage(format!(
+                        "generated path `{}` aliases or changes the file/directory shape of recorded output `{}`; reconcile the old output before generation",
+                        left.display(),
+                        previous.display()
+                    )));
+                }
             }
         }
     }
@@ -26686,6 +26765,125 @@ channel = "stable"
         );
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn force_planner_refuses_case_only_rename_of_recorded_output() {
+        let root = temporary_repository("force-case-only-output-rename");
+        let previous_path = PathBuf::from(".github/workflows/case.yml");
+        let current_path = PathBuf::from(".github/workflows/CASE.yml");
+        let bytes = format!("{GENERATED_HEADER}name: unchanged\n");
+        let previous = BTreeMap::from([(previous_path.clone(), bytes.clone())]);
+        must(
+            write_generated(&root, &previous, false, false, false),
+            "write previous generated output",
+        );
+        if !root.join(&current_path).exists() {
+            must(
+                fs::hard_link(root.join(&previous_path), root.join(&current_path)),
+                "make the case-only spellings share an on-disk file",
+            );
+        }
+        let state_before = must(
+            fs::read(root.join(OWNERSHIP_STATE)),
+            "capture previous ownership state",
+        );
+
+        let current = BTreeMap::from([(current_path, bytes)]);
+        // `adopt = true` is the planner permission paired with CLI `--force`.
+        let error = must_some(
+            plan_generated_write_with_options(
+                &root,
+                &current,
+                &BTreeMap::new(),
+                &GenerationInputs::parts(0, 0),
+                true,
+            )
+            .err(),
+            "force planning must refuse a case-only rename of a recorded output",
+        )
+        .to_string();
+        assert!(
+            error.contains("aliases or changes the file/directory shape of recorded output"),
+            "refusal must identify the previous output: {error}"
+        );
+        assert_eq!(
+            must(
+                fs::read(root.join(&previous_path)),
+                "read preserved previous output",
+            ),
+            format!("{GENERATED_HEADER}name: unchanged\n").as_bytes(),
+            "unchanged bytes do not permit force to remove an aliased prior spelling"
+        );
+        assert_eq!(
+            must(
+                fs::read(root.join(OWNERSHIP_STATE)),
+                "read ownership state after refusal",
+            ),
+            state_before,
+            "refusal must preserve the recorded output path"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn force_planner_ignores_case_alias_claim_when_prior_file_is_missing() {
+        let root = temporary_repository("force-missing-case-alias-claim");
+        let previous_path = PathBuf::from(".github/workflows/case.yml");
+        let current_path = PathBuf::from(".github/workflows/CASE.yml");
+        let bytes = format!("{GENERATED_HEADER}name: unchanged\n");
+        let previous = BTreeMap::from([(previous_path.clone(), bytes.clone())]);
+        must(
+            write_generated(&root, &previous, false, false, false),
+            "write previous generated output",
+        );
+        must(
+            fs::remove_file(root.join(&previous_path)),
+            "remove prior output but keep its sidecar claim",
+        );
+        assert!(
+            !root.join(&current_path).exists(),
+            "a missing prior output must not have an on-disk case alias"
+        );
+
+        let current = BTreeMap::from([(current_path.clone(), bytes.clone())]);
+        let plan = must(
+            plan_generated_write_with_options(
+                &root,
+                &current,
+                &BTreeMap::new(),
+                &GenerationInputs::parts(0, 0),
+                true,
+            ),
+            "force planning must ignore a missing stale sidecar path",
+        );
+        assert!(
+            plan.files
+                .iter()
+                .any(|file| file.path == current_path && file.action == PlannedAction::Create),
+            "the absent current output must be planned for installation"
+        );
+        assert!(
+            plan.unknown.is_empty(),
+            "a missing claim is not unknown content"
+        );
+
+        must(
+            write_generated(&root, &current, false, false, true),
+            "force generation from a missing stale claim",
+        );
+        assert_eq!(
+            must(fs::read(root.join(&current_path)), "read installed output"),
+            bytes.as_bytes()
+        );
+        let state = must(
+            fs::read_to_string(root.join(OWNERSHIP_STATE)),
+            "read reconciled ownership state",
+        );
+        assert!(state.contains(".github/workflows/CASE.yml\t"), "{state}");
+        assert!(!state.contains(".github/workflows/case.yml\t"), "{state}");
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn unrendered_legacy_guide_is_removed_after_digest_verification() {
         let root = temporary_repository("stale-generated-guide");
