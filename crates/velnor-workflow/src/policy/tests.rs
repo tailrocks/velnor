@@ -1335,7 +1335,12 @@ fn required_artifact_tree(name: &str, workflow: &str) -> PathBuf {
 }
 
 fn required_artifact_tree_with_runner(name: &str, workflow: &str, runner: &str) -> PathBuf {
-    required_artifact_tree_with_settings(name, workflow, runner, "github", false)
+    let workflow_runners = if runner == "velnor" {
+        "velnor"
+    } else {
+        "github"
+    };
+    required_artifact_tree_with_settings(name, workflow, runner, workflow_runners, false)
 }
 
 fn required_artifact_findings_with_macos_runner(
@@ -1754,12 +1759,13 @@ fn required_artifact_lanes_input_contract() {
             required_artifact_lanes_workflow(runner),
             "render required-artifact lanes workflow",
         );
+        let findings =
+            required_artifact_lanes_findings("required-artifact-lanes-valid", &workflow, runner);
         assert!(
-            required_artifact_lanes_findings("required-artifact-lanes-valid", &workflow, runner)
-                .is_empty(),
-            "valid {runner}-default lanes_input verifier was rejected"
+            findings.is_empty(),
+            "valid {runner}-default lanes_input verifier was rejected: {findings:?}"
         );
-        let mutated = workflow.replace(wrong_selector, replacement_selector);
+        let mutated = workflow.replacen(wrong_selector, replacement_selector, 1);
         let findings =
             required_artifact_lanes_findings("required-artifact-lanes-mutation", &mutated, runner);
         assert!(
@@ -1875,8 +1881,8 @@ fn required_artifact_verifier_job_mutations(canonical: &str) {
         (
             "extra-run",
             canonical.replace(
-                "  consumer:\n",
-                "      - name: Extra verifier script\n        run: echo hostile\n  consumer:\n",
+                "      - name: Clear verifier workspace",
+                "      - name: Extra verifier script\n        run: echo hostile\n      - name: Clear verifier workspace",
             ),
             "verifier job `verify-producer-artifacts` must match its protected S1 renderer output",
         ),
@@ -1919,8 +1925,8 @@ fn required_artifact_producer_upload_mutations(canonical: &str) {
         (
             "producer-skips-artifact-upload",
             canonical.replace(
-                "  producer:\n    name: Produce evidence\n",
-                "  producer:\n    name: Produce evidence\n    if: false\n",
+                "  producer:\n    name: \"Produce evidence\"\n",
+                "  producer:\n    name: \"Produce evidence\"\n    if: false\n",
             ),
             "producer `producer` if must match its canonical lane admission",
         ),
@@ -1953,8 +1959,8 @@ fn required_artifact_producer_upload_mutations(canonical: &str) {
         (
             "producer-continue-on-error",
             canonical.replace(
-                "  producer:\n    name: Produce evidence\n",
-                "  producer:\n    name: Produce evidence\n    continue-on-error: true\n",
+                "  producer:\n    name: \"Produce evidence\"\n",
+                "  producer:\n    name: \"Produce evidence\"\n    continue-on-error: true\n",
             ),
             "must preserve configured dependencies and bind artifact_id to its canonical pinned upload step",
         ),
@@ -1995,45 +2001,45 @@ fn required_artifact_consumer_job_mutations(canonical: &str) {
         (
             "consumer-skips-verifier",
             canonical.replace("needs: [verify-producer-artifacts]", "needs: [producer]"),
-            "consumer profile `consumer` needs must include required verifier dependencies",
+            "consumer profile `consumer` needs must match its protected-renderer dependencies",
         ),
         (
             "consumer-runner-mutation",
             canonical.replace(
-                "  consumer:\n    name: Consume evidence\n    needs: [verify-producer-artifacts]\n    runs-on: ubuntu-24.04\n",
-                "  consumer:\n    name: Consume evidence\n    needs: [verify-producer-artifacts]\n    runs-on: ubuntu-22.04\n",
+                "  consumer:\n    name: \"Consume evidence\"\n    needs: [verify-producer-artifacts]\n    runs-on: ubuntu-24.04\n",
+                "  consumer:\n    name: \"Consume evidence\"\n    needs: [verify-producer-artifacts]\n    runs-on: ubuntu-22.04\n",
             ),
             "consumer profile `consumer` runs-on must match its configured profile selector",
         ),
         (
             "consumer-continue-on-error",
             canonical.replace(
-                "  consumer:\n    name: Consume evidence\n",
-                "  consumer:\n    name: Consume evidence\n    continue-on-error: true\n",
+                "  consumer:\n    name: \"Consume evidence\"\n",
+                "  consumer:\n    name: \"Consume evidence\"\n    continue-on-error: true\n",
             ),
             "consumer profile `consumer` continue-on-error must match its configured advisory status",
         ),
         (
             "consumer-always-runs",
             canonical.replace(
-                "  consumer:\n    name: Consume evidence\n",
-                "  consumer:\n    name: Consume evidence\n    if: ${{ always() }}\n",
+                "  consumer:\n    name: \"Consume evidence\"\n",
+                "  consumer:\n    name: \"Consume evidence\"\n    if: ${{ always() }}\n",
             ),
             "if must preserve verifier success propagation",
         ),
         (
             "consumer-runs-on-failure",
             canonical.replace(
-                "  consumer:\n    name: Consume evidence\n",
-                "  consumer:\n    name: Consume evidence\n    if: ${{ failure() }}\n",
+                "  consumer:\n    name: \"Consume evidence\"\n",
+                "  consumer:\n    name: \"Consume evidence\"\n    if: ${{ failure() }}\n",
             ),
             "if must preserve verifier success propagation",
         ),
         (
             "consumer-runs-on-cancelled",
             canonical.replace(
-                "  consumer:\n    name: Consume evidence\n",
-                "  consumer:\n    name: Consume evidence\n    if: ${{ cancelled() }}\n",
+                "  consumer:\n    name: \"Consume evidence\"\n",
+                "  consumer:\n    name: \"Consume evidence\"\n    if: ${{ cancelled() }}\n",
             ),
             "if must preserve verifier success propagation",
         ),
@@ -2739,10 +2745,12 @@ fn required_artifact_duplicate_key_and_path_mutations(canonical: &str) {
         "audit required-artifact trailing-dot path",
     );
     assert!(
-        audit
-            .structure
-            .iter()
-            .any(|finding| finding.contains("paths must be distinct, safe literal file paths")),
+        audit.structure.iter().any(|finding| {
+            finding.contains("cannot reconstruct required-artifact jobs with the protected S1 renderer")
+                && finding.contains(
+                    "must be one non-empty relative literal file path without traversal, globs, or shell syntax",
+                )
+        }),
         "accepted trailing-dot required-artifact path: {:?}",
         audit.structure
     );

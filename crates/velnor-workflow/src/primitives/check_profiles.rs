@@ -593,7 +593,7 @@ fn profile_admission_expression(
                 "github.event_name != 'workflow_dispatch' || inputs.lanes != 'velnor' || ({admission})"
             )),
             "velnor" => Some(format!(
-                "(github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || ({admission})"
+                "github.event_name == 'workflow_dispatch' && inputs.lanes == 'github' || ({admission})"
             )),
             _ => None,
         };
@@ -1498,7 +1498,7 @@ mod tests {
             "the canonical admission follows the selected lane: {admission}"
         );
         let dynamic_gate = format!(
-            "(github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || ({admission})"
+            "github.event_name == 'workflow_dispatch' && inputs.lanes == 'github' || ({admission})"
         );
         let workflow = must(
             render_with_lanes(&config, &selected),
