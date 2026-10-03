@@ -53,8 +53,8 @@ use std::process::{Command, Stdio};
 use serde_yaml::{Mapping, Value};
 
 use super::{
-    closure as closure_identity, config, runtime, GeneratorError, ProjectConfig, SOURCE_CLOSURE,
-    SOURCE_REVISION,
+    closure as closure_identity, config, runtime, ActionPin, GeneratorError, ProjectConfig,
+    RunnerMode, SOURCE_CLOSURE, SOURCE_REVISION,
 };
 
 /// The generation config the audited tree declares itself with.
@@ -3376,6 +3376,7 @@ pub(crate) fn audit_workflows(root: &Path) -> Result<WorkflowAudit, GeneratorErr
         .map_err(|error| GeneratorError::io("read workflow directory", &workflows, &error))?;
     let policy_entrypoint = workflows.join("ci-policy.yml");
     let velnor_policy = configured_velnor_policy(root)?;
+    let generation = config::discover(root)?;
     let mut findings = PolicyFindings {
         root: root.to_path_buf(),
         ..PolicyFindings::default()
@@ -3386,6 +3387,7 @@ pub(crate) fn audit_workflows(root: &Path) -> Result<WorkflowAudit, GeneratorErr
     let parser = serde_yaml::ParserConfig::default()
         .duplicate_key_policy(serde_yaml::DuplicateKeyPolicy::Error);
     let mut paths = Vec::new();
+    let mut parsed_workflows = Vec::new();
     for entry in entries {
         let path = entry
             .map_err(|error| GeneratorError::usage(format!("read workflow entry: {error}")))?
@@ -3431,17 +3433,1390 @@ pub(crate) fn audit_workflows(root: &Path) -> Result<WorkflowAudit, GeneratorErr
             workflow,
             &path,
             is_policy_entrypoint,
+            generation.as_ref(),
             &velnor_policy,
             &mut findings,
         );
+        parsed_workflows.push((path, document));
     }
+    audit_required_artifact_verifiers(
+        root,
+        &parsed_workflows,
+        generation.as_ref(),
+        &velnor_policy,
+        &mut findings,
+    );
     Ok(findings.audit)
+}
+
+/// Candidate `artifacts_required` config identifies required verifier jobs.
+/// Re-render that data with the protected S1 generator, then compare the
+/// candidate jobs in full so renderer drift or extra capabilities fail.
+fn audit_required_artifact_verifiers(
+    root: &Path,
+    workflows: &[(PathBuf, Value)],
+    generation: Option<&config::RepoGenerationConfig>,
+    velnor_policy: &VelnorPolicyContract,
+    failures: &mut PolicyFindings,
+) {
+    let Some(generation) = generation else { return };
+    let profiles = generation.check_profiles();
+    let required_ids = profiles
+        .iter()
+        .filter(|profile| profile.artifacts_required())
+        .filter_map(|profile| profile.id().map(str::to_owned))
+        .collect::<BTreeSet<_>>();
+    if required_ids.is_empty() {
+        return;
+    }
+
+    let rendered_workflows = match trusted_rendered_workflows(root, generation) {
+        Ok(workflows) => workflows,
+        Err(message) => {
+            record_artifact_finding(
+                failures,
+                &root.join(GENERATION_CONFIG),
+                &format!(
+                    "cannot reconstruct required-artifact jobs with the protected S1 renderer: {message}"
+                ),
+            );
+            return;
+        }
+    };
+
+    for profile in profiles
+        .iter()
+        .filter(|profile| profile.artifacts_required())
+    {
+        let Some(profile_id) = profile.id() else {
+            record_artifact_finding(
+                failures,
+                &root.join(GENERATION_CONFIG),
+                "required-artifact profile has no id",
+            );
+            continue;
+        };
+        let verifier_id = format!("verify-{profile_id}-artifacts");
+        if !valid_required_artifact_profile_id(profile_id) {
+            record_artifact_finding(
+                failures,
+                &root.join(GENERATION_CONFIG),
+                &format!("required-artifact profile id `{profile_id}` is not a safe job id"),
+            );
+            continue;
+        }
+        let Some(artifacts) = profile.artifacts() else {
+            record_artifact_finding(
+                failures,
+                &root.join(GENERATION_CONFIG),
+                &format!("required-artifact profile `{profile_id}` declares no validated paths"),
+            );
+            continue;
+        };
+        if artifacts.is_empty()
+            || artifacts
+                .iter()
+                .any(|artifact| !valid_required_artifact_path(artifact))
+            || artifact_paths_collide(artifacts)
+        {
+            record_artifact_finding(
+                failures,
+                &root.join(GENERATION_CONFIG),
+                &format!(
+                    "required-artifact profile `{profile_id}` paths must be distinct, safe literal file paths"
+                ),
+            );
+            continue;
+        }
+        let expected_producer_jobs = workflow_job_instances(&rendered_workflows, profile_id);
+        if expected_producer_jobs.is_empty() {
+            record_artifact_finding(
+                failures,
+                &root.join(GENERATION_CONFIG),
+                &format!(
+                    "protected S1 renderer did not select required-artifact producer `{profile_id}` in a workflow"
+                ),
+            );
+        }
+        let producer_jobs = workflow_job_instances(workflows, profile_id);
+        if producer_jobs.is_empty() {
+            let path = root.join(".github/workflows");
+            record_artifact_finding(
+                failures,
+                &path,
+                &format!("required-artifact producer `{profile_id}` is missing"),
+            );
+            continue;
+        }
+        let verifier_jobs = workflow_job_instances(workflows, &verifier_id);
+        for (expected_path, _) in &expected_producer_jobs {
+            let producers_in_path = producer_jobs
+                .iter()
+                .filter(|(path, _)| path == expected_path)
+                .count();
+            if producers_in_path != 1 {
+                record_artifact_finding(
+                    failures,
+                    expected_path,
+                    &format!(
+                        "required-artifact producer `{profile_id}` must appear exactly once in this protected-renderer workflow; found {producers_in_path}"
+                    ),
+                );
+            }
+            let verifiers_in_path = verifier_jobs
+                .iter()
+                .filter(|(path, _)| path == expected_path)
+                .count();
+            if verifiers_in_path != 1 {
+                record_artifact_finding(
+                    failures,
+                    expected_path,
+                    &format!(
+                        "required-artifact config requires verifier job `{verifier_id}` in this workflow; found {verifiers_in_path}"
+                    ),
+                );
+            }
+        }
+        for (verifier_path, _) in &verifier_jobs {
+            if !producer_jobs
+                .iter()
+                .any(|(producer_path, _)| producer_path == verifier_path)
+            {
+                record_artifact_finding(
+                    failures,
+                    verifier_path,
+                    &format!(
+                        "verifier job `{verifier_id}` has no configured producer in this workflow"
+                    ),
+                );
+            }
+        }
+        for (producer_path, producer_job) in &producer_jobs {
+            let admission = match profile_admission_expression(
+                &generation,
+                profile_id,
+                profile.runner().unwrap_or("github"),
+                producer_path,
+                velnor_policy,
+            ) {
+                Ok(admission) => admission,
+                Err(message) => {
+                    record_artifact_finding(
+                        failures,
+                        producer_path,
+                        &format!(
+                            "required-artifact profile `{profile_id}` has invalid admission: {message}"
+                        ),
+                    );
+                    continue;
+                }
+            };
+            if !admission_if_matches(producer_job, admission.as_deref()) {
+                record_artifact_finding(
+                    failures,
+                    producer_path,
+                    &format!(
+                        "required-artifact producer `{profile_id}` if must match its canonical lane admission, including its configured absence"
+                    ),
+                );
+            }
+            if let Err(message) = profile_runner_selector_error(
+                producer_job,
+                profile,
+                producer_path,
+                &generation,
+                velnor_policy,
+            ) {
+                record_artifact_finding(
+                    failures,
+                    producer_path,
+                    &format!(
+                        "required-artifact producer `{profile_id}` runs-on must match its configured profile selector: {message}"
+                    ),
+                );
+            }
+            let expected_producer_needs = rendered_profile_needs(
+                profile,
+                profiles,
+                &required_ids,
+                &generation,
+                producer_path,
+            );
+            if !canonical_required_artifact_producer_binding(
+                profile_id,
+                &expected_producer_needs,
+                producer_job,
+            ) {
+                record_artifact_finding(
+                    failures,
+                    producer_path,
+                    &format!(
+                        "required-artifact producer `{profile_id}` must preserve configured dependencies and bind artifact_id to its canonical pinned upload step"
+                    ),
+                );
+            }
+            let matching_verifiers = verifier_jobs
+                .iter()
+                .filter(|(path, _)| path == producer_path)
+                .collect::<Vec<_>>();
+            if matching_verifiers.len() != 1 {
+                record_artifact_finding(
+                    failures,
+                    producer_path,
+                    &format!(
+                        "required-artifact config requires verifier job `{verifier_id}` in this workflow; found {}",
+                        matching_verifiers.len()
+                    ),
+                );
+                continue;
+            }
+            let (verifier_path, actual) = matching_verifiers[0];
+            let expected_verifiers = workflow_job_instances(&rendered_workflows, &verifier_id)
+                .into_iter()
+                .filter(|(path, _)| path == producer_path)
+                .collect::<Vec<_>>();
+            if expected_verifiers.len() != 1 || actual != &expected_verifiers[0].1 {
+                record_artifact_finding(
+                    failures,
+                    verifier_path,
+                    &format!(
+                        "verifier job `{verifier_id}` must match its protected S1 renderer output"
+                    ),
+                );
+            }
+        }
+    }
+
+    audit_required_artifact_profile_chain(
+        root,
+        workflows,
+        &rendered_workflows,
+        profiles,
+        generation,
+        &required_ids,
+        failures,
+    );
+
+    audit_required_artifact_consumers(
+        workflows,
+        profiles,
+        &required_ids,
+        generation,
+        &rendered_workflows,
+        velnor_policy,
+        failures,
+    );
+    audit_required_artifact_ancestors(
+        root,
+        workflows,
+        profiles,
+        &required_ids,
+        generation,
+        velnor_policy,
+        failures,
+    );
+}
+
+fn trusted_rendered_workflows(
+    root: &Path,
+    audited_generation: &config::RepoGenerationConfig,
+) -> Result<Vec<(PathBuf, Value)>, String> {
+    let scanned = super::scan_target(root, RunnerMode::Github, "main")
+        .map_err(|error| format!("scan candidate config as data: {error}"))?;
+    if scanned.generation.as_ref() != Some(audited_generation) {
+        return Err(
+            "generation config changed while rebuilding the S1 expected surface".to_owned(),
+        );
+    }
+    let surface = super::primitives::generate(
+        root,
+        &scanned.shape,
+        &scanned.config,
+        scanned.generation.as_ref(),
+    )
+    .map_err(|error| format!("render candidate config with protected S1 code: {error}"))?;
+    let parser = serde_yaml::ParserConfig::default()
+        .duplicate_key_policy(serde_yaml::DuplicateKeyPolicy::Error);
+    let mut workflows = Vec::new();
+    for (relative_path, content) in surface.files {
+        if !relative_path.starts_with(".github/workflows") {
+            continue;
+        }
+        if !matches!(
+            relative_path.extension().and_then(|value| value.to_str()),
+            Some("yml" | "yaml")
+        ) {
+            continue;
+        }
+        let document = serde_yaml::from_str_with_config(&content, &parser)
+            .map_err(|error| format!("parse protected renderer output: {error}"))?;
+        workflows.push((root.join(relative_path), document));
+    }
+    Ok(workflows)
+}
+
+fn required_artifact_profile_chain(
+    profiles: &[config::CheckProfileSection],
+    required_id: &str,
+) -> Result<BTreeSet<String>, String> {
+    let mut chain = required_artifact_ancestor_ids(profiles, required_id)?;
+    let mut descendants = BTreeSet::from([required_id.to_owned()]);
+    loop {
+        let mut changed = false;
+        for profile in profiles {
+            let Some(profile_id) = profile.id() else {
+                continue;
+            };
+            if descendants.contains(profile_id) {
+                continue;
+            }
+            if profile
+                .needs()
+                .unwrap_or_default()
+                .iter()
+                .any(|dependency| descendants.contains(dependency))
+            {
+                descendants.insert(profile_id.to_owned());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    chain.extend(descendants);
+    Ok(chain)
+}
+
+fn audit_required_artifact_profile_chain(
+    root: &Path,
+    candidate_workflows: &[(PathBuf, Value)],
+    rendered_workflows: &[(PathBuf, Value)],
+    profiles: &[config::CheckProfileSection],
+    generation: &config::RepoGenerationConfig,
+    required_ids: &BTreeSet<String>,
+    failures: &mut PolicyFindings,
+) {
+    let mut audited_workflows = BTreeSet::new();
+    for required_id in required_ids {
+        let chain = match required_artifact_profile_chain(profiles, required_id) {
+            Ok(chain) => chain,
+            Err(message) => {
+                record_artifact_finding(
+                    failures,
+                    &root.join(GENERATION_CONFIG),
+                    &format!(
+                        "required-artifact profile `{required_id}` has invalid dependency chain: {message}"
+                    ),
+                );
+                continue;
+            }
+        };
+        let workflow_paths = workflow_job_instances(rendered_workflows, required_id)
+            .into_iter()
+            .map(|(path, _)| path)
+            .chain(
+                workflow_job_instances(candidate_workflows, required_id)
+                    .into_iter()
+                    .map(|(path, _)| path),
+            )
+            .collect::<BTreeSet<_>>();
+        if workflow_paths.is_empty() {
+            record_artifact_finding(
+                failures,
+                &root.join(GENERATION_CONFIG),
+                &format!(
+                    "required-artifact profile `{required_id}` is absent from both the protected renderer and candidate workflows"
+                ),
+            );
+        }
+        for workflow_path in workflow_paths {
+            if audited_workflows.insert(workflow_path.clone()) {
+                let actual_documents = candidate_workflows
+                    .iter()
+                    .filter(|(path, _)| path == &workflow_path)
+                    .collect::<Vec<_>>();
+                let expected_documents = rendered_workflows
+                    .iter()
+                    .filter(|(path, _)| path == &workflow_path)
+                    .collect::<Vec<_>>();
+                let actual_document = actual_documents.first().map(|(_, document)| document);
+                let expected_document = expected_documents.first().map(|(_, document)| document);
+                if actual_documents.len() != 1
+                    || expected_documents.len() != 1
+                    || actual_document != expected_document
+                {
+                    record_artifact_finding(
+                        failures,
+                        &workflow_path,
+                        "required-artifact workflow must match its complete protected S1 renderer output",
+                    );
+                }
+            }
+            for profile_id in &chain {
+                if !profile_selected_in_workflow(generation, profile_id, &workflow_path) {
+                    continue;
+                }
+                let actual = workflow_job_instances(candidate_workflows, profile_id)
+                    .into_iter()
+                    .filter(|(path, _)| path == &workflow_path)
+                    .collect::<Vec<_>>();
+                let expected = workflow_job_instances(rendered_workflows, profile_id)
+                    .into_iter()
+                    .filter(|(path, _)| path == &workflow_path)
+                    .collect::<Vec<_>>();
+                if actual.len() != 1 || expected.len() != 1 {
+                    record_artifact_finding(
+                        failures,
+                        &workflow_path,
+                        &format!(
+                            "required-artifact chain profile `{profile_id}` must have exactly one candidate and protected-renderer job"
+                        ),
+                    );
+                    continue;
+                }
+                if actual[0].1 != expected[0].1 {
+                    record_artifact_finding(
+                        failures,
+                        &workflow_path,
+                        &format!(
+                            "required-artifact chain profile `{profile_id}` job must match the complete protected S1 renderer output"
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn audit_required_artifact_ancestors(
+    root: &Path,
+    workflows: &[(PathBuf, Value)],
+    profiles: &[config::CheckProfileSection],
+    required_ids: &BTreeSet<String>,
+    generation: &config::RepoGenerationConfig,
+    velnor_policy: &VelnorPolicyContract,
+    failures: &mut PolicyFindings,
+) {
+    for required in profiles
+        .iter()
+        .filter(|profile| profile.artifacts_required())
+    {
+        let Some(required_id) = required.id() else {
+            continue;
+        };
+        let ancestors = match required_artifact_ancestor_ids(profiles, required_id) {
+            Ok(ancestors) => ancestors,
+            Err(message) => {
+                record_artifact_finding(
+                    failures,
+                    &root.join(GENERATION_CONFIG),
+                    &format!(
+                        "required-artifact profile `{required_id}` has invalid dependency closure: {message}"
+                    ),
+                );
+                continue;
+            }
+        };
+        if ancestors.is_empty() {
+            continue;
+        }
+        for (workflow_path, _) in workflow_job_instances(workflows, required_id) {
+            for ancestor_id in &ancestors {
+                let Some(ancestor_profile) = profiles
+                    .iter()
+                    .find(|profile| profile.id() == Some(ancestor_id.as_str()))
+                else {
+                    record_artifact_finding(
+                        failures,
+                        &root.join(GENERATION_CONFIG),
+                        &format!(
+                            "required-artifact dependency `{ancestor_id}` is not a configured check profile"
+                        ),
+                    );
+                    continue;
+                };
+                if !profile_selected_in_workflow(generation, ancestor_id, &workflow_path) {
+                    record_artifact_finding(
+                        failures,
+                        &workflow_path,
+                        &format!(
+                            "required-artifact dependency profile `{ancestor_id}` must be selected in the producer workflow"
+                        ),
+                    );
+                    continue;
+                }
+                let matching_jobs = workflow_job_instances(workflows, ancestor_id)
+                    .into_iter()
+                    .filter(|(path, _)| path == &workflow_path)
+                    .collect::<Vec<_>>();
+                if matching_jobs.len() != 1 {
+                    record_artifact_finding(
+                        failures,
+                        &workflow_path,
+                        &format!(
+                            "required-artifact dependency profile `{ancestor_id}` must have exactly one generated job in the producer workflow"
+                        ),
+                    );
+                    continue;
+                }
+                let (path, job) = &matching_jobs[0];
+                let expected_needs = rendered_profile_needs(
+                    ancestor_profile,
+                    profiles,
+                    required_ids,
+                    generation,
+                    path,
+                );
+                let needs_match = job
+                    .as_mapping()
+                    .is_some_and(|job| profile_needs_match(job, &expected_needs));
+                if !needs_match {
+                    record_artifact_finding(
+                        failures,
+                        path,
+                        &format!(
+                            "required-artifact ancestor `{ancestor_id}` needs must match its configured workflow dependencies"
+                        ),
+                    );
+                }
+                if !profile_continue_on_error_matches(job, ancestor_profile) {
+                    record_artifact_finding(
+                        failures,
+                        path,
+                        &format!(
+                            "required-artifact ancestor `{ancestor_id}` continue-on-error must match its configured advisory status"
+                        ),
+                    );
+                }
+                if job
+                    .as_mapping()
+                    .and_then(|job| mapping_value(job, "steps"))
+                    .and_then(Value::as_sequence)
+                    .is_some_and(|steps| steps_have_continue_on_error(steps))
+                {
+                    record_artifact_finding(
+                        failures,
+                        path,
+                        &format!(
+                            "required-artifact ancestor `{ancestor_id}` steps must not set continue-on-error"
+                        ),
+                    );
+                }
+                if let Err(message) = profile_runner_selector_error(
+                    job,
+                    ancestor_profile,
+                    path,
+                    generation,
+                    velnor_policy,
+                ) {
+                    record_artifact_finding(
+                        failures,
+                        path,
+                        &format!(
+                            "required-artifact ancestor `{ancestor_id}` runs-on must match its configured profile selector: {message}"
+                        ),
+                    );
+                }
+                let admission = profile_admission_expression(
+                    generation,
+                    ancestor_id,
+                    ancestor_profile.runner().unwrap_or("github"),
+                    path,
+                    velnor_policy,
+                );
+                let admission = match admission {
+                    Ok(admission) => admission,
+                    Err(message) => {
+                        record_artifact_finding(
+                            failures,
+                            path,
+                            &format!(
+                                "required-artifact ancestor `{ancestor_id}` has invalid admission: {message}"
+                            ),
+                        );
+                        continue;
+                    }
+                };
+                if !admission_if_matches(job, admission.as_deref()) {
+                    record_artifact_finding(
+                        failures,
+                        path,
+                        &format!(
+                            "required-artifact ancestor `{ancestor_id}` if must match its canonical lane admission, including its configured absence"
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn required_artifact_ancestor_ids(
+    profiles: &[config::CheckProfileSection],
+    profile_id: &str,
+) -> Result<BTreeSet<String>, String> {
+    fn visit(
+        profiles: &[config::CheckProfileSection],
+        profile_id: &str,
+        active: &mut BTreeSet<String>,
+        visited: &mut BTreeSet<String>,
+        ancestors: &mut BTreeSet<String>,
+    ) -> Result<(), String> {
+        if active.contains(profile_id) {
+            return Err(format!("dependency cycle includes `{profile_id}`"));
+        }
+        if visited.contains(profile_id) {
+            return Ok(());
+        }
+        let profile = profiles
+            .iter()
+            .find(|profile| profile.id() == Some(profile_id))
+            .ok_or_else(|| {
+                format!("dependency `{profile_id}` is not a configured check profile")
+            })?;
+        active.insert(profile_id.to_owned());
+        for dependency in profile.needs().unwrap_or_default() {
+            ancestors.insert(dependency.clone());
+            visit(profiles, dependency, active, visited, ancestors)?;
+        }
+        active.remove(profile_id);
+        visited.insert(profile_id.to_owned());
+        Ok(())
+    }
+
+    let mut active = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut ancestors = BTreeSet::new();
+    visit(
+        profiles,
+        profile_id,
+        &mut active,
+        &mut visited,
+        &mut ancestors,
+    )?;
+    ancestors.remove(profile_id);
+    Ok(ancestors)
+}
+
+fn audit_required_artifact_consumers(
+    workflows: &[(PathBuf, Value)],
+    profiles: &[config::CheckProfileSection],
+    required_ids: &BTreeSet<String>,
+    generation: &config::RepoGenerationConfig,
+    rendered_workflows: &[(PathBuf, Value)],
+    velnor_policy: &VelnorPolicyContract,
+    failures: &mut PolicyFindings,
+) {
+    for consumer in profiles {
+        let Some(consumer_id) = consumer.id() else {
+            continue;
+        };
+        let Some(dependencies) = consumer.needs() else {
+            continue;
+        };
+        let expected_consumers = workflow_job_instances(rendered_workflows, consumer_id);
+        for (path, expected_job) in expected_consumers {
+            let expected_needs = expected_job
+                .as_mapping()
+                .and_then(|job| mapping_value(job, "needs"))
+                .and_then(Value::as_sequence)
+                .and_then(|needs| {
+                    needs
+                        .iter()
+                        .map(|need| need.as_str().map(str::to_owned))
+                        .collect::<Option<Vec<_>>>()
+                });
+            let selected_required_dependencies = dependencies
+                .iter()
+                .filter(|dependency| {
+                    required_ids.contains(*dependency)
+                        && workflow_job_instances(rendered_workflows, dependency)
+                            .iter()
+                            .any(|(producer_path, _)| producer_path == &path)
+                })
+                .collect::<Vec<_>>();
+            if selected_required_dependencies.is_empty() {
+                continue;
+            }
+            if !selected_required_dependencies.iter().all(|dependency| {
+                expected_needs
+                    .as_ref()
+                    .is_some_and(|needs| needs.contains(&format!("verify-{dependency}-artifacts")))
+            }) {
+                record_artifact_finding(
+                    failures,
+                    &path,
+                    &format!(
+                        "protected S1 renderer consumer `{consumer_id}` must wait for every selected required-artifact verifier"
+                    ),
+                );
+            }
+            let matching_consumers = workflow_job_instances(workflows, consumer_id)
+                .into_iter()
+                .filter(|(candidate_path, _)| candidate_path == &path)
+                .collect::<Vec<_>>();
+            if matching_consumers.len() != 1 {
+                record_artifact_finding(
+                    failures,
+                    &path,
+                    &format!(
+                        "consumer profile `{consumer_id}` must wait for its required-artifact verifier in this workflow"
+                    ),
+                );
+                continue;
+            }
+            let (path, job) = &matching_consumers[0];
+            let actual_needs = job
+                .as_mapping()
+                .and_then(|job| mapping_value(job, "needs"))
+                .and_then(Value::as_sequence)
+                .and_then(|needs| {
+                    needs
+                        .iter()
+                        .map(|need| need.as_str().map(str::to_owned))
+                        .collect::<Option<Vec<_>>>()
+                });
+            if actual_needs != expected_needs {
+                record_artifact_finding(
+                    failures,
+                    &path,
+                    &format!(
+                        "consumer profile `{consumer_id}` needs must match its protected-renderer dependencies"
+                    ),
+                );
+            }
+            if !profile_continue_on_error_matches(job, consumer) {
+                record_artifact_finding(
+                    failures,
+                    path,
+                    &format!(
+                        "consumer profile `{consumer_id}` continue-on-error must match its configured advisory status"
+                    ),
+                );
+            }
+            if let Err(message) =
+                profile_runner_selector_error(job, consumer, path, generation, velnor_policy)
+            {
+                record_artifact_finding(
+                    failures,
+                    path,
+                    &format!(
+                        "consumer profile `{consumer_id}` runs-on must match its configured profile selector: {message}"
+                    ),
+                );
+            }
+            let expected_admission = profile_admission_expression(
+                generation,
+                consumer_id,
+                consumer.runner().unwrap_or("github"),
+                path,
+                velnor_policy,
+            );
+            let expected_admission = match expected_admission {
+                Ok(admission) => admission,
+                Err(message) => {
+                    record_artifact_finding(
+                        failures,
+                        path,
+                        &format!(
+                            "consumer profile `{consumer_id}` has invalid admission: {message}"
+                        ),
+                    );
+                    continue;
+                }
+            };
+            if !admission_if_matches(job, expected_admission.as_deref()) {
+                record_artifact_finding(
+                    failures,
+                    path,
+                    &format!(
+                        "consumer profile `{consumer_id}` if must preserve verifier success propagation and its canonical lane admission, including its configured absence"
+                    ),
+                );
+            }
+        }
+    }
+}
+
+fn admission_if_matches(job: &Value, admission: Option<&str>) -> bool {
+    let actual_if = job.as_mapping().and_then(|job| mapping_value(job, "if"));
+    let expected_if = admission.map(|admission| format!("${{{{ ({admission}) }}}}"));
+    match (actual_if, expected_if.as_deref()) {
+        (None, None) => true,
+        (Some(Value::String(actual)), Some(expected)) => actual == expected,
+        _ => false,
+    }
+}
+
+fn profile_continue_on_error_matches(job: &Value, profile: &config::CheckProfileSection) -> bool {
+    let actual = job
+        .as_mapping()
+        .and_then(|job| mapping_value(job, "continue-on-error"));
+    if profile.status() == Some("advisory") {
+        actual == Some(&Value::Bool(true))
+    } else {
+        actual.is_none()
+    }
+}
+
+fn steps_have_continue_on_error(steps: &[Value]) -> bool {
+    steps.iter().any(|step| {
+        step.as_mapping()
+            .is_some_and(|step| mapping_value(step, "continue-on-error").is_some())
+    })
+}
+
+fn profile_runner_selector_error(
+    job: &Value,
+    profile: &config::CheckProfileSection,
+    workflow_path: &Path,
+    generation: &config::RepoGenerationConfig,
+    velnor_policy: &VelnorPolicyContract,
+) -> Result<(), String> {
+    let profile_id = profile
+        .id()
+        .ok_or_else(|| "configured profile has no id".to_owned())?;
+    let job_mapping = job
+        .as_mapping()
+        .ok_or_else(|| "generated profile job is not a mapping".to_owned())?;
+    let runner = profile.runner().unwrap_or("github");
+
+    if runner != "macos" && profile_uses_lanes_input(generation, profile_id, workflow_path) {
+        return canonical_lanes_input_profile_runner(
+            Some(profile_id),
+            workflow_path,
+            job_mapping,
+            Some(generation),
+            velnor_policy,
+        )
+        .and_then(|runner| {
+            runner.map(|_| ()).ok_or_else(|| {
+                format!(
+                    "check profile `{profile_id}` is missing its canonical lanes_input selector"
+                )
+            })
+        });
+    }
+
+    let expected_yaml = match runner {
+        "github" => super::s2::yaml_scalar(generation.github_runner().unwrap_or("ubuntu-24.04")),
+        "macos" => super::s2::yaml_scalar(generation.macos_runner().unwrap_or("macos-15")),
+        "velnor" => {
+            let labels = generation
+                .velnor_labels()
+                .filter(|labels| !labels.is_empty())
+                .unwrap_or(&velnor_policy.velnor_labels);
+            if labels.is_empty() {
+                return Err(format!(
+                    "Velnor check profile `{profile_id}` requires configured runner labels"
+                ));
+            }
+            super::velnor_runner(labels, generation.velnor_runner_group())
+        }
+        other => return Err(format!("unsupported profile runner `{other}`")),
+    };
+    let expected: Value = serde_yaml::from_str(&expected_yaml).map_err(|error| {
+        format!("cannot reconstruct check profile `{profile_id}` runs-on: {error}")
+    })?;
+    if mapping_value(job_mapping, "runs-on") != Some(&expected) {
+        return Err(format!(
+            "check profile `{profile_id}` runs-on differs from its configured {runner} selector"
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_required_artifact_producer_binding(
+    profile_id: &str,
+    expected_needs: &[String],
+    job: &Value,
+) -> bool {
+    let expected_outputs =
+        format!("artifact_id: ${{{{ steps.upload_artifact.outputs.artifact-id }}}}\n");
+    let Ok(expected_outputs) = serde_yaml::from_str::<Value>(&expected_outputs) else {
+        return false;
+    };
+    let expected_upload_step = format!(
+        "name: Upload {profile_id} artifacts\nif: success()\nid: upload_artifact\nuses: {}\nwith:\n  name: {profile_id}\n  path: ${{{{ runner.temp }}}}/velnor-required-artifacts-${{{{ github.run_id }}}}-{profile_id}\n  if-no-files-found: error\n",
+        ActionPin::UploadArtifact.reference()
+    );
+    let Ok(expected_upload_step) = serde_yaml::from_str::<Value>(&expected_upload_step) else {
+        return false;
+    };
+    let Some(job) = job.as_mapping() else {
+        return false;
+    };
+    if mapping_value(job, "continue-on-error").is_some() {
+        return false;
+    }
+    if !profile_needs_match(job, expected_needs) {
+        return false;
+    }
+    let Some(steps) = mapping_value(job, "steps").and_then(Value::as_sequence) else {
+        return false;
+    };
+    if steps_have_continue_on_error(steps) {
+        return false;
+    }
+    let upload_id_count = steps
+        .iter()
+        .filter(|step| {
+            step.as_mapping()
+                .and_then(|step| mapping_value(step, "id"))
+                .and_then(Value::as_str)
+                == Some("upload_artifact")
+        })
+        .count();
+    let upload_action_count = steps
+        .iter()
+        .filter(|step| {
+            step.as_mapping()
+                .and_then(|step| mapping_value(step, "uses"))
+                .and_then(Value::as_str)
+                .is_some_and(|uses| uses.starts_with("actions/upload-artifact@"))
+        })
+        .count();
+    let expected_upload_count = steps
+        .iter()
+        .filter(|step| *step == &expected_upload_step)
+        .count();
+    mapping_value(job, "outputs") == Some(&expected_outputs)
+        && upload_id_count == 1
+        && upload_action_count == 1
+        && expected_upload_count == 1
+}
+
+fn rendered_profile_needs(
+    profile: &config::CheckProfileSection,
+    profiles: &[config::CheckProfileSection],
+    required_ids: &BTreeSet<String>,
+    generation: &config::RepoGenerationConfig,
+    workflow_path: &Path,
+) -> Vec<String> {
+    let selected_required_ids = profiles
+        .iter()
+        .filter(|candidate| candidate.artifacts_required())
+        .filter_map(|candidate| candidate.id())
+        .filter(|candidate_id| {
+            profile_selected_in_workflow(generation, candidate_id, workflow_path)
+        })
+        .collect::<BTreeSet<_>>();
+    profile
+        .needs()
+        .unwrap_or_default()
+        .iter()
+        .map(|dependency| {
+            if required_ids.contains(dependency)
+                && selected_required_ids.contains(dependency.as_str())
+            {
+                format!("verify-{dependency}-artifacts")
+            } else {
+                dependency.clone()
+            }
+        })
+        .collect()
+}
+
+fn profile_needs_match(job: &Mapping, expected_needs: &[String]) -> bool {
+    match (mapping_value(job, "needs"), expected_needs.is_empty()) {
+        (None, true) => true,
+        (Some(Value::Sequence(needs)), false) => {
+            needs
+                .iter()
+                .map(|need| need.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+                .as_deref()
+                == Some(expected_needs)
+        }
+        _ => false,
+    }
+}
+
+fn workflow_job_instances(workflows: &[(PathBuf, Value)], job_id: &str) -> Vec<(PathBuf, Value)> {
+    workflows
+        .iter()
+        .filter_map(|(path, workflow)| {
+            let jobs = workflow
+                .as_mapping()
+                .and_then(|workflow| mapping_value(workflow, "jobs"))
+                .and_then(Value::as_mapping)?;
+            mapping_value(jobs, job_id).map(|job| (path.clone(), job.clone()))
+        })
+        .collect()
+}
+
+fn record_artifact_finding(failures: &mut PolicyFindings, path: &Path, message: &str) {
+    failures.record(Rule::Structure, path, message);
+}
+
+fn valid_required_artifact_profile_id(profile_id: &str) -> bool {
+    let mut bytes = profile_id.bytes();
+    bytes
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn valid_required_artifact_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.split('/').all(|component| {
+            let mut bytes = component.bytes();
+            bytes
+                .next()
+                .is_some_and(|first| first.is_ascii_alphanumeric())
+                && !component.ends_with('.')
+                && bytes
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        })
+}
+
+fn artifact_paths_collide(paths: &[String]) -> bool {
+    paths.iter().enumerate().any(|(index, path)| {
+        paths[index + 1..].iter().any(|other| {
+            let path = path.to_ascii_lowercase();
+            let other = other.to_ascii_lowercase();
+            path == other
+                || other
+                    .strip_prefix(&path)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+                || path
+                    .strip_prefix(&other)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        })
+    })
+}
+
+fn profile_admission_expression(
+    generation: &config::RepoGenerationConfig,
+    profile_id: &str,
+    runner: &str,
+    workflow_path: &Path,
+    velnor_policy: &VelnorPolicyContract,
+) -> Result<Option<String>, String> {
+    let lanes_input = profile_uses_lanes_input(generation, profile_id, workflow_path);
+    if runner == "macos" {
+        return Ok(None);
+    }
+    if runner != "velnor" && !lanes_input {
+        return match runner {
+            "github" | "macos" => Ok(None),
+            other => Err(format!("unsupported profile runner `{other}`")),
+        };
+    }
+    let policy = effective_artifact_admission_policy(generation, velnor_policy)?;
+    let admission = canonical_velnor_lane_admission(&policy, lanes_input)?;
+    match runner {
+        "velnor" if lanes_input => Ok(Some(format!(
+            "github.event_name == 'workflow_dispatch' && inputs.lanes == 'github' || ({admission})"
+        ))),
+        "velnor" => Ok(Some(admission)),
+        "github" if lanes_input => Ok(Some(format!(
+            "github.event_name != 'workflow_dispatch' || inputs.lanes != 'velnor' || ({admission})"
+        ))),
+        "github" | "macos" => Ok(None),
+        other => Err(format!("unsupported profile runner `{other}`")),
+    }
+}
+
+fn effective_artifact_admission_policy(
+    generation: &config::RepoGenerationConfig,
+    configured: &VelnorPolicyContract,
+) -> Result<VelnorPolicyContract, String> {
+    let mut policy = configured.clone();
+    if let Some(runners) = generation.runners() {
+        policy.runners = runners.to_owned();
+    }
+    if policy.runners.is_empty() {
+        policy.runners = "github".to_owned();
+    }
+    if let Some(automatic) = generation.automatic() {
+        policy.automatic = automatic.to_owned();
+    } else {
+        let runners =
+            super::parse_runner_mode(&policy.runners).map_err(|error| error.to_string())?;
+        policy.automatic = super::inferred_automatic(runners).as_str().to_owned();
+    }
+    if let Some(default_branch) = generation.default_branch() {
+        policy.default_branch = default_branch.to_owned();
+    }
+    if let Some(pull_request_on_velnor) = generation.pull_request_on_velnor() {
+        policy.pull_request_on_velnor = pull_request_on_velnor;
+    }
+    Ok(policy)
+}
+
+fn profile_uses_lanes_input(
+    generation: &config::RepoGenerationConfig,
+    profile_id: &str,
+    workflow_path: &Path,
+) -> bool {
+    let Some(workflow_file) = workflow_path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    generation.declare().iter().any(|declaration| {
+        declaration.primitive() == "scheduled-checks"
+            && declaration.file() == Some(workflow_file)
+            && declaration
+                .args()
+                .get("lanes_input")
+                .and_then(toml::Value::as_bool)
+                == Some(true)
+            && declaration.args().get("profiles").is_none_or(|profiles| {
+                profiles.as_array().is_some_and(|profiles| {
+                    profiles
+                        .iter()
+                        .any(|profile| profile.as_str() == Some(profile_id))
+                })
+            })
+    })
+}
+
+fn profile_selected_in_workflow(
+    generation: &config::RepoGenerationConfig,
+    profile_id: &str,
+    workflow_path: &Path,
+) -> bool {
+    let Some(workflow_file) = workflow_path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    generation.declare().iter().any(|declaration| {
+        declaration.primitive() == "scheduled-checks"
+            && declaration.file() == Some(workflow_file)
+            && declaration.args().get("profiles").is_none_or(|profiles| {
+                profiles.as_array().is_some_and(|profiles| {
+                    profiles
+                        .iter()
+                        .any(|profile| profile.as_str() == Some(profile_id))
+                })
+            })
+    })
+}
+
+/// Admit the generated dispatch-selected runner expression only for a
+/// configured scheduled-check profile in a workflow that declares
+/// `lanes_input`. The exact expression and its matching admission gate are
+/// reconstructed from the candidate's validated config before replacing the
+/// expression with its hosted leg for the ordinary runner audit.
+fn canonical_lanes_input_profile_runner(
+    job_id: Option<&str>,
+    workflow_path: &Path,
+    job: &Mapping,
+    generation: Option<&config::RepoGenerationConfig>,
+    velnor_policy: &VelnorPolicyContract,
+) -> Result<Option<String>, String> {
+    let Some(generation) = generation else {
+        return Ok(None);
+    };
+    let Some(job_id) = job_id else {
+        return Ok(None);
+    };
+    let Some(profile) = generation
+        .check_profiles()
+        .iter()
+        .find(|profile| profile.id() == Some(job_id))
+    else {
+        return Ok(None);
+    };
+    if !profile_uses_lanes_input(generation, job_id, workflow_path) {
+        return Ok(None);
+    }
+    let runner = profile.runner().unwrap_or("github");
+    if runner == "macos" {
+        return Ok(None);
+    }
+    if !matches!(runner, "github" | "velnor") {
+        return Err(format!(
+            "lanes_input check profile `{job_id}` has unsupported runner `{runner}`"
+        ));
+    }
+    if generation.velnor_runner_group().is_some() {
+        return Err(format!(
+            "lanes_input check profile `{job_id}` cannot route a configured Velnor runner group"
+        ));
+    }
+    let labels = generation
+        .velnor_labels()
+        .filter(|labels| !labels.is_empty())
+        .unwrap_or(&velnor_policy.velnor_labels);
+    if labels.is_empty() {
+        return Err(format!(
+            "lanes_input check profile `{job_id}` requires configured Velnor labels"
+        ));
+    }
+    let hosted_runner = generation.github_runner().unwrap_or("ubuntu-24.04");
+    let labels_json = super::primitives::lanes_labels_json(labels);
+    let expected_runs_on = match runner {
+        "github" => format!(
+            "${{{{ (github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor') && fromJSON('{labels_json}') || {} }}}}",
+            super::primitives::json_string(hosted_runner)
+        ),
+        "velnor" => format!(
+            "${{{{ (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && {} || fromJSON('{labels_json}') }}}}",
+            super::primitives::json_string(hosted_runner)
+        ),
+        other => {
+            return Err(format!(
+                "lanes_input check profile `{job_id}` has unsupported runner `{other}`"
+            ));
+        }
+    };
+    let expected_admission =
+        profile_admission_expression(generation, job_id, runner, workflow_path, velnor_policy)?
+            .ok_or_else(|| {
+                format!("lanes_input check profile `{job_id}` has no canonical admission gate")
+            })?;
+    let expected_if = format!("${{{{ ({expected_admission}) }}}}");
+    let actual_runs_on = mapping_value(job, "runs-on").and_then(Value::as_str);
+    let actual_if = mapping_value(job, "if").and_then(Value::as_str);
+    if actual_runs_on != Some(expected_runs_on.as_str()) {
+        return Err(format!(
+            "lanes_input check profile `{job_id}` runs-on must match its config-derived lane selector"
+        ));
+    }
+    if actual_if != Some(expected_if.as_str()) {
+        return Err(format!(
+            "lanes_input check profile `{job_id}` if must match its config-derived admission gate"
+        ));
+    }
+    Ok(Some(hosted_runner.to_owned()))
+}
+
+fn canonical_check_profile_admission_gate(
+    job_id: Option<&str>,
+    workflow_path: &Path,
+    job: &Mapping,
+    generation: Option<&config::RepoGenerationConfig>,
+    velnor_policy: &VelnorPolicyContract,
+) -> Result<bool, String> {
+    let Some(generation) = generation else {
+        return Ok(false);
+    };
+    let Some(job_id) = job_id else {
+        return Ok(false);
+    };
+    let profiles = generation.check_profiles();
+    let Some(profile) = profiles.iter().find(|profile| profile.id() == Some(job_id)) else {
+        return Ok(false);
+    };
+    let required_ids = profiles
+        .iter()
+        .filter(|profile| profile.artifacts_required())
+        .filter_map(|profile| profile.id())
+        .collect::<BTreeSet<_>>();
+    let mut is_required_ancestor = false;
+    for required_id in &required_ids {
+        if required_artifact_ancestor_ids(profiles, required_id)?.contains(job_id) {
+            is_required_ancestor = true;
+            break;
+        }
+    }
+    let is_artifact_related = profile.artifacts_required()
+        || profile.needs().is_some_and(|dependencies| {
+            dependencies
+                .iter()
+                .any(|dependency| required_ids.contains(dependency.as_str()))
+        })
+        || is_required_ancestor;
+    if !is_artifact_related {
+        return Ok(false);
+    }
+    let runner = profile.runner().unwrap_or("github");
+    if runner == "velnor" && !profile_uses_lanes_input(generation, job_id, workflow_path) {
+        let labels = generation
+            .velnor_labels()
+            .filter(|labels| !labels.is_empty())
+            .unwrap_or(&velnor_policy.velnor_labels);
+        if labels.is_empty() {
+            return Err(format!(
+                "Velnor check profile `{job_id}` requires configured runner labels"
+            ));
+        }
+        let expected_yaml = super::velnor_runner(labels, generation.velnor_runner_group());
+        let expected_runs_on: Value = serde_yaml::from_str(&expected_yaml).map_err(|error| {
+            format!("cannot reconstruct Velnor runner for check profile `{job_id}`: {error}")
+        })?;
+        if mapping_value(job, "runs-on") != Some(&expected_runs_on) {
+            return Err(format!(
+                "Velnor check profile `{job_id}` runs-on must match its configured labels and group"
+            ));
+        }
+    }
+    let Some(admission) =
+        profile_admission_expression(generation, job_id, runner, workflow_path, velnor_policy)?
+    else {
+        return Ok(false);
+    };
+    let expected = format!("${{{{ ({admission}) }}}}");
+    let actual = mapping_value(job, "if").and_then(Value::as_str);
+    if actual != Some(expected.as_str()) {
+        return Err(format!(
+            "check profile `{job_id}` if must match its config-derived lane admission"
+        ));
+    }
+    Ok(true)
+}
+
+fn canonical_velnor_lane_admission(
+    policy: &VelnorPolicyContract,
+    lanes_input: bool,
+) -> Result<String, String> {
+    if !runtime::valid_branch(&policy.default_branch) {
+        return Err(format!(
+            "invalid default branch `{}`",
+            policy.default_branch
+        ));
+    }
+    let runners = super::parse_runner_mode(&policy.runners).map_err(|error| error.to_string())?;
+    let automatic =
+        super::parse_runner_mode(&policy.automatic).map_err(|error| error.to_string())?;
+    if !matches!(runners, RunnerMode::Velnor | RunnerMode::Both) {
+        return Err(format!(
+            "Velnor admission is required but workflow runners are `{}`",
+            policy.runners
+        ));
+    }
+    let dispatch = if lanes_input {
+        "github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor'".to_owned()
+    } else {
+        velnor_dispatch_expression(matches!(automatic, RunnerMode::Velnor | RunnerMode::Both))
+    };
+    let automatic = matches!(automatic, RunnerMode::Velnor | RunnerMode::Both).then(|| {
+        if policy.pull_request_on_velnor {
+            format!(
+            "github.event_name=='pull_request'&&github.event.pull_request.head.repo.full_name==github.repository||github.event_name=='merge_group'||(github.ref=='refs/heads/{}'&&(github.event_name=='push'||github.event_name=='schedule'))",
+            policy.default_branch
+            )
+        } else {
+            format!(
+            "(github.event_name=='merge_group'||(github.ref=='refs/heads/{}'&&(github.event_name=='push'||github.event_name=='schedule')))" ,
+            policy.default_branch
+            )
+        }
+    });
+    Ok(match automatic {
+        Some(automatic) if policy.pull_request_on_velnor => {
+            format!("{automatic} || ({dispatch})")
+        }
+        Some(automatic) => format!("{automatic}||({dispatch})"),
+        None => dispatch,
+    })
+}
+
+fn velnor_dispatch_expression(include_default: bool) -> String {
+    let choices = if include_default {
+        "github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''"
+    } else {
+        "github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'"
+    };
+    format!("github.event_name == 'workflow_dispatch' && ({choices})")
 }
 
 fn inspect_workflow(
     workflow: &Mapping,
     path: &Path,
     is_policy_entrypoint: bool,
+    generation: Option<&config::RepoGenerationConfig>,
     velnor_policy: &VelnorPolicyContract,
     failures: &mut PolicyFindings,
 ) {
@@ -3459,8 +4834,16 @@ fn inspect_workflow(
         }
         match key {
             "on" => {}
-            "jobs" => inspect_jobs(value, path, velnor_policy, failures),
-            _ => inspect_yaml_value(value, path, None, false, velnor_policy, failures),
+            "jobs" => inspect_jobs(value, path, generation, velnor_policy, failures),
+            _ => inspect_yaml_value(
+                value,
+                path,
+                None,
+                false,
+                generation,
+                velnor_policy,
+                failures,
+            ),
         }
     }
 }
@@ -3560,6 +4943,7 @@ fn toml_bool(value: Option<&toml::Value>, field: &str) -> Result<Option<bool>, G
 #[derive(Clone, Debug, Default)]
 struct VelnorPolicyContract {
     runners: String,
+    automatic: String,
     default_branch: String,
     velnor_labels: Vec<String>,
     velnor_runner_group: Option<String>,
@@ -3600,6 +4984,8 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
     let generation = generation_workflow(root)?;
     if runtime.is_none() && generation.is_none() {
         return Ok(VelnorPolicyContract {
+            runners: "github".to_owned(),
+            automatic: "github".to_owned(),
             default_branch: "main".to_owned(),
             ..VelnorPolicyContract::default()
         });
@@ -3643,6 +5029,12 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
         })
         .unwrap_or_default()
         .to_owned();
+    let automatic = generation_workflow
+        .and_then(|workflow| workflow.get("automatic"))
+        .and_then(toml::Value::as_str)
+        .or_else(|| (!runners.is_empty()).then_some(runners.as_str()))
+        .unwrap_or("github")
+        .to_owned();
     let default_branch = runtime
         .as_ref()
         .and_then(|value| value.get("default_branch"))
@@ -3656,6 +5048,7 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
         .to_owned();
     let policy = VelnorPolicyContract {
         runners,
+        automatic,
         default_branch,
         velnor_labels: labels,
         velnor_runner_group: group,
@@ -3747,6 +5140,7 @@ fn is_generated_velnor_pr_gate(value: &str, default_branch: &str) -> bool {
 fn inspect_jobs(
     value: &Value,
     path: &Path,
+    generation: Option<&config::RepoGenerationConfig>,
     velnor_policy: &VelnorPolicyContract,
     failures: &mut PolicyFindings,
 ) {
@@ -3764,16 +5158,57 @@ fn inspect_jobs(
             );
             continue;
         };
-        let trusted_gate = mapping_value(job, "if")
-            .and_then(Value::as_str)
-            .is_some_and(|condition| has_safe_runner_gate(condition, job, velnor_policy));
+        let (inspected_job, lanes_gate_valid) = match canonical_lanes_input_profile_runner(
+            job_id.as_str(),
+            path,
+            job,
+            generation,
+            velnor_policy,
+        ) {
+            Ok(Some(hosted_runner)) => {
+                let mut inspected = job.clone();
+                inspected.insert("runs-on".to_owned(), Value::String(hosted_runner));
+                (inspected, true)
+            }
+            Ok(None) => (job.clone(), false),
+            Err(message) => {
+                failures.record(Rule::TrustedRunners, path, &message);
+                (job.clone(), false)
+            }
+        };
+        let profile_gate_valid = match canonical_check_profile_admission_gate(
+            job_id.as_str(),
+            path,
+            job,
+            generation,
+            velnor_policy,
+        ) {
+            Ok(valid) => valid,
+            Err(message) => {
+                failures.record(Rule::TrustedRunners, path, &message);
+                false
+            }
+        };
+        let trusted_gate = lanes_gate_valid
+            || profile_gate_valid
+            || mapping_value(job, "if")
+                .and_then(Value::as_str)
+                .is_some_and(|condition| has_safe_runner_gate(condition, job, velnor_policy));
         let matrix = mapping_value(job, "strategy")
             .and_then(Value::as_mapping)
             .and_then(|strategy| mapping_value(strategy, "matrix"))
             .and_then(Value::as_mapping);
         failures.job = Some(job_id.clone());
         audit_job_level_env(job, path, failures);
-        inspect_mapping(job, path, matrix, trusted_gate, velnor_policy, failures);
+        inspect_mapping(
+            &inspected_job,
+            path,
+            matrix,
+            trusted_gate,
+            generation,
+            velnor_policy,
+            failures,
+        );
         failures.job = None;
     }
 }
@@ -3868,16 +5303,33 @@ fn inspect_yaml_value(
     path: &Path,
     matrix: Option<&Mapping>,
     trusted_gate: bool,
+    generation: Option<&config::RepoGenerationConfig>,
     velnor_policy: &VelnorPolicyContract,
     failures: &mut PolicyFindings,
 ) {
     match value {
         Value::Mapping(mapping) => {
-            inspect_mapping(mapping, path, matrix, trusted_gate, velnor_policy, failures);
+            inspect_mapping(
+                mapping,
+                path,
+                matrix,
+                trusted_gate,
+                generation,
+                velnor_policy,
+                failures,
+            );
         }
         Value::Sequence(sequence) => {
             for item in sequence {
-                inspect_yaml_value(item, path, matrix, trusted_gate, velnor_policy, failures);
+                inspect_yaml_value(
+                    item,
+                    path,
+                    matrix,
+                    trusted_gate,
+                    generation,
+                    velnor_policy,
+                    failures,
+                );
             }
         }
         Value::Tagged(tagged) => {
@@ -3886,6 +5338,7 @@ fn inspect_yaml_value(
                 path,
                 matrix,
                 trusted_gate,
+                generation,
                 velnor_policy,
                 failures,
             );
@@ -3899,6 +5352,7 @@ fn inspect_mapping(
     path: &Path,
     matrix: Option<&Mapping>,
     trusted_gate: bool,
+    generation: Option<&config::RepoGenerationConfig>,
     velnor_policy: &VelnorPolicyContract,
     failures: &mut PolicyFindings,
 ) {
@@ -3914,7 +5368,15 @@ fn inspect_mapping(
             }
             "uses" => inspect_uses(value, path, failures),
             "runs-on" => inspect_runner(value, path, matrix, trusted_gate, velnor_policy, failures),
-            _ => inspect_yaml_value(value, path, matrix, trusted_gate, velnor_policy, failures),
+            _ => inspect_yaml_value(
+                value,
+                path,
+                matrix,
+                trusted_gate,
+                generation,
+                velnor_policy,
+                failures,
+            ),
         }
     }
 }

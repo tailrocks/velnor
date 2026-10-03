@@ -1324,57 +1324,131 @@ fn required_artifact_policy_tree(name: &str) -> PathBuf {
 
 fn required_artifact_policy_tree_for_runner(name: &str, runner: &str) -> PathBuf {
     let root = velnor_tree(name, &gated_trusted_job());
+    let consumer_runner = if runner == "velnor" {
+        "runner = \"velnor\"\n"
+    } else {
+        ""
+    };
+    let mut generation_config = format!(
+        "schema = 2\n\n[generator]\nrepository = \"example/consumer\"\n\n[[check_profile]]\nid = \"strict\"\nschedule = \"15 7 * * 1\"\nrunner = \"{runner}\"\ntasks = [\"check-strict\"]\nartifacts_required = true\nartifacts = [\"target/evidence.json\"]\n\n[[check_profile]]\nid = \"consumer\"\n{consumer_runner}schedule = \"15 7 * * 1\"\ntasks = [\"test\"]\nneeds = [\"strict\"]\n\n[[declare]]\nprimitive = \"scheduled-checks\"\nfile = \"ci-scheduled.yml\"\n"
+    );
+    if runner == "velnor" {
+        generation_config.push_str(
+            "\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"velnor-target-mvp\"]\n",
+        );
+    }
+    write(&root.join(GENERATION_CONFIG), &generation_config);
     write(
-        &root.join(GENERATION_CONFIG),
+        &root.join(crate::visibility::VISIBILITY_EVIDENCE_PATH),
         &format!(
-            "schema = 2\n\n[generator]\nrepository = \"example/consumer\"\n\n[[check_profile]]\nid = \"strict\"\nrunner = \"{runner}\"\ntasks = [\"check-strict\"]\nartifacts_required = true\nartifacts = [\"target/evidence.json\"]\n\n[[check_profile]]\nid = \"consumer\"\ntasks = [\"test\"]\nneeds = [\"strict\"]\n"
+            "repository = \"example/consumer\"\nvisibility = \"{}\"\n",
+            if runner == "velnor" {
+                "private"
+            } else {
+                "public"
+            }
         ),
     );
     write(
-        &root.join(crate::visibility::VISIBILITY_EVIDENCE_PATH),
-        "repository = \"example/consumer\"\nvisibility = \"private\"\n",
+        &root.join("mise.toml"),
+        "[tasks.check-strict]\nrun = \"mkdir -p target && printf evidence > target/evidence.json\"\n\n[tasks.test]\nrun = \"true\"\n\n[tasks.prepare]\nrun = \"true\"\n",
     );
-    let profile = CheckProfilePolicy {
-        id: "strict".to_owned(),
-        runner: runner.to_owned(),
-        needs: Vec::new(),
-        artifacts_required: true,
-        artifacts: vec!["target/evidence.json".to_owned()],
-        timeout_minutes: 30,
-        advisory: false,
-    };
-    let consumer_verifier = artifact_verifier_job_id(&profile.id);
-    let mut jobs = Mapping::new();
-    insert_yaml(&mut jobs, "strict", simple_check_job());
-    let automatic_providers = vec!["velnor".to_owned()];
-    insert_yaml(
-        &mut jobs,
-        &consumer_verifier,
-        Value::Mapping(must_some(
-            canonical_artifact_verifier_job(&profile, &automatic_providers),
-            "canonical verifier job",
-        )),
-    );
-    let mut consumer = Mapping::new();
-    insert_yaml(
-        &mut consumer,
-        "needs",
-        Value::Sequence(vec![yaml_string(&consumer_verifier)]),
-    );
-    insert_yaml(
-        &mut consumer,
-        "steps",
-        Value::Sequence(vec![simple_run_step("echo consumer\n")]),
-    );
-    insert_yaml(&mut jobs, "consumer", Value::Mapping(consumer));
-    let mut workflow = Mapping::new();
-    insert_yaml(&mut workflow, "jobs", Value::Mapping(jobs));
-    let content = must(
-        serde_yaml::to_string(&Value::Mapping(workflow)),
-        "serialize strict artifact workflow",
-    );
-    write(&root.join(".github/workflows/ci-scheduled.yml"), &content);
+    write_trusted_scheduled_checks(&root);
     root
+}
+
+fn write_trusted_scheduled_checks(root: &Path) {
+    let (files, _, _) = must(
+        super::trusted_check_profile_render(root),
+        "render trusted scheduled-check fixture",
+    );
+    let relative = Path::new(".github/workflows/ci-scheduled.yml");
+    let content = files
+        .get(relative)
+        .unwrap_or_else(|| panic!("trusted renderer emitted {}", relative.display()));
+    write(&root.join(relative), content);
+}
+
+fn required_artifact_policy_tree_with_prep_dependency(name: &str) -> PathBuf {
+    required_artifact_policy_tree_with_prep_dependency_for_runner(name, "github")
+}
+
+fn required_artifact_policy_tree_with_prep_dependency_for_runner(
+    name: &str,
+    runner: &str,
+) -> PathBuf {
+    let root = required_artifact_policy_tree_for_runner(name, runner);
+    let config_path = root.join(GENERATION_CONFIG);
+    let config = must(fs::read_to_string(&config_path), "read artifact config");
+    let prep_runner = if runner == "velnor" {
+        "runner = \"velnor\"\n"
+    } else {
+        ""
+    };
+    let config = config
+        .replace(
+            "tasks = [\"check-strict\"]\nartifacts_required = true",
+            "tasks = [\"check-strict\"]\nneeds = [\"prep\"]\nartifacts_required = true",
+        )
+        .replace(
+            "\n[[check_profile]]\nid = \"consumer\"",
+            &format!(
+                "\n[[check_profile]]\nid = \"prep\"\n{prep_runner}schedule = \"15 7 * * 1\"\ntasks = [\"prepare\"]\nartifacts = [\"target/prep.log\"]\n\n[[check_profile]]\nid = \"consumer\""
+            ),
+        );
+    assert!(
+        config.contains("needs = [\"prep\"]") && config.contains("id = \"prep\""),
+        "prep dependency fixture config was updated"
+    );
+    write(&config_path, &config);
+    write_trusted_scheduled_checks(&root);
+    root
+}
+
+fn required_artifact_policy_tree_with_bridge_consumer(name: &str) -> PathBuf {
+    let root = required_artifact_policy_tree(name);
+    let config_path = root.join(GENERATION_CONFIG);
+    let config = must(
+        fs::read_to_string(&config_path),
+        "read bridge consumer config",
+    );
+    let config = config.replace(
+        "[[check_profile]]\nid = \"consumer\"\nschedule = \"15 7 * * 1\"\ntasks = [\"test\"]\nneeds = [\"strict\"]",
+        "[[check_profile]]\nid = \"bridge\"\nschedule = \"15 7 * * 1\"\ntasks = [\"prepare\"]\nneeds = [\"strict\"]\n\n[[check_profile]]\nid = \"consumer\"\nschedule = \"15 7 * * 1\"\ntasks = [\"test\"]\nneeds = [\"bridge\"]",
+    );
+    assert!(
+        config.contains("id = \"bridge\"")
+            && config.contains("id = \"consumer\"\nschedule = \"15 7 * * 1\"\ntasks = [\"test\"]\nneeds = [\"bridge\"]"),
+        "bridge fixture config contains producer → bridge → consumer dependency chain"
+    );
+    write(&config_path, &config);
+    write_trusted_scheduled_checks(&root);
+    root
+}
+
+fn required_artifact_policy_tree_with_advisory_prep_dependency(name: &str) -> PathBuf {
+    let root = required_artifact_policy_tree_with_prep_dependency(name);
+    let config_path = root.join(GENERATION_CONFIG);
+    let config = must(
+        fs::read_to_string(&config_path),
+        "read advisory prep config",
+    );
+    let config = config.replace(
+        "id = \"prep\"\nschedule =",
+        "id = \"prep\"\nstatus = \"advisory\"\nschedule =",
+    );
+    assert!(config.contains("id = \"prep\"\nstatus = \"advisory\""));
+    write(&config_path, &config);
+    write_trusted_scheduled_checks(&root);
+    root
+}
+
+fn required_artifact_policy_tree_with_velnor_prep_dependency(name: &str) -> PathBuf {
+    required_artifact_policy_tree_with_prep_dependency_for_runner(name, "velnor")
+}
+
+fn required_artifact_policy_tree_with_velnor_consumer(name: &str) -> PathBuf {
+    required_artifact_policy_tree_for_runner(name, "velnor")
 }
 
 fn simple_check_job() -> Value {
@@ -1395,7 +1469,33 @@ fn simple_run_step(run: &str) -> Value {
 }
 
 fn mutated_required_artifact_policy_tree(name: &str, mutation: &str) -> PathBuf {
-    let root = required_artifact_policy_tree(name);
+    let root = match mutation {
+        value if value.starts_with("consumer-if-") => {
+            required_artifact_policy_tree_with_velnor_consumer(name)
+        }
+        "velnor-producer-if-always" => required_artifact_policy_tree_for_runner(name, "velnor"),
+        "velnor-producer-wrong-selector" => {
+            required_artifact_policy_tree_for_runner(name, "velnor")
+        }
+        "producer-transitive-skipped-prep" => {
+            required_artifact_policy_tree_with_prep_dependency(name)
+        }
+        "transitive-consumer-if-always" => required_artifact_policy_tree_with_bridge_consumer(name),
+        "unconfigured-output-consumer"
+        | "workflow-inherited-env"
+        | "workflow-inherited-permissions"
+        | "workflow-inherited-defaults" => required_artifact_policy_tree(name),
+        "producer-ancestor-runs-on"
+        | "producer-ancestor-continue-on-error"
+        | "producer-ancestor-task-continue-on-error"
+        | "producer-ancestor-task-command"
+        | "producer-ancestor-extra-step"
+        | "producer-ancestor-optional-artifact-tail" => {
+            required_artifact_policy_tree_with_prep_dependency(name)
+        }
+        "macos-producer-runs-on" => required_artifact_policy_tree_for_runner(name, "macos"),
+        _ => required_artifact_policy_tree(name),
+    };
     let workflow_path = root.join(".github/workflows/ci-scheduled.yml");
     let content = must(fs::read_to_string(&workflow_path), "read test workflow");
     let mut workflow: Value = must(serde_yaml::from_str(&content), "parse test workflow");
@@ -1405,18 +1505,18 @@ fn mutated_required_artifact_policy_tree(name: &str, mutation: &str) -> PathBuf 
     let verifier_id = "verify-strict-artifacts";
     match mutation {
         "missing-verifier" => {
-            let removed = jobs.remove(&yaml_string(verifier_id));
+            let removed = jobs.remove(verifier_id);
             assert!(removed.is_some(), "canonical verifier exists");
         }
         "renamed-verifier" => {
             let verifier = jobs
-                .remove(&yaml_string(verifier_id))
+                .remove(verifier_id)
                 .unwrap_or_else(|| panic!("canonical verifier exists"));
-            jobs.insert(yaml_string("verify-renamed-artifacts"), verifier);
+            jobs.insert("verify-renamed-artifacts".to_owned(), verifier);
         }
         "extra-checkout" | "extra-action" | "extra-run" => {
             let verifier = test_mapping_value_mut(
-                jobs.get_mut(&yaml_string(verifier_id))
+                jobs.get_mut(verifier_id)
                     .and_then(Value::as_mapping_mut)
                     .unwrap_or_else(|| panic!("canonical verifier job exists")),
                 "steps",
@@ -1441,7 +1541,7 @@ fn mutated_required_artifact_policy_tree(name: &str, mutation: &str) -> PathBuf 
         }
         "permission-widening" => {
             let verifier = jobs
-                .get_mut(&yaml_string(verifier_id))
+                .get_mut(verifier_id)
                 .and_then(Value::as_mapping_mut)
                 .unwrap_or_else(|| panic!("canonical verifier job exists"));
             let permissions = test_mapping_value_mut(verifier, "permissions")
@@ -1451,14 +1551,14 @@ fn mutated_required_artifact_policy_tree(name: &str, mutation: &str) -> PathBuf 
         }
         "container" => {
             let verifier = jobs
-                .get_mut(&yaml_string(verifier_id))
+                .get_mut(verifier_id)
                 .and_then(Value::as_mapping_mut)
                 .unwrap_or_else(|| panic!("canonical verifier job exists"));
             insert_yaml(verifier, "container", yaml_string("node:latest"));
         }
         "service" => {
             let verifier = jobs
-                .get_mut(&yaml_string(verifier_id))
+                .get_mut(verifier_id)
                 .and_then(Value::as_mapping_mut)
                 .unwrap_or_else(|| panic!("canonical verifier job exists"));
             let mut services = Mapping::new();
@@ -1469,14 +1569,14 @@ fn mutated_required_artifact_policy_tree(name: &str, mutation: &str) -> PathBuf 
         }
         "continue-on-error" => {
             let verifier = jobs
-                .get_mut(&yaml_string(verifier_id))
+                .get_mut(verifier_id)
                 .and_then(Value::as_mapping_mut)
                 .unwrap_or_else(|| panic!("canonical verifier job exists"));
             insert_yaml(verifier, "continue-on-error", Value::Bool(true));
         }
         "altered-artifact-id" => {
             let verifier = jobs
-                .get_mut(&yaml_string(verifier_id))
+                .get_mut(verifier_id)
                 .and_then(Value::as_mapping_mut)
                 .unwrap_or_else(|| panic!("canonical verifier job exists"));
             let steps = test_mapping_value_mut(verifier, "steps")
@@ -1496,14 +1596,21 @@ fn mutated_required_artifact_policy_tree(name: &str, mutation: &str) -> PathBuf 
         }
         "altered-runner" => {
             let verifier = jobs
-                .get_mut(&yaml_string(verifier_id))
+                .get_mut(verifier_id)
                 .and_then(Value::as_mapping_mut)
                 .unwrap_or_else(|| panic!("canonical verifier job exists"));
             insert_yaml(verifier, "runs-on", yaml_string("windows-latest"));
         }
+        "verifier-if-always" => {
+            let verifier = jobs
+                .get_mut(verifier_id)
+                .and_then(Value::as_mapping_mut)
+                .unwrap_or_else(|| panic!("canonical verifier job exists"));
+            insert_yaml(verifier, "if", yaml_string("${{ always() }}"));
+        }
         "altered-guard" => {
             let verifier = jobs
-                .get_mut(&yaml_string(verifier_id))
+                .get_mut(verifier_id)
                 .and_then(Value::as_mapping_mut)
                 .unwrap_or_else(|| panic!("canonical verifier job exists"));
             let steps = test_mapping_value_mut(verifier, "steps")
@@ -1522,9 +1629,171 @@ fn mutated_required_artifact_policy_tree(name: &str, mutation: &str) -> PathBuf 
                 &config.replace("target/evidence.json", "../outside.json"),
             );
         }
+        "windows-trailing-dot-path" => {
+            let config_path = root.join(GENERATION_CONFIG);
+            let config = must(fs::read_to_string(&config_path), "read artifact config");
+            write(
+                &config_path,
+                &config.replace("target/evidence.json", "target/report."),
+            );
+            replace_yaml_strings(&mut workflow, "target/evidence.json", "target/report.");
+        }
+        "producer-output-redirect" => {
+            set_producer_output(jobs, "${{ needs.evil.outputs.artifact_id }}");
+        }
+        "producer-forged-dependency" => {
+            set_producer_needs(jobs, vec![yaml_string("evil")]);
+        }
+        "producer-forged-dependency-output" => {
+            set_producer_needs(jobs, vec![yaml_string("evil")]);
+            set_producer_output(jobs, "${{ needs.evil.outputs.artifact_id }}");
+        }
+        "unconfigured-output-consumer" => {
+            let mut job = simple_check_job()
+                .as_mapping()
+                .cloned()
+                .unwrap_or_else(|| panic!("extra job mapping exists"));
+            insert_yaml(
+                &mut job,
+                "needs",
+                Value::Sequence(vec![yaml_string("strict")]),
+            );
+            let mut step = Mapping::new();
+            insert_yaml(
+                &mut step,
+                "run",
+                yaml_string("echo '${{ needs.strict.outputs.artifact_id }}'"),
+            );
+            insert_yaml(
+                &mut job,
+                "steps",
+                Value::Sequence(vec![Value::Mapping(step)]),
+            );
+            insert_yaml(jobs, "unconfigured-exporter", Value::Mapping(job));
+        }
+        "producer-skipped-dependency" => {
+            let mut optional = simple_check_job();
+            insert_yaml(
+                optional
+                    .as_mapping_mut()
+                    .unwrap_or_else(|| panic!("optional job mapping exists")),
+                "if",
+                yaml_string("${{ false }}"),
+            );
+            insert_yaml(jobs, "optional", optional);
+            set_producer_needs(jobs, vec![yaml_string("optional")]);
+        }
+        "producer-continue-on-error" => {
+            let producer = jobs
+                .get_mut("strict")
+                .and_then(Value::as_mapping_mut)
+                .unwrap_or_else(|| panic!("required-artifact producer job exists"));
+            insert_yaml(producer, "continue-on-error", Value::Bool(true));
+        }
+        "producer-forged-mise-setup" => {
+            let producer = jobs
+                .get_mut("strict")
+                .and_then(Value::as_mapping_mut)
+                .unwrap_or_else(|| panic!("producer job exists"));
+            let steps = test_mapping_value_mut(producer, "steps")
+                .and_then(Value::as_sequence_mut)
+                .unwrap_or_else(|| panic!("producer steps exist"));
+            let mut forged = Mapping::new();
+            insert_yaml(&mut forged, "name", yaml_string("Set up Mise"));
+            insert_yaml(
+                &mut forged,
+                "run",
+                yaml_string(
+                    "mkdir -p /tmp/fake-bin && printf '#!/bin/sh\\nexit 0\\n' > /tmp/fake-bin/mise",
+                ),
+            );
+            steps[1] = Value::Mapping(forged);
+        }
+        "producer-job-bash-env" => {
+            let mut env = Mapping::new();
+            insert_yaml(&mut env, "BASH_ENV", yaml_string("/tmp/attacker.sh"));
+            set_job_field(jobs, "strict", "env", Value::Mapping(env));
+        }
+        "producer-job-container" => {
+            set_job_field(jobs, "strict", "container", yaml_string("node:latest"));
+        }
+        "producer-job-defaults" => {
+            let mut run = Mapping::new();
+            insert_yaml(&mut run, "shell", yaml_string("bash"));
+            let mut defaults = Mapping::new();
+            insert_yaml(&mut defaults, "run", Value::Mapping(run));
+            set_job_field(jobs, "strict", "defaults", Value::Mapping(defaults));
+        }
+        "producer-job-strategy" => {
+            let mut strategy = Mapping::new();
+            insert_yaml(&mut strategy, "fail-fast", Value::Bool(false));
+            set_job_field(jobs, "strict", "strategy", Value::Mapping(strategy));
+        }
+        "producer-upload-id" => {
+            insert_yaml(
+                producer_upload_step(jobs),
+                "id",
+                yaml_string("other_upload"),
+            );
+        }
+        "producer-upload-action" => {
+            insert_yaml(
+                producer_upload_step(jobs),
+                "uses",
+                yaml_string("actions/upload-artifact@v4"),
+            );
+        }
+        "producer-upload-name" => {
+            let upload = producer_upload_step(jobs);
+            let with = test_mapping_value_mut(upload, "with")
+                .and_then(Value::as_mapping_mut)
+                .unwrap_or_else(|| panic!("producer upload inputs exist"));
+            insert_yaml(with, "name", yaml_string("evil"));
+        }
+        "producer-upload-path" => {
+            let upload = producer_upload_step(jobs);
+            let with = test_mapping_value_mut(upload, "with")
+                .and_then(Value::as_mapping_mut)
+                .unwrap_or_else(|| panic!("producer upload inputs exist"));
+            insert_yaml(with, "path", yaml_string("."));
+        }
+        "producer-upload-error-policy" => {
+            let upload = producer_upload_step(jobs);
+            let with = test_mapping_value_mut(upload, "with")
+                .and_then(Value::as_mapping_mut)
+                .unwrap_or_else(|| panic!("producer upload inputs exist"));
+            insert_yaml(with, "if-no-files-found", yaml_string("warn"));
+        }
+        "producer-upload-if" => {
+            insert_yaml(producer_upload_step(jobs), "if", yaml_string("always()"));
+        }
+        "producer-ancestor-optional-artifact-tail" => {
+            let upload = profile_upload_step(jobs, "prep");
+            let with = test_mapping_value_mut(upload, "with")
+                .and_then(Value::as_mapping_mut)
+                .unwrap_or_else(|| panic!("optional ancestor upload inputs exist"));
+            insert_yaml(with, "path", yaml_string("."));
+        }
+        "workflow-inherited-env" => {
+            let mut env = Mapping::new();
+            insert_yaml(&mut env, "BASH_ENV", yaml_string("/tmp/attacker.sh"));
+            insert_yaml(&mut workflow, "env", Value::Mapping(env));
+        }
+        "workflow-inherited-permissions" => {
+            let mut permissions = Mapping::new();
+            insert_yaml(&mut permissions, "contents", yaml_string("write"));
+            insert_yaml(&mut workflow, "permissions", Value::Mapping(permissions));
+        }
+        "workflow-inherited-defaults" => {
+            let mut run = Mapping::new();
+            insert_yaml(&mut run, "working-directory", yaml_string("/tmp"));
+            let mut defaults = Mapping::new();
+            insert_yaml(&mut defaults, "run", Value::Mapping(run));
+            insert_yaml(&mut workflow, "defaults", Value::Mapping(defaults));
+        }
         "consumer-skips-verifier" => {
             let consumer = jobs
-                .get_mut(&yaml_string("consumer"))
+                .get_mut("consumer")
                 .and_then(Value::as_mapping_mut)
                 .unwrap_or_else(|| panic!("consumer job exists"));
             insert_yaml(
@@ -1533,6 +1802,126 @@ fn mutated_required_artifact_policy_tree(name: &str, mutation: &str) -> PathBuf 
                 Value::Sequence(vec![yaml_string("strict")]),
             );
         }
+        "consumer-extra-need" => {
+            let consumer = jobs
+                .get_mut("consumer")
+                .and_then(Value::as_mapping_mut)
+                .unwrap_or_else(|| panic!("consumer job exists"));
+            insert_yaml(
+                consumer,
+                "needs",
+                Value::Sequence(vec![yaml_string(verifier_id), yaml_string("unrelated")]),
+            );
+        }
+        "consumer-task-noop" => {
+            insert_yaml(
+                profile_task_step(jobs, "consumer"),
+                "run",
+                yaml_string("echo noop"),
+            );
+        }
+        "consumer-job-continue-on-error" => {
+            set_job_field(jobs, "consumer", "continue-on-error", Value::Bool(true));
+        }
+        "consumer-step-continue-on-error" => {
+            insert_yaml(
+                profile_task_step(jobs, "consumer"),
+                "continue-on-error",
+                Value::Bool(true),
+            );
+        }
+        "consumer-if-always" => set_consumer_if(jobs, "${{ always() }}"),
+        "transitive-consumer-if-always" => set_consumer_if(jobs, "${{ always() }}"),
+        "consumer-if-failure" => set_consumer_if(jobs, "${{ failure() }}"),
+        "consumer-if-cancelled" => set_consumer_if(jobs, "${{ cancelled() }}"),
+        "consumer-if-not-cancelled" => set_consumer_if(jobs, "${{ !cancelled() }}"),
+        "hosted-consumer-if" => set_consumer_if(jobs, "${{ always() }}"),
+        "producer-if-false" => set_producer_if(jobs, "${{ false }}"),
+        "producer-transitive-skipped-prep" => {
+            let prep = jobs
+                .get_mut("prep")
+                .and_then(Value::as_mapping_mut)
+                .unwrap_or_else(|| panic!("configured prep job exists"));
+            insert_yaml(prep, "if", yaml_string("${{ false }}"));
+        }
+        "producer-ancestor-runs-on" => {
+            set_job_field(jobs, "prep", "runs-on", yaml_string("windows-latest"));
+        }
+        "producer-ancestor-continue-on-error" => {
+            set_job_field(jobs, "prep", "continue-on-error", Value::Bool(true));
+        }
+        "producer-ancestor-task-continue-on-error" => {
+            let task = profile_task_step(jobs, "prep");
+            insert_yaml(task, "run", yaml_string("mkdir -p target && false"));
+            insert_yaml(task, "continue-on-error", Value::Bool(true));
+        }
+        "producer-runs-on-hosted" => {
+            set_producer_runs_on(jobs, "windows-latest");
+        }
+        "producer-runs-on-other-provider" => {
+            set_producer_runs_on(jobs, "velnor-native");
+        }
+        "velnor-producer-wrong-selector" => {
+            set_producer_runs_on(jobs, "velnor-native");
+        }
+        "macos-producer-runs-on" => {
+            set_producer_runs_on(jobs, "ubuntu-24.04");
+        }
+        "consumer-runs-on" => {
+            set_job_field(jobs, "consumer", "runs-on", yaml_string("windows-latest"));
+        }
+        "producer-task-continue-on-error" => {
+            let task = producer_task_step(jobs);
+            insert_yaml(
+                task,
+                "run",
+                yaml_string("mkdir -p target && printf partial > target/evidence.json && false"),
+            );
+            insert_yaml(task, "continue-on-error", Value::Bool(true));
+        }
+        "producer-task-command" => {
+            let task = producer_task_step(jobs);
+            insert_yaml(task, "run", yaml_string("mise run unrelated"));
+        }
+        "producer-task-if-false" => {
+            let task = producer_task_step(jobs);
+            insert_yaml(task, "if", yaml_string("false"));
+        }
+        "producer-extra-task-step" => {
+            let producer = jobs
+                .get_mut("strict")
+                .and_then(Value::as_mapping_mut)
+                .unwrap_or_else(|| panic!("producer job exists"));
+            let steps = test_mapping_value_mut(producer, "steps")
+                .and_then(Value::as_sequence_mut)
+                .unwrap_or_else(|| panic!("producer steps exist"));
+            let insertion = steps.len() - 3;
+            steps.insert(
+                insertion,
+                super::canonical_profile_task_step("unconfigured"),
+            );
+        }
+        "producer-ancestor-task-command" => {
+            let task = profile_task_step(jobs, "prep");
+            insert_yaml(task, "run", yaml_string("mise run unrelated"));
+        }
+        "producer-ancestor-extra-step" => {
+            let prep = jobs
+                .get_mut("prep")
+                .and_then(Value::as_mapping_mut)
+                .unwrap_or_else(|| panic!("prep job exists"));
+            let steps = test_mapping_value_mut(prep, "steps")
+                .and_then(Value::as_sequence_mut)
+                .unwrap_or_else(|| panic!("prep steps exist"));
+            steps.push(super::canonical_profile_task_step("unconfigured"));
+        }
+        "velnor-producer-if-always" => set_producer_if(
+            jobs,
+            &format!(
+                "${{{{ always() && ({}) }}}}",
+                super::super::TRUSTED_EVENT_EXPRESSION
+            ),
+        ),
         _ => panic!("unknown test mutation: {mutation}"),
     }
     let content = must(
@@ -1543,8 +1932,114 @@ fn mutated_required_artifact_policy_tree(name: &str, mutation: &str) -> PathBuf 
     root
 }
 
+fn set_consumer_if(jobs: &mut Mapping, condition: &str) {
+    let consumer = jobs
+        .get_mut("consumer")
+        .and_then(Value::as_mapping_mut)
+        .unwrap_or_else(|| panic!("consumer job exists"));
+    insert_yaml(consumer, "if", yaml_string(condition));
+}
+
+fn set_producer_if(jobs: &mut Mapping, condition: &str) {
+    let producer = jobs
+        .get_mut("strict")
+        .and_then(Value::as_mapping_mut)
+        .unwrap_or_else(|| panic!("required-artifact producer job exists"));
+    insert_yaml(producer, "if", yaml_string(condition));
+}
+
+fn set_job_field(jobs: &mut Mapping, job_id: &str, field: &str, value: Value) {
+    let job = jobs
+        .get_mut(job_id)
+        .and_then(Value::as_mapping_mut)
+        .unwrap_or_else(|| panic!("job `{job_id}` exists"));
+    insert_yaml(job, field, value);
+}
+
+fn set_producer_runs_on(jobs: &mut Mapping, runner: &str) {
+    set_job_field(jobs, "strict", "runs-on", yaml_string(runner));
+}
+
+fn set_producer_output(jobs: &mut Mapping, expression: &str) {
+    let producer = jobs
+        .get_mut("strict")
+        .and_then(Value::as_mapping_mut)
+        .unwrap_or_else(|| panic!("required-artifact producer job exists"));
+    let outputs = test_mapping_value_mut(producer, "outputs")
+        .and_then(Value::as_mapping_mut)
+        .unwrap_or_else(|| panic!("producer outputs exist"));
+    insert_yaml(outputs, "artifact_id", yaml_string(expression));
+}
+
+fn set_producer_needs(jobs: &mut Mapping, needs: Vec<Value>) {
+    let producer = jobs
+        .get_mut("strict")
+        .and_then(Value::as_mapping_mut)
+        .unwrap_or_else(|| panic!("required-artifact producer job exists"));
+    insert_yaml(producer, "needs", Value::Sequence(needs));
+}
+
+fn producer_upload_step(jobs: &mut Mapping) -> &mut Mapping {
+    profile_upload_step(jobs, "strict")
+}
+
+fn profile_upload_step(jobs: &mut Mapping, job_id: &str) -> &mut Mapping {
+    let profile = jobs
+        .get_mut(job_id)
+        .and_then(Value::as_mapping_mut)
+        .unwrap_or_else(|| panic!("profile job `{job_id}` exists"));
+    let steps = test_mapping_value_mut(profile, "steps")
+        .and_then(Value::as_sequence_mut)
+        .unwrap_or_else(|| panic!("profile steps exist"));
+    steps
+        .last_mut()
+        .and_then(Value::as_mapping_mut)
+        .unwrap_or_else(|| panic!("profile artifact upload step exists"))
+}
+
+fn producer_task_step(jobs: &mut Mapping) -> &mut Mapping {
+    profile_task_step(jobs, "strict")
+}
+
+fn profile_task_step(jobs: &mut Mapping, job_id: &str) -> &mut Mapping {
+    let producer = jobs
+        .get_mut(job_id)
+        .and_then(Value::as_mapping_mut)
+        .unwrap_or_else(|| panic!("profile job `{job_id}` exists"));
+    let steps = test_mapping_value_mut(producer, "steps")
+        .and_then(Value::as_sequence_mut)
+        .unwrap_or_else(|| panic!("profile steps exist"));
+    steps
+        .iter_mut()
+        .find(|step| {
+            step.as_mapping()
+                .and_then(|step| test_mapping_value(step, "name"))
+                .and_then(Value::as_str)
+                .is_some_and(|name| name.starts_with("Run "))
+        })
+        .and_then(Value::as_mapping_mut)
+        .unwrap_or_else(|| panic!("profile task step exists"))
+}
+
+fn replace_yaml_strings(value: &mut Value, from: &str, to: &str) {
+    match value {
+        Value::String(string) => *string = string.replace(from, to),
+        Value::Sequence(sequence) => {
+            for child in sequence {
+                replace_yaml_strings(child, from, to);
+            }
+        }
+        Value::Mapping(mapping) => {
+            for child in mapping.values_mut() {
+                replace_yaml_strings(child, from, to);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn test_mapping_value_mut<'a>(mapping: &'a mut Mapping, name: &str) -> Option<&'a mut Value> {
-    mapping.get_mut(&yaml_string(name))
+    mapping.get_mut(name)
 }
 
 #[test]
@@ -1554,6 +2049,54 @@ fn required_artifact_verifiers_are_canonical_and_consumers_wait() {
     assert!(
         audit.required_artifacts.is_empty(),
         "{:?}",
+        audit.required_artifacts
+    );
+    let _ = fs::remove_dir_all(root);
+
+    let root = required_artifact_policy_tree_with_prep_dependency(
+        "required-artifact-policy-canonical-prep-dependency",
+    );
+    let audit = must(audit_workflows(&root), "audit canonical prep dependency");
+    assert!(
+        audit.required_artifacts.is_empty(),
+        "renderer-generated prep gate and needs are admitted: {:?}",
+        audit.required_artifacts
+    );
+    let _ = fs::remove_dir_all(root);
+
+    let root = required_artifact_policy_tree_with_advisory_prep_dependency(
+        "required-artifact-policy-advisory-prep-dependency",
+    );
+    let audit = must(audit_workflows(&root), "audit advisory prep dependency");
+    assert!(
+        audit.required_artifacts.is_empty(),
+        "renderer-generated advisory ancestor keeps its job-level continue-on-error: {:?}",
+        audit.required_artifacts
+    );
+    let _ = fs::remove_dir_all(root);
+
+    let root = required_artifact_policy_tree_with_velnor_prep_dependency(
+        "required-artifact-policy-canonical-velnor-prep-dependency",
+    );
+    let audit = must(
+        audit_workflows(&root),
+        "audit canonical Velnor prep dependency",
+    );
+    assert!(
+        audit.required_artifacts.is_empty(),
+        "renderer-generated Velnor prep admission is admitted: {:?}",
+        audit.required_artifacts
+    );
+    let _ = fs::remove_dir_all(root);
+
+    let root = required_artifact_policy_tree_for_runner(
+        "required-artifact-policy-renderer-velnor-producer",
+        "velnor",
+    );
+    let audit = must(audit_workflows(&root), "audit renderer Velnor producer");
+    assert!(
+        audit.required_artifacts.is_empty(),
+        "renderer-generated Velnor admission is admitted: {:?}",
         audit.required_artifacts
     );
     let _ = fs::remove_dir_all(root);
@@ -1570,9 +2113,54 @@ fn required_artifact_verifiers_are_canonical_and_consumers_wait() {
         "continue-on-error",
         "altered-artifact-id",
         "altered-runner",
+        "verifier-if-always",
         "altered-guard",
         "unsafe-config-path",
+        "windows-trailing-dot-path",
         "consumer-skips-verifier",
+        "consumer-task-noop",
+        "consumer-job-continue-on-error",
+        "consumer-step-continue-on-error",
+        "consumer-extra-need",
+        "consumer-if-always",
+        "consumer-if-failure",
+        "consumer-if-cancelled",
+        "consumer-if-not-cancelled",
+        "hosted-consumer-if",
+        "producer-if-false",
+        "velnor-producer-if-always",
+        "producer-runs-on-hosted",
+        "producer-runs-on-other-provider",
+        "velnor-producer-wrong-selector",
+        "macos-producer-runs-on",
+        "consumer-runs-on",
+        "producer-task-continue-on-error",
+        "producer-forged-mise-setup",
+        "producer-job-bash-env",
+        "producer-job-container",
+        "producer-job-defaults",
+        "producer-job-strategy",
+        "producer-task-command",
+        "producer-task-if-false",
+        "producer-extra-task-step",
+        "producer-output-redirect",
+        "producer-forged-dependency",
+        "producer-forged-dependency-output",
+        "producer-skipped-dependency",
+        "producer-transitive-skipped-prep",
+        "producer-ancestor-runs-on",
+        "producer-ancestor-continue-on-error",
+        "producer-ancestor-task-continue-on-error",
+        "producer-ancestor-task-command",
+        "producer-ancestor-extra-step",
+        "producer-ancestor-optional-artifact-tail",
+        "producer-continue-on-error",
+        "producer-upload-id",
+        "producer-upload-action",
+        "producer-upload-name",
+        "producer-upload-path",
+        "producer-upload-error-policy",
+        "producer-upload-if",
     ] {
         let root = mutated_required_artifact_policy_tree(
             &format!("required-artifact-policy-{mutation}"),
@@ -1583,17 +2171,209 @@ fn required_artifact_verifiers_are_canonical_and_consumers_wait() {
             !audit.required_artifacts.is_empty(),
             "mutation `{mutation}` passed artifact policy"
         );
-        if mutation == "consumer-skips-verifier" {
+        if mutation.starts_with("consumer-if-")
+            || mutation == "hosted-consumer-if"
+            || mutation == "consumer-skips-verifier"
+            || mutation == "consumer-task-noop"
+            || mutation == "consumer-job-continue-on-error"
+            || mutation == "consumer-step-continue-on-error"
+            || mutation == "consumer-runs-on"
+        {
             assert!(
                 audit.required_artifacts.iter().any(|finding| {
-                    finding.contains("consumer") && finding.contains("without waiting")
+                    finding.contains("consumer") && finding.contains("complete scheduled-check job")
                 }),
-                "missing consumer verifier edge should name its failure: {:?}",
+                "consumer mutation should name its renderer mismatch: {:?}",
+                audit.required_artifacts
+            );
+        }
+        if mutation == "verifier-if-always"
+            || mutation == "altered-guard"
+            || mutation == "altered-artifact-id"
+            || mutation == "altered-runner"
+            || mutation == "permission-widening"
+            || mutation == "container"
+            || mutation == "service"
+            || mutation == "continue-on-error"
+            || mutation == "extra-checkout"
+            || mutation == "extra-action"
+            || mutation == "extra-run"
+        {
+            assert!(
+                audit.required_artifacts.iter().any(|finding| {
+                    finding.contains("verifier")
+                        && finding.contains("complete fail-closed artifact-verifier job")
+                }),
+                "verifier mutation should name its renderer mismatch: {:?}",
+                audit.required_artifacts
+            );
+        }
+        if mutation.starts_with("producer-if-")
+            || mutation == "velnor-producer-if-always"
+            || mutation.starts_with("producer-runs-on")
+            || mutation == "velnor-producer-wrong-selector"
+            || mutation == "macos-producer-runs-on"
+            || mutation.starts_with("producer-task-")
+            || mutation.starts_with("producer-forged-")
+            || mutation.starts_with("producer-upload-")
+            || mutation == "producer-output-redirect"
+            || mutation == "producer-skipped-dependency"
+            || mutation == "producer-continue-on-error"
+            || mutation == "producer-forged-mise-setup"
+            || mutation == "producer-job-bash-env"
+            || mutation == "producer-job-container"
+            || mutation == "producer-job-defaults"
+            || mutation == "producer-job-strategy"
+        {
+            assert!(
+                audit.required_artifacts.iter().any(|finding| {
+                    finding.contains("producer profile `strict`")
+                        && finding.contains("complete scheduled-check job")
+                }),
+                "producer mutation should name its renderer mismatch: {:?}",
+                audit.required_artifacts
+            );
+        }
+        if mutation.starts_with("producer-ancestor-") {
+            assert!(
+                audit.required_artifacts.iter().any(|finding| {
+                    finding.contains("ancestor profile `prep`")
+                        && finding.contains("complete scheduled-check job")
+                }),
+                "ancestor mutation should name its renderer mismatch: {:?}",
+                audit.required_artifacts
+            );
+        }
+        if mutation == "producer-transitive-skipped-prep" {
+            assert!(
+                audit.required_artifacts.iter().any(|finding| {
+                    finding.contains("ancestor profile `prep`")
+                        && finding.contains("complete scheduled-check job")
+                }),
+                "skipped configured ancestor should name its failure: {:?}",
+                audit.required_artifacts
+            );
+        }
+        if mutation == "windows-trailing-dot-path" {
+            assert!(
+                audit
+                    .required_artifacts
+                    .iter()
+                    .any(|finding| { finding.contains("unsafe path `target/report.`") }),
+                "trailing-dot path must match config's rejection: {:?}",
                 audit.required_artifacts
             );
         }
         let _ = fs::remove_dir_all(root);
     }
+}
+
+#[test]
+fn required_artifact_gate_covers_transitive_consumers() {
+    let root = required_artifact_policy_tree_with_bridge_consumer(
+        "required-artifact-policy-transitive-consumer-canonical",
+    );
+    let audit = must(
+        audit_workflows(&root),
+        "audit canonical producer-bridge-consumer chain",
+    );
+    assert!(
+        audit.required_artifacts.is_empty(),
+        "renderer-generated transitive consumers preserve verifier gating: {:?}",
+        audit.required_artifacts
+    );
+    let _ = fs::remove_dir_all(root);
+
+    let root = mutated_required_artifact_policy_tree(
+        "required-artifact-policy-transitive-consumer-always",
+        "transitive-consumer-if-always",
+    );
+    let audit = must(
+        audit_workflows(&root),
+        "audit consumer bypass beyond direct verifier consumer",
+    );
+    assert!(
+        audit.required_artifacts.iter().any(|finding| {
+            finding.contains("downstream consumer `consumer`")
+                && finding.contains("complete scheduled-check job")
+        }),
+        "transitive `if: always()` must fail renderer matching: {:?}",
+        audit.required_artifacts
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn required_artifact_job_lookup_ignores_same_ids_in_other_workflows() {
+    let root = required_artifact_policy_tree("required-artifact-policy-reused-job-id");
+    write(
+        &root.join(".github/workflows/ci-unrelated.yml"),
+        "name: Unrelated\non:\n  workflow_dispatch:\njobs:\n  strict:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo unrelated\n",
+    );
+    let audit = must(
+        audit_workflows(&root),
+        "audit unrelated workflow reusing producer job id",
+    );
+    assert!(
+        audit.required_artifacts.is_empty(),
+        "only the renderer-declared workflow may supply the required producer: {:?}",
+        audit.required_artifacts
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn required_artifact_workflow_binds_job_set_and_inherited_controls() {
+    for mutation in [
+        "unconfigured-output-consumer",
+        "workflow-inherited-env",
+        "workflow-inherited-permissions",
+        "workflow-inherited-defaults",
+    ] {
+        let root = mutated_required_artifact_policy_tree(
+            &format!("required-artifact-policy-{mutation}"),
+            mutation,
+        );
+        let audit = must(
+            audit_workflows(&root),
+            "audit modified scheduled-check workflow document",
+        );
+        assert!(
+            audit
+                .required_artifacts
+                .iter()
+                .any(|finding| { finding.contains("complete workflow document") }),
+            "mutation `{mutation}` must violate complete rendered workflow equality: {:?}",
+            audit.required_artifacts
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn velnor_artifact_consumer_keeps_canonical_admission_and_implicit_success() {
+    let root = required_artifact_policy_tree_with_velnor_consumer(
+        "required-artifact-velnor-consumer-canonical",
+    );
+    let audit = must(audit_workflows(&root), "audit Velnor artifact consumer");
+    assert!(
+        audit.required_artifacts.is_empty(),
+        "canonical Velnor admission retains implicit success gating: {:?}",
+        audit.required_artifacts
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn macos_artifact_producer_omits_explicit_admission_condition() {
+    let root = required_artifact_policy_tree_for_runner("required-artifact-macos", "macos");
+    let audit = must(audit_workflows(&root), "audit macOS artifact producer");
+    assert!(
+        audit.required_artifacts.is_empty(),
+        "canonical macOS producer omits `if:` and retains implicit success: {:?}",
+        audit.required_artifacts
+    );
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -1640,7 +2420,7 @@ fn velnor_artifact_verifier_keeps_the_producer_admission_gate() {
         .and_then(Value::as_mapping_mut)
         .unwrap_or_else(|| panic!("workflow jobs mapping exists"));
     let verifier = jobs
-        .get_mut(&yaml_string("verify-strict-artifacts"))
+        .get_mut("verify-strict-artifacts")
         .and_then(Value::as_mapping_mut)
         .unwrap_or_else(|| panic!("Velnor verifier job exists"));
     insert_yaml(
@@ -1658,7 +2438,7 @@ fn velnor_artifact_verifier_keeps_the_producer_admission_gate() {
     write(&workflow_path, &content);
     let audit = must(audit_workflows(&root), "audit altered Velnor verifier");
     assert!(audit.required_artifacts.iter().any(|finding| {
-        finding.contains("canonical fail-closed hosted artifact verifier")
+        finding.contains("complete fail-closed artifact-verifier job")
     }), "the verifier must follow visibility-derived automatic admission rather than runtime drift: {:?}", audit.required_artifacts);
     let _ = fs::remove_dir_all(root);
 }
