@@ -1631,11 +1631,9 @@ fn required_artifact_lanes_findings(name: &str, workflow: &str, runner: &str) ->
     findings
 }
 
-#[test]
-fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
-    let canonical = canonical_required_artifact_workflow();
+fn required_artifact_runner_profile_contracts(canonical: &str) {
     assert!(
-        required_artifact_mutation_findings("required-artifact-canonical", &canonical).is_empty(),
+        required_artifact_mutation_findings("required-artifact-canonical", canonical).is_empty(),
         "canonical verifier was rejected"
     );
     let macos = canonical.replace("ubuntu-24.04", "macos-15");
@@ -1703,7 +1701,9 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
         }),
         "accepted altered static Velnor producer selector: {findings:?}"
     );
+}
 
+fn required_artifact_lanes_input_contract() {
     for (runner, wrong_selector, replacement_selector, runs_on) in [
         (
             "github",
@@ -1801,8 +1801,32 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
         "accepted lanes_input with a runner group: {findings:?}"
     );
     let _ = fs::remove_dir_all(grouped_root);
+}
 
-    let mutations = [
+fn assert_required_artifact_mutation_cases<const N: usize>(
+    canonical: &str,
+    mutations: [(&str, String, &str); N],
+) {
+    for (name, workflow, expected_finding) in mutations {
+        assert_ne!(
+            workflow, canonical,
+            "mutation fixture did not alter generated S1 YAML: {name}"
+        );
+        let findings =
+            required_artifact_mutation_findings(&format!("required-artifact-{name}"), &workflow);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.contains(expected_finding)),
+            "accepted hostile mutation or unrelated rejection: {name}: {findings:?}"
+        );
+    }
+}
+
+fn required_artifact_verifier_job_mutations(canonical: &str) {
+    assert_required_artifact_mutation_cases(
+        canonical,
+        [
         (
             "missing-or-renamed-verifier",
             canonical.replace("verify-producer-artifacts:", "renamed-verifier:"),
@@ -1852,6 +1876,14 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
                 .replace("!= \"github-hosted\"", "!= \"self-hosted\""),
             "verifier job `verify-producer-artifacts` must match its protected S1 renderer output",
         ),
+        ],
+    );
+}
+
+fn required_artifact_producer_upload_mutations(canonical: &str) {
+    assert_required_artifact_mutation_cases(
+        canonical,
+        [
         (
             "producer-skips-artifact-upload",
             canonical.replace(
@@ -1862,7 +1894,7 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
         ),
         (
             "producer-runner-mutation",
-            mutate_required_artifact_workflow(&canonical, |workflow| {
+            mutate_required_artifact_workflow(canonical, |workflow| {
                 required_artifact_job_mut(workflow, "producer").insert(
                     "runs-on".to_owned(),
                     Value::String("ubuntu-22.04".to_owned()),
@@ -1920,6 +1952,14 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
             ),
             "must preserve configured dependencies and bind artifact_id to its canonical pinned upload step",
         ),
+        ],
+    );
+}
+
+fn required_artifact_consumer_job_mutations(canonical: &str) {
+    assert_required_artifact_mutation_cases(
+        canonical,
+        [
         (
             "consumer-skips-verifier",
             canonical.replace("needs: [verify-producer-artifacts]", "needs: [producer]"),
@@ -1965,22 +2005,11 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
             ),
             "if must preserve verifier success propagation",
         ),
-    ];
-    for (name, workflow, expected_finding) in mutations {
-        assert_ne!(
-            workflow, canonical,
-            "mutation fixture did not alter generated S1 YAML: {name}"
-        );
-        let findings =
-            required_artifact_mutation_findings(&format!("required-artifact-{name}"), &workflow);
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.contains(expected_finding)),
-            "accepted hostile mutation or unrelated rejection: {name}: {findings:?}"
-        );
-    }
+        ],
+    );
+}
 
+fn required_artifact_optional_dependency_mutations() {
     let optional_workflow = canonical_required_artifact_optional_dependency_workflow();
     let root = required_artifact_optional_dependency_tree(
         "required-artifact-optional-dependency-canonical",
@@ -2022,11 +2051,12 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
         audit.structure
     );
     let _ = fs::remove_dir_all(root);
+}
 
-    let transitive_workflow = canonical_required_artifact_transitive_workflow();
+fn required_artifact_transitive_canonical_and_prep_skip(transitive_workflow: &str) {
     let root = required_artifact_transitive_tree(
         "required-artifact-transitive-canonical",
-        &transitive_workflow,
+        transitive_workflow,
     );
     let audit = must(
         audit_workflows(&root),
@@ -2039,7 +2069,7 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
     );
     let _ = fs::remove_dir_all(root);
 
-    let prep_skipped = mutate_required_artifact_workflow(&transitive_workflow, |workflow| {
+    let prep_skipped = mutate_required_artifact_workflow(transitive_workflow, |workflow| {
         let prep = required_artifact_job_mut(workflow, "prep");
         prep.insert(
             "if".to_owned(),
@@ -2062,9 +2092,11 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
         audit.structure
     );
     let _ = fs::remove_dir_all(root);
+}
 
+fn required_artifact_transitive_status_mutations(transitive_workflow: &str) {
     let missing_advisory_continue =
-        mutate_required_artifact_workflow(&transitive_workflow, |workflow| {
+        mutate_required_artifact_workflow(transitive_workflow, |workflow| {
             required_artifact_job_mut(workflow, "prep").remove("continue-on-error");
         });
     let root = required_artifact_transitive_tree(
@@ -2087,7 +2119,7 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
     let _ = fs::remove_dir_all(root);
 
     let required_ancestor_continue =
-        mutate_required_artifact_workflow(&transitive_workflow, |workflow| {
+        mutate_required_artifact_workflow(transitive_workflow, |workflow| {
             required_artifact_job_mut(workflow, "build")
                 .insert("continue-on-error".to_owned(), Value::Bool(true));
         });
@@ -2110,7 +2142,7 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
     );
     let _ = fs::remove_dir_all(root);
 
-    let build_step_continue = mutate_required_artifact_workflow(&transitive_workflow, |workflow| {
+    let build_step_continue = mutate_required_artifact_workflow(transitive_workflow, |workflow| {
         required_artifact_step_mut(workflow, "build", "Run build")
             .insert("continue-on-error".to_owned(), Value::Bool(true));
     });
@@ -2131,9 +2163,11 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
         audit.structure
     );
     let _ = fs::remove_dir_all(root);
+}
 
+fn required_artifact_transitive_runner_and_ancestor_mutations(transitive_workflow: &str) {
     let wrong_ancestor_runner =
-        mutate_required_artifact_workflow(&transitive_workflow, |workflow| {
+        mutate_required_artifact_workflow(transitive_workflow, |workflow| {
             required_artifact_job_mut(workflow, "prep").insert(
                 "runs-on".to_owned(),
                 Value::String("ubuntu-22.04".to_owned()),
@@ -2208,7 +2242,7 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
             }),
         ),
     ] {
-        let mutated = mutate_required_artifact_workflow(&transitive_workflow, |workflow| {
+        let mutated = mutate_required_artifact_workflow(transitive_workflow, |workflow| {
             mutate(workflow);
         });
         let findings =
@@ -2222,8 +2256,10 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
             "accepted transitive ancestor {name} mutation: {findings:?}"
         );
     }
+}
 
-    let prep_optional_tail = mutate_required_artifact_workflow(&transitive_workflow, |workflow| {
+fn required_artifact_transitive_optional_artifact_tail(transitive_workflow: &str) {
+    let prep_optional_tail = mutate_required_artifact_workflow(transitive_workflow, |workflow| {
         let prep = required_artifact_job_mut(workflow, "prep");
         let steps = prep
             .get_mut("steps")
@@ -2254,8 +2290,10 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
         }),
         "accepted ancestor optional-artifact tail mutation: {findings:?}"
     );
+}
 
-    let producer_task_command = mutate_required_artifact_workflow(&canonical, |workflow| {
+fn required_artifact_producer_task_mutations(canonical: &str) {
+    let producer_task_command = mutate_required_artifact_workflow(canonical, |workflow| {
         required_artifact_step_mut(workflow, "producer", "Run check").insert(
             "run".to_owned(),
             Value::String("mise run unrelated".to_owned()),
@@ -2274,7 +2312,7 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
         "accepted producer task command mutation: {findings:?}"
     );
 
-    let producer_task_if = mutate_required_artifact_workflow(&canonical, |workflow| {
+    let producer_task_if = mutate_required_artifact_workflow(canonical, |workflow| {
         required_artifact_step_mut(workflow, "producer", "Run check").insert(
             "if".to_owned(),
             Value::String(concat!("$", "{{ false }}").to_owned()),
@@ -2293,7 +2331,7 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
         "accepted producer task condition mutation: {findings:?}"
     );
 
-    let producer_extra_step = mutate_required_artifact_workflow(&canonical, |workflow| {
+    let producer_extra_step = mutate_required_artifact_workflow(canonical, |workflow| {
         let producer = required_artifact_job_mut(workflow, "producer");
         producer
             .get_mut("steps")
@@ -2314,7 +2352,7 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
         "accepted producer extra step: {findings:?}"
     );
 
-    let producer_checkout = mutate_required_artifact_workflow(&canonical, |workflow| {
+    let producer_checkout = mutate_required_artifact_workflow(canonical, |workflow| {
         required_artifact_step_mut(workflow, "producer", "Checkout repository").insert(
             "uses".to_owned(),
             Value::String("actions/checkout@v4".to_owned()),
@@ -2332,8 +2370,10 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
         }),
         "accepted producer checkout mutation: {findings:?}"
     );
+}
 
-    let producer_setup = mutate_required_artifact_workflow(&canonical, |workflow| {
+fn required_artifact_producer_setup_and_staging_mutations(canonical: &str) {
+    let producer_setup = mutate_required_artifact_workflow(canonical, |workflow| {
         required_artifact_step_mut(workflow, "producer", "Set up Mise").insert(
             "run".to_owned(),
             Value::String("echo hostile PATH".to_owned()),
@@ -2352,7 +2392,7 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
         "accepted producer setup mutation: {findings:?}"
     );
 
-    let producer_preflight = mutate_required_artifact_workflow(&canonical, |workflow| {
+    let producer_preflight = mutate_required_artifact_workflow(canonical, |workflow| {
         required_artifact_step_mut(workflow, "producer", "Verify producer artifacts").insert(
             "run".to_owned(),
             Value::String("set -euo pipefail\ntrue".to_owned()),
@@ -2371,7 +2411,7 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
         "accepted producer artifact preflight mutation: {findings:?}"
     );
 
-    let producer_staging = mutate_required_artifact_workflow(&canonical, |workflow| {
+    let producer_staging = mutate_required_artifact_workflow(canonical, |workflow| {
         required_artifact_step_mut(workflow, "producer", "Stage producer artifacts").insert(
             "run".to_owned(),
             Value::String("echo partial stage".to_owned()),
@@ -2389,7 +2429,9 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
         }),
         "accepted producer staging mutation: {findings:?}"
     );
+}
 
+fn required_artifact_producer_job_environment_mutations(canonical: &str) {
     for (name, mutate) in [
         (
             "container",
@@ -2428,7 +2470,7 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
             }),
         ),
     ] {
-        let mutated = mutate_required_artifact_workflow(&canonical, |workflow| {
+        let mutated = mutate_required_artifact_workflow(canonical, |workflow| {
             mutate(required_artifact_job_mut(workflow, "producer"));
         });
         let findings = required_artifact_mutation_findings(
@@ -2444,12 +2486,17 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
             "accepted producer {name} mutation: {findings:?}"
         );
     }
+}
 
+fn required_artifact_transitive_tail_and_consumer_step_mutations(
+    canonical: &str,
+    transitive_workflow: &str,
+) {
     for (name, condition) in [
         ("always", "${{ always() }}"),
         ("failure", "${{ failure() }}"),
     ] {
-        let mutated = mutate_required_artifact_workflow(&transitive_workflow, |workflow| {
+        let mutated = mutate_required_artifact_workflow(transitive_workflow, |workflow| {
             required_artifact_job_mut(workflow, "tail")
                 .insert("if".to_owned(), Value::String(condition.to_owned()));
         });
@@ -2473,7 +2520,7 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
         let _ = fs::remove_dir_all(root);
     }
 
-    let consumer_task_continue = mutate_required_artifact_workflow(&canonical, |workflow| {
+    let consumer_task_continue = mutate_required_artifact_workflow(canonical, |workflow| {
         required_artifact_step_mut(workflow, "consumer", "Run consume")
             .insert("continue-on-error".to_owned(), Value::Bool(true));
     });
@@ -2489,7 +2536,9 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
         }),
         "accepted consumer task continue-on-error: {findings:?}"
     );
+}
 
+fn required_artifact_optional_artifact_profile() {
     let root = required_artifact_tree("required-artifact-optional-artifacts", "");
     let config_path = root.join(GENERATION_CONFIG);
     let generation = must(
@@ -2516,55 +2565,75 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
         "renderer created a verifier for optional artifacts"
     );
     let _ = fs::remove_dir_all(root);
+}
+
+fn assert_required_artifact_workflow_level_mutation(
+    canonical: &str,
+    name: &str,
+    mutate: impl FnOnce(&mut Value),
+) {
+    let mutated = mutate_required_artifact_workflow(canonical, mutate);
+    let findings = required_artifact_mutation_findings(
+        &format!("required-artifact-workflow-{name}"),
+        &mutated,
+    );
+    assert!(
+        findings.iter().any(|finding| {
+            finding.contains(
+                "required-artifact workflow must match its complete protected S1 renderer output",
+            )
+        }),
+        "accepted workflow-level {name} bypass: {findings:?}"
+    );
+}
+
+fn required_artifact_workflow_level_mutations(canonical: &str) {
+    assert_required_artifact_workflow_level_mutation(
+        canonical,
+        "extra-output-consumer",
+        |workflow: &mut Value| {
+            let mapping = workflow
+                .as_mapping_mut()
+                .unwrap_or_else(|| panic!("workflow mapping exists"));
+            let jobs = mapping
+                .get_mut("jobs")
+                .and_then(Value::as_mapping_mut)
+                .unwrap_or_else(|| panic!("workflow jobs exist"));
+            let mut rogue = Mapping::new();
+            rogue.insert(
+                "needs".to_owned(),
+                Value::Sequence(vec![Value::String("producer".to_owned())]),
+            );
+            rogue.insert(
+                "runs-on".to_owned(),
+                Value::String("ubuntu-latest".to_owned()),
+            );
+            let mut outputs = Mapping::new();
+            outputs.insert(
+                "artifact_id".to_owned(),
+                Value::String(concat!("$", "{{ needs.producer.outputs.artifact_id }}").to_owned()),
+            );
+            rogue.insert("outputs".to_owned(), Value::Mapping(outputs));
+            let mut env = Mapping::new();
+            env.insert(
+                "ARTIFACT_ID".to_owned(),
+                Value::String(concat!("$", "{{ needs.producer.outputs.artifact_id }}").to_owned()),
+            );
+            rogue.insert("env".to_owned(), Value::Mapping(env));
+            let mut step = Mapping::new();
+            step.insert(
+                "run".to_owned(),
+                Value::String("echo \"$ARTIFACT_ID\"".to_owned()),
+            );
+            rogue.insert(
+                "steps".to_owned(),
+                Value::Sequence(vec![Value::Mapping(step)]),
+            );
+            jobs.insert("unreviewed-consumer".to_owned(), Value::Mapping(rogue));
+        },
+    );
 
     for (name, mutate) in [
-        (
-            "extra-output-consumer",
-            Box::new(|workflow: &mut Value| {
-                let mapping = workflow
-                    .as_mapping_mut()
-                    .unwrap_or_else(|| panic!("workflow mapping exists"));
-                let jobs = mapping
-                    .get_mut("jobs")
-                    .and_then(Value::as_mapping_mut)
-                    .unwrap_or_else(|| panic!("workflow jobs exist"));
-                let mut rogue = Mapping::new();
-                rogue.insert(
-                    "needs".to_owned(),
-                    Value::Sequence(vec![Value::String("producer".to_owned())]),
-                );
-                rogue.insert(
-                    "runs-on".to_owned(),
-                    Value::String("ubuntu-latest".to_owned()),
-                );
-                let mut outputs = Mapping::new();
-                outputs.insert(
-                    "artifact_id".to_owned(),
-                    Value::String(
-                        concat!("$", "{{ needs.producer.outputs.artifact_id }}").to_owned(),
-                    ),
-                );
-                rogue.insert("outputs".to_owned(), Value::Mapping(outputs));
-                let mut env = Mapping::new();
-                env.insert(
-                    "ARTIFACT_ID".to_owned(),
-                    Value::String(
-                        concat!("$", "{{ needs.producer.outputs.artifact_id }}").to_owned(),
-                    ),
-                );
-                rogue.insert("env".to_owned(), Value::Mapping(env));
-                let mut step = Mapping::new();
-                step.insert(
-                    "run".to_owned(),
-                    Value::String("echo \"$ARTIFACT_ID\"".to_owned()),
-                );
-                rogue.insert(
-                    "steps".to_owned(),
-                    Value::Sequence(vec![Value::Mapping(step)]),
-                );
-                jobs.insert("unreviewed-consumer".to_owned(), Value::Mapping(rogue));
-            }) as Box<dyn Fn(&mut Value)>,
-        ),
         (
             "workflow-env",
             Box::new(|workflow: &mut Value| {
@@ -2604,21 +2673,11 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
             }),
         ),
     ] {
-        let mutated = mutate_required_artifact_workflow(&canonical, |workflow| {
-            mutate(workflow);
-        });
-        let findings = required_artifact_mutation_findings(
-            &format!("required-artifact-workflow-{name}"),
-            &mutated,
-        );
-        assert!(
-            findings.iter().any(|finding| {
-                finding.contains("required-artifact workflow must match its complete protected S1 renderer output")
-            }),
-            "accepted workflow-level {name} bypass: {findings:?}"
-        );
+        assert_required_artifact_workflow_level_mutation(canonical, name, mutate);
     }
+}
 
+fn required_artifact_duplicate_key_and_path_mutations(canonical: &str) {
     let duplicate_key = canonical.replace(
         "    name: Verify producer artifacts\n",
         "    name: Verify producer artifacts\n    name: Duplicate verifier name\n",
@@ -2656,6 +2715,30 @@ fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
         audit.structure
     );
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn required_artifact_verifier_contract_rejects_hostile_job_mutations() {
+    let canonical = canonical_required_artifact_workflow();
+    required_artifact_runner_profile_contracts(&canonical);
+    required_artifact_lanes_input_contract();
+    required_artifact_verifier_job_mutations(&canonical);
+    required_artifact_producer_upload_mutations(&canonical);
+    required_artifact_consumer_job_mutations(&canonical);
+    required_artifact_optional_dependency_mutations();
+
+    let transitive_workflow = canonical_required_artifact_transitive_workflow();
+    required_artifact_transitive_canonical_and_prep_skip(&transitive_workflow);
+    required_artifact_transitive_status_mutations(&transitive_workflow);
+    required_artifact_transitive_runner_and_ancestor_mutations(&transitive_workflow);
+    required_artifact_transitive_optional_artifact_tail(&transitive_workflow);
+    required_artifact_producer_task_mutations(&canonical);
+    required_artifact_producer_setup_and_staging_mutations(&canonical);
+    required_artifact_producer_job_environment_mutations(&canonical);
+    required_artifact_transitive_tail_and_consumer_step_mutations(&canonical, &transitive_workflow);
+    required_artifact_optional_artifact_profile();
+    required_artifact_workflow_level_mutations(&canonical);
+    required_artifact_duplicate_key_and_path_mutations(&canonical);
 }
 
 #[test]
