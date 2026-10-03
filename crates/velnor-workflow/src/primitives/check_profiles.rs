@@ -922,7 +922,7 @@ fn render_artifact_step(output: &mut String, profile: &CheckProfileSpec) {
     };
     let path = if profile.artifacts_required {
         format!(
-            "${{ runner.temp }}/velnor-required-artifacts-${{ github.run_id }}-{}",
+            "${{{{ runner.temp }}}}/velnor-required-artifacts-${{{{ github.run_id }}}}-{}",
             profile.id
         )
     } else {
