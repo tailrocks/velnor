@@ -520,7 +520,9 @@ fn secure_directory_entries(directory: &fs::File) -> Result<Vec<SecureDirectoryE
     {
         use std::os::unix::ffi::OsStringExt as _;
 
-        let parent_mount = mount_identity_of_directory(directory)?;
+        let parent_mount_id = match mount_identity_of_directory(directory)? {
+            FilesystemMountIdentity::LinuxMountId(mount_id) => mount_id,
+        };
         // `fdopendir` advances a directory stream cursor. Open `.` relative
         // to the pinned descriptor so every scan gets an independent cursor.
         let scan_directory = open_directory_child(directory, std::ffi::OsStr::new("."))?;
@@ -543,7 +545,7 @@ fn secure_directory_entries(directory: &fs::File) -> Result<Vec<SecureDirectoryE
                 == rustix::fs::FileType::Directory;
             let is_mountpoint = if is_directory {
                 mount_id_at(directory, &name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?
-                    != parent_mount
+                    != parent_mount_id
             } else {
                 false
             };
@@ -1118,10 +1120,9 @@ fn linux_stat_at(parent: &fs::File, name: &std::ffi::OsStr) -> Result<rustix::fs
     )
     .map_err(std::io::Error::from)
     .context("inspect nofollow inventory entry")?;
-    if !stat
-        .stx_mask
-        .contains(rustix::fs::StatxFlags::BASIC_STATS | rustix::fs::StatxFlags::MNT_ID)
-    {
+    let required_mask =
+        (rustix::fs::StatxFlags::BASIC_STATS | rustix::fs::StatxFlags::MNT_ID).bits();
+    if stat.stx_mask & required_mask != required_mask {
         bail!("filesystem omitted required inventory identity or metadata");
     }
     Ok(stat)
@@ -1435,7 +1436,7 @@ fn runtime_root() -> Option<PathBuf> {
 pub fn reclaim_with_liveness(
     work_roots: &[PathBuf],
     liveness: &WorkspaceLiveness,
-    mut docker: impl FnMut(&[String]) -> Result<String>,
+    docker: impl FnMut(&[String]) -> Result<String>,
     mut remove_dir: impl FnMut(&Path) -> Result<()>,
     prune_dangling_images: bool,
 ) -> Result<LeftoverReclaimReport> {
@@ -1671,8 +1672,8 @@ fn remove_dir_all_at(
 ) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        let FilesystemMountIdentity::LinuxMountId(expected_mount_id) = expected_mount else {
-            bail!("refusing leftover cleanup with non-Linux mount identity");
+        let expected_mount_id = match expected_mount {
+            FilesystemMountIdentity::LinuxMountId(mount_id) => mount_id,
         };
         remove_dir_all_with_identity_at(
             parent,
@@ -1731,7 +1732,7 @@ fn create_private_quarantine(
     expected_anchor: &FilesystemDirectoryIdentity,
 ) -> Result<(fs::File, std::ffi::OsString)> {
     use std::os::fd::AsRawFd as _;
-    use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+    use std::os::unix::ffi::OsStringExt as _;
 
     let anchor_identity = directory_identity(anchor)?;
     if &anchor_identity != expected_anchor {
@@ -3127,7 +3128,8 @@ fn mount_id_at(
     )
     .map_err(std::io::Error::from)
     .context("read mount identity for leftover cleanup")?;
-    if !stat.stx_mask.contains(rustix::fs::StatxFlags::MNT_ID) {
+    let required_mask = rustix::fs::StatxFlags::MNT_ID.bits();
+    if stat.stx_mask & required_mask != required_mask {
         bail!("filesystem does not provide mount identity for leftover cleanup");
     }
     Ok(stat.stx_mnt_id)
@@ -3146,10 +3148,8 @@ pub(crate) fn filesystem_mount_id(path: &Path) -> Option<u64> {
                     rustix::fs::StatxFlags::MNT_ID,
                 )
                 .ok()?;
-                return stat
-                    .stx_mask
-                    .contains(rustix::fs::StatxFlags::MNT_ID)
-                    .then_some(stat.stx_mnt_id);
+                let required_mask = rustix::fs::StatxFlags::MNT_ID.bits();
+                return (stat.stx_mask & required_mask == required_mask).then_some(stat.stx_mnt_id);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 probe = probe.parent()?;
