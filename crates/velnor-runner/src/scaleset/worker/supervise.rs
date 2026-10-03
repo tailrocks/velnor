@@ -30,6 +30,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::executor::{CommandResult, CommandRunner};
 use anyhow::{Context, Result};
 
 use super::ownership::WorkerIdentity;
@@ -629,18 +630,30 @@ fn stop_container(runner: &mut dyn WorkerRunner, container: &str, failures: &mut
 }
 
 fn remove_container(runner: &mut dyn WorkerRunner, container: &str, failures: &mut Vec<String>) {
-    match runner.run(
-        "docker",
-        &crate::docker::client::container_remove_args(container, true, false),
-    ) {
-        Ok(output) if output.code == 0 => {}
-        Ok(output) if crate::docker::client::daemon_reports_missing(&output.stderr) => {}
-        Ok(output) => failures.push(format!(
-            "remove {container} exited {}: {}",
-            output.code,
-            output.stderr.trim()
-        )),
+    let result = {
+        let mut command_runner = WorkerRunnerCommandAdapter(runner);
+        crate::docker::Docker::job(&mut command_runner).container_remove(container, true, false)
+    };
+    match result {
+        Ok(_) => {}
+        Err(error) if crate::docker::client::is_not_found(&error) => {}
         Err(error) => failures.push(format!("remove {container}: {error:#}")),
+    }
+}
+
+/// Adapt the worker's intentionally small process seam to the typed Docker
+/// client. The default `is_host_process_runner` stays false, so test/guest
+/// runners keep all Engine queries and mutations on their own command seam.
+struct WorkerRunnerCommandAdapter<'a>(&'a mut dyn WorkerRunner);
+
+impl CommandRunner for WorkerRunnerCommandAdapter<'_> {
+    fn run(&mut self, program: &str, args: &[String]) -> anyhow::Result<CommandResult> {
+        let output = self.0.run(program, args)?;
+        Ok(CommandResult {
+            code: output.code,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
     }
 }
 
@@ -1134,15 +1147,19 @@ mod tests {
     #[test]
     fn cleanup_exports_before_first_deletion_in_order() {
         let state = temp_state("order");
+        let runner_id = "1".repeat(64);
+        let dind_id = "2".repeat(64);
         let mut runner = ScriptRunner::scripted(vec![
             ScriptRunner::ok("runner\n"),  // stop runner
             ScriptRunner::ok("LOGS-R\n"),  // logs runner
             ScriptRunner::ok("LOGS-D\n"),  // logs dind
             ScriptRunner::ok("[{}]\n"),    // inspect runner
             ScriptRunner::ok("[{}]\n"),    // inspect dind
-            ScriptRunner::ok("runner\n"),  // rm runner
+            ScriptRunner::ok(&runner_id),  // resolve runner ID under rm gate
+            ScriptRunner::ok("runner\n"),  // rm runner by exact ID
             ScriptRunner::ok("dind\n"),    // stop dind
-            ScriptRunner::ok("dind\n"),    // rm dind
+            ScriptRunner::ok(&dind_id),    // resolve dind ID under rm gate
+            ScriptRunner::ok("dind\n"),    // rm dind by exact ID
             ScriptRunner::ok("net\n"),     // rm network
             ScriptRunner::ok("work\n"),    // rm workspace volume
             ScriptRunner::ok("dindata\n"), // rm dind data volume
@@ -1151,18 +1168,24 @@ mod tests {
         assert!(report.confirmed(), "{report:?}");
         let verbs: Vec<String> = runner.seen.iter().map(|argv| argv.join(" ")).collect();
         let position = |needle: &str| verbs.iter().position(|v| v.contains(needle)).unwrap();
-        // Order: stop runner < logs < rm runner < stop dind < rm dind < network < volumes.
+        // Order: stop runner < logs < resolve/rm runner < stop dind < resolve/rm dind < network < volumes.
         assert!(position("stop -t 30 -- velnor-scaleset-runner") < position("logs --"));
-        assert!(position("logs --") < position("rm --force -- velnor-scaleset-runner"));
-        assert!(
-            position("rm --force -- velnor-scaleset-runner")
-                < position("stop -t 30 -- velnor-scaleset-dind")
-        );
-        assert!(
-            position("stop -t 30 -- velnor-scaleset-dind")
-                < position("rm --force -- velnor-scaleset-dind")
-        );
-        assert!(position("rm --force -- velnor-scaleset-dind") < position("network rm"));
+        let remove_runner = format!("rm --force -- {runner_id}");
+        let remove_dind = format!("rm --force -- {dind_id}");
+        assert!(position("logs --") < position(&remove_runner));
+        assert!(position(&remove_runner) < position("stop -t 30 -- velnor-scaleset-dind"));
+        assert!(position("stop -t 30 -- velnor-scaleset-dind") < position(&remove_dind));
+        assert!(position(&remove_dind) < position("network rm"));
+        assert!(runner.seen.iter().any(|args| {
+            args.first().is_some_and(|arg| arg == "inspect")
+                && args
+                    .last()
+                    .is_some_and(|arg| arg == "velnor-scaleset-runner")
+        }));
+        assert!(runner.seen.iter().any(|args| {
+            args.first().is_some_and(|arg| arg == "inspect")
+                && args.last().is_some_and(|arg| arg == "velnor-scaleset-dind")
+        }));
         assert!(position("network rm") < position("volume rm"));
         // Evidence landed on disk.
         assert_eq!(
@@ -1174,6 +1197,42 @@ mod tests {
             "LOGS-D\n"
         );
         std::fs::remove_dir_all(&state).unwrap();
+    }
+
+    #[test]
+    fn teardown_reports_remove_failure_and_sends_only_one_exact_id_delete() {
+        let runner_id = "3".repeat(64);
+        let dind_id = "4".repeat(64);
+        let mut runner = ScriptRunner::scripted(vec![
+            ScriptRunner::ok(&runner_id),
+            ScriptRunner::fail(1, "remove refused"),
+            ScriptRunner::ok("dind\n"),
+            ScriptRunner::ok(&dind_id),
+            ScriptRunner::ok("dind\n"),
+            ScriptRunner::ok("net\n"),
+            ScriptRunner::ok("work\n"),
+            ScriptRunner::ok("dindata\n"),
+        ]);
+
+        let failures = teardown_owned_resources(&mut runner, &identity());
+
+        assert!(failures
+            .iter()
+            .any(|failure| failure.contains("remove refused")));
+        let deletes = runner
+            .seen
+            .iter()
+            .filter(|args| args.first().is_some_and(|arg| arg == "rm"))
+            .collect::<Vec<_>>();
+        assert_eq!(deletes.len(), 2, "{:?}", runner.seen);
+        assert_eq!(
+            deletes[0].last().map(String::as_str),
+            Some(runner_id.as_str())
+        );
+        assert_eq!(
+            deletes[1].last().map(String::as_str),
+            Some(dind_id.as_str())
+        );
     }
 
     #[test]

@@ -468,10 +468,13 @@ fn docker_backend_cancel_runs_docker_rm_force() {
     let mut fs = MemoryFs::default();
     let docker = socket_for(ExecutionBackendKind::Docker);
     fs.write(&docker, b"socket").unwrap();
+    let immutable_id = "e".repeat(64);
+    assert_eq!(immutable_id.len(), 64);
+    assert!(immutable_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
     let mut runner = RecordingCommands {
         next: CommandResult {
             code: 0,
-            stdout: "ok".into(),
+            stdout: immutable_id.clone(),
             stderr: String::new(),
         },
         ..RecordingCommands::default()
@@ -493,14 +496,29 @@ fn docker_backend_cancel_runs_docker_rm_force() {
         session.start(&mut world).unwrap();
         session.cancel(&mut world).unwrap();
     }
+    let job_name = "velnor-job-job-cancel-docker";
     assert!(
         runner.calls.iter().any(|(program, args)| {
             program == "docker"
-                && args.contains(&"rm".to_string())
-                && args.contains(&"--force".to_string())
-                && args.iter().any(|arg| arg.contains("job-cancel-docker"))
+                && args.first().is_some_and(|arg| arg == "inspect")
+                && args.get(1).is_some_and(|arg| arg == "--format={{.Id}}")
+                && args.last().is_some_and(|arg| arg == job_name)
         }),
-        "docker cancel must rm --force the job container, got {:?}",
+        "docker cancel must resolve the canonical job name, got {:?}",
+        runner.calls
+    );
+    assert!(
+        runner.calls.iter().any(|(program, args)| {
+            program == "docker"
+                && args
+                    == &vec![
+                        "rm".to_owned(),
+                        "--force".to_owned(),
+                        "--".to_owned(),
+                        immutable_id.clone(),
+                    ]
+        }),
+        "docker cancel must remove the captured immutable ID, got {:?}",
         runner.calls
     );
 }

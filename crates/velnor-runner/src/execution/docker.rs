@@ -218,16 +218,31 @@ impl DockerBackend {
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
         let job = crate::github_adapter::job_container_name_for_id(&isolation.id);
-        let args = ["rm".into(), "--force".into(), job];
+        let args = crate::docker::client::container_remove_args(&job, true, false);
         events.push(ExecutionEvent::HostDockerInvoked(format!(
             "docker {}",
             args.join(" ")
         )));
-        let _ = world.runner.run("docker", &args);
-        events.push(ExecutionEvent::JobCompleted {
-            conclusion: JobConclusion::Cancelled,
-            exit_code: 1,
-        });
+        let removed = crate::docker::Docker::job(&mut *world.runner)
+            .container_remove(&job, true, false)
+            .map_err(|error| {
+                ExecutionError::DockerPreflight(format!(
+                    "Docker cancellation could not remove job container {job}: {error:#}"
+                ))
+            });
+        match removed {
+            Ok(_) => events.push(ExecutionEvent::JobCompleted {
+                conclusion: JobConclusion::Cancelled,
+                exit_code: 1,
+            }),
+            Err(error) => {
+                events.push(ExecutionEvent::Log {
+                    stream: 1,
+                    line: format!("Docker cancellation cleanup failed: {error}"),
+                });
+                return Err(error);
+            }
+        }
         Ok(())
     }
 }
@@ -343,40 +358,42 @@ fn verify_docker_vm_resource_controls(
         )));
     }
 
+    // `docker create` prints the immutable ID. Use that captured identity for
+    // both inspection and deletion when available; the facade resolves any
+    // fallback name under the shared rm gate before it issues an exact-ID rm.
+    let created_id = created.stdout.trim();
+    let selector =
+        if created_id.len() == 64 && created_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            created_id.to_string()
+        } else {
+            name.clone()
+        };
     let inspect_args = vec![
         "inspect".to_owned(),
         "--format".to_owned(),
         "{{.HostConfig.CgroupParent}}\t{{.HostConfig.NanoCpus}}\t{{.HostConfig.Memory}}".to_owned(),
         "--".to_owned(),
-        name.clone(),
+        selector.clone(),
     ];
     let inspected = runner.run("docker", &inspect_args);
-    let removed = runner.run(
-        "docker",
-        &[
-            "rm".to_owned(),
-            "--force".to_owned(),
-            "--".to_owned(),
-            name.clone(),
-        ],
-    );
+    let removed = crate::docker::Docker::job(&mut *runner).container_remove(&selector, true, false);
     let inspected = inspected.map_err(|error| {
-        ExecutionError::DockerPreflight(format!(
-            "macOS Docker VM resource-isolation probe could not inspect its container: {error}"
-        ))
-    })?;
+        format!("macOS Docker VM resource-isolation probe inspect failed: {error}")
+    });
     let removed = removed.map_err(|error| {
-        ExecutionError::DockerPreflight(format!(
-            "macOS Docker VM resource-isolation probe cleanup failed for {name}: {error}"
-        ))
-    })?;
-    if removed.code != 0 {
-        return Err(ExecutionError::DockerPreflight(format!(
-            "macOS Docker VM resource-isolation probe cleanup failed for {name}: exited {}: {}",
-            removed.code,
-            removed.stderr.trim()
-        )));
-    }
+        format!("macOS Docker VM resource-isolation probe cleanup failed for {name}: {error:#}")
+    });
+    let (inspected, _removed) = match (inspected, removed) {
+        (Ok(inspected), Ok(removed)) => (inspected, removed),
+        (Err(inspect_error), Err(remove_error)) => {
+            return Err(ExecutionError::DockerPreflight(format!(
+                "{inspect_error}; {remove_error}"
+            )));
+        }
+        (Err(error), Ok(_)) | (Ok(_), Err(error)) => {
+            return Err(ExecutionError::DockerPreflight(error));
+        }
+    };
     if inspected.code != 0 {
         return Err(ExecutionError::DockerPreflight(format!(
             "macOS Docker VM resource-isolation probe inspect failed: exited {}: {}",
@@ -565,7 +582,15 @@ mod tests {
         let mut fs = MemoryFs::default();
         let docker_socket = PathBuf::from("/var/run/docker.sock");
         fs.write(&docker_socket, b"socket").unwrap();
-        let mut runner = RecordingCommands::default();
+        let id = "a".repeat(64);
+        let mut runner = RecordingCommands {
+            next: crate::executor::CommandResult {
+                code: 0,
+                stdout: id.clone(),
+                stderr: String::new(),
+            },
+            ..RecordingCommands::default()
+        };
         let mut firecracker = RecordingFirecracker::default();
         let kvm = PathBuf::from("/dev/kvm");
         let artifacts = PathBuf::from("/microvm");
@@ -591,13 +616,22 @@ mod tests {
             runner
                 .calls
                 .iter()
-                .find(|(program, _)| program == "docker")
+                .find(|(program, args)| program == "docker"
+                    && args.first().is_some_and(|a| a == "rm"))
                 .map(|(_, args)| args),
             Some(&vec![
                 "rm".to_owned(),
                 "--force".to_owned(),
-                "velnor-job-run_42_unsafe".to_owned(),
+                "--".to_owned(),
+                id,
             ])
         );
+        assert!(runner.calls.iter().any(|(program, args)| {
+            program == "docker"
+                && args.first().is_some_and(|arg| arg == "inspect")
+                && args
+                    .last()
+                    .is_some_and(|arg| arg == "velnor-job-run_42_unsafe")
+        }));
     }
 }
