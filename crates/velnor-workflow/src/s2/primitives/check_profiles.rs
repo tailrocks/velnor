@@ -838,7 +838,7 @@ fn render_artifact_step(output: &mut String, profile: &CheckProfileSpec) {
     };
     let path = if profile.artifacts_required {
         format!(
-            "${{ runner.temp }}/velnor-required-artifacts-${{ github.run_id }}-{}",
+            "${{{{ runner.temp }}}}/velnor-required-artifacts-${{{{ github.run_id }}}}-{}",
             profile.id
         )
     } else {
@@ -1282,7 +1282,7 @@ mod tests {
             workflow.contains(
                 "path: ${{ runner.temp }}/velnor-required-artifacts-${{ github.run_id }}-strict"
             ),
-            "the producer uploads a staged relative tree: {workflow}"
+            "the producer upload path uses exact runner.temp and github.run_id expressions: {workflow}"
         );
         assert!(
             workflow.contains("destination=\"$stage/target/ci-evidence/rollup.json\""),
