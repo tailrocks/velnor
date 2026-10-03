@@ -58,12 +58,12 @@ New to Velnor? Follow this path:
   come from the acquired GitHub payload; Scale Set job credentials come through
   the official runner's GitHub session. Neither admin credential replaces job
   credentials.
-- The control socket exposes reads, events, logs, and telemetry. Lifecycle
-  mutation routes, reconciliation actions, and diagnostics bundles are not
-  currently available through the public control interface.
-- Local query and log projections are bounded and some projections are not
-  rebuilt after reopening the service. Treat GitHub as authoritative for job
-  state and use local events, files, and service logs as operational evidence.
+- The control socket exposes resource reads, events, and telemetry. Production
+  local-log and storage projections return HTTP 501; lifecycle mutation
+  routes, reconciliation actions, and diagnostics bundles are also unavailable.
+- Query resources reload from SQLite when queried. Events are durable; use
+  GitHub for job output and local event, telemetry, and service-log evidence
+  for diagnosis.
 
 ## Documentation map
 

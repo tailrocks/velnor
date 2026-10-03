@@ -36,7 +36,8 @@ starting the daemon:
 
 - systemd, outbound HTTPS, Git, curl, CA certificates, util-linux, and enough
   CPU, memory, and disk for the selected jobs;
-- Docker backend: a running Docker daemon and the required host Docker socket;
+- Docker backend: a running Docker daemon and its host socket for
+  Velnor-managed containers;
 - MicroVM backend: `/dev/kvm`, packaged verified Firecracker artifacts, and a
   working jailer. MicroVM never falls back to Docker.
 
@@ -78,12 +79,19 @@ validation must be `strict`. Organization and enterprise scopes require an
 explicit runner group and a matching desired routing policy.
 
 `VELNOR_TRUST_SCOPE` defaults to `untrusted` and fails closed. A node upgraded
-from a build that defaulted to `trusted` loses the host Docker socket,
+from a build that defaulted to `trusted` loses the host Docker socket mount on
+supported Linux Docker hosts,
 privileged container and service options, host port publishing, and the right
-to run a job carrying user secrets, and its persistent stores move to the
-`untrusted` namespace so the first job rebuilds its caches once. Set
+to run a job carrying user secrets. Its stores now resolve in the `untrusted`
+keyed namespace; old raw-scope paths under `v1` are not reused, so the first
+job may start cold. Set
 `VELNOR_TRUST_SCOPE=trusted` explicitly if that is what the pool is for. See
 [Trust scope](/reference/trust-scope).
+
+On macOS, Velnor still needs the Docker daemon and its host socket to run job
+containers, but it does not pass the raw host socket into job containers.
+Workflows that invoke the host Docker Engine from inside a job need a supported
+Linux host; ordinary non-Docker workflows remain usable on macOS.
 
 Start the services explicitly:
 
@@ -147,23 +155,29 @@ mbx doctor
 
 Its container store is `/var/cache/mbx` (managed targets are below
 `/var/cache/mbx/targets`). With packaged storage, host stores are below
-`/var/cache/velnor/v1/{untrusted,trusted,release}/compiler/mbx/REPOSITORY_ID`;
-an invalid repository ID uses job-ephemeral storage instead. Do not merge trust
-class or repository directories while diagnosing disk use. Mr Boxington's
+`/var/cache/velnor/v1__trust_scope_v1/trust-scope-v1-<digest>/compiler/mbx/REPOSITORY_ID`;
+the digest represents the effective store scope, such as `untrusted`,
+`trusted`, `release`, `pr`, or a configured custom scope for trusted jobs.
+An invalid repository ID uses job-ephemeral storage.
+Do not merge scope or repository directories while diagnosing disk use. Mr Boxington's
 internal 20 GiB cache, 30 GiB target, and 50 GiB combined GC limits remain
 subject to Velnor's host disk accounting. Cargo registry and Git source caches
 are independent and must be inspected separately.
 
-Jobs run unbounded: no per-job CPU/RAM ceiling is imposed anywhere, and
-host capacity is governed only by the `max_jobs=N` permit ledger. A build
-that looks under-parallelized is not being throttled by the daemon —
-check the tool's own parallelism settings and the host's actual load:
+Jobs run unbounded: no per-job CPU/RAM ceiling is imposed anywhere.
+`max_jobs=N` caps concurrent admitted jobs through the host permit ledger.
+Separately, disk pressure blocks admission when a checked filesystem has less
+than 2 GiB available or is at least 90% used; persistent pressure may drain
+and deregister the slot. A build that looks under-parallelized is not being
+CPU/RAM-throttled by the daemon — check the tool's own parallelism settings
+and the host's actual load:
 [Storage and resource budgets](/operations/storage-and-resources).
 
 ## Daily inspection
 
 The read-only control socket exposes resource queries, bounded event watches,
-logs, and telemetry:
+and telemetry. Its production local-log endpoint is unsupported and returns
+501; use GitHub job logs for job output.
 
 ```sh
 velnorctl get hosts
@@ -174,14 +188,13 @@ velnorctl get jobs
 velnorctl get runs
 velnorctl get queue
 velnorctl events --limit 100
-velnorctl logs JOB_UID_OR_RUN_ID --tail 200
 velnorctl telemetry --limit 100
 velnorctl top host
 velnorctl wait instance/default --for Ready --timeout 60
 ```
 
 `top` requires a target: `host`, `instances`, `slots`, `jobs`, or `storage`.
-Logs, events, and telemetry are bounded; expired cursors require a fresh
+Event watches and telemetry are bounded; expired cursors require a fresh
 snapshot. There is no Prometheus endpoint, dashboard, SSE endpoint, or HTTP
 health endpoint.
 
@@ -343,8 +356,9 @@ emergency operations.
 5. If GitHub queues work but Velnor sees no job, verify runner labels, scope,
    runner-group policy, online state, and `velnorctl get runners`/`get queue`.
 6. If Velnor executes but GitHub lacks logs or completion, inspect
-   `velnorctl events`, `velnorctl logs JOB_UID_OR_RUN_ID`, telemetry, and the daemon
-   journal. Completion is retried and local outbox state is retained until
+   `velnorctl events`, telemetry, and the daemon journal. The production
+   `velnorctl logs` endpoint returns unsupported/501; inspect GitHub job logs
+   for job output. Completion is retried and local outbox state is retained until
    remote acknowledgement or terminal observation.
 
 For lifecycle-stage diagnosis, see [Troubleshooting](/troubleshooting).

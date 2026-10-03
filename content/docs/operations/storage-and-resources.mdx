@@ -7,58 +7,109 @@ title: "Storage and resource budgets"
 Velnor derives what a job may use from what the machine actually has, rather
 than letting each tool assume it owns the host. Jobs run unbounded — no
 CPU/RAM ceiling is imposed on any container, daemon, or compiler — and host
-capacity is governed by a single `max_jobs=N` permit ledger. This page
-describes the store catalog, the unbounded execution policy, and how disk
-pressure is handled.
+`max_jobs=N` caps concurrent admitted jobs; disk pressure separately gates
+admission. This page describes the store catalog, the unbounded execution
+policy, and how disk pressure is handled.
 
 > Navigation: [← Observability](/operations/observability) · [Index](/) · [Security and data →](/operations/security-and-data)
 
 ## The store catalog
 
-Every persistent store Velnor owns has exactly one path expression, published
-in one catalog. Writers and both garbage collectors resolve through it, so a
-store cannot be written at one path and reclaimed at another.
+Cache GC classes have one path expression in the shared store catalog. Their
+writers and cache collectors resolve through it, so a store cannot be written
+at one path and reclaimed at another. Stable workspaces live in per-slot work
+roots outside the keyed cache namespace. Git mirrors live in their own class
+under that namespace and appear in `storage status`, but use separate locking
+and ref-retention rules and are not reclaimed by cache GC. Docker storage is
+measured separately where available and is not reclaimed by Velnor's cache
+catalog.
+
+With packaged storage rooted at `/var`, trust-scoped classes use the sibling
+namespace `/var/cache/velnor/v1__trust_scope_v1/trust-scope-v1-<digest>/`.
+Repository and cache-key scoping varies by class; the matrix below gives each
+class's current key, including `actions-cache`'s sanitized repository name.
+The keyed layout does not migrate or reuse existing raw-scope paths under
+`/var/cache/velnor/v1`. The Debian package's guarded `storage purge-legacy`
+step removes supported old roots only for packaged instances still present in
+the configuration. Undiscoverable custom roots, roots for deconfigured
+instances, and unsupported old layouts may remain outside the keyed catalog
+while consuming disk.
 
 | Class | Contents | Reclaimable |
 | --- | --- | --- |
 | `cargo` | Cargo registry cache, registry index, Git database, and `$CARGO_HOME/bin` | yes |
 | `mise` | mise download cache, tool installs, and per-version binaries | yes |
-| `targets` | Host-persistent Cargo target generations | yes |
-| `actions-cache` | `actions/cache` storage | yes |
-| `artifacts` | Local artifact store, bucketed per workflow run | yes |
+| `targets` | Retired host-persistent Cargo target generations; cataloged for cleanup, with no current writer | GC only |
+| `actions-cache` (`caches` root) | Local `actions/cache` entries, Playwright browsers, Bun install cache, npm cache, and Terraform plugin cache | yes |
+| `artifacts` | Local artifact store, bucketed by workflow run ID and attempt | yes |
 | `mbx` | Mr Boxington cache and managed targets | yes |
 | `sccache` | Explicit `sccache-action` store | yes |
-| `gha-cache` | Hosted GitHub Actions cache service storage | yes |
+| `gha-cache` | Velnor's local GitHub Actions cache service data | yes |
 | `docker` | Docker's own image, container, volume, and build storage | no |
 
-Each reclaimable class declares a lease class a running job publishes to mark
-the store live, so a reclaimer cannot delete a class it does not own, and
-cannot delete a store a job is using. `docker` declares none: Velnor never
-reclaims Docker's storage by scope, but host disk accounting must include it,
-because it consumes the same filesystem.
+Running jobs publish `ScopeLease`s for the `actions-cache`, `artifacts`,
+`cargo`, `mise`, `mbx`, and `sccache` classes. The GHA cache service instead
+registers per-job token-to-identity sessions for request routing; these are
+not `ScopeLease`s. The retired `targets` class has no current writer or active
+lease and remains cataloged for cleanup only. `docker` has no Velnor scope
+lease: its storage is measured separately where possible, but is not reclaimed
+by class.
 
-Stores resolve under `VELNOR_STORAGE_ROOT` when set, otherwise through the
-systemd state directory and XDG defaults documented in
-[Configuration](/reference/configuration). The daemon-shared work root holds
-cross-slot warm data; slot-scoped paths (mbx object/target trees, mise
-installs, stable workspaces) lift to that root by construction so affinity
-matters but the catalog stays singular.
+Canonical cache classes resolve below the configured cache root under the
+keyed trust namespace, as documented in
+[Configuration](/reference/configuration). Slot workers share that cache
+root; some classes, such as MBX and mise installs, add per-slot subtrees.
+Work roots are separate: each slot has its own job and stable-workspace paths,
+while artifacts use a shared `<daemon-work-root>/_velnor_artifacts` root with
+per-run buckets. Git mirrors also use separate locking and ref-retention
+paths. Active non-MBX warm Cargo targets live inside per-slot
+`stable-workspaces`, outside the store catalog, with a 30 GiB per-slot cap.
+MBX keeps its own managed targets. The 200 GiB `VELNOR_BUDGET_TARGETS_BYTES`
+default is a GC ceiling for residual entries in the retired `targets` class,
+not a budget for active stable workspaces. The mise collector also scans
+residual `mise/rustup` paths, but jobs set `RUSTUP_HOME=/root/.rustup`, so
+current rustup toolchains are not written to that host store.
 
 | Store | Shared across slots | Scoped by |
 | --- | --- | --- |
-| Cargo registry cache/index + git db | yes (trust scope) | repository id |
-| mise download cache | yes (trust scope) | repository id |
-| mise installs + per-version binaries | per slot | trust + repository |
-| mbx cache + managed targets | per slot | trust + repository |
-| actions-cache / gha-cache emulator | per host | repository + key |
-| artifacts | per run | workflow run id |
+| Cargo registry cache/index + git db | yes | trust scope |
+| Cargo executable store (`$CARGO_HOME/bin`) | yes | trust scope + sanitized `github.repository` slug |
+| mise download cache | yes | trust scope |
+| mise installs | per-slot | trust scope + sanitized `github.repository` slug |
+| mise per-version binaries | yes | trust scope + sanitized `github.repository` slug |
+| `caches` root: `actions/cache`, Playwright, Bun, npm, Terraform plugin cache | yes | trust scope + sanitized `github.repository` slug; `actions/cache` adds its compatibility version and key |
+| mbx cache + managed targets | per-slot subtrees | trust scope + numeric `github.repository_id` |
+| sccache store | yes | trust scope + numeric `github.repository_id` |
+| `gha-cache` service data | per host | repository/ref/trust identity, then cache key |
+| artifacts | per run | `GITHUB_RUN_ID-GITHUB_RUN_ATTEMPT` (`local-1` fallback) |
+| Stable workspace | per-slot | admitted trust scope + numeric `github.repository_id` |
 
-Operator GC for reclaimable Velnor-owned classes is
+The `caches` root is one shared catalog class, accounted and reclaimed under
+the `actions-cache` budget and lease. Cargo registry/Git downloads and mise
+downloads are trust-scoped only; they do not add repository identity.
+
+Routine GC for reclaimable Velnor-owned classes is
 `velnorctl cache --work-dir DIR gc --yes`, typically on a systemd timer after
-baseline measurement with
-`velnorctl cache du`. That reclaims UUID workspaces and orphaned images under
-the 2 GiB admission floor; it does not delete live leases. BuildKit and Docker
-image storage remain operator-managed on trusted docker hosts.
+baseline measurement with `velnorctl cache du`. It may evict eligible,
+unleased Velnor file-store entries under age and budget policy and remove
+leftover workspaces. It leaves BuildKit cache and ordinary Docker images,
+containers, and volumes alone.
+
+On Docker-backend slots, 90% measured usage triggers cleanup of orphaned UUID
+workspaces under work roots on that filesystem; this pass preserves file-store
+and BuildKit caches. Below 2 GiB available, the emergency path may reclaim
+eligible Velnor file-store entries and retry workspace cleanup. Liveness and
+mount checks must pass. After each file-store reclaim, the runner samples free
+space again. BuildKit pruning is considered only while that fresh sample stays
+below the 2 GiB floor, and the pressure check repeats before each candidate
+and prune. It requires an unclaimed current-domain builder, a native Linux
+Docker Engine, and same-filesystem ownership checks.
+Successful pruning stops the daemon but retains the builder and state volume.
+With managed `cleanup: false`, the BuildKit post action releases its claim but
+leaves the daemon running. A later horizon pass may stop the unclaimed daemon;
+stopped builders with no holders are deleted after seven idle days. Pressure
+reclaim does not prune dangling images or reclaim ordinary Docker images,
+containers, or volumes by scope.
 
 ## Unbounded execution and the host permit ledger
 
@@ -71,16 +122,17 @@ again at emission; nested creates through the job lease proxy are
 stripped the same way. `velnor-jobs.slice` exists for identity and
 cleanup ancestry only.
 
-Host capacity is governed instead by a single host-wide `max_jobs=N`
-permit ledger, shared by the native and Scale Set lanes. One top-level
-job holds one permit from acquisition-commit until terminal work and
-owned cleanup are confirmed; a full ledger skips the acquisition and
-the broker redelivers. The only number to tune for completed-work
-throughput is `N` (`--max-jobs` / `VELNOR_MAX_JOBS`, defaulting to the
-daemon's slot count on single-daemon hosts). The first daemon start
-configures `N`; later starts adopt the configured value, so a second
-scope daemon's slot count never rewrites host capacity — an explicit
-`--max-jobs` always wins as deliberate intent.
+Concurrency is capped by one host-wide `max_jobs=N` permit ledger, shared by
+the native and Scale Set lanes. Separately, disk pressure blocks admission
+when a checked filesystem has less than 2 GiB available or is at least 90%
+used, regardless of free permits. One top-level job holds one permit from
+acquisition-commit until terminal work and owned cleanup are confirmed; a
+full ledger skips the acquisition and the broker redelivers. `N` is the
+concurrency knob (`--max-jobs` / `VELNOR_MAX_JOBS`, defaulting to the daemon's
+slot count on single-daemon hosts), not a disk-pressure override. The first
+daemon start configures `N`; later starts adopt the configured value, so a
+second scope daemon's slot count never rewrites it — an explicit `--max-jobs`
+always wins as deliberate intent.
 
 Native offers queue oldest-observed-first across every scope: each broker
 offer is recorded with an immutable first-seen age, redelivery retains
@@ -123,46 +175,76 @@ lanes are independent.
 
 ## Disk pressure
 
-Free space is measured with `statvfs` on the filesystem that actually holds the
-work root, using the unprivileged figure (`f_bavail`), not the root-reserved
-one. Docker's own usage is measured and subtracted from the headroom Velnor is
-willing to promise; when it cannot be measured it is treated as unknown, never
-as zero.
+Free space is measured with `statvfs` on the filesystem that holds the work
+root, using the unprivileged figure (`f_bavail`), not the root-reserved one.
+Admission does not run `docker system df` or separately subtract Docker usage.
+Docker bytes on that same filesystem already reduce `f_bavail`; Docker storage
+on another filesystem is outside this measurement. `velnorctl cache du` can
+report Docker usage separately when it can be measured.
 
-The free-space floor is 2 GiB. Below it, a slot must not admit a job. Pressure
-is handled as a total state machine — every state has a defined successor and
-none of them means "sleep and try again forever":
+Admission pressure begins when a checked filesystem has less than 2 GiB
+available or reaches 90% used. On Docker-backend slots, 90% usage also
+triggers cleanup of orphaned UUID job workspaces, leaving file stores and
+BuildKit caches intact. Below 2 GiB available, the runner targets eligible
+Velnor file-store entries and may prune an unclaimed current-domain BuildKit
+cache.
 
-| State | Meaning | Action |
-| --- | --- | --- |
-| `Healthy` | at or above the floor | admit jobs |
-| `Reclaiming` | below the floor, reclaim not yet attempted this episode | run the bounded reclaimer, re-evaluate |
-| `Degraded` | reclaim ran, still below the floor | refuse admission, with the time left before escalation |
-| `Draining` | the degraded deadline expired | stop accepting work, shed the slot |
-| `Deregistered` | terminal | delete the registration and exit |
+The controller and each worker probe two roots: the effective config root
+(`exec.config_dir`, falling back to the service state directory) and the
+effective work root (configured `work_dir`, otherwise `<config-root>/_work`).
+Exact duplicate paths are checked once. Paths on the same filesystem share one
+sample using the lower available-space reading; each distinct filesystem has
+its own pressure episode. An unmeasurable root blocks slot permits and job
+admission.
 
-The degraded deadline is 10 minutes and the drain deadline a further 5. Any
-non-terminal state returns to `Healthy` the moment space appears; recovery is
-checked before escalation. `Deregistered` is terminal and requires an operator
-or the fleet controller to act.
+An episode is keyed by the canonical service state directory and the Unix
+device identity `unix-device:<st_dev hex>`. This is a device number, not a
+filesystem UUID. Its identity and journal deadline survive worker relaunches
+while the service journal and device identity stay the same; a mount with a
+different device identity gets a separate episode. The first low observation
+persists the start time, the 10-minute degraded deadline (D), the later
+5-minute drain deadline (E = D + 5 minutes), and the episode's one reclaim
+claim. Relaunches reuse both deadlines and do not claim another reclaim. The
+claim is at-most-once: a crash after it commits but before cleanup can skip
+that physical attempt, but cannot reset the deadlines or admit work. Clock
+rollback or a filesystem identity change also fails closed.
 
-Admission is evaluated *before* a job is acquired. Acquiring first and
-discovering afterwards that the host cannot hold the job is what produced
-doomed jobs and the indefinite park.
+While any pressure episode is active, the worker refuses job admission. The
+controller treats active or unmeasurable pressure as unavailable: it stops
+idle waiter children and withholds permit grants and recovery. At D, a still
+low observation enters `Drain`; the worker accepts no new jobs, waits up to
+60 seconds, then rechecks the persisted episode and filesystem. Terminal is
+latched only when a still-low observation arrives at or after E. `Deregister`
+then runs failed-slot cleanup, deleting the registration and clearing local
+slot state.
 
-What a node does today when it is below the floor is measure, run the bounded
-reclaimer, re-measure, and — if it is still below the floor — refuse readiness
-with a `low disk space` reason naming the free and required bytes. That is
-bounded and fail-closed. The escalation past `Degraded` into `Draining` and
-`Deregistered` is defined but is not yet driven from the slot loop, so a host
-that stays full holds a refusing slot instead of shedding it.
+At terminal pressure, the controller revokes pressure launch leases and fences
+desired slot generations. It clears a terminal episode only after every
+configured root has a fresh healthy measurement, every desired slot is
+Fenced, no jobs remain active, and a compare-and-swap matches the episode ID
+and revision. Fenced slots resume through the next-generation path. A
+nonterminal episode can recover on healthy measurements without terminal slot
+fencing. Clock rollback and filesystem identity changes are fail-closed
+exceptions to the D/E timeline.
 
-The reclaimer is bounded: it takes a leader lock so two daemons do not reclaim
-concurrently, targets a byte goal rather than running to completion, skips any
-class a live lease covers, and reports what it freed. It reclaims UUID job
-workspaces and dangling untagged images; warm caches, volumes, builders, and
-shared microVM work roots are protected or skipped. It does not scrub bytes.
+Admission is evaluated *before* a job is acquired, so a slot does not claim a
+job when any checked filesystem cannot support admission.
 
-`velnorctl storage paths` and `velnorctl storage status` report the resolved
-roots and the per-class byte totals. `velnorctl storage explain-pressure` is
-not available.
+File-store reclaim is bounded: it coordinates concurrent reclaim, targets a
+byte goal, skips candidates covered by live leases, and reports what it freed.
+The emergency path can remove eligible Velnor file-store entries, reclaim
+orphaned UUID workspaces on the pressured filesystem when Docker-backend
+liveness checks are available, and consider BuildKit pruning only if a fresh
+free-space sample after file-store reclaim remains below 2 GiB. Pruning
+requires an unclaimed current-domain builder and stops its daemon. It does not
+prune dangling images or delete the BuildKit builder or state volume. It does
+not scrub bytes.
+
+`velnorctl storage paths` lists the configured cache, library, run, and log
+roots. `velnorctl storage status` recursively sizes direct class directories
+under each keyed trust namespace in the cache root, including `git-mirrors`.
+It omits the shared artifact root, host-global GHA cache, Docker/BuildKit, and
+per-slot stable workspaces. `velnorctl cache du` reports cache-GC roots,
+including artifacts and host-global `gha-cache`, plus a separate Docker usage
+estimate when measurable; it omits stable workspaces and Git mirrors.
+`velnorctl storage explain-pressure` is not available.

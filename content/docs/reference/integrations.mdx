@@ -98,26 +98,28 @@ Check these surfaces first, in order:
 1. `velnorctl status --json` — connection, readiness, backend, and alerts.
 2. `velnorctl get jobs` or `velnorctl get runs` — correlate the job with its
    repository, workflow, plan, and job IDs.
-3. `velnorctl events`, `velnorctl logs JOB_ID`, and `velnorctl telemetry` —
-   inspect the local event/log/telemetry records for the same job ID. Also check
-   the instance log files (`daemon.log`, `lifecycle.log`, `registry.log`, and
-   `trace.jsonl`) under the configured log directory.
+3. `velnorctl events` and `velnorctl telemetry` — inspect local lifecycle and
+   telemetry records for the same job ID. The production `velnorctl logs`
+   endpoint returns HTTP 501. Also check the instance log files
+   (`daemon.log`, `lifecycle.log`, `registry.log`, and `trace.jsonl`) under the
+   configured log directory.
 
 Interpret the publishing path as follows:
 
 | Failure | Verify | First local evidence |
 | --- | --- | --- |
-| Results Service step state or live feed is absent | `ResultsServiceUrl`, `FeedStreamUrl`, the endpoint access token, `plan.plan_id`, `job_id`, and the step ID from the acquired job; confirm the service URL is present and reachable. | `velnorctl logs JOB_ID`, `velnorctl events`, and `trace.jsonl`; look for Results Service or WebSocket connection errors. |
-| Distributed Task timeline is stale | `SystemVssConnection` access token plus `plan.plan_id`, `timeline.id`, and the timeline record ID. | `velnorctl logs JOB_ID` and `velnorctl events`; distinguish timeline-update errors from successful local step execution. |
-| Step/job blob or summary upload fails | Confirm the Results Service response supplied a non-empty signed blob URL; preserve its query string when issuing the upload, and check expiry/HTTPS/proxy handling. | `velnorctl logs JOB_ID`, `velnorctl events`, and `trace.jsonl`; compare the upload failure with the job/step ID. |
+| Results Service step state or live feed is absent | `ResultsServiceUrl`, `FeedStreamUrl`, the endpoint access token, `plan.plan_id`, `job_id`, and the step ID from the acquired job; confirm the service URL is present and reachable. | `daemon.log`, `trace.jsonl`, and `velnorctl events`; look for Results Service or WebSocket connection errors. |
+| Distributed Task timeline is stale | `SystemVssConnection` access token plus `plan.plan_id`, `timeline.id`, and the timeline record ID. | `daemon.log` and `velnorctl events`; distinguish timeline-update errors from successful local step execution. |
+| Step/job blob or summary upload fails | Confirm the Results Service response supplied a non-empty signed blob URL; preserve its query string when issuing the upload, and check expiry/HTTPS/proxy handling. | `daemon.log`, `velnorctl events`, and `trace.jsonl`; compare the upload failure with the job/step ID. |
 | GitHub remains stale although local execution passed | Check lease renewal, Results Service/timeline publishing, `completejob`, and the durable completion outbox. | `velnorctl get jobs`, `velnorctl events`, `velnorctl telemetry`, then `daemon.log`/`lifecycle.log`. |
 
 The WebSocket carries live masked lines; signed blob URLs carry uploaded log,
 summary, or artifact content. A live-feed failure can therefore leave the
 final uploaded log intact, and a signed-upload failure can leave live output
-visible. Treat them as separate failures. If a local projection is empty after
-restart, compare durable events with the bounded local log/telemetry views and
-check GitHub's job UI; these views are not an archival record.
+visible. Treat them as separate failures. Query resources reload from SQLite
+after restart; the production local-log endpoint is unsupported. Compare
+durable events, telemetry, runner forensic files, and GitHub's job UI; file
+logs and telemetry are not archival records.
 
 ## Execution backends
 
@@ -193,4 +195,4 @@ For Native runner jobs, distinguish the endpoint that failed:
 | Native GitHub job queued, no Velnor activity | Labels/routing, runner readiness, broker session, and broker poll errors. |
 | Native request received but no execution | Run Service acquisition, Native admission/capability rejection, capacity, and backend preflight. |
 | Native local execution succeeded, GitHub stale | Lease renewal, Results Service/timeline uploads, `completejob`, and the local completion outbox. |
-| Native logs missing only after restart | Local projection rehydration and bounded log retention; compare durable events and GitHub-side logs. |
+| Native logs missing only after restart | Production `velnorctl logs` returns unsupported/501; compare runner forensic files with GitHub-side logs. |

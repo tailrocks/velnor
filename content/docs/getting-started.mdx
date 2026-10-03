@@ -230,14 +230,9 @@ Diagnose in order:
 5. Admission: unsupported actions, trust scope, capabilities, or routing can
    reject a job before checkout or credentials.
 6. Execution: run `velnorctl preflight` and inspect backend-specific errors.
-7. Reporting: compare local events/logs with GitHub job state and completion.
-
-```sh
-velnorctl logs job-1 --tail 200
-```
-
-Replace `job-1` with the exact job UID shown by `velnorctl get jobs --output
-wide`. `velnorctl logs` accepts one concrete job or run subject.
+7. Reporting: compare `velnorctl events` and telemetry with GitHub job state
+   and completion. The production `velnorctl logs` endpoint returns HTTP 501;
+   use GitHub job logs for job output and the daemon journal for service logs.
 
 For the complete lifecycle and recovery behavior, continue to the
 [operator guide](/guides/operator), [observability guide](/operations/observability),

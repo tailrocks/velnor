@@ -16,20 +16,23 @@ path: no host Docker socket, no user secrets, untrusted store namespace.
 ## The default is `untrusted`, and it fails closed
 
 `VELNOR_TRUST_SCOPE` (or `--trust-scope`) defaults to `untrusted`. Absent or
-empty values resolve to `untrusted`. Only the exact value
-`trusted` grants capability; `release` selects the `release` store namespace
-with the same capability as `untrusted`, and any other (custom) value selects
-a store namespace of its own, also with the capability of `untrusted`.
+whitespace-only values resolve to `untrusted`. Capability checks trim the
+value and match `trusted` case-insensitively. Store keys preserve each
+non-empty trimmed value: `release` and other custom labels keep distinct
+namespaces but do not grant trusted capabilities. The namespace key is based
+on the trimmed spelling, so case variants can use separate namespaces even
+when the capability check treats them alike.
 
 ### Breaking change for existing deployments
 
 The default used to be
 `trusted`, and the two binaries disagreed about which value was in force. A
-node upgraded without changing its configuration loses the host Docker socket,
+node upgraded without changing its configuration loses the host Docker socket
+mount on supported Linux Docker hosts,
 privileged container options, privileged service containers, host port
 publishing, and the right to run a job carrying user secrets. Its persistent
-stores also move into the `untrusted` namespace, so the first job after the
-upgrade rebuilds its caches once.
+stores now resolve in the `untrusted` keyed namespace, so the first job may
+start cold because old raw-scope paths are not reused by the keyed layout.
 
 **What an operator must do:** if the pool is meant to run trusted work, set
 `VELNOR_TRUST_SCOPE=trusted` in `/etc/velnor/velnor.env` explicitly and restart
@@ -44,7 +47,7 @@ and a fork or unknown job gets the untrusted column on every pool.
 
 | Capability | untrusted path | trusted pool + trusted job |
 | --- | --- | --- |
-| Host Docker socket mounted into the job | refused | allowed |
+| Host Docker socket mounted into a Docker-backend job | refused | allowed on supported Linux hosts; suppressed on macOS until a VM-reachable per-job lease proxy exists |
 | Privileged job-container options | refused | allowed |
 | Privileged service containers | refused | allowed |
 | Host port publishing | refused | allowed |
@@ -56,42 +59,63 @@ name before any side effect, not silently stripped.
 
 ## Store partitioning
 
-Every executable or build store Velnor persists across jobs is partitioned
-first by the job's admitted scope — the pool ceiling narrowed by the job's
-trust class — and then, where a repository identity applies, by numeric
-GitHub repository ID:
+Canonical trust-scoped cache stores are partitioned by the job's admitted
+scope — the pool ceiling narrowed by the job's trust class — and use a keyed
+sibling root. The repository key is class-specific:
 
 ```text
-<storage root>/cache/velnor/v1/<admitted scope>/<class>[/<repository id>]
+<cache root>__trust_scope_v1/trust-scope-v1-<digest>/<class>/...
 ```
 
-On a `trusted` pool that is `trusted` for same-repo jobs and `untrusted` for
-fork and unknown jobs; on a `release` pool it is `release` and `untrusted`;
-on a custom pool (any other scope value) trusted jobs keep the pool's own
-scope while fork and unknown jobs still run under `untrusted`. The spelling
-is one value threaded through the storage leases, the container mounts, and
-garbage collection, so a custom scope can never lease one namespace and mount
-another.
+For example, the packaged cache root is `/var/cache/velnor/v1`, and its keyed
+namespace is `/var/cache/velnor/v1__trust_scope_v1`. The filesystem component
+is `trust-scope-v1-<digest>`, derived from the normalized scope; it is not the
+raw scope label. The layout does not migrate, reuse, or read prior raw-scope
+directories under `v1`. The Debian package's guarded `storage purge-legacy`
+step removes supported old roots only for packaged instances still present in
+configuration. Undiscoverable custom roots, roots for deconfigured instances,
+and unsupported old layouts may remain outside the keyed catalog, absent from
+current cache reports and GC while still consuming disk.
 
-With the packaged storage root that is `/var/cache/velnor/v1/...`. The
-partitioned classes are the Mr Boxington store (`compiler/mbx`), the sccache
-store (`compiler/sccache`), `$CARGO_HOME/bin`, the mise install and binary
-stores, the Cargo target generation store, and the Playwright browser store.
+On a `trusted` pool, trusted jobs normally use `trusted` and fork or unknown
+jobs use `untrusted`. Same-repository pull-request events on exactly the
+`trusted` pool use the `pr` store scope; their Cargo download store is seeded
+from `trusted` before the container starts. This changes store scope, not the
+job's trust class. On a `release` pool, trusted jobs use `release`; on a custom
+pool they keep that pool's scope. Fork and unknown jobs still use `untrusted`.
+The effective scope determines store paths and mounts. Classes with active
+writers publish matching `ScopeLease`s; the GHA cache service instead uses
+token-bound job identity sessions, and retired `targets` has no active writer.
+
+Among cataloged cache stores, the key types are:
+
+- Cargo registry/Git downloads and mise download cache use trust scope only.
+- `$CARGO_HOME/bin`, mise installs and binaries, and the shared `caches` root
+  (local `actions/cache`, Playwright, Bun, npm, and Terraform plugin caches)
+  use trust scope plus sanitized `github.repository`. `actions/cache` adds its
+  compatibility version and cache key below that repository path.
+- Mr Boxington (`compiler/mbx`) and explicit sccache (`compiler/sccache`) use
+  trust scope plus numeric `github.repository_id`; MBX keeps cache and managed
+  targets in per-slot subtrees.
+
+Active non-MBX Cargo targets live in per-slot `stable-workspaces`, outside the
+store catalog, keyed by admitted scope and numeric repository ID. The
+cataloged `targets` class is retired and has no active writer; it remains for
+cleanup of residual persistent target generations.
 
 Partitioning exists so compiled state, installed toolchains, and anything else
 on a later job's `PATH` cannot cross a trust boundary. It is a cache-reuse
 boundary. It is not encryption, and it is not protection from a compromised
 host.
 
-Daemon-shared stores that hold no executable content — the Cargo registry
-cache, registry index, and Git database — stay warm across scopes in the
-legacy layout, where trust is namespaced below the shared root. In the
-canonical layout the root itself is namespaced by the job's admitted scope,
-so a fork job's download caches are cold there too: isolation first, warmth
-second.
+The Cargo registry cache, registry index, Git database, and mise download
+cache are trust-scoped and shared across slots, but not across trust scopes in
+the canonical layout. Repository identity does not further partition these
+download stores. A fork or unknown job therefore uses a separate download
+store from trusted work.
 
-A missing or invalid repository identity fails closed to a job-ephemeral store
-rather than sharing one.
+For a store that needs repository identity, a missing or invalid value fails
+closed to job-ephemeral storage rather than sharing one.
 
 ## Admission record
 
