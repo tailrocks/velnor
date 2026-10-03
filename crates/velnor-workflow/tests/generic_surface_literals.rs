@@ -88,11 +88,19 @@ const CARGO_TOML: &str = "Cargo.toml";
 const ADMITTED_CARGO_LINE_MARKERS: &[&str] = &["termrock = { git"];
 
 /// The generator's own distribution paths (`tailrocks/velnor/.github/...`) and
-/// the regeneration marker are generator identity, not consumer knowledge. The
+/// repository arguments are generator identity, not consumer knowledge. The
 /// bare slug may appear exactly `BARE_GENERATOR_SLUG_OCCURRENCES` times: the
-/// pinned install URL and the regeneration marker constant in each of the
-/// schema-1 engine and the schema-2 fork.
-const BARE_GENERATOR_SLUG_OCCURRENCES: usize = 4;
+/// pinned install URL and regeneration marker in each engine, plus two
+/// `gh release download --repo` arguments in each bootstrap renderer.
+const BARE_GENERATOR_SLUG_OCCURRENCES: usize = 8;
+const GENERATOR_REPOSITORY_SLUG: &str = "tailrocks/velnor";
+
+/// The bootstrap transport test models the generator repository as its
+/// consumer, so its repository constant and two config fixtures name the
+/// generator repository. Keep those sites separate from literals in generator
+/// code.
+const GENERATOR_SLUG_FIXTURE_FILES: &[&str] = &["tests/bootstrap_transport.rs"];
+const BOOTSTRAP_FIXTURE_GENERATOR_SLUG_OCCURRENCES: usize = 3;
 
 /// Everything the deny list applies to: the crate's Rust sources, its
 /// templates, its tests and fixtures, its build scripts, benches, examples,
@@ -177,17 +185,46 @@ fn cargo_toml_scan_text(root: &Path) -> Option<String> {
     Some(kept)
 }
 
-/// Occurrences of the generator slug that are part of a `.github/...` path are
-/// the generator pointing at its own infrastructure.
-fn is_generator_path(line: &str) -> bool {
-    let mut rest = line;
-    while let Some(start) = rest.find("tailrocks/velnor") {
-        rest = &rest[start + "tailrocks/velnor".len()..];
-        if rest.starts_with('/') || rest.starts_with(".github") {
-            return true;
+/// Columns of bare slug occurrences, excluding each occurrence that continues
+/// into a slash-delimited repository path. Inspect matches individually so a
+/// path elsewhere on the same line cannot hide a bare literal or file suffix.
+fn bare_generator_slug_columns(line: &str) -> Vec<usize> {
+    let mut columns = Vec::new();
+    let mut offset = 0;
+    while let Some(relative_start) = line[offset..].find(GENERATOR_REPOSITORY_SLUG) {
+        let start = offset + relative_start;
+        let end = start + GENERATOR_REPOSITORY_SLUG.len();
+        let suffix = &line[end..];
+        if !suffix.starts_with('/') {
+            columns.push(line[..start].chars().count() + 1);
         }
+        offset = end;
     }
-    false
+    columns
+}
+
+fn is_generator_slug_fixture(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    GENERATOR_SLUG_FIXTURE_FILES
+        .iter()
+        .any(|file| relative == Path::new(file))
+}
+
+#[test]
+fn generator_slug_scan_counts_matches_not_lines() {
+    let line = "tailrocks/velnor/.github/actions/a tailrocks/velnor --repo tailrocks/velnor";
+    assert_eq!(bare_generator_slug_columns(line).len(), 2);
+}
+
+#[test]
+fn generator_slug_scan_requires_a_path_separator() {
+    assert_eq!(
+        bare_generator_slug_columns("tailrocks/velnor.github").len(),
+        1
+    );
+    assert!(bare_generator_slug_columns("tailrocks/velnor/.github/workflows/ci.yml").is_empty());
 }
 
 #[test]
@@ -195,6 +232,7 @@ fn generic_modules_never_name_a_repository() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
     let mut bare_slug_sites = Vec::new();
+    let mut fixture_slug_sites = Vec::new();
     for path in scanned_files(root) {
         if admitted(root, &path) {
             continue;
@@ -225,8 +263,13 @@ fn generic_modules_never_name_a_repository() {
                     ));
                 }
             }
-            if line.contains("tailrocks/velnor") && !is_generator_path(line) {
-                bare_slug_sites.push(format!("{}:{}", path.display(), number + 1));
+            for column in bare_generator_slug_columns(line) {
+                let site = format!("{}:{}:{column}", path.display(), number + 1);
+                if is_generator_slug_fixture(root, &path) {
+                    fixture_slug_sites.push(site);
+                } else {
+                    bare_slug_sites.push(site);
+                }
             }
         }
     }
@@ -238,7 +281,12 @@ fn generic_modules_never_name_a_repository() {
     assert_eq!(
         bare_slug_sites.len(),
         BARE_GENERATOR_SLUG_OCCURRENCES,
-        "the bare generator slug must stay pinned to the regeneration marker: {bare_slug_sites:?}"
+        "unexpected bare generator slug occurrences in engine source: {bare_slug_sites:?}"
+    );
+    assert_eq!(
+        fixture_slug_sites.len(),
+        BOOTSTRAP_FIXTURE_GENERATOR_SLUG_OCCURRENCES,
+        "bootstrap fixtures must keep only their declared generator repository literals: {fixture_slug_sites:?}"
     );
 }
 

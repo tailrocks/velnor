@@ -389,11 +389,11 @@ const BUILDX_INPUTS: &[InputRule] = &[
     InputRule::Any("name"),
     InputRule::Literal("driver", &["docker-container"]),
     InputRule::Literal("install", &["true", "false"]),
-    // Builders and their state volumes are job-scoped and mandatory teardown
-    // removes them. Until a stable trust/repository owner exists, admitting
-    // retention controls would claim persistence that Velnor cannot provide.
-    InputRule::Literal("cleanup", &["true"]),
-    InputRule::Literal("keep-state", &["false"]),
+    // Managed builders and their state volumes outlive an action invocation.
+    // Velnor's native post adapter releases the job claim; the guest action
+    // must not remove shared objects, so only these retention values are valid.
+    InputRule::Literal("cleanup", &["false"]),
+    InputRule::Literal("keep-state", &["true"]),
     InputRule::Literal(
         "buildkitd-config-inline",
         &["[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]"],
@@ -3574,32 +3574,38 @@ mod tests {
     }
 
     #[test]
-    fn validate_job_rejects_unrepresentable_buildx_retention_controls() {
+    fn validate_job_accepts_only_persistent_buildx_retention_controls() {
         let cleanup_errors = violations(&job(
             "docker/setup-buildx-action",
             Some("bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"),
-            serde_json::json!({"cleanup": false}),
+            serde_json::json!({"cleanup": true}),
         ));
         assert_eq!(cleanup_errors[0].field, "with.cleanup");
-        assert_eq!(cleanup_errors[0].accepted, ["true"]);
+        assert_eq!(cleanup_errors[0].accepted, ["false"]);
 
         let keep_state_errors = violations(&job(
             "docker/setup-buildx-action",
             Some("bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"),
-            serde_json::json!({"keep-state": true}),
+            serde_json::json!({"keep-state": false}),
         ));
         assert_eq!(keep_state_errors[0].field, "with.keep-state");
-        assert_eq!(keep_state_errors[0].accepted, ["false"]);
+        assert_eq!(keep_state_errors[0].accepted, ["true"]);
 
-        validate_job_with_context(
-            &job(
-                "docker/setup-buildx-action",
-                Some("bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"),
-                serde_json::json!({"cleanup": true, "keep-state": false}),
-            ),
-            &[],
-        )
-        .unwrap();
+        for inputs in [
+            serde_json::json!({"cleanup": false}),
+            serde_json::json!({"keep-state": true}),
+            serde_json::json!({"cleanup": false, "keep-state": true}),
+        ] {
+            validate_job_with_context(
+                &job(
+                    "docker/setup-buildx-action",
+                    Some("bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"),
+                    inputs,
+                ),
+                &[],
+            )
+            .unwrap();
+        }
     }
 
     #[test]

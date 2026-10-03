@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 const LEGACY_ARTIFACT_STORE_DIR: &str = "_velnor_artifacts";
 const LEGACY_ACTIONS_CACHE_DIR: &str = "_velnor_caches";
 const LEGACY_MBX_DIR: &str = "_velnor_mbx";
+const MBX_CLASS: &str = "compiler/mbx";
 
 /// The hosted GitHub Actions cache lives beside the other cache classes under
 /// the canonical cache root, so `cache du`/`cache gc` account for it.
@@ -109,7 +110,7 @@ impl StoreCatalog {
         reason = "crate-local catalog tests exercise this constructor"
     )]
     pub(crate) fn for_work_root(root: impl Into<PathBuf>) -> Self {
-        let layout = crate::storage::StorageLayout::resolve();
+        let layout = crate::storage::selected_or_resolved_layout();
         Self::for_work_root_with_layout(root, layout.as_ref())
     }
 
@@ -136,7 +137,7 @@ impl StoreCatalog {
     /// artifact path itself with a different root helper and landed it one
     /// directory below where GC looks.
     pub(crate) fn for_job_temp(temp_host: &Path) -> Self {
-        let layout = crate::storage::StorageLayout::resolve();
+        let layout = crate::storage::selected_or_resolved_layout();
         Self {
             work_root: crate::container::daemon_store_root(temp_host),
             layout,
@@ -224,16 +225,35 @@ impl StoreCatalog {
         crate::storage::cache_class_path_for_trust_with_layout(
             &self.work_root,
             trust_scope,
-            "compiler/mbx",
+            MBX_CLASS,
             LEGACY_MBX_DIR,
             self.layout.as_ref(),
         )
     }
 
-    /// The legacy (pre-`VELNOR_STORAGE_ROOT`) mbx root under the work root,
-    /// trust scopes below it. The startup migration deletes it whole once
-    /// canonical storage is in effect; nothing else may construct it.
+    /// MBX class root for a key read from the filesystem. The value is already
+    /// encoded by `trust_scope::filesystem_key`; it cannot be decoded into the
+    /// original scope and must not pass through [`Self::mbx`] again.
+    pub(crate) fn mbx_from_filesystem_key(&self, filesystem_key: &str) -> PathBuf {
+        debug_assert!(crate::trust_scope::is_filesystem_key(filesystem_key));
+        if let Some(layout) = &self.layout {
+            crate::trust_scope::filesystem_key_namespace(&layout.cache_root)
+                .join(filesystem_key)
+                .join(MBX_CLASS)
+        } else {
+            self.legacy_mbx_root().join(filesystem_key)
+        }
+    }
+
+    /// The versioned legacy mbx sibling root under the work root, with keyed
+    /// trust namespaces below it.
     pub(crate) fn legacy_mbx_root(&self) -> PathBuf {
+        crate::storage::legacy_store_root(&self.work_root, LEGACY_MBX_DIR)
+    }
+
+    /// The old, unversioned mbx root. Canonical startup migration deletes this
+    /// historical store family; no writer or reader resolves paths below it.
+    pub(crate) fn old_legacy_mbx_root(&self) -> PathBuf {
         self.work_root.join(LEGACY_MBX_DIR)
     }
 

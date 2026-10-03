@@ -21,12 +21,23 @@ use crate::{
 const WANTED_REF_PREFIX: &str = "refs/velnor";
 
 pub fn store_root(legacy_work_root: &Path, trust_scope: &str) -> PathBuf {
-    if let Some(layout) = crate::storage::StorageLayout::resolve() {
+    store_root_with_layout(
+        legacy_work_root,
+        trust_scope,
+        crate::storage::selected_or_resolved_layout().as_ref(),
+    )
+}
+
+fn store_root_with_layout(
+    legacy_work_root: &Path,
+    trust_scope: &str,
+    layout: Option<&crate::storage::StorageLayout>,
+) -> PathBuf {
+    if let Some(layout) = layout {
         layout.cache_class(trust_scope, "git-mirrors")
     } else {
-        legacy_work_root
-            .join("_velnor_git")
-            .join(sanitize_store_key(trust_scope))
+        crate::storage::legacy_store_root(legacy_work_root, "_velnor_git")
+            .join(crate::trust_scope::filesystem_key(trust_scope))
             .join("git-mirrors")
     }
 }
@@ -634,6 +645,61 @@ mod tests {
             git_ref: git_ref.to_string(),
             full_history: false,
             tags: false,
+        }
+    }
+
+    #[test]
+    fn mirror_roots_use_collision_resistant_trust_keys() {
+        let root = Path::new("/work");
+        let layout = crate::storage::StorageLayout::from_prefix(Path::new("/storage"));
+        for layout in [None, Some(&layout)] {
+            let left = store_root_with_layout(root, "public/forks", layout);
+            let right = store_root_with_layout(root, "public_forks", layout);
+            let left_key = crate::trust_scope::filesystem_key("public/forks");
+            let right_key = crate::trust_scope::filesystem_key("public_forks");
+            assert_ne!(left, right);
+            assert!(left
+                .components()
+                .any(|part| part.as_os_str() == left_key.as_str()));
+            assert!(right
+                .components()
+                .any(|part| part.as_os_str() == right_key.as_str()));
+        }
+    }
+
+    #[test]
+    fn encoded_scope_cannot_alias_an_old_mirror_directory() {
+        let work_root = Path::new("/work");
+        let cache_root = Path::new("/cache/velnor/v1");
+        let layout = crate::storage::StorageLayout {
+            cache_root: cache_root.to_path_buf(),
+            lib_root: PathBuf::from("/lib/velnor"),
+            run_root: PathBuf::from("/run/velnor"),
+            log_root: PathBuf::from("/log/velnor"),
+            mode: "test",
+        };
+        let encoded_scope = crate::trust_scope::filesystem_key("trusted");
+        for current in [
+            store_root_with_layout(work_root, "trusted", None),
+            store_root_with_layout(work_root, "trusted", Some(&layout)),
+        ] {
+            let old_alias = if current.starts_with(work_root) {
+                work_root
+                    .join("_velnor_git")
+                    .join(crate::container::sanitize_store_key(&encoded_scope))
+                    .join("git-mirrors")
+            } else {
+                cache_root
+                    .join(crate::container::sanitize_store_key(&encoded_scope))
+                    .join("git-mirrors")
+            };
+            assert_eq!(
+                crate::container::sanitize_store_key(&encoded_scope),
+                encoded_scope
+            );
+            assert_ne!(current, old_alias);
+            assert!(!current.starts_with(&old_alias));
+            assert!(!old_alias.starts_with(&current));
         }
     }
 

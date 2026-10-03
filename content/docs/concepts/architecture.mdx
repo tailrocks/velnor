@@ -174,7 +174,7 @@ order. The shared local order is not GitHub submission-order FIFO.
 | Scale Set job protocol | Official runner container | The unmodified official runner handles its job session, lease renewal, cancellation, status/log publishing, and completion with GitHub. |
 | Workflow generation | `velnor-workflow` | Static repository scan, owned workflow/config rendering, affected-unit planning ([change-aware planning](/concepts/change-aware-planning)), policy, and release checks. It does not schedule GitHub work. |
 | Workflow monitoring | `velnor-tools` | Read-only correlation of GitHub run state with Velnor control-plane evidence. GitHub owns the terminal result. |
-| Operator inspection | Operator | Local Unix-socket control API, local health files, metrics files, and bounded local logs, normally through `velnorctl`. |
+| Operator inspection | Operator | Local Unix-socket resource/event/telemetry API; production log and storage projections return HTTP 501. Health, metrics, and runner forensic files provide local evidence; GitHub holds job output. |
 
 GitHub initiates scheduling and sends work requests. Velnor initiates its
 control-plane operations: native broker polling, Scale Set registration and

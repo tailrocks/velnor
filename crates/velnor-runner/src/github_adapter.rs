@@ -1369,9 +1369,9 @@ mod tests {
 
         // Every trust-scoped store path, including the five that used to read
         // the environment variable behind the gate's back. All of them carry
-        // a `public` component now — the compiler stores used to collapse to
-        // `untrusted` here while the leases pinned `public`. None may ever
-        // carry `trusted`.
+        // the filesystem key for `public` now — the compiler stores used to
+        // collapse to `untrusted` here while the leases pinned `public`. None
+        // may ever carry the key for `trusted`.
         let scoped_stores = [
             crate::container::cargo_executable_store_host(
                 temp,
@@ -1411,14 +1411,16 @@ mod tests {
                 .components()
                 .any(|component| component.as_os_str() == wanted)
         };
+        let public_key = crate::trust_scope::filesystem_key("public");
+        let trusted_key = crate::trust_scope::filesystem_key("trusted");
         for store in &scoped_stores {
             assert!(
-                !has_component(store, "trusted"),
+                !has_component(store, &trusted_key),
                 "store path leaked the ambient VELNOR_TRUST_SCOPE value: {}",
                 store.display()
             );
             assert!(
-                has_component(store, "public"),
+                has_component(store, &public_key),
                 "store path is not scoped to the resolved trust scope: {}",
                 store.display()
             );
@@ -1564,7 +1566,8 @@ mod tests {
             assert_eq!(lease_root, mount_root, "pool={pool}");
 
             let repository_key = crate::container::sanitize_store_key("octo/base");
-            let trust_key = crate::container::sanitize_store_key(admitted);
+            let trust_key = crate::trust_scope::filesystem_key(admitted);
+            let untrusted_key = crate::trust_scope::filesystem_key(crate::trust_scope::FAIL_CLOSED);
             // Lease side, exactly as `runner.rs` composes it; mount side from
             // the spec's scope, exactly as `container.rs` composes it.
             for (lease, mount) in [
@@ -1636,9 +1639,9 @@ mod tests {
                     lease.display()
                 );
                 assert!(
-                    !lease
-                        .components()
-                        .any(|component| component.as_os_str() == crate::trust_scope::FAIL_CLOSED),
+                    !lease.components().any(|component| {
+                        component.as_os_str() == std::ffi::OsStr::new(&untrusted_key)
+                    }),
                     "trusted-class store path collapsed to the untrusted floor: {}",
                     lease.display()
                 );
@@ -1709,11 +1712,15 @@ mod tests {
 
         assert_eq!(
             github_mbx_store_host(&job(41), temp, "trusted"),
-            std::path::Path::new("/var/lib/velnor/work/_velnor_mbx/trusted/41")
+            std::path::Path::new("/var/lib/velnor/work/_velnor_mbx__trust_scope_v1")
+                .join(crate::trust_scope::filesystem_key("trusted"))
+                .join("41")
         );
         assert_eq!(
             crate::sccache_compat::store_host(&job(42), temp, "trusted"),
-            std::path::Path::new("/var/lib/velnor/work/_velnor_sccache/trusted/42")
+            std::path::Path::new("/var/lib/velnor/work/_velnor_sccache__trust_scope_v1")
+                .join(crate::trust_scope::filesystem_key("trusted"))
+                .join("42")
         );
         assert_ne!(
             crate::sccache_compat::store_host(&job(41), temp, "trusted"),

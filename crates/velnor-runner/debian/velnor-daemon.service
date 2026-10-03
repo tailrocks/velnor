@@ -37,7 +37,6 @@ Environment=MISE_LOCKED_VERIFY_PROVENANCE=1
 # mismatched tuple fails closed here, so a mixed old/new tuple never runs.
 ExecStartPre=/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock /usr/bin/velnor-runner release verify-installed
 ExecStart=/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock /usr/bin/velnor-runner daemon \
-  --url ${VELNOR_URL} \
   --name ${VELNOR_NAME} \
   --labels ${VELNOR_LABELS} \
   --slots ${VELNOR_SLOTS} \

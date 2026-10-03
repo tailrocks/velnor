@@ -372,6 +372,7 @@ impl From<DaemonArgs> for velnor_runner::args::DaemonArgs {
             dry_run_jobs: args.dry_run_jobs,
             dump_job_message: args.dump_job_message,
             docker_image: args.docker_image,
+            mode: rt::HostMode::NativeOnly,
             max_jobs: args.max_jobs,
             permit_ledger: args.permit_ledger,
             scale_set_config: args.scale_set_config,
@@ -844,6 +845,27 @@ mod tests {
             docker_image: "ubuntu:24.04".into(),
             require_buildx: true,
         }
+    }
+
+    #[test]
+    fn daemon_conversion_keeps_scale_set_config_from_enabling_lane() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            daemon: DaemonArgs,
+        }
+
+        let parsed =
+            Cli::try_parse_from(["velnorctl", "--scale-set-config", "scale-set.toml"]).unwrap();
+        let converted: rt::DaemonArgs = parsed.daemon.into();
+
+        assert_eq!(converted.mode, rt::HostMode::NativeOnly);
+        assert_eq!(
+            converted.scale_set_config,
+            Some(PathBuf::from("scale-set.toml"))
+        );
     }
 
     #[test]

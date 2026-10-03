@@ -489,12 +489,37 @@ pub(crate) fn control_plane_provider(universe: &ProviderSet) -> ProviderId {
     }
 }
 
-/// A GitHub-owned execution label: inherently hosted, never a trust fact.
-/// Hosted selectors must use these exclusively; anything else in a hosted
-/// selector could route a hosted-only tree onto caller-managed runners.
+/// Standard GitHub-hosted runner labels from the
+/// [GitHub runner-selection docs](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job#choosing-github-hosted-runners).
+/// Hosted selectors must use these exact labels; accepting a prefix could
+/// route a hosted-only tree onto caller-managed runners.
+const GITHUB_HOSTED_LABELS: &[&str] = &[
+    "ubuntu-slim",
+    "ubuntu-latest",
+    "ubuntu-24.04",
+    "ubuntu-22.04",
+    "ubuntu-26.04",
+    "ubuntu-24.04-arm",
+    "ubuntu-22.04-arm",
+    "ubuntu-26.04-arm",
+    "windows-latest",
+    "windows-2025",
+    "windows-2025-vs2026",
+    "windows-2022",
+    "windows-11-arm",
+    "windows-11-vs2026-arm",
+    "macos-15-intel",
+    "macos-26-intel",
+    "macos-latest",
+    "macos-14",
+    "macos-15",
+    "macos-26",
+    "xcode-27",
+];
+
 #[must_use]
 pub(crate) fn is_github_owned_label(label: &str) -> bool {
-    label.starts_with("ubuntu-") || label.starts_with("macos-") || label.starts_with("windows-")
+    GITHUB_HOSTED_LABELS.contains(&label)
 }
 
 /// Stable plan digest over sorted unit IDs × sorted providers × exclusion
@@ -696,6 +721,14 @@ pub(crate) fn evaluate_verdict(
             });
             continue;
         }
+        if run.platform_for(&identity.unit_id) != Some(identity.platform) {
+            failures.push(VerdictFailure::IdentityMismatch {
+                unit_id: identity.unit_id.clone(),
+                provider: identity.provider,
+                reason: "platform does not match the planned unit".to_owned(),
+            });
+            continue;
+        }
         if !expected.contains(&key) {
             // A record for a pair outside the expected set is either a claim
             // for another provider's work or an unselected unit: both fail.
@@ -783,6 +816,7 @@ pub(crate) struct RunIdentity {
     pub(crate) run_attempt: String,
     pub(crate) plan_digest: String,
     pub(crate) command_digests: BTreeMap<String, String>,
+    pub(crate) platforms: BTreeMap<String, Platform>,
 }
 
 impl RunIdentity {
@@ -795,6 +829,10 @@ impl RunIdentity {
             .get(unit_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    fn platform_for(&self, unit_id: &str) -> Option<Platform> {
+        self.platforms.get(unit_id).copied()
     }
 }
 
@@ -913,6 +951,54 @@ mod tests {
     }
 
     #[test]
+    fn github_hosted_labels_match_the_exact_documented_allowlist() {
+        for label in GITHUB_HOSTED_LABELS {
+            assert!(
+                is_github_owned_label(label),
+                "documented hosted label `{label}` rejected"
+            );
+        }
+
+        for label in [
+            "ubuntu-slim",
+            "ubuntu-22.04-arm",
+            "ubuntu-26.04-arm",
+            "windows-2022",
+            "windows-11-arm",
+            "macos-14",
+            "macos-15-intel",
+        ] {
+            assert!(
+                is_github_owned_label(label),
+                "documented hosted label `{label}` rejected"
+            );
+        }
+
+        for label in [
+            "ubuntu-private",
+            "ubuntu-24.04-custom",
+            "ubuntu-26.04-preview",
+            "macos-custom",
+            "windows-private",
+            "xcode-27-custom",
+            "Ubuntu-24.04",
+            " ubuntu-24.04",
+        ] {
+            assert!(
+                !is_github_owned_label(label),
+                "non-exact hosted label `{label}` accepted"
+            );
+        }
+
+        for label in ["ubuntu-24.04", "ubuntu-26.04", "xcode-27"] {
+            assert!(
+                is_github_owned_label(label),
+                "official label `{label}` rejected"
+            );
+        }
+    }
+
+    #[test]
     fn provider_sets_reject_duplicates_and_empty_and_unbounded() {
         let field = "providers";
         let dupes = vec!["velnor".to_owned(), "velnor".to_owned()];
@@ -1018,5 +1104,22 @@ mod tests {
             false
         )
         .is_ok());
+    }
+
+    #[test]
+    fn selection_plan_digest_keeps_the_legacy_sixteen_hex_shape() {
+        let units = vec![(
+            "rust-unit".to_owned(),
+            ProviderSet::from([ProviderId::GithubHosted]),
+            "command-digest".to_owned(),
+        )];
+        let exclusions = vec![(
+            "docs".to_owned(),
+            ProviderId::Velnor,
+            ExclusionReason::GenuinelyUnaffected,
+        )];
+        let digest = plan_digest(&units, &exclusions);
+        assert_eq!(digest.len(), 16);
+        assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 }

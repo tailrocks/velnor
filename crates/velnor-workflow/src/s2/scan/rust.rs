@@ -4192,6 +4192,7 @@ mod tests {
             root: &root,
             files: &files,
             file_set: &file_set,
+            renderer_output_paths: BTreeSet::new(),
             apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
@@ -4226,6 +4227,7 @@ mod tests {
             root: &root,
             files: &files,
             file_set: &file_set,
+            renderer_output_paths: BTreeSet::new(),
             apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
@@ -4260,6 +4262,7 @@ mod tests {
             root: &root,
             files: &files,
             file_set: &file_set,
+            renderer_output_paths: BTreeSet::new(),
             apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
@@ -4291,6 +4294,7 @@ mod tests {
             root: &root,
             files: &files,
             file_set: &file_set,
+            renderer_output_paths: BTreeSet::new(),
             apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
@@ -4325,6 +4329,7 @@ mod tests {
             root: &root,
             files: &files,
             file_set: &file_set,
+            renderer_output_paths: BTreeSet::new(),
             apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
@@ -4361,6 +4366,7 @@ mod tests {
             root: &root,
             files: &files,
             file_set: &file_set,
+            renderer_output_paths: BTreeSet::new(),
             apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
@@ -4412,6 +4418,7 @@ mod tests {
             root: &root,
             files: &files,
             file_set: &file_set,
+            renderer_output_paths: BTreeSet::new(),
             apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
@@ -4441,6 +4448,7 @@ mod tests {
             root: &root,
             files: &files,
             file_set: &file_set,
+            renderer_output_paths: BTreeSet::new(),
             apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
@@ -4474,6 +4482,7 @@ mod tests {
             root: &root,
             files: &files,
             file_set: &file_set,
+            renderer_output_paths: BTreeSet::new(),
             apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
@@ -4502,6 +4511,7 @@ mod tests {
             root: &root,
             files: &files,
             file_set: &file_set,
+            renderer_output_paths: BTreeSet::new(),
             apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
@@ -4546,6 +4556,7 @@ mod tests {
             root: &root,
             files: &files,
             file_set: &file_set,
+            renderer_output_paths: BTreeSet::new(),
             apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
@@ -4580,6 +4591,7 @@ mod tests {
             root: &root,
             files: &files,
             file_set: &file_set,
+            renderer_output_paths: BTreeSet::new(),
             apple: &apple,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
@@ -4903,6 +4915,7 @@ mod tests {
             root: &root,
             files: &files,
             file_set: &file_set,
+            renderer_output_paths: BTreeSet::new(),
             apple: &default,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
@@ -4921,6 +4934,7 @@ mod tests {
             root: &root,
             files: &files,
             file_set: &file_set,
+            renderer_output_paths: BTreeSet::new(),
             apple: &typed,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
@@ -4965,6 +4979,7 @@ mod tests {
                 root: &root,
                 files: &files,
                 file_set: &file_set,
+                renderer_output_paths: BTreeSet::new(),
                 apple: policy,
             };
             let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
@@ -5013,6 +5028,7 @@ mod tests {
             root: &root,
             files: &files,
             file_set: &file_set,
+            renderer_output_paths: BTreeSet::new(),
             apple: &default,
         };
         let (producers, diagnostics) = must(boltffi_producers(&context), "scan succeeds");
@@ -5045,6 +5061,7 @@ mod tests {
                 root: &root,
                 files: &files,
                 file_set: &file_set,
+                renderer_output_paths: BTreeSet::new(),
                 apple: policy,
             };
             let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");
@@ -5095,6 +5112,7 @@ mod tests {
                 root: &root,
                 files: &files,
                 file_set: &file_set,
+                renderer_output_paths: BTreeSet::new(),
                 apple: policy,
             };
             let (producers, diagnostics) = must(boltffi_producers(&context), "discover producers");

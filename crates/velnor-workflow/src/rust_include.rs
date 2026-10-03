@@ -132,6 +132,7 @@ pub(crate) fn parse_include_str_literals(source: &str) -> Result<Vec<String>, St
 enum IncludeAlias {
     Builtin,
     Shadowed,
+    Uncertain,
 }
 
 #[derive(Clone, Debug)]
@@ -150,7 +151,8 @@ impl IncludeScanner {
         let tokens = stream.into_iter().collect::<Vec<_>>();
         let mut aliases = BTreeMap::new();
         let mut wrappers = BTreeMap::new();
-        self.scan_tokens(&tokens, &mut aliases, &mut wrappers);
+        let mut macro_names = BTreeSet::new();
+        self.scan_tokens(&tokens, &mut aliases, &mut wrappers, &mut macro_names);
     }
 
     fn scan_tokens(
@@ -158,14 +160,17 @@ impl IncludeScanner {
         tokens: &[TokenTree],
         aliases: &mut BTreeMap<String, IncludeAlias>,
         wrappers: &mut BTreeMap<String, MacroWrapper>,
+        macro_names: &mut BTreeSet<String>,
     ) {
-        // Rust imports and macro names are visible throughout their lexical
-        // scope. Pre-collect declarations so a later use item also applies to
-        // an earlier invocation; nested module scopes get independent maps.
+        // Imports are visible throughout their lexical scope, so pre-collect
+        // them before scanning invocations. Macro definitions follow Rust's
+        // textual scope and are added as encountered; their names and literal
+        // wrappers are carried into child modules without leaking back out.
         collect_scope_aliases(tokens, aliases);
         let mut index = 0;
         while index < tokens.len() {
             if let Some((name, body, next)) = macro_rules_definition(tokens, index) {
+                macro_names.insert(name.clone());
                 aliases.insert(name.clone(), IncludeAlias::Shadowed);
                 wrappers.remove(&name);
                 if let Some(wrapper) = parse_macro_wrapper(body) {
@@ -176,7 +181,15 @@ impl IncludeScanner {
                     // token scanner without treating a supported wrapper's
                     // metavariable as a real include site.
                     let nested = body.stream().into_iter().collect::<Vec<_>>();
-                    self.scan_tokens(&nested, aliases, wrappers);
+                    let mut nested_aliases = aliases.clone();
+                    let mut nested_wrappers = wrappers.clone();
+                    let mut nested_macro_names = macro_names.clone();
+                    self.scan_tokens(
+                        &nested,
+                        &mut nested_aliases,
+                        &mut nested_wrappers,
+                        &mut nested_macro_names,
+                    );
                 }
                 // Do not scan macro metavariables as ordinary include calls.
                 index = next;
@@ -200,14 +213,27 @@ impl IncludeScanner {
                     let expanded =
                         substitute_macro_tokens(&wrapper.body, &wrapper.parameter, &arguments);
                     let expanded = expanded.into_iter().collect::<Vec<_>>();
-                    self.scan_tokens(&expanded, aliases, wrappers);
+                    self.scan_tokens(&expanded, aliases, wrappers, macro_names);
                 }
                 index += 3;
                 continue;
             }
-            if let Some(macro_name) = include_macro_name(tokens, index, aliases) {
+            if let Some(macro_name) = uncertain_include_macro_name(tokens, index, aliases) {
                 let line = token_line(&tokens[index]);
-                if let Some((_, group)) = include_invocation(tokens, index, aliases) {
+                self.includes
+                    .push(IncludeDiscovery::Opaque { macro_name, line });
+                if let Some(TokenTree::Group(group)) = tokens.get(index + 2) {
+                    let nested = group.stream().into_iter().collect::<Vec<_>>();
+                    self.scan_tokens(&nested, aliases, wrappers, macro_names);
+                    index += 3;
+                } else {
+                    index += 2;
+                }
+                continue;
+            }
+            if let Some(macro_name) = include_macro_name(tokens, index, aliases, macro_names) {
+                let line = token_line(&tokens[index]);
+                if let Some((_, group)) = include_invocation(tokens, index, aliases, macro_names) {
                     match parse_static_string_expression(group.stream(), macro_name) {
                         Ok(expression) => self.includes.push(IncludeDiscovery::Resolved(
                             IncludeString::from_static(expression),
@@ -219,7 +245,7 @@ impl IncludeScanner {
                     // An include argument may itself contain a macro group;
                     // recurse to discover includes in arbitrary macro bodies.
                     let nested = group.stream().into_iter().collect::<Vec<_>>();
-                    self.scan_tokens(&nested, aliases, wrappers);
+                    self.scan_tokens(&nested, aliases, wrappers, macro_names);
                     index += 3;
                 } else {
                     // Shaped like an invocation but undelimited (for example
@@ -240,13 +266,15 @@ impl IncludeScanner {
                 } else {
                     aliases.clone()
                 };
-                let mut nested_wrappers = if module_scope {
-                    BTreeMap::new()
-                } else {
-                    wrappers.clone()
-                };
+                let mut nested_wrappers = wrappers.clone();
+                let mut nested_macro_names = macro_names.clone();
                 let nested = group.stream().into_iter().collect::<Vec<_>>();
-                self.scan_tokens(&nested, &mut nested_aliases, &mut nested_wrappers);
+                self.scan_tokens(
+                    &nested,
+                    &mut nested_aliases,
+                    &mut nested_wrappers,
+                    &mut nested_macro_names,
+                );
             }
             index += 1;
         }
@@ -277,8 +305,9 @@ fn include_invocation<'a>(
     tokens: &'a [TokenTree],
     index: usize,
     aliases: &BTreeMap<String, IncludeAlias>,
+    macro_names: &BTreeSet<String>,
 ) -> Option<(&'static str, &'a proc_macro2::Group)> {
-    let macro_name = include_macro_name(tokens, index, aliases)?;
+    let macro_name = include_macro_name(tokens, index, aliases, macro_names)?;
     let Some(TokenTree::Group(group)) = tokens.get(index + 2) else {
         return None;
     };
@@ -289,21 +318,30 @@ fn include_macro_name(
     tokens: &[TokenTree],
     index: usize,
     aliases: &BTreeMap<String, IncludeAlias>,
+    macro_names: &BTreeSet<String>,
 ) -> Option<&'static str> {
     let TokenTree::Ident(identifier) = &tokens[index] else {
         return None;
     };
-    let macro_name = match identifier.to_string().as_str() {
+    let identifier_text = identifier.to_string();
+    let path_qualified = is_double_colon_before(tokens, index);
+    if (aliases.get(&identifier_text) == Some(&IncludeAlias::Shadowed)
+        || macro_names.contains(&identifier_text))
+        && !path_qualified
+    {
+        return None;
+    }
+    let macro_name = match identifier_text.as_str() {
         "include_str" => "include_str!",
         "include_bytes" => "include_bytes!",
-        _ if aliases.get(&identifier.to_string()) == Some(&IncludeAlias::Builtin) => {
+        _ if aliases.get(&identifier_text) == Some(&IncludeAlias::Builtin) => {
             "aliased include macro!"
         }
         _ => return None,
     };
     // A path-qualified invocation is normally a user macro. `std::` and
     // `core::` are the standard-library paths that re-export include macros.
-    if is_double_colon_before(tokens, index) && !is_standard_library_qualified(tokens, index) {
+    if path_qualified && !is_standard_library_qualified(tokens, index) {
         return None;
     }
     if !tokens
@@ -313,6 +351,29 @@ fn include_macro_name(
         return None;
     }
     Some(macro_name)
+}
+
+fn uncertain_include_macro_name(
+    tokens: &[TokenTree],
+    index: usize,
+    aliases: &BTreeMap<String, IncludeAlias>,
+) -> Option<&'static str> {
+    let TokenTree::Ident(identifier) = tokens.get(index)? else {
+        return None;
+    };
+    if is_double_colon_before(tokens, index)
+        || aliases.get(&identifier.to_string()) != Some(&IncludeAlias::Uncertain)
+        || !tokens
+            .get(index + 1)
+            .is_some_and(|token| is_punct(token, '!'))
+    {
+        return None;
+    }
+    match identifier.to_string().as_str() {
+        "include_str" => Some("include_str!"),
+        "include_bytes" => Some("include_bytes!"),
+        _ => Some("aliased include macro!"),
+    }
 }
 
 fn collect_use_tree(
@@ -345,6 +406,28 @@ fn collect_use_branch(
             .iter()
             .position(|token| matches!(token, TokenTree::Ident(identifier) if identifier == "as"))
         else {
+            let mut path = inherited_prefix.to_vec();
+            let Some(mut branch_path) = use_path_segments(branch) else {
+                return;
+            };
+            path.append(&mut branch_path);
+            let Some(name) = path.last() else {
+                return;
+            };
+            if !matches!(name.as_str(), "include_str" | "include_bytes") {
+                return;
+            }
+            let alias_kind = if matches!(
+                path.as_slice(),
+                [qualifier, name]
+                    if matches!(qualifier.as_str(), "std" | "core")
+                        && matches!(name.as_str(), "include_str" | "include_bytes")
+            ) {
+                IncludeAlias::Builtin
+            } else {
+                IncludeAlias::Uncertain
+            };
+            aliases.insert(name.clone(), alias_kind);
             return;
         };
         let Some(TokenTree::Ident(alias)) = branch.get(as_index + 1) else {
@@ -363,7 +446,7 @@ fn collect_use_branch(
         ) {
             IncludeAlias::Builtin
         } else {
-            IncludeAlias::Shadowed
+            IncludeAlias::Uncertain
         };
         aliases.insert(alias.to_string(), alias_kind);
         return;
@@ -635,8 +718,25 @@ fn is_standard_library_qualified(tokens: &[TokenTree], index: usize) -> bool {
         return false;
     }
     // Reject `other::std::include_str!`; permit direct `std::` / `core::`
-    // and absolute `::std::` / `::core::` spellings.
-    !is_double_colon_before(tokens, qualifier_index) || qualifier_index == 2
+    // and absolute `::std::` / `::core::` spellings. For an absolute path,
+    // the token before the leading `::` is a delimiter or operator, never a
+    // path segment. The source may contain earlier tokens, so checking the
+    // absolute path by index alone is insufficient.
+    if !is_double_colon_before(tokens, qualifier_index) {
+        return true;
+    }
+    let Some(first_colon_index) = qualifier_index.checked_sub(2) else {
+        return false;
+    };
+    let preceding = first_colon_index
+        .checked_sub(1)
+        .and_then(|index| tokens.get(index));
+    !preceding.is_some_and(|token| {
+        matches!(
+            token,
+            TokenTree::Ident(_) | TokenTree::Group(_) | TokenTree::Literal(_)
+        )
+    })
 }
 
 /// Path resolution errors stay structured so both schema scanners can render
@@ -930,8 +1030,164 @@ const _: &str = ignored!("user-macro.txt");
             Some(vec![
                 IncludeDiscovery::Resolved(IncludeString::Relative("aliased.txt".to_owned())),
                 IncludeDiscovery::Resolved(IncludeString::Relative("aliased.bin".to_owned())),
+                IncludeDiscovery::Opaque {
+                    macro_name: "aliased include macro!",
+                    line: 7,
+                },
             ])
         );
+    }
+
+    #[test]
+    fn ignores_macro_rules_shadows_of_builtin_names() {
+        let source = r#"
+macro_rules! include_str {
+    ($path:expr) => { $path };
+}
+macro_rules! include_bytes {
+    ($path:expr) => { $path };
+}
+const _: &str = include_str!("shadowed.txt");
+const _: &str = include_bytes!("shadowed.bin");
+"#;
+        assert_eq!(parse_include_paths(source).ok(), Some(vec![]));
+    }
+
+    #[test]
+    fn ignores_unaliased_nonstandard_include_imports() {
+        let source = r#"
+use other::include_str;
+use other::include_bytes;
+const _: &str = include_str!("imported.txt");
+const _: &str = include_bytes!("imported.bin");
+"#;
+        assert_eq!(
+            parse_include_paths(source).ok(),
+            Some(vec![
+                IncludeDiscovery::Opaque {
+                    macro_name: "include_str!",
+                    line: 4,
+                },
+                IncludeDiscovery::Opaque {
+                    macro_name: "include_bytes!",
+                    line: 5,
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn accepts_unaliased_standard_library_include_imports() {
+        let source = r#"
+use std::include_str;
+use core::include_bytes;
+const _: &str = include_str!("imported.txt");
+const _: &[u8] = include_bytes!("imported.bin");
+"#;
+        assert_eq!(
+            parse_include_paths(source).ok(),
+            Some(vec![
+                IncludeDiscovery::Resolved(IncludeString::Relative("imported.txt".to_owned())),
+                IncludeDiscovery::Resolved(IncludeString::Relative("imported.bin".to_owned())),
+            ])
+        );
+    }
+
+    #[test]
+    fn preserves_nested_use_prefixes_and_absolute_standard_paths() {
+        let source = r#"
+use std::{include_str, include_bytes};
+use core::{include_str as core_str, include_bytes as core_bytes};
+use ::std::{include_str as absolute_str, include_bytes as absolute_bytes};
+const _: &str = include_str!("std.txt");
+const _: &[u8] = include_bytes!("std.bin");
+const _: &str = core_str!("core.txt");
+const _: &[u8] = core_bytes!("core.bin");
+const _: &str = absolute_str!("absolute-import.txt");
+const _: &[u8] = absolute_bytes!("absolute-import.bin");
+const _: &str = ::std::include_str!("absolute.txt");
+const _: &[u8] = ::core::include_bytes!("absolute.bin");
+mod nested_core {
+    use core::{include_str, include_bytes};
+    const _: &str = include_str!("nested-core.txt");
+    const _: &[u8] = include_bytes!("nested-core.bin");
+}
+"#;
+        assert_eq!(
+            parse_include_paths(source).ok(),
+            Some(vec![
+                IncludeDiscovery::Resolved(IncludeString::Relative("std.txt".to_owned())),
+                IncludeDiscovery::Resolved(IncludeString::Relative("std.bin".to_owned())),
+                IncludeDiscovery::Resolved(IncludeString::Relative("core.txt".to_owned())),
+                IncludeDiscovery::Resolved(IncludeString::Relative("core.bin".to_owned())),
+                IncludeDiscovery::Resolved(IncludeString::Relative(
+                    "absolute-import.txt".to_owned()
+                )),
+                IncludeDiscovery::Resolved(IncludeString::Relative(
+                    "absolute-import.bin".to_owned()
+                )),
+                IncludeDiscovery::Resolved(IncludeString::Relative("absolute.txt".to_owned())),
+                IncludeDiscovery::Resolved(IncludeString::Relative("absolute.bin".to_owned())),
+                IncludeDiscovery::Resolved(IncludeString::Relative("nested-core.txt".to_owned())),
+                IncludeDiscovery::Resolved(IncludeString::Relative("nested-core.bin".to_owned())),
+            ])
+        );
+    }
+
+    #[test]
+    fn path_qualified_standard_includes_survive_unqualified_shadowing() {
+        let source = r#"
+use other::include_str;
+use other::include_bytes;
+const _: &str = include_str!("shadowed.txt");
+const _: &[u8] = include_bytes!("shadowed.bin");
+const _: &str = std::include_str!("std.txt");
+const _: &[u8] = core::include_bytes!("core.bin");
+"#;
+        assert_eq!(
+            parse_include_paths(source).ok(),
+            Some(vec![
+                IncludeDiscovery::Opaque {
+                    macro_name: "include_str!",
+                    line: 4,
+                },
+                IncludeDiscovery::Opaque {
+                    macro_name: "include_bytes!",
+                    line: 5,
+                },
+                IncludeDiscovery::Resolved(IncludeString::Relative("std.txt".to_owned())),
+                IncludeDiscovery::Resolved(IncludeString::Relative("core.bin".to_owned())),
+            ])
+        );
+    }
+
+    #[test]
+    fn macro_rules_shadowing_in_parent_module_reaches_child_modules() {
+        let source = r#"
+macro_rules! include_str {
+    ($path:expr) => { $path };
+}
+mod child {
+    const _: &str = include_str!("child-shadowed.txt");
+}
+"#;
+        assert_eq!(parse_include_paths(source).ok(), Some(vec![]));
+    }
+
+    #[test]
+    fn parent_shadowing_is_preserved_through_child_wrapper_expansion() {
+        let source = r#"
+macro_rules! include_str {
+    ($path:expr) => { $path };
+}
+macro_rules! embed {
+    ($path:literal) => { include_str!($path) };
+}
+mod child {
+    const _: &str = embed!("child-shadowed.txt");
+}
+"#;
+        assert_eq!(parse_include_paths(source).ok(), Some(vec![]));
     }
 
     #[test]

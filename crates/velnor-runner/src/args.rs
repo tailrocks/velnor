@@ -237,6 +237,59 @@ pub struct RunArgs {
     pub require_docker_socket: bool,
 }
 
+/// Explicit host execution topology. The daemon never enables one engine
+/// merely because configuration for the other engine happens to be present.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HostMode {
+    #[default]
+    NativeOnly,
+    ScaleSetOnly,
+    Both,
+}
+
+impl HostMode {
+    #[must_use]
+    pub const fn native_enabled(self) -> bool {
+        matches!(self, Self::NativeOnly | Self::Both)
+    }
+
+    #[must_use]
+    pub const fn scale_set_enabled(self) -> bool {
+        matches!(self, Self::ScaleSetOnly | Self::Both)
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeOnly => "native-only",
+            Self::ScaleSetOnly => "scale-set-only",
+            Self::Both => "both",
+        }
+    }
+}
+
+impl std::fmt::Display for HostMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for HostMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "native-only" => Ok(Self::NativeOnly),
+            "scale-set-only" => Ok(Self::ScaleSetOnly),
+            "both" => Ok(Self::Both),
+            other => Err(format!(
+                "invalid host mode {other:?}; expected native-only, scale-set-only, or both"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DaemonArgs {
     /// Explicit operational store path. Kept in the typed daemon context so
@@ -269,6 +322,9 @@ pub struct DaemonArgs {
     pub dry_run_jobs: bool,
     pub dump_job_message: Option<PathBuf>,
     pub docker_image: String,
+    /// Explicitly selects which host execution engines are supervised.
+    #[serde(default)]
+    pub mode: HostMode,
     /// Host-wide maximum concurrent jobs. `None` (or 0) falls back to
     /// `slots`, which is correct only for single-daemon hosts.
     #[serde(default)]
@@ -277,8 +333,9 @@ pub struct DaemonArgs {
     /// next to the operational state db.
     #[serde(default)]
     pub permit_ledger: Option<PathBuf>,
-    /// Scale-set lane config file (TOML). `None` disables the lane and the
-    /// daemon runs its native slots exactly as before.
+    /// Scale-set lane config file (TOML). This must be paired with an
+    /// explicit `HostMode::Both` or `HostMode::ScaleSetOnly`; `None` disables
+    /// the lane and preserves the native-only default.
     #[serde(default)]
     pub scale_set_config: Option<PathBuf>,
     pub trust_scope: String,
@@ -425,5 +482,29 @@ mod tests {
     #[test]
     fn installed_binary_path_is_the_daemon_binary() {
         assert_eq!(INSTALLED_BINARY_PATH, "/usr/bin/velnor-runner");
+    }
+
+    #[test]
+    fn host_mode_is_explicit_and_round_trips() {
+        for (text, mode) in [
+            ("native-only", HostMode::NativeOnly),
+            ("scale-set-only", HostMode::ScaleSetOnly),
+            ("both", HostMode::Both),
+        ] {
+            assert_eq!(text.parse::<HostMode>().unwrap(), mode);
+            assert_eq!(mode.to_string(), text);
+        }
+        assert_eq!(HostMode::default(), HostMode::NativeOnly);
+        assert!("native".parse::<HostMode>().is_err());
+    }
+
+    #[test]
+    fn host_mode_does_not_infer_the_other_engine() {
+        assert!(HostMode::NativeOnly.native_enabled());
+        assert!(!HostMode::NativeOnly.scale_set_enabled());
+        assert!(!HostMode::ScaleSetOnly.native_enabled());
+        assert!(HostMode::ScaleSetOnly.scale_set_enabled());
+        assert!(HostMode::Both.native_enabled());
+        assert!(HostMode::Both.scale_set_enabled());
     }
 }

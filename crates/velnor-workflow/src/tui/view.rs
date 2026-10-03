@@ -306,7 +306,8 @@ fn plan_summary(app: &App) -> String {
         .files
         .iter()
         .filter(|file| file.action == PlannedAction::Delete)
-        .count();
+        .count()
+        + plan.unknown.len();
     if created + updated + deleted == 0 {
         "No changes needed".to_owned()
     } else {
@@ -329,6 +330,12 @@ fn push_file_lines(lines: &mut Vec<Line<'static>>, app: &App, system: &DesignSys
             };
             lines.push(Line::from(vec![
                 Span::styled(marker, system.style(role)),
+                Span::raw(file.path.display().to_string()),
+            ]));
+        }
+        for file in &plan.unknown {
+            lines.push(Line::from(vec![
+                Span::styled("- DELETE ", system.style(Role::Danger)),
                 Span::raw(file.path.display().to_string()),
             ]));
         }
@@ -792,7 +799,7 @@ mod tests {
             mise_lock_backends: BTreeMap::new(),
             mise_install_deps: crate::s2::MiseInstallDeps::default(),
             github_cache: crate::config::CacheGithubSection::default(),
-            velnor_host_cache: crate::config::CacheVelnorSection::default(),
+            host_cache: crate::config::CacheHostSection::default(),
         };
         let id = "workspace-with-a-long-name".to_owned();
         let mut selector = termrock::widgets::ListState::new(Some(id.clone()));
@@ -919,11 +926,6 @@ mod tests {
         app.plan = Some(crate::GeneratedWritePlan {
             files: vec![
                 crate::PlannedFile {
-                    path: PathBuf::from(".github/workflows/old.yml"),
-                    action: crate::PlannedAction::Delete,
-                    preimage: crate::FilePreimage::Missing,
-                },
-                crate::PlannedFile {
                     path: PathBuf::from(".github/ci/unchanged.toml"),
                     action: crate::PlannedAction::Same,
                     preimage: crate::FilePreimage::Missing,
@@ -935,8 +937,11 @@ mod tests {
                 },
             ],
             changed: Vec::new(),
-            stale: vec![PathBuf::from(".github/workflows/old.yml")],
-            unknown: Vec::new(),
+            unknown: vec![crate::PlannedFile {
+                path: PathBuf::from(".github/workflows/old.yml"),
+                action: crate::PlannedAction::Delete,
+                preimage: crate::FilePreimage::Missing,
+            }],
             conflicts: Vec::new(),
             ownership_present: true,
             ownership_needs_refresh: true,

@@ -115,6 +115,46 @@ mod tests {
     }
 
     #[test]
+    fn exec_config_round_trips_host_mode_and_defaults_old_json_to_native_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-exec-host-mode-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut args = dummy_args();
+        for mode in [
+            crate::args::HostMode::NativeOnly,
+            crate::args::HostMode::ScaleSetOnly,
+            crate::args::HostMode::Both,
+        ] {
+            args.mode = mode;
+            write_exec_config(&dir, &args, 2).unwrap();
+            let json: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(dir.join(EXEC_FILE)).unwrap()).unwrap();
+            assert_eq!(json["mode"], mode.as_str());
+            assert_eq!(load_exec_config(&dir).unwrap().mode, mode);
+        }
+
+        let mut old_json = serde_json::to_value(&args).unwrap();
+        old_json
+            .as_object_mut()
+            .expect("daemon execution config must be an object")
+            .remove("mode");
+        std::fs::write(dir.join(EXEC_FILE), serde_json::to_vec(&old_json).unwrap()).unwrap();
+        assert_eq!(
+            load_exec_config(&dir).unwrap().mode,
+            crate::args::HostMode::NativeOnly
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn zero_slot_exec_config_is_rejected_on_write_and_load() {
         let dir = std::env::temp_dir().join(format!(
             "velnor-exec-zero-{}-{}",

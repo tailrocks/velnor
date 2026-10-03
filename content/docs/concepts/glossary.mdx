@@ -15,7 +15,7 @@ behavior and proof limits.
 | Backend | The selected execution implementation: `docker` or `microvm`. Selection is explicit; there is no fallback. |
 | Broker | The GitHub Actions Runner V2 service endpoint that delivers control/job messages to a runner session. |
 | CAS | Content-addressed storage. Velnor stores blobs/trees by verified BLAKE3 digest and reclaims unreachable content. |
-| Control plane | Node-local services and durable lifecycle/event state plus bounded projections used to inspect resources, logs, telemetry, and lifecycle intent. Query, log, and storage projections are currently not repopulated after service reopen. |
+| Control plane | Node-local services and durable lifecycle/event state. Query resources reload from SQLite when queried; production log and storage projections are unsupported and return HTTP 501. |
 | Generation | A fencing number attached to a slot, job, lease, or isolation identity. Older generations cannot claim current ownership. |
 | Guest agent | The Velnor process inside a Firecracker guest. It receives a validated plan over vsock and executes it using guest-local Docker. |
 | Irrelevant | A changed path no unit watches or reads while no unit is opaque: change-aware planning selects nothing for it. See [change-aware planning](/concepts/change-aware-planning). |

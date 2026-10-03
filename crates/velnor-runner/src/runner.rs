@@ -1586,6 +1586,7 @@ fn persist_daemon_instance(sink: &crate::ops::OpsSink, total_slots: usize) -> Re
 fn persist_and_announce_daemon_readiness(
     sink: &crate::ops::OpsSink,
     total_slots: usize,
+    native_enabled: bool,
 ) -> Result<()> {
     persist_daemon_instance(sink, total_slots)?;
     let now_unix = Timestamp::now()
@@ -1598,7 +1599,7 @@ fn persist_and_announce_daemon_readiness(
         sink.instance_slug(),
         Some(format!("daemon pass ready pid={}", std::process::id())),
     );
-    notify_daemon_ready(total_slots, total_slots);
+    notify_daemon_ready(native_enabled, total_slots, total_slots);
     Ok(())
 }
 
@@ -2460,13 +2461,43 @@ enum RunnerStorageMode {
     ExplicitLocal,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DaemonLanePlan {
+    native: bool,
+    scale_set: bool,
+}
+
+fn daemon_lane_plan(args: &DaemonArgs) -> DaemonLanePlan {
+    DaemonLanePlan {
+        native: args.mode.native_enabled(),
+        scale_set: args.mode.scale_set_enabled(),
+    }
+}
+
+fn validate_daemon_lane_config(args: &DaemonArgs) -> Result<()> {
+    if args.mode.scale_set_enabled() && args.scale_set_config.is_none() {
+        bail!(
+            "host mode {} requires --scale-set-config or VELNOR_SCALE_SET_CONFIG",
+            args.mode
+        );
+    }
+    Ok(())
+}
+
+fn daemon_is_supervised(args: &DaemonArgs) -> bool {
+    !args.once
+        && !args.dry_run_registration
+        && (args.url.is_some()
+            || (daemon_lane_plan(args).scale_set && args.scale_set_config.is_some()))
+}
+
 fn daemon_storage_mode(args: &DaemonArgs) -> RunnerStorageMode {
     // Packaged Linux units set VELNOR_STORAGE_ROOT=/var. A long-running
     // GitHub URL alone is not production: `velnorctl host start` on macOS
     // is a repository-scoped recovery daemon and must use user-local storage.
     let packaged_linux = std::env::var_os("VELNOR_STORAGE_ROOT")
         .is_some_and(|value| Path::new(&value) == Path::new("/var"));
-    if packaged_linux && args.url.is_some() && !args.once && !args.dry_run_registration {
+    if packaged_linux && daemon_is_supervised(args) {
         RunnerStorageMode::SupervisedProduction
     } else {
         RunnerStorageMode::ExplicitLocal
@@ -2902,17 +2933,30 @@ fn emit_drain_completed_once() {
         sink.emit(
             velnor_model::EventReason::DrainCompleted,
             sink.instance_slug(),
-            Some("all slots deregistered or finished; exiting".to_owned()),
+            Some("daemon lanes drained; exiting".to_owned()),
         );
     }
 }
 
-fn notify_daemon_ready(usable_slots: usize, slots: usize) {
+fn daemon_readiness_status(native_enabled: bool, usable_slots: usize, slots: usize) -> String {
+    if native_enabled {
+        format!(
+            "configured: {usable_slots}/{slots} native runner slot(s); control READY follows a local cycle"
+        )
+    } else {
+        "configured: scale-set lane; no native runner slots; control READY follows a local cycle"
+            .to_owned()
+    }
+}
+
+fn notify_daemon_ready(native_enabled: bool, usable_slots: usize, slots: usize) {
     if DAEMON_READY.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    crate::sd_notify::status(&format!(
-        "configured: {usable_slots}/{slots} runner slot(s); control READY follows a local cycle"
+    crate::sd_notify::status(&daemon_readiness_status(
+        native_enabled,
+        usable_slots,
+        slots,
     ));
     RETENTION_READY.notify_waiters();
 }
@@ -3092,6 +3136,7 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
 async fn daemon_lifetime(args: DaemonArgs) -> Result<DaemonExit> {
     let slots = validate_daemon_slots(args.slots)?;
     validate_daemon_runner_labels(&args)?;
+    validate_daemon_lane_config(&args)?;
     if args.complete_noop && args.execute_scripts {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
     }
@@ -3101,7 +3146,7 @@ async fn daemon_lifetime(args: DaemonArgs) -> Result<DaemonExit> {
     // rest of daemon startup: a transient journal/filesystem failure must not
     // turn into a systemd restart storm, while no slot may register until the
     // gate succeeds.
-    let supervised = args.url.is_some() && !args.once && !args.dry_run_registration;
+    let supervised = daemon_is_supervised(&args);
     if supervised && let Ok(config_base) = daemon_config_dir(&args) {
         start_drain_listener(config_base);
     }
@@ -3162,7 +3207,7 @@ async fn daemon_lifetime(args: DaemonArgs) -> Result<DaemonExit> {
     if !supervised {
         daemon_pass(&args, slots).await?;
         return Ok(DaemonExit::new(
-            "one-shot daemon pass completed (not supervised: no --url, --once, or --dry-run-registration)",
+            "one-shot daemon pass completed (supervision disabled by mode or flags)",
         ));
     }
 
@@ -3183,7 +3228,7 @@ async fn daemon_lifetime(args: DaemonArgs) -> Result<DaemonExit> {
             Ok(()) => {
                 stop_retention_lifecycle(&mut retention_lifecycle).await;
                 return Ok(DaemonExit::new(
-                    "supervised daemon pass completed: every slot deregistered or finished draining",
+                    "supervised daemon pass completed successfully",
                 ));
             }
             Err(error) => {
@@ -3256,13 +3301,19 @@ async fn reap_checkout_credentials_at_startup(supervised: bool) -> Result<()> {
     }
 }
 
-/// One full daemon pass: preflight → prune → reserve permits → supervise
-/// slot processes. JIT registration is the controller `RegisterRunner` side
-/// effect after permit+routing+session+executor proof, not a bulk configure
-/// before those checks. Dry-run still calls `configure_daemon_slots`.
+/// One full daemon pass: initialize shared host state, then start and supervise
+/// the explicitly enabled lanes. Native-lane JIT registration is the
+/// controller `RegisterRunner` side effect after permit+routing+session+executor
+/// proof, not a bulk configure before those checks. Native-lane dry-run still
+/// calls `configure_daemon_slots`.
 async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
+    validate_daemon_lane_config(args)?;
     if effective_draining(daemon_drain_journal(args).as_deref()) {
         return Ok(());
+    }
+    let lanes = daemon_lane_plan(args);
+    if args.once && !lanes.native {
+        bail!("--once requires native execution; scale-set-only has no one-shot mode");
     }
     // Store open/migration belongs inside the pass so supervised startup
     // retries transient filesystem/database failures with the same bounded
@@ -3272,14 +3323,16 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
     let config_base = daemon_config_dir(args)?;
     let storage_layout = select_runner_storage_layout(&config_base, daemon_storage_mode(args))?;
-    if args.url.is_some() && !args.dry_run_registration {
+    if lanes.native && args.url.is_some() && !args.dry_run_registration {
         // Before preflight and before any slot can admit a job: delete every
         // mbx store layout the current code no longer produces, then bring
         // the compiler stores under the host budget.
         startup_store_maintenance(args, &config_base, &storage_layout, slots);
     }
-    preflight_before_daemon_jit_config(args, &config_base, slots)?;
-    if args.url.is_some() && !args.dry_run_registration {
+    if lanes.native {
+        preflight_before_daemon_jit_config(args, &config_base, slots)?;
+    }
+    if lanes.native && args.url.is_some() && !args.dry_run_registration {
         let daemon_id = args
             .work_dir
             .as_deref()
@@ -3304,18 +3357,28 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
             );
         }
     }
-    let mut resolved_args = resolve_daemon_runner_group_once(args).await?;
+    let mut resolved_args = if lanes.native {
+        resolve_daemon_runner_group_once(args).await?
+    } else {
+        args.clone()
+    };
     let total_slots = slots;
-    reserve_capacity_permits(&config_base, &resolved_args, slots as u32)?;
+    if lanes.native {
+        reserve_capacity_permits(&config_base, &resolved_args, slots as u32)?;
+    }
     if !daemon_should_poll_after_jit_config(&resolved_args) {
-        let _usable_slots =
-            configure_daemon_slots(&resolved_args, &config_base, total_slots).await?;
+        if lanes.native {
+            let _usable_slots =
+                configure_daemon_slots(&resolved_args, &config_base, total_slots).await?;
+        }
         println!("Daemon JIT config dry run complete; skipped polling GitHub for jobs.");
         return Ok(());
     }
     // Startup preflight covered every executable slot before supervision.
     // Child cycles must not repeat the same expensive check.
-    resolved_args.skip_preflight = true;
+    if lanes.native {
+        resolved_args.skip_preflight = true;
+    }
     let drain_journal_path = config_base.join("journal.db");
     if effective_draining(Some(&drain_journal_path)) {
         return Ok(());
@@ -3327,51 +3390,70 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     // Persist durable instance identity before advertising daemon readiness or
     // emitting the readiness event. In supervised mode this error returns to
     // the retry loop above; no daemon pass may continue with unrecorded state.
-    persist_and_announce_daemon_readiness(sink, total_slots)?;
+    persist_and_announce_daemon_readiness(
+        sink,
+        if lanes.native { total_slots } else { 0 },
+        lanes.native,
+    )?;
     // The daemon-level retention lifecycle is started by `daemon` and waits
     // for this readiness announcement. Keeping ownership outside this retryable
     // pass prevents detached ticker duplication across retries.
-    println!(
-        "Starting Velnor controller with {total_slots} runner slot process{} (slots={slots}).",
-        if total_slots == 1 { "" } else { "es" }
-    );
-    if total_slots > 1 {
+    let lifecycle = if lanes.native {
         println!(
-            "Each slot is one OS process with config under {}/slots/slot-N.",
-            config_base.display()
+            "Starting Velnor controller with {total_slots} runner slot process{} (slots={slots}).",
+            if total_slots == 1 { "" } else { "es" }
         );
-    }
-    crate::sd_notify::status(&format!(
-        "supervising {total_slots} runner slot process(es)"
-    ));
-    daemon_forensic_log(
-        &config_base,
-        &format!(
-            "supervising {total_slots} slot process(es) slots={slots} version={}",
-            env!("CARGO_PKG_VERSION")
-        ),
-    );
-    crate::node::exec::write_exec_config(&config_base, &resolved_args, total_slots)?;
-    let scope = resolved_args
-        .name
-        .clone()
-        .unwrap_or_else(|| "velnor".to_owned());
-    // The lifecycle ledger slug (hostname-derived daemon identity) differs
-    // from the controller scope (slot-id prefix): map both explicitly.
-    let lifecycle = controller_lifecycle_for_daemon(&resolved_args, sink);
+        if total_slots > 1 {
+            println!(
+                "Each slot is one OS process with config under {}/slots/slot-N.",
+                config_base.display()
+            );
+        }
+        crate::sd_notify::status(&format!(
+            "supervising {total_slots} runner slot process(es)"
+        ));
+        daemon_forensic_log(
+            &config_base,
+            &format!(
+                "supervising {total_slots} slot process(es) slots={slots} version={}",
+                env!("CARGO_PKG_VERSION")
+            ),
+        );
+        crate::node::exec::write_exec_config(&config_base, &resolved_args, total_slots)?;
+        controller_lifecycle_for_daemon(&resolved_args, sink)
+    } else {
+        None
+    };
     // Scale-set lane network startup runs BEFORE slot supervision: a lane
     // that cannot register/adopt fails the pass fast (supervised retry),
     // never beside already-polling slots.
-    let scaleset_lane =
-        ScaleSetLaneHandle::start_if_configured(&resolved_args, &config_base).await?;
-    let mut result = crate::node::controller::supervise_from_daemon(
-        config_base.clone(),
-        scope,
-        slots as u32,
-        resolved_args.once,
-        lifecycle,
-    )
-    .await;
+    let mut scaleset_lane = if lanes.scale_set {
+        ScaleSetLaneHandle::start_if_configured(&resolved_args, &config_base).await?
+    } else {
+        None
+    };
+    let mut result = if lanes.native {
+        let scope = resolved_args
+            .name
+            .clone()
+            .unwrap_or_else(|| "velnor".to_owned());
+        crate::node::controller::supervise_from_daemon(
+            config_base.clone(),
+            scope,
+            slots as u32,
+            resolved_args.once,
+            lifecycle,
+        )
+        .await
+    } else {
+        // ScaleSetOnly has no native controller to keep the process alive. The
+        // lane watcher owns the same durable drain signal and the lane task
+        // reports its own failures, so this preserves retry and error paths.
+        let lane = scaleset_lane.take().ok_or_else(|| {
+            anyhow::anyhow!("scale-set-only mode requires a started scale-set lane")
+        })?;
+        lane.wait_and_join().await
+    };
     // The lane stops after supervision returns (its drain watcher already
     // stopped the poll on SIGTERM). A supervision error wins for
     // reporting; a lane-only error fails the pass so retry re-adopts.
@@ -4896,15 +4978,25 @@ impl ScaleSetLaneHandle {
         }))
     }
 
-    /// Stop the loop, join the lane task, and report the shutdown triage.
+    /// Join the lane task and report the shutdown triage. When `stop` is set,
+    /// native supervision has ended and requests the lane to stop. Otherwise
+    /// the ScaleSetOnly path waits for the lane's drain watcher or task error.
     /// No timeout: systemd bounds the stop and crash recovery converges
     /// anything a SIGKILL interrupts; cutting the triage short here would
     /// only strand permits that retention reclaims anyway.
-    async fn shutdown_and_join(self) -> Result<()> {
-        self.shutdown.store(true, Ordering::SeqCst);
-        self.watcher.abort();
-        let _ = self.watcher.await;
-        let report = self.task.await??;
+    async fn join(self, stop: bool) -> Result<()> {
+        let Self {
+            shutdown,
+            task,
+            watcher,
+        } = self;
+        if stop {
+            shutdown.store(true, Ordering::SeqCst);
+        }
+        let task_result = task.await;
+        watcher.abort();
+        let _ = watcher.await;
+        let report = task_result??;
         let shutdown = &report.shutdown_report;
         println!(
             "Scale-set lane stopped: set {} adopted_across_restart={} failed={} recorded_total={}.",
@@ -4914,6 +5006,14 @@ impl ScaleSetLaneHandle {
             shutdown.recorded_total,
         );
         Ok(())
+    }
+
+    async fn shutdown_and_join(self) -> Result<()> {
+        self.join(true).await
+    }
+
+    async fn wait_and_join(self) -> Result<()> {
+        self.join(false).await
     }
 }
 
@@ -14275,10 +14375,10 @@ fn setup_job_lines(
     ));
     lines.push("##[endgroup]".to_string());
 
-    // Operating System (fixed: Velnor jobs always run in Ubuntu 24.04).
+    // Operating System (fixed: Velnor jobs always run in Ubuntu 26.04).
     lines.push("##[group]Operating System".to_string());
     lines.push("Ubuntu".to_string());
-    lines.push("24.04.2".to_string());
+    lines.push("26.04".to_string());
     lines.push("LTS".to_string());
     lines.push("##[endgroup]".to_string());
 
@@ -17183,6 +17283,7 @@ fn default_agent_name() -> String {
 )]
 mod tests {
     use super::*;
+    use crate::args::HostMode;
     use crate::executor::STEP_PUBLISH_OVERFLOW_CAPACITY;
     use crate::protocol::acquire_reply_is_definitely_gone;
     use crate::slot_log::LIFECYCLE_LOG;
@@ -20122,6 +20223,7 @@ jobs:
             routing_policy_file: None,
             dry_run_registration: false,
             slots,
+            mode: HostMode::NativeOnly,
             once: false,
             idle_timeout_seconds: None,
             complete_noop: false,
@@ -20210,7 +20312,7 @@ jobs:
         connection.execute_batch("DROP TABLE instances;").unwrap();
         drop(connection);
 
-        let error = persist_and_announce_daemon_readiness(&sink, 2).unwrap_err();
+        let error = persist_and_announce_daemon_readiness(&sink, 2, true).unwrap_err();
         let rendered = format!("{error:#}");
         assert!(
             rendered.contains("operational store instance upsert failed for test-instance"),
@@ -21226,6 +21328,76 @@ jobs:
 
         args.dry_run_registration = true;
         assert!(!daemon_should_poll_after_jit_config(&args));
+    }
+
+    #[test]
+    fn daemon_lane_plan_respects_host_mode_and_scale_set_config() {
+        let mut args = daemon_args(1);
+        args.scale_set_config = Some(PathBuf::from("/etc/velnor/scaleset.toml"));
+        for (mode, native, scale_set) in [
+            (HostMode::NativeOnly, true, false),
+            (HostMode::ScaleSetOnly, false, true),
+            (HostMode::Both, true, true),
+        ] {
+            args.mode = mode;
+            assert_eq!(
+                daemon_lane_plan(&args),
+                DaemonLanePlan { native, scale_set }
+            );
+        }
+
+        args.mode = HostMode::NativeOnly;
+        args.scale_set_config = None;
+        assert_eq!(
+            daemon_lane_plan(&args),
+            DaemonLanePlan {
+                native: true,
+                scale_set: false,
+            }
+        );
+        args.mode = HostMode::Both;
+        assert_eq!(
+            daemon_lane_plan(&args),
+            DaemonLanePlan {
+                native: true,
+                scale_set: true,
+            }
+        );
+        assert!(validate_daemon_lane_config(&args).is_err());
+
+        args.mode = HostMode::ScaleSetOnly;
+        assert!(validate_daemon_lane_config(&args).is_err());
+
+        args.mode = HostMode::NativeOnly;
+        args.scale_set_config = Some(PathBuf::from("/etc/velnor/scaleset.toml"));
+        assert!(validate_daemon_lane_config(&args).is_ok());
+    }
+
+    #[test]
+    fn scale_set_only_config_makes_daemon_supervised_without_native_url() {
+        let mut args = daemon_args(1);
+        args.mode = HostMode::ScaleSetOnly;
+        assert!(!daemon_is_supervised(&args));
+
+        args.scale_set_config = Some(PathBuf::from("/etc/velnor/scaleset.toml"));
+        assert!(daemon_is_supervised(&args));
+
+        args.once = true;
+        assert!(!daemon_is_supervised(&args));
+
+        args.once = false;
+        args.url = Some("https://github.com/owner/repo".into());
+        args.mode = HostMode::Both;
+        args.scale_set_config = None;
+        assert!(validate_daemon_lane_config(&args).is_err());
+    }
+
+    #[test]
+    fn scale_set_only_readiness_status_does_not_advertise_fake_slots() {
+        let status = daemon_readiness_status(false, 0, 0);
+        assert!(status.contains("scale-set lane"), "{status}");
+        assert!(status.contains("no native runner slots"), "{status}");
+        assert!(!status.contains("0/0"), "{status}");
     }
 
     #[test]
@@ -26607,8 +26779,7 @@ runs:
         assert!(joined.contains("Backend: 'docker'"));
         assert!(!joined.contains("ghp_"));
         assert!(!joined.contains("github_pat_"));
-        assert!(joined.contains("##[group]Operating System"));
-        assert!(joined.contains("##[endgroup]"));
+        assert!(joined.contains("##[group]Operating System\nUbuntu\n26.04\nLTS\n##[endgroup]"));
         assert!(joined.contains("Prepare workflow directory"));
         // Secret source always present regardless of whether permissions are known.
         assert!(joined.contains("Secret source: Actions"));
@@ -27594,6 +27765,7 @@ runs:
                         "daemon".into(),
                     )?),
                     job_network: None,
+                    docker_objects: crate::docker_lease::DockerObjectIds::default(),
                 })
             },
         );
@@ -27650,6 +27822,7 @@ runs:
                         "daemon".into(),
                     )?),
                     job_network: None,
+                    docker_objects: crate::docker_lease::DockerObjectIds::default(),
                 })
             });
             // Dropped without claim: Drop runs cleanup with a real docker CLI

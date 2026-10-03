@@ -966,14 +966,20 @@ impl CommandFileSet {
 /// step-writable and is therefore only ever reached descriptor-relative and
 /// `O_NOFOLLOW`.
 fn open_step_file_dir(temp_host: &Path) -> Result<NoFollowDestinationDir> {
-    NoFollowDestinationDir::open_trusted_rooted_destination(temp_host, Path::new("")).with_context(
-        || {
-            format!(
-                "open step file directory {} without following symlinks",
-                temp_host.display()
-            )
-        },
+    let staging_parent = temp_host
+        .parent()
+        .context("RUNNER_TEMP has no private staging parent")?;
+    NoFollowDestinationDir::open_trusted_rooted_destination_with_staging_parent(
+        temp_host,
+        Path::new(""),
+        staging_parent,
     )
+    .with_context(|| {
+        format!(
+            "open step file directory {} without following symlinks",
+            temp_host.display()
+        )
+    })
 }
 
 /// Create or replace one step file inside `RUNNER_TEMP`.
@@ -985,9 +991,9 @@ fn open_step_file_dir(temp_host: &Path) -> Result<NoFollowDestinationDir> {
 /// truncate as the runner user, with no race to win.
 ///
 /// `write_file_from_reader` refuses a destination that is not a regular file,
-/// stages the content in an `O_CREAT | O_EXCL | O_NOFOLLOW` temporary it
-/// created itself, and renames that over the name. A planted symlink is
-/// therefore either reported or replaced, never written through.
+/// stages under the unmounted per-job parent in an `O_CREAT | O_EXCL | O_NOFOLLOW`
+/// private directory, then renames by held directory descriptors. A planted
+/// symlink is therefore either reported or replaced, never written through.
 fn write_step_file(temp_dir: &NoFollowDestinationDir, name: &str, contents: &str) -> Result<()> {
     temp_dir
         .write_file_from_reader(

@@ -23,7 +23,6 @@ velnorctl get jobs
 velnorctl get runs
 velnorctl get queue
 velnorctl events
-velnorctl logs JOB_UID_OR_RUN_ID
 velnorctl telemetry
 velnorctl top host
 velnorctl top instances
@@ -37,7 +36,6 @@ velnorctl capabilities check JOB_MESSAGE.json
 velnorctl run list
 velnorctl run view RUN_ID
 velnorctl run watch RUN_ID
-velnorctl run logs RUN_ID
 ```
 
 These are read-only views. `velnorctl top TARGET` requires one of `host`,
@@ -106,16 +104,16 @@ does not provide a separate dashboard correlation view.
 `velnorctl events` reads a bounded event stream. Watches retain at most 4,096
 items. Event cursors are opaque and expire; resnapshot before continuing.
 
-`velnorctl logs JOB_UID_OR_RUN_ID` reads bounded local log records (up to 16,384 records
-or 16 MiB). Log cursors expire with retention. `--step` and `--failed` are
-accepted by the CLI but currently do not filter results. Runner forensic files
-are `lifecycle.log`, `broker.log`, `registry.log`, and `daemon.log`; each has
-an active file and one rotated `.1` generation. These writers are best effort.
+The production control API's local-log endpoint is unsupported;
+`velnorctl logs` and `velnorctl run logs RUN_ID` return HTTP 501. Use GitHub
+job logs for output. Runner forensic files are `lifecycle.log`, `broker.log`,
+`registry.log`, and `daemon.log`; each has an active file and one rotated `.1`
+generation. These writers are best effort.
 
 GitHub receives separate log forms: live masked lines over the Results Service
-WebSocket, uploaded step/job blobs, and timeline feed updates. Local logs can
-show that publishing was attempted; GitHub is the authority for what it
-actually received and rendered.
+WebSocket, uploaded step/job blobs, and timeline feed updates. Runner forensic
+files can show that publishing was attempted; GitHub is the authority for what
+it actually received and rendered.
 
 `velnorctl telemetry` returns versioned records with opaque cursors. A cursor is
 a continuation position, not a timestamp or record ID to interpret. When a page
@@ -141,11 +139,10 @@ not stop the runner.
 
 ## Durability and visibility limits
 
-The SQLite control journal durably stores events and recovery intent. Normal
-query, log, and storage projections are not fully rehydrated after service
-recreation, so a reopened service can have durable events while resource or
-log views are empty. Treat an empty projection after restart as a visibility
-limitation, not proof that no work occurred.
+The SQLite control journal durably stores events and recovery intent. Query
+resources reload from SQLite when queried, including after service recreation.
+The production local-log and storage projections are unsupported and return
+HTTP 501; they are not empty in-memory fallbacks.
 
 Completion recovery uses local outbox state plus remote acknowledgement. An
 outbox entry is retained until it reaches a terminal state, which is one of
@@ -169,8 +166,9 @@ some cases, and are not live-service observability.
 1. Copy the GitHub repository, workflow run, job, and queued/start timestamps.
 2. Query `velnorctl get runs`, `get jobs`, and `events`.
 3. Confirm runner, slot, labels, backend, admission, and completion state.
-4. Inspect `velnorctl logs JOB_UID_OR_RUN_ID` and `velnorctl telemetry` for the same
-   subject and time window.
+4. Inspect `velnorctl telemetry`, the daemon journal, and runner forensic files
+   for the same subject and time window. `velnorctl logs` returns HTTP 501 in
+   the production service; use GitHub logs for job output.
 5. Compare GitHub's rendered logs/timeline/result with Velnor's local terminal
    and outbox evidence.
 
