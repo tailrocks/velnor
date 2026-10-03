@@ -2421,9 +2421,13 @@ branches = ["main"]"#,
             "the dispatch carries the github-default lanes choice: {workflow}"
         );
         assert_eq!(
-            workflow.matches("inputs.lanes == 'velnor'").count(),
+            workflow
+                .matches(
+                    "github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor') && fromJSON",
+                )
+                .count(),
             2,
-            "every job dispatches across lanes: {workflow}"
+            "every profile uses the lane input in its runs-on selector: {workflow}"
         );
         for job in ["  smoke:\n", "  load:\n"] {
             assert_eq!(
@@ -2461,9 +2465,13 @@ branches = ["main"]"#,
             "the dispatch carries the velnor-default lanes choice: {workflow}"
         );
         assert_eq!(
-            workflow.matches("inputs.lanes == 'github'").count(),
+            workflow
+                .matches(
+                    "github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && \"ubuntu-24.04\" || fromJSON",
+                )
+                .count(),
             2,
-            "every job dispatches across lanes: {workflow}"
+            "every profile uses the lane input in its runs-on selector: {workflow}"
         );
     }
 
@@ -2489,9 +2497,13 @@ branches = ["main"]"#,
             "the macos job keeps its static label: {workflow}"
         );
         assert_eq!(
-            workflow.matches("inputs.lanes").count(),
+            workflow
+                .matches(
+                    "github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor') && fromJSON",
+                )
+                .count(),
             1,
-            "only the dispatchable job threads the conditional: {workflow}"
+            "only the dispatchable job uses the lane input in its runs-on selector: {workflow}"
         );
     }
 
