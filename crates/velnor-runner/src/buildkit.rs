@@ -6,20 +6,19 @@
 //! Builders are expensive persistent infrastructure being treated as per-job
 //! scratch. This module reverses that:
 //!
-//! * **Stable names.** A builder is keyed by (trust scope, repository,
-//!   requested name) instead of the runner slot, so the next job reuses the
-//!   warm daemon and its cache. Proven live: a fresh buildx client state
-//!   plus `buildx create` over a kept daemon rebuilds `CACHED`.
+//! * **Stable names.** A builder is keyed by Engine, durable storage root,
+//!   trust scope, repository, and requested name instead of the runner slot,
+//!   so slots in one local domain reuse the warm daemon and its cache.
 //! * **Claims.** Concurrent jobs on one repository share one builder, so the
 //!   post step cannot blindly stop it: stopping a shared daemon mid-build
 //!   fails the other job. Each setup claims the builder for its job
 //!   container; each post and teardown releases; the daemon stops only when
-//!   the last holder releases. Claims live in the daemon's run root next to
-//!   the scope leases, guarded by the same entry lock.
+//!   the last holder releases. Claims, owner records, and lifecycle locks
+//!   live below the same durable BuildKit domain root.
 //! * **Reclamation.** What claims cannot cover, maintenance converges:
-//!   disk-pressure reclaim stops and prunes builders with no holders
-//!   (largest first, du-measured), and the horizon path deletes builders
-//!   idle past [`IDLE_DELETE_AFTER`]. Builders are a cache: every destructive
+//!   disk-pressure reclaim stops and prunes builders with no holders, and
+//!   the horizon path deletes builders idle past [`IDLE_DELETE_AFTER`].
+//!   Builders are a cache: every destructive
 //!   action degrades the next build to cold, never to wrong.
 //! * **Unbounded.** A builder daemon carries no CPU/memory ceiling: claims
 //!   record only holder identity, creation passes no resource sizing, and
@@ -46,31 +45,32 @@
 //! Every tier input comes from the runner-authoritative immutable job
 //! environment (`GITHUB_REF`, `GITHUB_REF_TYPE`, `GITHUB_EVENT_NAME`,
 //! `GITHUB_REF_PROTECTED`), never from mutable step env a workflow can
-//! rewrite. Pre-tier builder names (no tier segment) match no new key and
-//! converge through the horizon path as idle orphans.
+//! rewrite. Pre-tier and pre-domain builder names cannot prove current
+//! ownership and remain untouched for explicit operator cleanup.
 //!
-//! Lock protocol: every claim-file mutation holds the entry lock, and *only*
-//! the mutation does. Slow Docker work (stop, prune, remove, inspect) always
-//! runs unlocked, then re-locks and rechecks for holders that arrived
-//! mid-operation; a stop that raced a new claim is undone with a restart.
+//! Lock protocol: every claim-file mutation holds the claim lock. Setup and
+//! release take locks in coordinator → per-builder lifecycle → claim →
+//! Engine/volume order. The per-builder lock spans setup and a final-holder
+//! stop/recovery, so a new holder cannot start a build during stop. Maintenance
+//! takes the coordinator exclusively before claim and volume locks.
 //! Lock waits are bounded ([`CLAIM_LOCK_TIMEOUT`]) and every wait, race, and
 //! Docker act emits `velnor.buildkit` tracing telemetry. Docker calls carry
 //! their own class deadlines through `host_call`.
 //!
 //! Lifecycle gate: setup and release take the filesystem coordinator shared;
-//! the horizon reaper takes it exclusive across the Buildx/container scans
+//! the horizon reaper takes it exclusive across owner/container inspection
 //! and deletion. Cache-pressure pruning runs under the same exclusive gate
 //! from cache reclamation. The per-builder lock protects claim and owner
 //! record updates, including register-before-create and delete-after-remove.
 //! A queued job may be admitted while the reaper runs, but cannot claim or
 //! create a builder until the exclusive pass finishes.
 //!
-//! Workflow-requested builder names have no per-group ceiling. Runtime claims
-//! live under `/run`, while a durable owner record under the storage lib root
-//! preserves current-generation identity across reboot. The horizon pass
-//! converges registered current builders and exact reserved pre-generation
-//! names only while their runtime claims remain readable. Missing claims are
-//! pinned because container snapshots cannot prove runner admission quiescence.
+//! Workflow-requested builder names have no per-group ceiling. Claims and
+//! durable owner records live below the selected storage root's domain
+//! directory. Only owners in this Engine+storage domain are cleanup
+//! candidates. Pre-domain resources are left for operator cleanup. Missing
+//! claims are pinned because container snapshots cannot prove runner
+//! admission quiescence.
 //!
 //! Torn claims, missing claims, and owner records fail closed, so their
 //! builder is never stopped, pruned, or deleted. Every unreadable ownership
@@ -78,16 +78,9 @@
 //! using its Docker endpoint are quiescent, remove the owner record to permit
 //! a fresh claim. Doctor surfaces unreadable claim files.
 //!
-//! Legacy slot-scoped builders (`velnor-builder-<requested>-<slot>`, from
-//! before persistence) keep their destroy-at-teardown path: teardown matches
-//! them by the current job's slot suffix, and anything with the
-//! [`PERSISTENT_BUILDER_PREFIX`] prefix is excluded from every
-//! destroy/orphan match.
-//! The exclusion direction is fail-safe: a legacy builder whose requested
-//! name starts with the marker is skipped (orphaned until the horizon path),
-//! while a persistent builder can never match a slot suffix unless an
-//! operator names a temp directory `shared-*`, in which case the failure is
-//! a loud cold-cache rebuild, not a wrong build.
+//! Pre-domain persistent names, including the former `unbounded-v1`
+//! generation, remain reserved and untouched. They lack enough identity to
+//! prove Engine/storage ownership and need explicit operator cleanup.
 
 use anyhow::{Context, Result};
 use serde::de::{MapAccess, Visitor};
@@ -102,10 +95,15 @@ use std::time::{Duration, Instant, SystemTime};
 /// Velnor's destroy/orphan decisions.
 pub(crate) const PERSISTENT_BUILDER_PREFIX: &str = "velnor-builder-shared-";
 
-/// Namespace for builders created without the retired per-daemon ceilings.
-/// Changing this generation makes setup create a clean, unconstrained daemon
-/// instead of reusing an older Buildx container with capped HostConfig.
-const CURRENT_PERSISTENT_BUILDER_PREFIX: &str = "velnor-builder-shared-unbounded-v1-";
+/// Namespace for builders created with a durable Engine/storage domain.
+/// Changing the generation leaves every pre-domain resource for explicit
+/// operator cleanup instead of attributing an old owner to this domain.
+const CURRENT_PERSISTENT_BUILDER_PREFIX: &str = "velnor-builder-shared-unbounded-v2-";
+const BUILDKIT_DOMAIN_TOKEN_HEX_LEN: usize = 32;
+const BUILDER_SCOPE_SEGMENT_MAX: usize = 42;
+const BUILDER_REPOSITORY_SEGMENT_MAX: usize = 48;
+const BUILDER_REQUESTED_SEGMENT_MAX: usize = 40;
+const MAX_BUILDKIT_CONTROL_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// The setup-buildx default builder name. A job that requests exactly this
 /// gets the short form without a requested-name segment.
@@ -138,18 +136,25 @@ const CLAIMS_DIR: &str = "buildkit-claims";
 /// Durable exact-name ownership records. Claim holders are runtime state;
 /// these records let maintenance recognize current builders after reboot.
 const OWNER_REGISTRY_DIR: &str = "buildkit-owners";
-const OWNER_REGISTRY_VERSION: u32 = 1;
+/// Exact-ID evidence that Buildx copied its approved daemon config and the
+/// resulting daemon passed the worker readiness probe.
+const BUILDER_READINESS_DIR: &str = "buildkit-readiness";
+const BUILDER_LIFECYCLE_LOCKS_DIR: &str = "builder-lifecycle-locks";
+/// Process-shared setup leases bind one in-flight Buildx create/archive/start
+/// sequence to its domain, expected config, and immutable daemon ID.
+const BUILDER_CREATOR_LEASES_DIR: &str = "buildkit-creator-leases";
+const OWNER_REGISTRY_VERSION: u32 = 2;
+const BUILDER_READINESS_VERSION: u32 = 1;
+const BUILDER_CREATOR_LEASE_VERSION: u32 = 1;
+const MAX_BUILDER_CREATOR_LEASE_BYTES: u64 = 4096;
 
 /// Marker file recording the last periodic horizon pass (unix seconds).
 const HORIZON_REAP_MARKER: &str = ".last-horizon-reap";
+const MAX_HORIZON_REAP_MARKER_BYTES: u64 = 32;
 
 /// Job-local record of the builders this job claimed, so teardown releases
 /// exactly what setup claimed even when the post step never ran (cancel).
 const JOB_BUILDERS_FILE: &str = "_velnor/buildkit-builders.json";
-
-/// Repository slug when the job carries no repository (no checkout): parseable
-/// and impossible to collide with a real `owner_repo` slug.
-const NO_REPO_SLUG: &str = "no_repo";
 
 /// The trust tier for a job's immutable ref signals. Release requires
 /// affirmative release-grade evidence; branch requires affirmative
@@ -197,78 +202,277 @@ pub(crate) fn builder_trust_tier(
 /// trust scope, trust tier, repository). Trust first, like the store namespaces; the tier keeps
 /// branch jobs out of the release daemon's ID-keyed cache mounts, and the
 /// repository slug keeps one repo's cache out of another's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PersistentBuildKitDomain {
+    pub(crate) token: String,
+    pub(crate) engine_id: String,
+    /// Durable, process-shared root derived from the selected StorageLayout.
+    /// Domain ledgers live below `root`; Engine-wide volume locks live below
+    /// this path and deliberately omit the storage UUID from their key.
+    pub(crate) identity_root: PathBuf,
+    pub(crate) root: PathBuf,
+}
+
+impl PersistentBuildKitDomain {
+    pub(crate) fn from_identities(
+        identity_root: &Path,
+        storage_id: &str,
+        engine_id: &str,
+    ) -> Result<Self> {
+        if storage_id.trim().is_empty() || engine_id.trim().is_empty() {
+            anyhow::bail!("BuildKit storage and Docker Engine identities must be nonempty");
+        }
+        let root_dir =
+            crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(identity_root)
+                .with_context(|| {
+                    format!("secure BuildKit storage root {}", identity_root.display())
+                })?;
+        let (device, inode) = root_dir
+            .physical_identity()
+            .context("read physical BuildKit storage-root identity")?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"velnor-buildkit-domain-v1\0");
+        hash_component(&mut hasher, b"storage", Some(storage_id));
+        hash_component(&mut hasher, b"engine", Some(engine_id));
+        hash_component_bytes(
+            &mut hasher,
+            b"storage-root-device",
+            Some(&device.to_be_bytes()),
+        );
+        hash_component_bytes(
+            &mut hasher,
+            b"storage-root-inode",
+            Some(&inode.to_be_bytes()),
+        );
+        let token = hasher.finalize().to_hex()[..BUILDKIT_DOMAIN_TOKEN_HEX_LEN].to_string();
+        let root = identity_root.join("buildkit-domains").join(&token);
+        #[cfg(unix)]
+        crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination(
+            identity_root,
+            Path::new("buildkit-domains").join(&token).as_path(),
+        )
+        .with_context(|| format!("secure BuildKit domain directory {}", root.display()))?;
+        #[cfg(not(unix))]
+        anyhow::bail!(
+            "persistent BuildKit domain directories require unix no-follow filesystem support"
+        );
+        let domain_dir = crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(&root)
+            .with_context(|| format!("open BuildKit domain directory {}", root.display()))?;
+        domain_dir
+            .open_relative_directory(Path::new(CLAIMS_DIR))
+            .context("initialize BuildKit claims directory")?;
+        domain_dir
+            .open_relative_directory(Path::new(OWNER_REGISTRY_DIR))
+            .context("initialize BuildKit owner registry directory")?;
+        domain_dir
+            .open_relative_directory(Path::new(BUILDER_READINESS_DIR))
+            .context("initialize BuildKit readiness directory")?;
+        domain_dir
+            .open_relative_directory(Path::new(BUILDER_LIFECYCLE_LOCKS_DIR))
+            .context("initialize BuildKit lifecycle lock directory")?;
+        domain_dir
+            .open_relative_directory(Path::new(BUILDER_CREATOR_LEASES_DIR))
+            .context("initialize BuildKit creator lease directory")?;
+        Ok(Self {
+            token,
+            engine_id: engine_id.to_string(),
+            identity_root: identity_root.to_path_buf(),
+            root,
+        })
+    }
+
+    pub(crate) fn resolve() -> Result<Self> {
+        let layout = crate::storage::selected_layout()
+            .or_else(crate::storage::StorageLayout::resolve)
+            .context("persistent BuildKit requires the selected Velnor storage layout")?;
+        Self::resolve_from_layout(layout)
+    }
+
+    pub(crate) fn try_resolve() -> Result<Option<Self>> {
+        let Some(layout) =
+            crate::storage::selected_layout().or_else(crate::storage::StorageLayout::resolve)
+        else {
+            return Ok(None);
+        };
+        Self::resolve_from_layout(layout).map(Some)
+    }
+
+    pub(crate) fn resolve_from_layout(layout: crate::storage::StorageLayout) -> Result<Self> {
+        let identity_root = layout.buildkit_identity_root();
+        let storage_id = crate::storage::ensure_buildkit_storage_identity(&identity_root)?;
+        let endpoint = crate::docker::engine::resolve_docker_endpoint()
+            .context("resolve Docker endpoint for BuildKit domain")?;
+        let engine_id = crate::docker::engine::daemon_identity_blocking(&endpoint.socket)
+            .map(|identity| identity.id)
+            .filter(|identity| !identity.trim().is_empty())
+            .context("Docker Engine /info.ID is unavailable; persistent BuildKit is disabled")?;
+        Self::from_identities(&identity_root, &storage_id, &engine_id)
+    }
+}
+
+pub(crate) fn persistent_builder_name_for_domain(
+    domain_token: &str,
+    requested: &str,
+    scope: &str,
+    tier: &str,
+    repository: Option<&str>,
+) -> String {
+    assert_domain_token(domain_token);
+    let scope = bounded_builder_segment("s", Some(scope), BUILDER_SCOPE_SEGMENT_MAX);
+    let tier = sanitize_builder_segment(tier);
+    let repo = bounded_builder_segment("r", repository, BUILDER_REPOSITORY_SEGMENT_MAX);
+    let requested = requested.trim().to_ascii_lowercase();
+    let requested_default = requested.is_empty() || requested == DEFAULT_REQUESTED_NAME;
+    let base = format!("{CURRENT_PERSISTENT_BUILDER_PREFIX}d{domain_token}-{scope}-{tier}-{repo}");
+    let name = if requested_default {
+        base
+    } else {
+        format!(
+            "{base}-{}",
+            bounded_builder_segment("n", Some(&requested), BUILDER_REQUESTED_SEGMENT_MAX)
+        )
+    };
+    debug_assert!(daemon_state_volume(&name).len() <= 255);
+    name
+}
+
+fn bounded_builder_segment(tag: &str, value: Option<&str>, max_len: usize) -> String {
+    let identity = value.map(str::trim).filter(|value| !value.is_empty());
+    let slug = identity
+        .as_deref()
+        .map(|value| sanitize_builder_segment(&value.to_ascii_lowercase()))
+        .unwrap_or_else(|| "none".to_string());
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"velnor-buildkit-name-component-v1\0");
+    // Keep the readable part Buildx-safe lowercase, but preserve original
+    // identity bytes in the digest. Trust scope keys are case-sensitive.
+    hash_component(&mut hasher, tag.as_bytes(), identity);
+    let digest = hasher.finalize().to_hex();
+    // A 128-bit component digest keeps unrelated long identities out of the
+    // same builder while the fixed segment budgets keep Buildx's derived
+    // daemon container and state-volume names under Docker's 255-byte limit.
+    let suffix = format!("-{tag}{}", &digest[..32]);
+    let readable_budget = max_len.saturating_sub(suffix.len());
+    let readable = slug.chars().take(readable_budget).collect::<String>();
+    format!("{readable}{suffix}")
+}
+
+fn hash_component(hasher: &mut blake3::Hasher, tag: &[u8], value: Option<&str>) {
+    hash_component_bytes(hasher, tag, value.map(str::as_bytes));
+}
+
+fn hash_component_bytes(hasher: &mut blake3::Hasher, tag: &[u8], value: Option<&[u8]>) {
+    hasher.update(&(tag.len() as u64).to_be_bytes());
+    hasher.update(tag);
+    match value {
+        Some(value) => {
+            hasher.update(&[1]);
+            hasher.update(&(value.len() as u64).to_be_bytes());
+            hasher.update(value);
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) const TEST_BUILDKIT_DOMAIN_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+#[cfg(test)]
 pub(crate) fn persistent_builder_name(
     requested: &str,
     scope: &str,
     tier: &str,
     repository: Option<&str>,
 ) -> String {
-    let scope = sanitize_builder_segment(scope);
-    let tier = sanitize_builder_segment(tier);
-    let repo = repo_slug(repository);
-    let requested = sanitize_builder_segment(requested);
-    if requested == DEFAULT_REQUESTED_NAME || requested.is_empty() {
-        format!("{CURRENT_PERSISTENT_BUILDER_PREFIX}{scope}-{tier}-{repo}")
-    } else {
-        format!("{CURRENT_PERSISTENT_BUILDER_PREFIX}{scope}-{tier}-{repo}-{requested}")
-    }
+    persistent_builder_name_for_domain(
+        TEST_BUILDKIT_DOMAIN_TOKEN,
+        requested,
+        scope,
+        tier,
+        repository,
+    )
 }
 
-/// True when `builder` names a persistent builder. Prefix-anchored: a legacy
-/// `velnor-builder-<requested>-<slot>` only matches when its requested name
-/// starts with `shared-`, in which case teardown skips it (fail-safe) and the
-/// horizon path deletes it once idle.
+fn assert_domain_token(token: &str) {
+    debug_assert_eq!(token.len(), BUILDKIT_DOMAIN_TOKEN_HEX_LEN);
+    debug_assert!(token
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+}
+
+/// Return the stable Engine/storage token embedded in a current-generation
+/// builder name. Old unscoped generations deliberately have no token and
+/// therefore cannot be adopted, released, or reaped by domain-aware code.
+pub(crate) fn persistent_builder_domain_token(builder: &str) -> Option<&str> {
+    let rest = builder.strip_prefix(CURRENT_PERSISTENT_BUILDER_PREFIX)?;
+    let rest = rest.strip_prefix('d')?;
+    let (token, _) = rest.split_once('-')?;
+    (token.len() == BUILDKIT_DOMAIN_TOKEN_HEX_LEN
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then_some(token)
+}
+
+pub(crate) fn is_current_domain_builder_name(builder: &str, domain_token: &str) -> bool {
+    persistent_builder_domain_token(builder) == Some(domain_token)
+}
+
+pub(crate) fn is_current_domained_persistent_builder(builder: &str) -> bool {
+    persistent_builder_domain_token(builder).is_some()
+}
+
+/// True when a builder name uses Velnor's reserved persistent marker. This
+/// blocks guest adoption and generic cleanup; only exact current-domain
+/// records grant maintenance authority. Retired names remain quarantined for
+/// explicit operator cleanup because their Engine/storage identity is absent.
 pub(crate) fn is_persistent_builder_name(builder: &str) -> bool {
     builder.starts_with(PERSISTENT_BUILDER_PREFIX)
 }
 
-/// True only for names the retired formatter could generate: a sanitized
-/// scope, one canonical trust tier, a sanitized repo, and an optional
-/// sanitized requested name. The `unbounded-*` generation is never legacy.
-fn is_legacy_capped_builder_name(builder: &str) -> bool {
-    let Some(rest) = builder.strip_prefix(PERSISTENT_BUILDER_PREFIX) else {
-        return false;
-    };
-    if builder.starts_with(CURRENT_PERSISTENT_BUILDER_PREFIX) || rest.starts_with("unbounded-") {
-        return false;
-    }
-    [TRUST_TIER_BRANCH, TRUST_TIER_RELEASE, TRUST_TIER_UNKNOWN]
-        .into_iter()
-        .any(|tier| {
-            let marker = format!("-{tier}-");
-            rest.match_indices(&marker).any(|(offset, _)| {
-                let scope = &rest[..offset];
-                let tail = &rest[offset + marker.len()..];
-                is_old_builder_segment(scope) && is_old_repo_and_requested(tail)
-            })
-        })
-}
-
-fn is_old_builder_segment(segment: &str) -> bool {
-    !segment.is_empty()
-        && segment.len() <= 128
-        && !matches!(segment, "." | "..")
-        && segment.chars().all(|character| {
-            character.is_ascii_alphanumeric() || "-_".contains(character) || character == '.'
-        })
-}
-
-fn is_old_repo_and_requested(value: &str) -> bool {
-    if is_old_builder_segment(value) {
-        return true;
-    }
-    value.match_indices('-').any(|(offset, _)| {
-        is_old_builder_segment(&value[..offset]) && is_old_builder_segment(&value[offset + 1..])
-    })
-}
-
 /// True when a buildkitd container or state volume belongs to a persistent
 /// builder. The object name embeds the builder name
-/// (`buildx_buildkit_<builder>0[_state]`), so the marker survives the
-/// embedding; legacy objects match only with a `shared-*` requested name,
-/// which fails safe toward skipping.
+/// (`buildx_buildkit_<builder><node>[_state]`), so the marker survives the
+/// embedding. Retired generations and appended node indexes stay quarantined
+/// for explicit operator cleanup rather than infer ownership.
 pub(crate) fn is_persistent_builder_object(name: &str) -> bool {
-    name.contains(PERSISTENT_BUILDER_PREFIX)
+    name.split(',')
+        .any(|name| buildkit_daemon_builder_name(name).is_some_and(is_persistent_builder_name))
+}
+
+/// Return the structurally encoded Velnor Buildx builder part of a daemon
+/// container or state volume name. This recognizes node indexes only for
+/// cleanup classification; lifecycle authority still comes from exact owner
+/// records and node-zero attestation.
+pub(crate) fn buildkit_daemon_builder_name(name: &str) -> Option<&str> {
+    let name = name.trim().trim_start_matches('/');
+    let container = name.strip_suffix("_state").unwrap_or(name);
+    let rest = container.strip_prefix(DAEMON_CONTAINER_PREFIX)?;
+    let node_start = rest
+        .char_indices()
+        .rev()
+        .take_while(|(_, character)| character.is_ascii_digit())
+        .last()
+        .map(|(index, _)| index)?;
+    let builder = &rest[..node_start];
+    let node = &rest[node_start..];
+    (builder
+        .strip_prefix("velnor-builder-")
+        .is_some_and(|scope| !scope.is_empty())
+        && node.bytes().all(|byte| byte.is_ascii_digit()))
+    .then_some(builder)
+}
+
+/// Recognize Buildx daemon rows using exact name structure. Docker's `name=`
+/// filter is substring-based, so destructive callers must use this after the
+/// listing query to avoid treating guest names containing the marker as a
+/// BuildKit daemon.
+pub(crate) fn is_velnor_buildkit_daemon_name(names: &str) -> bool {
+    names
+        .split(',')
+        .any(|name| buildkit_daemon_builder_name(name).is_some())
 }
 
 fn sanitize_builder_segment(value: &str) -> String {
@@ -277,20 +481,6 @@ fn sanitize_builder_segment(value: &str) -> String {
 
 /// `owner/repo` becomes `owner_repo`, sanitized for builder names, temp
 /// paths, and claim files alike.
-fn repo_slug(repository: Option<&str>) -> String {
-    let slug = repository
-        .map(str::trim)
-        .filter(|repo| !repo.is_empty())
-        .map(|repo| repo.replace('/', "_"))
-        .unwrap_or_else(|| NO_REPO_SLUG.to_string());
-    let slug = crate::container::sanitize_store_key(&slug);
-    if slug.is_empty() {
-        NO_REPO_SLUG.to_string()
-    } else {
-        slug
-    }
-}
-
 /// Prefix buildx derives docker-container daemon names from:
 /// `buildx_buildkit_<builder>0`. Persistent builder names start with
 /// `velnor-builder-`, so the existing
@@ -299,9 +489,8 @@ fn repo_slug(repository: Option<&str>) -> String {
 const DAEMON_CONTAINER_PREFIX: &str = "buildx_buildkit_";
 
 /// The docker-container daemon's container name for a single-node builder.
-/// Velnor never appends nodes, so the `0` node is the whole fleet. A workflow
-/// that appends its own nodes leaves the extra daemons to the reclaim paths,
-/// which enumerate by prefix instead of deriving.
+/// Velnor owns node 0 only; the lease rejects persistent Buildx node indexes
+/// other than 0 so no appended daemon can escape this lifecycle registry.
 pub(crate) fn daemon_container_name(builder: &str) -> String {
     format!("{DAEMON_CONTAINER_PREFIX}{builder}0")
 }
@@ -398,12 +587,10 @@ impl<'de> serde::Deserialize<'de> for BuilderHolder {
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
 struct BuilderClaims {
     holders: BTreeMap<String, BuilderHolder>,
-    /// Full builder name this file guards. The file name is a sanitized
-    /// (and truncated) derivation of it, so the reverse mapping lives here
-    /// for ownership checks and deletion.
+    /// Full builder name this file guards. The file name is a full-name
+    /// digest, so the reverse mapping lives here for ownership checks.
     builder: String,
 }
 
@@ -412,21 +599,480 @@ struct BuilderClaims {
 struct BuilderOwnerRecord {
     version: u32,
     builder: String,
+    phase: BuilderOwnerPhase,
 }
 
-fn claims_file(run_root: &Path, builder: &str) -> PathBuf {
-    run_root.join(CLAIMS_DIR).join(format!(
-        "{}.json",
-        crate::container::sanitize_store_key(builder)
-    ))
+#[derive(serde::Deserialize)]
+struct BuilderOwnerIdentity {
+    version: u32,
+    builder: String,
 }
 
-fn owner_registry_root(lib_root: &Path) -> PathBuf {
-    lib_root.join(OWNER_REGISTRY_DIR)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BuilderOwnerPhase {
+    Active,
+    Deleting,
 }
 
-pub(crate) fn claims_registry_root() -> Option<PathBuf> {
-    crate::storage::StorageLayout::resolve().map(|layout| owner_registry_root(&layout.lib_root))
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuilderReadinessRecord {
+    version: u32,
+    builder: String,
+    domain_token: String,
+    state_volume: String,
+    container_id: String,
+    config_fingerprint: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuilderCreatorLeaseRecord {
+    version: u32,
+    builder: String,
+    domain_token: String,
+    config_fingerprint: String,
+    container_id: Option<String>,
+    archived_config_fingerprint: Option<String>,
+}
+
+/// RAII ownership of one process-shared BuildKit create transaction. Its
+/// flock proves liveness; the sibling record binds the in-flight creator to
+/// the exact domain/config/container until readiness is durably published.
+pub(crate) struct PersistentBuildKitCreatorLease {
+    domain: PersistentBuildKitDomain,
+    builder: String,
+    config_fingerprint: String,
+    generation: u64,
+    _lock: std::fs::File,
+}
+
+/// `None` is an explicit no-config mode; an auto-discovered default config is
+/// rejected because its archive cannot match this mode. The configured value
+/// is limited to the single approved mirror config. Buildx
+/// v0.36.1/Pelletier TOML v2.3.1 reserializes that input to the archived bytes
+/// below, so this fingerprint binds the exact payload BuildKit receives
+/// rather than the source spelling supplied to Buildx.
+pub(crate) fn persistent_buildkit_config_fingerprint(config: Option<&str>) -> Result<String> {
+    let Some(config) = config.filter(|config| !config.trim().is_empty()) else {
+        return Ok("no-config-v1".to_owned());
+    };
+    if !crate::docker_lease::is_approved_persistent_buildkit_config(config) {
+        anyhow::bail!("persistent BuildKit config is not approved");
+    }
+    Ok("sha256:333c40f4fee6f473bee299aed751bb40967b9e8315af90378a5de0b5dc69a76b".to_owned())
+}
+
+fn builder_readiness_file(domain: &PersistentBuildKitDomain, builder: &str) -> PathBuf {
+    let digest = blake3::hash(builder.as_bytes()).to_hex();
+    domain
+        .root
+        .join(BUILDER_READINESS_DIR)
+        .join(format!("{digest}.json"))
+}
+
+fn builder_creator_file(domain: &PersistentBuildKitDomain, builder: &str) -> PathBuf {
+    let digest = blake3::hash(builder.as_bytes()).to_hex();
+    domain
+        .root
+        .join(BUILDER_CREATOR_LEASES_DIR)
+        .join(format!("{digest}.json"))
+}
+
+fn builder_creator_lock_name(builder: &str) -> String {
+    format!("{}.lock", blake3::hash(builder.as_bytes()).to_hex())
+}
+
+fn builder_creator_state_lock_name(builder: &str) -> String {
+    format!("{}.state.lock", blake3::hash(builder.as_bytes()).to_hex())
+}
+
+fn open_builder_creator_directory(
+    domain: &PersistentBuildKitDomain,
+) -> Result<crate::fs_copy::NoFollowDestinationDir> {
+    crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(&domain.root)
+        .with_context(|| format!("open BuildKit domain {} safely", domain.root.display()))?
+        .open_relative_directory(Path::new(BUILDER_CREATOR_LEASES_DIR))
+        .context("open BuildKit creator lease directory safely")
+}
+
+fn lock_creator_state_file(
+    directory: &crate::fs_copy::NoFollowDestinationDir,
+    builder: &str,
+) -> Result<std::fs::File> {
+    let file = directory
+        .open_or_create_lock_file(std::ffi::OsStr::new(&builder_creator_state_lock_name(
+            builder,
+        )))
+        .context("open BuildKit creator state lock")?;
+    let started = Instant::now();
+    loop {
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => return Ok(file),
+            Err(rustix::io::Errno::WOULDBLOCK) if started.elapsed() < CLAIM_LOCK_TIMEOUT => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(rustix::io::Errno::WOULDBLOCK) => {
+                anyhow::bail!("timed out locking BuildKit creator state for {builder}");
+            }
+            Err(error) => return Err(anyhow::Error::new(error).context("lock creator state")),
+        }
+    }
+}
+
+fn creator_lock_is_held(
+    directory: &crate::fs_copy::NoFollowDestinationDir,
+    builder: &str,
+) -> Result<bool> {
+    let Some(file) = directory
+        .open_relative_file_if_exists(Path::new(&builder_creator_lock_name(builder)))
+        .context("open BuildKit creator lease lock safely")?
+    else {
+        return Ok(false);
+    };
+    match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(false),
+        Err(rustix::io::Errno::WOULDBLOCK) => Ok(true),
+        Err(error) => Err(anyhow::Error::new(error).context("probe BuildKit creator lease")),
+    }
+}
+
+fn validate_creator_record(
+    record: &BuilderCreatorLeaseRecord,
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+) -> Result<()> {
+    if record.version != BUILDER_CREATOR_LEASE_VERSION
+        || record.builder != builder
+        || record.domain_token != domain.token
+        || record.config_fingerprint.trim().is_empty()
+    {
+        anyhow::bail!("BuildKit creator lease identity does not match {builder}");
+    }
+    Ok(())
+}
+
+fn read_live_builder_creator(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+) -> Result<Option<BuilderCreatorLeaseRecord>> {
+    let path = builder_creator_file(domain, builder);
+    let Some(bytes) =
+        read_control_file_no_follow_with_limit(&path, MAX_BUILDER_CREATOR_LEASE_BYTES)?
+    else {
+        return Ok(None);
+    };
+    let record: BuilderCreatorLeaseRecord = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse BuildKit creator lease {}", path.display()))?;
+    validate_creator_record(&record, domain, builder)
+        .with_context(|| format!("validate BuildKit creator lease {}", path.display()))?;
+    if !creator_lock_is_held(&open_builder_creator_directory(domain)?, builder)? {
+        return Ok(None);
+    }
+    Ok(Some(record))
+}
+
+/// A process-shared lock protects the whole create/archive/start transition.
+/// A stale record is never authority: readers also require the stable lock
+/// inode to be held by a live process.
+pub(crate) fn begin_persistent_builder_creator_lease(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    config_fingerprint: &str,
+    generation: u64,
+) -> Result<PersistentBuildKitCreatorLease> {
+    if persistent_builder_domain_token(builder) != Some(domain.token.as_str()) {
+        anyhow::bail!("refuse creator lease for a BuildKit builder from another domain");
+    }
+    if config_fingerprint.trim().is_empty() {
+        anyhow::bail!("BuildKit creator lease requires an exact config fingerprint");
+    }
+    let directory = open_builder_creator_directory(domain)?;
+    let lock_name = builder_creator_lock_name(builder);
+    let lock = directory
+        .open_or_create_lock_file(std::ffi::OsStr::new(&lock_name))
+        .with_context(|| format!("open BuildKit creator lease lock {lock_name}"))?;
+    let started = Instant::now();
+    loop {
+        match rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => break,
+            Err(rustix::io::Errno::WOULDBLOCK) if started.elapsed() < CLAIM_LOCK_TIMEOUT => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(rustix::io::Errno::WOULDBLOCK) => {
+                anyhow::bail!("timed out acquiring BuildKit creator lease for {builder}");
+            }
+            Err(error) => {
+                return Err(anyhow::Error::new(error)
+                    .context(format!("lock BuildKit creator lease for {builder}")));
+            }
+        }
+    }
+    let lease = PersistentBuildKitCreatorLease {
+        domain: domain.clone(),
+        builder: builder.to_owned(),
+        config_fingerprint: config_fingerprint.to_owned(),
+        generation,
+        _lock: lock,
+    };
+    write_builder_creator_record(
+        &lease.domain,
+        &lease.builder,
+        &lease.config_fingerprint,
+        None,
+        None,
+    )?;
+    Ok(lease)
+}
+
+impl PersistentBuildKitCreatorLease {
+    pub(crate) fn matches(
+        &self,
+        domain: &PersistentBuildKitDomain,
+        builder: &str,
+        config: &str,
+        generation: u64,
+    ) -> bool {
+        self.domain.token == domain.token
+            && self.domain.root == domain.root
+            && self.builder == builder
+            && self.config_fingerprint == config
+            && self.generation == generation
+    }
+}
+
+fn write_builder_creator_record(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    config_fingerprint: &str,
+    container_id: Option<&str>,
+    archived_config_fingerprint: Option<&str>,
+) -> Result<()> {
+    let record = BuilderCreatorLeaseRecord {
+        version: BUILDER_CREATOR_LEASE_VERSION,
+        builder: builder.to_owned(),
+        domain_token: domain.token.clone(),
+        config_fingerprint: config_fingerprint.to_owned(),
+        container_id: container_id.map(str::to_owned),
+        archived_config_fingerprint: archived_config_fingerprint.map(str::to_owned),
+    };
+    let bytes = serde_json::to_vec(&record).context("encode BuildKit creator lease")?;
+    write_atomic_document(&builder_creator_file(domain, builder), &bytes)
+}
+
+fn update_live_builder_creator(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    config_fingerprint: &str,
+    container_id: &str,
+    archived_config_fingerprint: Option<&str>,
+) -> Result<()> {
+    let directory = open_builder_creator_directory(domain)?;
+    let _state_lock = lock_creator_state_file(&directory, builder)?;
+    if !creator_lock_is_held(&directory, builder)? {
+        anyhow::bail!("no live BuildKit creator lease for {builder}");
+    }
+    let path = builder_creator_file(domain, builder);
+    let bytes = read_control_file_no_follow_with_limit(&path, MAX_BUILDER_CREATOR_LEASE_BYTES)?
+        .context("live BuildKit creator lease record is missing")?;
+    let mut record: BuilderCreatorLeaseRecord = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse BuildKit creator lease {}", path.display()))?;
+    validate_creator_record(&record, domain, builder)?;
+    if record.config_fingerprint != config_fingerprint {
+        anyhow::bail!("BuildKit creator config changed while creating {builder}");
+    }
+    if record
+        .container_id
+        .as_deref()
+        .is_some_and(|known| known != container_id)
+    {
+        anyhow::bail!("BuildKit creator lease for {builder} is bound to another container ID");
+    }
+    record.container_id = Some(container_id.to_owned());
+    if let Some(archive_fingerprint) = archived_config_fingerprint {
+        if archive_fingerprint != config_fingerprint {
+            anyhow::bail!("BuildKit creator archive does not match requested config");
+        }
+        record.archived_config_fingerprint = Some(archive_fingerprint.to_owned());
+    }
+    if !creator_lock_is_held(&directory, builder)? {
+        anyhow::bail!("BuildKit creator lease for {builder} ended during attestation");
+    }
+    let bytes = serde_json::to_vec(&record).context("encode updated BuildKit creator lease")?;
+    write_atomic_document(&path, &bytes)
+}
+
+pub(crate) fn bind_persistent_builder_creator_container(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    config_fingerprint: &str,
+    container_id: &str,
+) -> Result<()> {
+    update_live_builder_creator(domain, builder, config_fingerprint, container_id, None)
+}
+
+pub(crate) fn record_persistent_builder_creator_archive(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    config_fingerprint: &str,
+    container_id: &str,
+    archive_fingerprint: &str,
+) -> Result<()> {
+    update_live_builder_creator(
+        domain,
+        builder,
+        config_fingerprint,
+        container_id,
+        Some(archive_fingerprint),
+    )
+}
+
+fn remove_builder_auxiliary_metadata(domain_root: &Path, builder: &str) -> Result<()> {
+    let digest = blake3::hash(builder.as_bytes()).to_hex();
+    let root = crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(domain_root)
+        .with_context(|| {
+            format!(
+                "open BuildKit domain {} for metadata cleanup",
+                domain_root.display()
+            )
+        })?;
+    for (directory_name, file_name) in [
+        (BUILDER_READINESS_DIR, format!("{digest}.json")),
+        (BUILDER_LIFECYCLE_LOCKS_DIR, format!("{digest}.lock")),
+    ] {
+        // Open beneath the already secured domain descriptor. Creating an
+        // absent empty directory is harmless and keeps deletion path handling
+        // uniform; no path component is re-resolved through the filesystem.
+        let directory = root.open_relative_directory(Path::new(directory_name))?;
+        match directory.remove_tree_entry(std::ffi::OsStr::new(&file_name)) {
+            Ok(()) => directory.sync_directory().with_context(|| {
+                format!("sync removed BuildKit metadata directory {directory_name}")
+            })?,
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("remove BuildKit metadata {directory_name}/{file_name}")
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_builder_readiness(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+) -> Result<Option<BuilderReadinessRecord>> {
+    let path = builder_readiness_file(domain, builder);
+    let Some(bytes) = read_control_file_no_follow_with_limit(&path, 4096)? else {
+        return Ok(None);
+    };
+    let proof: BuilderReadinessRecord = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse BuildKit readiness proof {}", path.display()))?;
+    if proof.version != BUILDER_READINESS_VERSION
+        || proof.builder != builder
+        || proof.domain_token != domain.token
+        || proof.state_volume != daemon_state_volume(builder)
+        || persistent_builder_domain_token(builder) != Some(domain.token.as_str())
+    {
+        anyhow::bail!(
+            "BuildKit readiness proof {} has mismatched identity",
+            path.display()
+        );
+    }
+    Ok(Some(proof))
+}
+
+pub(crate) fn builder_readiness_matches(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    container_id: &str,
+    config_fingerprint: &str,
+) -> Result<bool> {
+    let Some(proof) = read_builder_readiness(domain, builder)? else {
+        return Ok(false);
+    };
+    Ok(proof.container_id == container_id && proof.config_fingerprint == config_fingerprint)
+}
+
+pub(crate) fn builder_readiness_for_config(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    config_fingerprint: &str,
+) -> Result<Option<String>> {
+    let Some(proof) = read_builder_readiness(domain, builder)? else {
+        return Ok(None);
+    };
+    if proof.config_fingerprint != config_fingerprint {
+        anyhow::bail!("persistent BuildKit config mode changed for existing builder {builder}");
+    }
+    Ok(Some(proof.container_id))
+}
+
+fn config_mode_matches_command(fingerprint: &str, has_config_flag: bool) -> bool {
+    (fingerprint == "no-config-v1") != has_config_flag
+}
+
+/// Persist restart authority only after Buildx's successful `--config`
+/// archive, Docker's successful ContainerStart response, an Engine-volume
+/// and immutable container re-attestation, and a passing worker readiness
+/// probe. The lock is dropped during worker polling and reacquired before the
+/// proof is published.
+pub(crate) fn persist_builder_readiness_after_start(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    expected_container_id: &str,
+    config_fingerprint: &str,
+) -> Result<()> {
+    wait_for_attested_buildkit_ready(expected_container_id)
+        .with_context(|| format!("wait for BuildKit daemon {builder} after start"))?;
+    with_attested_domain_builder(
+        domain,
+        builder,
+        |_, daemon, volume, volume_present, container_id| {
+            if !volume_present {
+                anyhow::bail!("BuildKit state volume for {daemon} disappeared after start");
+            }
+            let container_id = container_id
+                .context("BuildKit daemon disappeared before readiness proof publication")?;
+            if container_id != expected_container_id {
+                anyhow::bail!("BuildKit daemon {daemon} changed immutable ID after start");
+            }
+            let state = crate::docker::Docker::host()
+                .inspect_exit(container_id)
+                .with_context(|| {
+                    format!("inspect BuildKit daemon {daemon} after readiness probe")
+                })?;
+            if state.status != Some(crate::docker::client::ContainerState::Running) {
+                anyhow::bail!(
+                    "BuildKit daemon {daemon} stopped before readiness proof publication"
+                );
+            }
+            let proof = BuilderReadinessRecord {
+                version: BUILDER_READINESS_VERSION,
+                builder: builder.to_owned(),
+                domain_token: domain.token.clone(),
+                state_volume: volume.to_owned(),
+                container_id: container_id.to_owned(),
+                config_fingerprint: config_fingerprint.to_owned(),
+            };
+            let bytes = serde_json::to_vec(&proof).context("encode BuildKit readiness proof")?;
+            write_atomic_document(&builder_readiness_file(domain, builder), &bytes)
+        },
+    )
+}
+
+fn claims_file(domain_root: &Path, builder: &str) -> PathBuf {
+    let digest = blake3::hash(builder.as_bytes()).to_hex();
+    domain_root.join(CLAIMS_DIR).join(format!("{digest}.json"))
+}
+
+fn owner_registry_root(domain_root: &Path) -> PathBuf {
+    domain_root.join(OWNER_REGISTRY_DIR)
 }
 
 fn owner_registry_file(registry_root: &Path, builder: &str) -> PathBuf {
@@ -434,15 +1080,99 @@ fn owner_registry_file(registry_root: &Path, builder: &str) -> PathBuf {
     registry_root.join(format!("{digest}.json"))
 }
 
+/// List the domain's durable builder owners. Buildx registration state lives in
+/// each disposable job container, so a host `docker buildx ls` is not an owner
+/// inventory and must never authorize or erase shared ownership records.
+fn registered_domain_builders(registry_root: &Path, domain_token: &str) -> Result<Vec<String>> {
+    if domain_token.len() != BUILDKIT_DOMAIN_TOKEN_HEX_LEN
+        || !domain_token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        anyhow::bail!("invalid BuildKit domain token");
+    }
+    match std::fs::symlink_metadata(registry_root) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Ok(_) => anyhow::bail!(
+            "BuildKit owner registry is not a real directory: {}",
+            registry_root.display()
+        ),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "inspect BuildKit owner registry {}",
+                    registry_root.display()
+                )
+            });
+        }
+    }
+    let root = crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(registry_root)
+        .with_context(|| format!("secure BuildKit owner registry {}", registry_root.display()))?;
+    let entries = match std::fs::read_dir(registry_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("list BuildKit owner registry {}", registry_root.display())
+            });
+        }
+    };
+    let mut builders = Vec::new();
+    for entry in entries {
+        let entry = entry.context("read BuildKit owner registry entry")?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .context("BuildKit owner registry entry has no filename")?;
+        let mut file = root
+            .open_relative_file(Path::new(file_name))
+            .with_context(|| format!("open BuildKit owner record {} safely", path.display()))?;
+        let bytes = read_bounded_control_file(&mut file, &path, MAX_BUILDKIT_CONTROL_FILE_BYTES)?;
+        let identity: BuilderOwnerIdentity = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parse BuildKit owner identity {}", path.display()))?;
+        if identity.version != OWNER_REGISTRY_VERSION {
+            if is_current_domain_builder_name(&identity.builder, domain_token) {
+                anyhow::bail!(
+                    "current BuildKit owner record {} uses unsupported schema version {}; expected {}",
+                    path.display(),
+                    identity.version,
+                    OWNER_REGISTRY_VERSION
+                );
+            }
+            // Retired/unscoped records and records copied from another domain
+            // carry no deletion authority here. Keep their bytes untouched;
+            // old on-disk versions are not migrated or adopted.
+            continue;
+        }
+        let record: BuilderOwnerRecord = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parse current BuildKit owner record {}", path.display()))?;
+        if !is_current_domain_builder_name(&record.builder, domain_token)
+            || owner_registry_file(registry_root, &record.builder) != path
+        {
+            anyhow::bail!(
+                "current BuildKit owner record {} has mismatched domain identity",
+                path.display()
+            );
+        }
+        builders.push(record.builder);
+    }
+    builders.sort();
+    builders.dedup();
+    Ok(builders)
+}
+
 fn read_owner_record(registry_root: &Path, builder: &str) -> Result<Option<BuilderOwnerRecord>> {
-    if !builder.starts_with(CURRENT_PERSISTENT_BUILDER_PREFIX) {
+    if !is_current_domained_persistent_builder(builder) {
         return Ok(None);
     }
+    ensure_owner_registry_directory(registry_root)?;
     let path = owner_registry_file(registry_root, builder);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    let Some(bytes) = read_control_file_no_follow(&path)? else {
+        return Ok(None);
     };
     let record: BuilderOwnerRecord =
         serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
@@ -455,24 +1185,114 @@ fn read_owner_record(registry_root: &Path, builder: &str) -> Result<Option<Build
     Ok(Some(record))
 }
 
+/// Read runner-owned BuildKit metadata through a descriptor-bound parent and
+/// a no-follow regular-file open. A matching JSON document behind a symlink
+/// has no ownership authority.
+fn read_control_file_no_follow(path: &Path) -> Result<Option<Vec<u8>>> {
+    read_control_file_no_follow_with_limit(path, MAX_BUILDKIT_CONTROL_FILE_BYTES)
+}
+
+fn read_control_file_no_follow_with_limit(path: &Path, maximum: u64) -> Result<Option<Vec<u8>>> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("BuildKit metadata path has no parent: {}", path.display()))?;
+    let name = path
+        .file_name()
+        .with_context(|| format!("BuildKit metadata path has no filename: {}", path.display()))?;
+    let directory = crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(parent)
+        .with_context(|| {
+            format!(
+                "open BuildKit metadata directory {} safely",
+                parent.display()
+            )
+        })?;
+    let Some(mut file) = directory
+        .open_relative_file_if_exists(Path::new(name))
+        .with_context(|| format!("open BuildKit metadata file {} safely", path.display()))?
+    else {
+        return Ok(None);
+    };
+    read_bounded_control_file(&mut file, path, maximum).map(Some)
+}
+
+fn read_bounded_control_file(
+    file: &mut std::fs::File,
+    path: &Path,
+    maximum: u64,
+) -> Result<Vec<u8>> {
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("inspect BuildKit metadata file {}", path.display()))?;
+    if !metadata.is_file() || metadata.len() > maximum {
+        anyhow::bail!(
+            "BuildKit metadata file {} is not regular or exceeds {} bytes",
+            path.display(),
+            maximum
+        );
+    }
+    let limit = maximum.saturating_add(1);
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    let mut limited = std::io::Read::take(file, limit);
+    std::io::Read::read_to_end(&mut limited, &mut bytes)
+        .with_context(|| format!("read BuildKit metadata file {}", path.display()))?;
+    if bytes.len() as u64 > maximum {
+        anyhow::bail!(
+            "BuildKit metadata file {} exceeds {} bytes",
+            path.display(),
+            maximum
+        );
+    }
+    Ok(bytes)
+}
+
+fn ensure_owner_registry_directory(registry_root: &Path) -> Result<()> {
+    crate::fs_copy::NoFollowDestinationDir::open_or_create_absolute_no_follow(registry_root)
+        .map(|_| ())
+        .with_context(|| format!("secure BuildKit owner registry {}", registry_root.display()))
+}
+
 fn ensure_owner_record(registry_root: &Path, builder: &str) -> Result<()> {
-    if !builder.starts_with(CURRENT_PERSISTENT_BUILDER_PREFIX) {
+    if !is_current_domained_persistent_builder(builder) {
         return Ok(());
     }
-    if read_owner_record(registry_root, builder)?.is_some() {
+    ensure_owner_registry_directory(registry_root)?;
+    if let Some(record) = read_owner_record(registry_root, builder)? {
+        if record.phase == BuilderOwnerPhase::Deleting {
+            anyhow::bail!("BuildKit builder {builder} is durably marked for deletion");
+        }
         return Ok(());
     }
     let record = BuilderOwnerRecord {
         version: OWNER_REGISTRY_VERSION,
         builder: builder.to_string(),
+        phase: BuilderOwnerPhase::Active,
     };
     let path = owner_registry_file(registry_root, builder);
     let bytes = serde_json::to_vec_pretty(&record).context("encode BuildKit owner record")?;
     write_atomic_document(&path, &bytes)
 }
 
+fn ensure_active_owner_record(registry_root: &Path, builder: &str) -> Result<()> {
+    ensure_owner_record(registry_root, builder)
+}
+
+fn mark_owner_record_deleting(registry_root: &Path, builder: &str) -> Result<()> {
+    if !is_current_domained_persistent_builder(builder) {
+        anyhow::bail!("refuse deletion tombstone for an unscoped BuildKit builder");
+    }
+    let mut record = read_owner_record(registry_root, builder)?
+        .context("cannot tombstone a BuildKit builder without an active owner record")?;
+    if record.phase == BuilderOwnerPhase::Deleting {
+        return Ok(());
+    }
+    record.phase = BuilderOwnerPhase::Deleting;
+    let path = owner_registry_file(registry_root, builder);
+    let bytes = serde_json::to_vec_pretty(&record).context("encode BuildKit deletion tombstone")?;
+    write_atomic_document(&path, &bytes)
+}
+
 fn remove_owner_record(registry_root: &Path, builder: &str) -> Result<()> {
-    if !builder.starts_with(CURRENT_PERSISTENT_BUILDER_PREFIX) {
+    if !is_current_domained_persistent_builder(builder) {
         return Ok(());
     }
     let path = owner_registry_file(registry_root, builder);
@@ -487,15 +1307,16 @@ fn remove_owner_record(registry_root: &Path, builder: &str) -> Result<()> {
 /// an error the caller must treat as *claimed*: with atomic rename writes a
 /// torn file means disk corruption or a pre-atomic crash, and the safe
 /// direction is to stop, prune, and delete nothing.
-fn read_claims(path: &Path) -> Result<BuilderClaims> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(BuilderClaims::default())
-        }
-        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+fn read_claims(path: &Path, builder: &str) -> Result<BuilderClaims> {
+    let Some(bytes) = read_control_file_no_follow(path)? else {
+        return Ok(BuilderClaims {
+            builder: builder.to_owned(),
+            ..BuilderClaims::default()
+        });
     };
-    parse_claims(path, &bytes)
+    let claims = parse_claims(path, &bytes)?;
+    ensure_claims_builder(path, &claims, builder)?;
+    Ok(claims)
 }
 
 fn runtime_claims_missing(path: &Path) -> Result<bool> {
@@ -530,21 +1351,33 @@ fn parse_claims(path: &Path, bytes: &[u8]) -> Result<BuilderClaims> {
     Ok(claims)
 }
 
+fn ensure_claims_builder(path: &Path, claims: &BuilderClaims, expected: &str) -> Result<()> {
+    if claims.builder != expected {
+        anyhow::bail!(
+            "claim file {} names builder {:?}, expected {expected}",
+            path.display(),
+            claims.builder
+        );
+    }
+    Ok(())
+}
+
 /// Read a Velnor ownership record without treating a missing or mismatched
 /// file as an empty claim. A reserved-looking name alone is not proof that an
 /// external Buildx builder belongs to this daemon.
 fn read_registered_claims(path: &Path, builder: &str) -> Result<Option<BuilderClaims>> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    let Some(bytes) = read_control_file_no_follow(path)? else {
+        return Ok(None);
     };
     let claims = parse_claims(path, &bytes)?;
-    if claims.builder == builder && is_persistent_builder_name(&claims.builder) {
-        Ok(Some(claims))
-    } else {
-        Ok(None)
+    ensure_claims_builder(path, &claims, builder)?;
+    if !is_current_domained_persistent_builder(&claims.builder) {
+        anyhow::bail!(
+            "claim file {} names a retired or unscoped builder",
+            path.display()
+        );
     }
+    Ok(Some(claims))
 }
 
 /// A failed ownership read during a maintenance pass, carrying the exact file
@@ -574,12 +1407,10 @@ impl OwnershipReadError {
     }
 }
 
-/// Read ownership for a maintenance pass. Old capped names predate the
-/// current generation and their claims lived under `/run`; their namespace
-/// remains recognized only when the runtime claim file is present. Missing
-/// claims never become an empty holder set: Docker's container snapshot does
-/// not cover runner admission markers, and a current owner record cannot
-/// identify which jobs hold its builder.
+/// Read ownership for a maintenance pass. Only current domain names reach
+/// this function. Missing claims never become an empty holder set: Docker's
+/// container snapshot does not cover runner admission markers, and a current
+/// owner record cannot identify which jobs hold its builder.
 fn read_claims_for_reaping(
     path: &Path,
     builder: &str,
@@ -588,7 +1419,7 @@ fn read_claims_for_reaping(
     if let Some(claims) = read_registered_claims(path, builder)
         .map_err(|source| OwnershipReadError::claims(path, source))?
     {
-        if builder.starts_with(CURRENT_PERSISTENT_BUILDER_PREFIX)
+        if is_current_domained_persistent_builder(builder)
             && let Some(registry_root) = registry_root
         {
             // An existing malformed or mismatched durable record is a hard
@@ -609,7 +1440,7 @@ fn read_claims_for_reaping(
             ));
         }
     }
-    if builder.starts_with(CURRENT_PERSISTENT_BUILDER_PREFIX)
+    if is_current_domained_persistent_builder(builder)
         && let Some(registry_root) = registry_root
         && read_owner_record(registry_root, builder)
             .map_err(|source| OwnershipReadError::owner_record(registry_root, builder, source))?
@@ -627,39 +1458,85 @@ fn read_claims_for_reaping(
     Ok(None)
 }
 
+fn repair_pressure_claims(
+    run_root: &Path,
+    registry_root: &Path,
+    builder: &str,
+    present: &BTreeSet<String>,
+) -> Result<bool> {
+    let path = claims_file(run_root, builder);
+    let _lock = lock_claims(builder, &path)?;
+    let mut claims = match read_claims_for_reaping(&path, builder, Some(registry_root)) {
+        Ok(Some(claims)) => claims,
+        Ok(None) => anyhow::bail!("BuildKit claims for {builder} are missing or mismatched"),
+        Err(error) => {
+            return Err(error.source).context(format!(
+                "read BuildKit ownership at {}",
+                error.path.display()
+            ));
+        }
+    };
+    ensure_active_owner_record(registry_root, builder)?;
+    repair_absent_unlocked(&mut claims, present);
+    write_claims(&path, &claims)?;
+    Ok(claims.holders.is_empty())
+}
+
 /// Atomically replace one runtime claim file.
 fn write_claims(path: &Path, claims: &BuilderClaims) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(claims).context("encode builder claims")?;
     write_atomic_document(path, &bytes)
 }
 
+fn publish_claims_before_owner(
+    path: &Path,
+    claims: &BuilderClaims,
+    publish_owner: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    write_claims(path, claims)?;
+    publish_owner()
+}
+
 /// Atomically replace one JSON document: write and fsync a sibling temp,
 /// rename it, then fsync the parent directory. A crash leaves either the
 /// previous record or the new record, never a partial target.
 fn write_atomic_document(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let parent = path
+        .parent()
+        .with_context(|| format!("BuildKit document has no parent: {}", path.display()))?;
+    let destination = path
+        .file_name()
+        .with_context(|| format!("BuildKit document has no filename: {}", path.display()))?;
+    let directory =
+        crate::fs_copy::NoFollowDestinationDir::open_or_create_absolute_no_follow(parent)
+            .with_context(|| {
+                format!(
+                    "open BuildKit document directory {} safely",
+                    parent.display()
+                )
+            })?;
+    let (staged, staging_name) = directory.create_temporary_file("velnor-buildkit")?;
+    let mut staged = Some(staged);
     let write_result = (|| -> Result<()> {
-        {
-            use std::io::Write as _;
-            let mut temp_file = std::fs::File::create(&temp)
-                .with_context(|| format!("write {}", temp.display()))?;
-            temp_file
-                .write_all(bytes)
-                .with_context(|| format!("write {}", temp.display()))?;
-            temp_file
-                .sync_all()
-                .with_context(|| format!("fsync {}", temp.display()))?;
-        }
-        std::fs::rename(&temp, path)
-            .with_context(|| format!("rename {} to {}", temp.display(), path.display()))?;
-        sync_parent(path)?;
+        use std::io::Write as _;
+        staged
+            .as_mut()
+            .context("staged BuildKit document was already closed")?
+            .write_all(bytes)
+            .with_context(|| format!("write BuildKit document {}", path.display()))?;
+        staged
+            .as_ref()
+            .context("staged BuildKit document was already closed")?
+            .sync_all()
+            .with_context(|| format!("fsync BuildKit document {}", path.display()))?;
+        drop(staged.take());
+        directory.publish_temporary_file(&staging_name, destination)?;
+        directory.sync_directory()?;
         Ok(())
     })();
     if write_result.is_err() {
-        let _ = std::fs::remove_file(&temp);
+        drop(staged.take());
+        let _ = directory.remove_tree_entry(&staging_name);
     }
     write_result
 }
@@ -722,6 +1599,55 @@ fn lock_claims(builder: &str, path: &Path) -> Result<crate::cache::CacheEntryLoc
     Ok(lock)
 }
 
+/// Serialize one builder's setup and last-holder release across slow Docker
+/// operations. Both callers take the domain coordinator before this lock.
+pub(crate) fn lock_builder_lifecycle(domain_root: &Path, builder: &str) -> Result<std::fs::File> {
+    if !is_current_domained_persistent_builder(builder) {
+        anyhow::bail!("refuse lifecycle lock for an unscoped or retired BuildKit builder");
+    }
+    let lock_root = domain_root.join(BUILDER_LIFECYCLE_LOCKS_DIR);
+    let directory =
+        crate::fs_copy::NoFollowDestinationDir::open_or_create_absolute_no_follow(&lock_root)
+            .with_context(|| {
+                format!(
+                    "secure BuildKit lifecycle lock root {}",
+                    lock_root.display()
+                )
+            })?;
+    let file_name = format!("{}.lock", blake3::hash(builder.as_bytes()).to_hex());
+    let file = directory
+        .open_or_create_lock_file(std::ffi::OsStr::new(&file_name))
+        .with_context(|| format!("open BuildKit lifecycle lock {file_name}"))?;
+    let started = Instant::now();
+    loop {
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => {
+                let waited_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                tracing::debug!(
+                    target: "velnor.buildkit",
+                    builder,
+                    lifecycle_lock_wait_ms = waited_ms,
+                    "builder lifecycle lock acquired"
+                );
+                return Ok(file);
+            }
+            Err(rustix::io::Errno::WOULDBLOCK) if started.elapsed() < CLAIM_LOCK_TIMEOUT => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(rustix::io::Errno::WOULDBLOCK) => {
+                anyhow::bail!(
+                    "timed out acquiring BuildKit lifecycle lock for {builder} after {:?}",
+                    CLAIM_LOCK_TIMEOUT
+                );
+            }
+            Err(error) => {
+                return Err(anyhow::Error::new(error)
+                    .context(format!("lock BuildKit lifecycle for {builder}")));
+            }
+        }
+    }
+}
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -746,14 +1672,31 @@ fn repair_absent_unlocked(claims: &mut BuilderClaims, present: &BTreeSet<String>
 /// Claim `builder` for the calling job. Idempotent: claiming twice (two
 /// setup-buildx steps, one name) holds once. Current-generation owner records
 /// are committed before setup can create or reuse the Buildx object.
+#[cfg(test)]
 pub(crate) fn claim_builder(
-    run_root: &Path,
+    domain_root: &Path,
     builder: &str,
     slot: &str,
     container: &str,
 ) -> Result<()> {
-    let registry_root = claims_registry_root();
-    claim_builder_with_registry(run_root, registry_root.as_deref(), builder, slot, container)
+    if !is_current_domained_persistent_builder(builder) {
+        anyhow::bail!("refuse claims for an unscoped or retired BuildKit builder");
+    }
+    let registry_root = owner_registry_root(domain_root);
+    claim_builder_with_registry(domain_root, Some(&registry_root), builder, slot, container)
+}
+
+pub(crate) fn claim_domain_builder(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    slot: &str,
+    container: &str,
+) -> Result<()> {
+    if persistent_builder_domain_token(builder) != Some(domain.token.as_str()) {
+        anyhow::bail!("refuse claims for a BuildKit builder from another domain");
+    }
+    let registry_root = owner_registry_root(&domain.root);
+    claim_builder_with_registry(&domain.root, Some(&registry_root), builder, slot, container)
 }
 
 fn claim_builder_with_registry(
@@ -763,35 +1706,38 @@ fn claim_builder_with_registry(
     slot: &str,
     container: &str,
 ) -> Result<()> {
+    if !is_current_domained_persistent_builder(builder) {
+        anyhow::bail!("refuse claims for an unscoped or retired BuildKit builder");
+    }
     let path = claims_file(run_root, builder);
     let _lock = lock_claims(builder, &path)?;
+    let owner = registry_root
+        .map(|registry_root| read_owner_record(registry_root, builder))
+        .transpose()?
+        .flatten();
+    if owner
+        .as_ref()
+        .is_some_and(|record| record.phase == BuilderOwnerPhase::Deleting)
+    {
+        anyhow::bail!("BuildKit builder {builder} is durably marked for deletion");
+    }
     if runtime_claims_missing(&path)?
-        && builder.starts_with(CURRENT_PERSISTENT_BUILDER_PREFIX)
+        && is_current_domained_persistent_builder(builder)
         && let Some(registry_root) = registry_root
-        && read_owner_record(registry_root, builder)?.is_some()
+        && owner.is_some()
     {
         anyhow::bail!(
             "runtime claims for registered BuildKit builder {builder} are missing; after all jobs using this Docker endpoint are quiescent, remove owner record {} before setup creates a fresh claim",
             owner_registry_file(registry_root, builder).display()
         );
     }
-    let mut claims = match read_claims(&path) {
+    let mut claims = match read_claims(&path, builder) {
         Ok(claims) => claims,
         Err(error) => {
             log_torn_claims(builder, &path, &error);
             return Err(error);
         }
     };
-    if !claims.builder.is_empty() && claims.builder != builder {
-        anyhow::bail!(
-            "claim file {} names builder {}, expected {builder}",
-            path.display(),
-            claims.builder
-        );
-    }
-    if let Some(registry_root) = registry_root {
-        ensure_owner_record(registry_root, builder)?;
-    }
     repair_slot_unlocked(&mut claims, slot, container);
     claims.holders.insert(
         container.to_string(),
@@ -802,7 +1748,16 @@ fn claim_builder_with_registry(
         },
     );
     claims.builder = builder.to_string();
-    write_claims(&path, &claims)
+    // Claims publish first. A crash before the owner record leaves no Docker
+    // side effects authorized and a recoverable claims-only ledger; the
+    // reverse order could leave an Active owner with missing claims, which
+    // must remain permanently fail-closed.
+    publish_claims_before_owner(&path, &claims, || {
+        if let Some(registry_root) = registry_root {
+            ensure_active_owner_record(registry_root, builder)?;
+        }
+        Ok(())
+    })
 }
 
 /// What a release did.
@@ -818,26 +1773,45 @@ pub(crate) struct ReleaseOutcome {
 }
 
 /// Release the calling job's hold, stopping the daemon when this release
-/// removed the final holder. The lock covers only the holder mutation: the
-/// stop runs unlocked so one slow daemon cannot park every setup, and a
-/// recheck under a fresh lock restarts the daemon when a setup raced the
-/// stop. A racing setup whose build starts after the stop restarts the
-/// daemon on first build; a build caught mid-stop may fail once and is
-/// visible in telemetry — the bounded, observable race this trades for
-/// never holding the lock across Docker. Releasing a hold this job does not
-/// have (post after post, teardown after post) succeeds without stopping.
-/// A torn claim file reads as claimed: no removal, no stop, success.
+/// removed the final holder. The shared lifecycle coordinator and per-builder
+/// lock remain held across claim mutation, Docker stop, and recovery, so setup
+/// cannot create or use this builder until the stop is complete. Releasing a
+/// hold this job does not have (post after post, teardown after post) succeeds
+/// without stopping. A torn claim file reads as claimed: no removal, no stop,
+/// success.
+#[cfg(test)]
 pub(crate) fn release_and_stop_if_last(
-    run_root: &Path,
+    domain_root: &Path,
     builder: &str,
     container: &str,
     stop: impl FnOnce() -> Result<bool>,
     start: impl FnOnce() -> Result<bool>,
 ) -> Result<ReleaseOutcome> {
-    let registry_root = claims_registry_root();
+    let registry_root = owner_registry_root(domain_root);
     release_and_stop_if_last_with_registry(
-        run_root,
-        registry_root.as_deref(),
+        domain_root,
+        Some(&registry_root),
+        builder,
+        container,
+        stop,
+        start,
+    )
+}
+
+pub(crate) fn release_domain_builder_if_last(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    container: &str,
+    stop: impl FnOnce() -> Result<bool>,
+    start: impl FnOnce() -> Result<bool>,
+) -> Result<ReleaseOutcome> {
+    if persistent_builder_domain_token(builder) != Some(domain.token.as_str()) {
+        anyhow::bail!("refuse release for a BuildKit builder from another domain");
+    }
+    let registry_root = owner_registry_root(&domain.root);
+    release_and_stop_if_last_with_registry(
+        &domain.root,
+        Some(&registry_root),
         builder,
         container,
         stop,
@@ -846,20 +1820,24 @@ pub(crate) fn release_and_stop_if_last(
 }
 
 fn release_and_stop_if_last_with_registry(
-    run_root: &Path,
+    domain_root: &Path,
     registry_root: Option<&Path>,
     builder: &str,
     container: &str,
     stop: impl FnOnce() -> Result<bool>,
     start: impl FnOnce() -> Result<bool>,
 ) -> Result<ReleaseOutcome> {
-    let _lifecycle = crate::capacity::FilesystemCoordinator::lock_shared(run_root)
+    if !is_current_domained_persistent_builder(builder) {
+        anyhow::bail!("refuse release for an unscoped or retired BuildKit builder");
+    }
+    let _lifecycle = crate::capacity::FilesystemCoordinator::lock_shared(domain_root)
         .context("lock BuildKit lifecycle for release")?;
-    let path = claims_file(run_root, builder);
+    let _builder_lifecycle = lock_builder_lifecycle(domain_root, builder)?;
+    let path = claims_file(domain_root, builder);
     let removed_last = {
         let _lock = lock_claims(builder, &path)?;
         if runtime_claims_missing(&path)? && is_persistent_builder_name(builder) {
-            if builder.starts_with(CURRENT_PERSISTENT_BUILDER_PREFIX)
+            if is_current_domained_persistent_builder(builder)
                 && let Some(registry_root) = registry_root
                 && read_owner_record(registry_root, builder)?.is_some()
             {
@@ -884,7 +1862,7 @@ fn release_and_stop_if_last_with_registry(
                 restarted: false,
             });
         }
-        let mut claims = match read_claims(&path) {
+        let mut claims = match read_claims(&path, builder) {
             Ok(claims) => claims,
             Err(error) => {
                 log_torn_claims(builder, &path, &error);
@@ -896,9 +1874,6 @@ fn release_and_stop_if_last_with_registry(
             }
         };
         let removed = claims.holders.remove(container).is_some();
-        if claims.builder.is_empty() {
-            claims.builder = builder.to_string();
-        }
         write_claims(&path, &claims)?;
         removed && claims.holders.is_empty()
     };
@@ -910,28 +1885,50 @@ fn release_and_stop_if_last_with_registry(
         });
     }
     let stop_started = Instant::now();
-    let stopped = stop()?;
+    let stop_result = stop();
+    let stopped = stop_result.as_ref().copied().unwrap_or(false);
+    let stop_error = stop_result.err();
     tracing::debug!(
         target: "velnor.buildkit",
         builder,
         stop_ms = stop_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
         stopped,
+        stop_uncertain = stop_error.is_some(),
         "release stop ran outside the claim lock"
     );
     // Recheck: a setup that claimed while the stop ran needs the daemon
-    // back. A torn recheck reads as claimed and restarts too.
-    let raced = {
+    // back. An ambiguous stop result still reaches this recheck; lock or
+    // ownership uncertainty triggers a best-effort start before returning.
+    let recheck = (|| -> Result<(bool, bool)> {
         let _lock = lock_claims(builder, &path)?;
-        match read_claims_for_reaping(&path, builder, registry_root) {
-            Ok(Some(claims)) => !claims.holders.is_empty(),
-            Ok(None) => true,
-            Err(error) => {
-                log_unreadable_ownership(builder, &error.path, &error.source);
-                true
+        Ok(
+            match read_claims_for_reaping(&path, builder, registry_root) {
+                Ok(Some(claims)) => (!claims.holders.is_empty(), false),
+                Ok(None) => (true, true),
+                Err(error) => {
+                    log_unreadable_ownership(builder, &error.path, &error.source);
+                    (true, true)
+                }
+            },
+        )
+    })();
+    let (raced, recheck_uncertain) = match recheck {
+        Ok(recheck) => recheck,
+        Err(error) => {
+            // Lock/read uncertainty cannot establish that no holder arrived.
+            // Start the daemon unconditionally; this is idempotent for a
+            // still-running daemon and repairs a stop that acted then errored.
+            if let Err(start_error) = start() {
+                return Err(error).context(format!(
+                    "BuildKit claim recheck failed and safe restart also failed: {start_error:#}"
+                ));
             }
+            return Err(error).context(
+                "BuildKit claim recheck failed; attempted safe restart after ambiguous stop",
+            );
         }
     };
-    let restarted = if raced && stopped {
+    let restarted = if raced && (stopped || stop_error.is_some() || recheck_uncertain) {
         tracing::warn!(
             target: "velnor.buildkit",
             builder,
@@ -952,6 +1949,24 @@ fn release_and_stop_if_last_with_registry(
     } else {
         false
     };
+    if raced && !restarted {
+        anyhow::bail!(
+            "BuildKit holders arrived during release stop, but the attested daemon did not become ready"
+        );
+    }
+    if let Some(error) = stop_error {
+        if raced && restarted {
+            tracing::warn!(
+                target: "velnor.buildkit",
+                builder,
+                error = format!("{error:#}"),
+                "release stop returned an error; daemon restarted after holder recheck"
+            );
+        } else {
+            return Err(error)
+                .context("BuildKit release stop returned an error after claim recheck");
+        }
+    }
     Ok(ReleaseOutcome {
         removed_last,
         stopped,
@@ -979,7 +1994,7 @@ pub(crate) fn builder_holders(
 ) -> Result<Vec<BuilderHolder>> {
     let path = claims_file(run_root, builder);
     let _lock = lock_claims(builder, &path)?;
-    let mut claims = read_claims(&path)?;
+    let mut claims = read_claims(&path, builder)?;
     if let Some((slot, container)) = my_slot {
         repair_slot_unlocked(&mut claims, slot, container);
         write_claims(&path, &claims)?;
@@ -1010,7 +2025,7 @@ pub(crate) fn repair_absent_holders(
 ) -> Result<Vec<BuilderHolder>> {
     let path = claims_file(run_root, builder);
     let _lock = lock_claims(builder, &path)?;
-    let mut claims = read_claims(&path)?;
+    let mut claims = read_claims(&path, builder)?;
     repair_absent_unlocked(&mut claims, present);
     write_claims(&path, &claims)?;
     let mut holders: Vec<BuilderHolder> = claims.holders.into_values().collect();
@@ -1021,8 +2036,9 @@ pub(crate) fn repair_absent_holders(
 /// True when the periodic horizon pass is due: no marker, an unreadable
 /// marker, or one older than [`HORIZON_REAP_INTERVAL`].
 fn horizon_reap_due(marker: &Path, now: SystemTime) -> bool {
-    let elapsed = std::fs::read(marker)
+    let elapsed = read_control_file_no_follow_with_limit(marker, MAX_HORIZON_REAP_MARKER_BYTES)
         .ok()
+        .flatten()
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .and_then(|text| text.trim().parse::<u64>().ok())
         .and_then(|stamp| {
@@ -1038,8 +2054,11 @@ fn horizon_reap_due(marker: &Path, now: SystemTime) -> bool {
 /// setup path so long-lived daemons converge without startup, doctor, or
 /// an operator; failures are stamped too — a failing Engine must not make
 /// every setup pay for a pass that cannot succeed.
-pub(crate) fn maybe_reap_idle_builders(run_root: &Path, now: SystemTime) -> Option<HorizonReport> {
-    maybe_reap_idle_builders_with(run_root, now, reap_idle_builders)
+pub(crate) fn maybe_reap_idle_builders(
+    domain: &PersistentBuildKitDomain,
+    now: SystemTime,
+) -> Option<HorizonReport> {
+    maybe_reap_idle_builders_with(&domain.root, now, |_, _| reap_idle_builders(domain, now))
 }
 
 /// [`maybe_reap_idle_builders`] with the pass injected, so tests cover the
@@ -1054,15 +2073,19 @@ fn maybe_reap_idle_builders_with(
         return None;
     }
     let report = reap(run_root, now);
-    if let Some(parent) = marker.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     let stamp = now
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(0)
         .to_string();
-    let _ = std::fs::write(&marker, stamp);
+    if let Err(error) = write_atomic_document(&marker, stamp.as_bytes()) {
+        tracing::warn!(
+            target: "velnor.buildkit",
+            marker = %marker.display(),
+            error = %error,
+            "failed to stamp BuildKit horizon marker; next setup will retry"
+        );
+    }
     Some(report)
 }
 
@@ -1094,82 +2117,745 @@ pub(crate) fn read_job_builders(temp_host: &Path) -> Result<Vec<String>> {
     Ok(serde_json::from_slice(&bytes).unwrap_or_default())
 }
 
-/// The daemon run root holding claim files, if this process has storage
-/// configured. Maintenance and job paths degrade to no-claim operation
-/// without one (builders still persist by name; nothing stops them).
-pub(crate) fn claims_run_root() -> Option<PathBuf> {
-    crate::storage::StorageLayout::resolve().map(|layout| layout.run_root)
-}
-
 // ---------------------------------------------------------------------------
 // Daemon operations (host engine, every call deadline-bounded)
 // ---------------------------------------------------------------------------
 
-/// Stop one builder's daemon. Returns true when the daemon exists (a stop
-/// acted or it was already stopped — exit 0 meant true here before the
-/// migration, and the CLI leg still cannot distinguish); a missing
-/// daemon reads as already stopped. Only ever called with zero holders.
-pub(crate) fn stop_builder_daemon(builder: &str) -> Result<bool> {
-    let daemon = daemon_container_name(builder);
-    match crate::docker::Docker::host().container_stop(&daemon, None) {
-        Ok(_) => Ok(true),
-        Err(error) if crate::docker::client::is_not_found(&error) => Ok(false),
-        Err(error) => Err(error).with_context(|| format!("stop BuildKit daemon {daemon}")),
-    }
+/// Run a lifecycle command only after locking and re-attesting the domain's
+/// exact state volume and daemon. Docker containers are addressed by the
+/// immutable ID returned by that inspect, never by a reusable name.
+fn with_attested_domain_builder<T>(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    operation: impl FnOnce(&str, &str, &str, bool, Option<&str>) -> Result<T>,
+) -> Result<T> {
+    with_attested_domain_builder_with(
+        domain,
+        builder,
+        |identity_root, engine_id, volume| {
+            crate::docker_lease::lock_host_volume_name_for_domain(identity_root, engine_id, volume)
+        },
+        attest_buildkit_removal_volume,
+        attest_buildkit_removal_container,
+        operation,
+    )
 }
 
-/// Start one builder's daemon. Missing reads as already gone. The undo half
-/// of every stop that runs outside the claim lock: when a recheck finds
-/// holders that arrived mid-stop, this brings the daemon back for them.
-pub(crate) fn start_builder_daemon(builder: &str) -> Result<bool> {
-    let daemon = daemon_container_name(builder);
-    match crate::docker::Docker::host().container_start(&daemon) {
-        Ok(_) => Ok(true),
-        Err(error) if crate::docker::client::is_not_found(&error) => Ok(false),
-        Err(error) => Err(error).with_context(|| format!("start BuildKit daemon {daemon}")),
+fn with_attested_domain_builder_with<G, T>(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    acquire_volume_lock: impl FnOnce(&Path, &str, &str) -> Result<G>,
+    mut inspect_volume: impl FnMut(&PersistentBuildKitDomain, &str) -> Result<bool>,
+    inspect_container: impl FnOnce(
+        &PersistentBuildKitDomain,
+        &str,
+        &str,
+        &str,
+    ) -> Result<Option<String>>,
+    operation: impl FnOnce(&str, &str, &str, bool, Option<&str>) -> Result<T>,
+) -> Result<T> {
+    if persistent_builder_domain_token(builder) != Some(domain.token.as_str()) {
+        anyhow::bail!("refuse operation on a BuildKit builder from another domain");
     }
-}
-
-/// Prune one builder's cache completely, returning the du-measured bytes
-/// freed. A missing builder (or one that vanishes mid-prune) frees nothing.
-/// A stopped daemon is started first: `buildx du` and `buildx prune` both
-/// refuse a stopped daemon (proven live). Called only after a locked holder
-/// check found zero holders, but the prune itself runs unlocked — a racing
-/// setup claims concurrently, then the recheck restarts the daemon for it.
-/// A racing build caught mid-prune may observe the cold; that bounded,
-/// observable race is the price of never holding the lock across Docker.
-fn prune_builder(builder: &str) -> Result<u64> {
-    let mut docker = crate::docker::Docker::host();
-    let before = match docker.buildx_disk_usage(builder) {
-        Ok(usage) => usage,
-        Err(error) if crate::docker::client::is_not_running(&error) => {
-            if !start_builder_daemon(builder)? {
-                return Ok(0);
-            }
-            docker.buildx_disk_usage(builder).unwrap_or(0)
-        }
-        Err(_) => return Ok(0),
+    let daemon = daemon_container_name(builder);
+    let volume = daemon_state_volume(builder);
+    let _volume_lock = acquire_volume_lock(&domain.identity_root, &domain.engine_id, &volume)?;
+    // Inspect up front so uncertainty prevents container mutation.
+    let volume_present = inspect_volume(domain, &volume)?;
+    let container_id = if volume_present {
+        inspect_container(domain, builder, &daemon, &volume)?
+    } else {
+        None
     };
-    let args = vec![
-        "buildx".to_string(),
-        "prune".to_string(),
-        "--builder".to_string(),
-        builder.to_string(),
-        "--force".to_string(),
-    ];
-    if let Err(error) = crate::docker::client::host_call(&args) {
-        // Missing daemon (narrow engine vocabulary) or missing buildx
-        // registration (`no builder "x" found`, typed at the Docker
-        // boundary) both free nothing.
-        if crate::docker::client::is_not_found(&error)
-            || crate::docker::client::is_buildkit_builder_not_found(&error)
-        {
-            return Ok(0);
-        }
-        return Err(error).with_context(|| format!("prune BuildKit builder {builder}"));
+    operation(
+        builder,
+        &daemon,
+        &volume,
+        volume_present,
+        container_id.as_deref(),
+    )
+}
+
+/// Stop only the inspected persistent daemon, holding the same volume-name
+/// lock used by setup and removal. Missing attested objects are already gone.
+pub(crate) fn stop_builder_in_domain(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+) -> Result<bool> {
+    with_attested_domain_builder(
+        domain,
+        builder,
+        |_, daemon, _, volume_present, container_id| {
+            if !volume_present {
+                return Ok(false);
+            }
+            let Some(container_id) = container_id else {
+                return Ok(false);
+            };
+            stop_attested_builder_confirmed(container_id)
+                .with_context(|| format!("stop BuildKit daemon {daemon}"))
+        },
+    )
+}
+
+/// Restart a re-attested daemon after a holder appears during unlocked work.
+pub(crate) fn start_builder_in_domain(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+) -> Result<bool> {
+    start_builder_in_domain_matching_id(domain, builder, None)
+}
+
+/// Start a host-inspected persistent daemon only if a fresh attestation still
+/// resolves the same immutable ID observed by the lease conflict path.
+pub(crate) fn start_builder_in_domain_matching_id(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    expected_container_id: Option<&str>,
+) -> Result<bool> {
+    let Some(container_id) =
+        start_builder_container_in_domain_matching_id(domain, builder, expected_container_id)?
+    else {
+        anyhow::bail!(
+            "attested BuildKit daemon {} disappeared before restart",
+            daemon_container_name(builder)
+        );
+    };
+    wait_for_attested_buildkit_ready(&container_id).with_context(|| {
+        format!(
+            "wait for BuildKit daemon {} after start",
+            daemon_container_name(builder)
+        )
+    })?;
+    Ok(true)
+}
+
+fn require_buildkit_restart(result: Result<bool>) -> Result<()> {
+    match result? {
+        true => Ok(()),
+        false => anyhow::bail!("attested BuildKit daemon was not restarted"),
     }
-    let after = docker.buildx_disk_usage(builder).unwrap_or(0);
-    Ok(before.saturating_sub(after))
+}
+
+fn start_builder_container_in_domain_matching_id(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    expected_container_id: Option<&str>,
+) -> Result<Option<String>> {
+    with_attested_domain_builder(
+        domain,
+        builder,
+        |_, daemon, _, volume_present, container_id| {
+            if !volume_present {
+                return Ok(None);
+            }
+            let Some(container_id) = container_id else {
+                return Ok(None);
+            };
+            if expected_container_id.is_some_and(|expected| expected != container_id) {
+                anyhow::bail!(
+                    "attested BuildKit daemon {daemon} changed immutable ID before restart"
+                );
+            }
+            let proof = read_builder_readiness(domain, builder)?
+                .context("refuse host restart without durable BuildKit readiness proof")?;
+            if proof.container_id != container_id {
+                anyhow::bail!(
+                    "refuse host restart of {daemon}: readiness proof names another immutable ID"
+                );
+            }
+            let started = start_attested_builder_confirmed(container_id)
+                .with_context(|| format!("start BuildKit daemon {daemon}"))?;
+            if started {
+                return Ok(Some(container_id.to_owned()));
+            }
+            Ok(None)
+        },
+    )
+}
+
+/// Complete Buildx's name-conflict reuse path for one freshly attested
+/// immutable container. A `Created` container may belong to the winning
+/// concurrent create request, which still needs to copy its config before
+/// starting it; wait for that owner. Restart only a previously-started
+/// container (Docker supplies a nonzero FinishedAt for stopped instances).
+pub(crate) fn ensure_conflicting_builder_ready_in_domain(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    expected_container_id: &str,
+    config_fingerprint: &str,
+    mut other_create_in_flight: impl FnMut() -> Result<bool>,
+    mut recover_unbound_created: impl FnMut(&str) -> Result<bool>,
+) -> Result<bool> {
+    if persistent_builder_domain_token(builder) != Some(domain.token.as_str()) {
+        anyhow::bail!("refuse conflict recovery for a BuildKit builder from another domain");
+    }
+    if !builder_readiness_matches(domain, builder, expected_container_id, config_fingerprint)? {
+        ensure_conflicting_builder_creator_or_readiness(
+            expected_container_id,
+            config_fingerprint,
+            Duration::from_secs(30),
+            || {
+                let volume = daemon_state_volume(builder);
+                let _volume_lock = crate::docker_lease::lock_host_volume_name_for_domain(
+                    &domain.identity_root,
+                    &domain.engine_id,
+                    &volume,
+                )?;
+                if !attest_buildkit_removal_volume(domain, &volume)? {
+                    return Ok(None);
+                }
+                attest_buildkit_removal_container(
+                    domain,
+                    builder,
+                    &daemon_container_name(builder),
+                    &volume,
+                )
+            },
+            || {
+                builder_readiness_matches(
+                    domain,
+                    builder,
+                    expected_container_id,
+                    config_fingerprint,
+                )
+            },
+            &mut other_create_in_flight,
+            &mut recover_unbound_created,
+            || read_live_builder_creator(domain, builder),
+            |delay| std::thread::sleep(delay),
+        )?;
+    }
+    ensure_conflicting_builder_ready_with_attestation(
+        expected_container_id,
+        || {
+            crate::docker_lease::lock_host_volume_name_for_domain(
+                &domain.identity_root,
+                &domain.engine_id,
+                &daemon_state_volume(builder),
+            )
+        },
+        || attest_buildkit_removal_volume(domain, &daemon_state_volume(builder)),
+        || {
+            attest_buildkit_removal_container(
+                domain,
+                builder,
+                &daemon_container_name(builder),
+                &daemon_state_volume(builder),
+            )
+        },
+        Duration::from_secs(30),
+        |delay| std::thread::sleep(delay),
+        |id, timeout| crate::docker::Docker::host().inspect_exit_bounded(id, timeout),
+        |id| {
+            start_builder_container_in_domain_matching_id(domain, builder, Some(id))
+                .map(|started| started.is_some())
+        },
+        wait_for_attested_buildkit_ready,
+    )
+}
+
+/// Recover an exact stale `Created` daemon after the current request wins the
+/// serialized creator lease. Buildx's 409 path skips both archive and start,
+/// so only this path may transfer the approved archive and start the same
+/// immutable container. The Engine-volume lock covers re-attestation, archive,
+/// and start; worker polling happens after it is released.
+pub(crate) fn recover_conflicting_created_builder_in_domain(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    expected_container_id: &str,
+    config_fingerprint: &str,
+    mut upload_archive: impl FnMut(&str, &str) -> Result<()>,
+) -> Result<bool> {
+    if persistent_builder_domain_token(builder) != Some(domain.token.as_str()) {
+        anyhow::bail!("refuse Created recovery for a BuildKit builder from another domain");
+    }
+    if builder_readiness_matches(domain, builder, expected_container_id, config_fingerprint)? {
+        return Ok(true);
+    }
+    let creator = read_live_builder_creator(domain, builder)?
+        .context("refuse Created recovery without the current live creator lease")?;
+    if creator.config_fingerprint != config_fingerprint
+        || creator
+            .container_id
+            .as_deref()
+            .is_some_and(|id| id != expected_container_id)
+    {
+        anyhow::bail!("live BuildKit creator does not match Created recovery identity");
+    }
+    // A creator that has already bound this ID owns a different in-flight
+    // transaction. Its observer must publish readiness; this callback only
+    // recovers an unbound lease after all competing create attempts end.
+    if creator.container_id.is_some() {
+        return Ok(false);
+    }
+
+    let volume = daemon_state_volume(builder);
+    let volume_lock = crate::docker_lease::lock_host_volume_name_for_domain(
+        &domain.identity_root,
+        &domain.engine_id,
+        &volume,
+    )?;
+    if builder_readiness_matches(domain, builder, expected_container_id, config_fingerprint)? {
+        return Ok(true);
+    }
+    if !attest_buildkit_removal_volume(domain, &volume)? {
+        return Ok(false);
+    }
+    let daemon = daemon_container_name(builder);
+    let Some(container_id) = attest_buildkit_removal_container(domain, builder, &daemon, &volume)?
+    else {
+        return Ok(false);
+    };
+    if container_id != expected_container_id {
+        anyhow::bail!("BuildKit daemon changed immutable ID before Created recovery");
+    }
+    let creator = read_live_builder_creator(domain, builder)?
+        .context("BuildKit creator lease ended before Created recovery")?;
+    if creator.config_fingerprint != config_fingerprint || creator.container_id.is_some() {
+        return Ok(false);
+    }
+    let before = crate::docker::Docker::host()
+        .inspect_exit_bounded(&container_id, Duration::from_secs(2))
+        .context("inspect attested BuildKit daemon before Created recovery")?;
+    if before.status != Some(crate::docker::client::ContainerState::Created)
+        || before.finished.is_some()
+    {
+        return Ok(false);
+    }
+
+    bind_persistent_builder_creator_container(domain, builder, config_fingerprint, &container_id)?;
+    upload_archive(&container_id, config_fingerprint)
+        .context("upload approved BuildKit config archive for Created recovery")?;
+    record_persistent_builder_creator_archive(
+        domain,
+        builder,
+        config_fingerprint,
+        &container_id,
+        config_fingerprint,
+    )?;
+
+    if !attest_buildkit_removal_volume(domain, &volume)?
+        || attest_buildkit_removal_container(domain, builder, &daemon, &volume)?.as_deref()
+            != Some(container_id.as_str())
+    {
+        anyhow::bail!("BuildKit daemon identity changed after Created recovery archive");
+    }
+    let after_archive = crate::docker::Docker::host()
+        .inspect_exit_bounded(&container_id, Duration::from_secs(2))
+        .context("inspect attested BuildKit daemon after Created recovery archive")?;
+    if after_archive.status != Some(crate::docker::client::ContainerState::Created)
+        || after_archive.finished.is_some()
+    {
+        anyhow::bail!("BuildKit daemon state changed before Created recovery start");
+    }
+    if !start_attested_builder_confirmed(&container_id)? {
+        anyhow::bail!("attested BuildKit daemon disappeared during Created recovery start");
+    }
+    drop(volume_lock);
+
+    wait_for_attested_buildkit_ready(&container_id)
+        .context("wait for recovered BuildKit daemon workers")?;
+    persist_builder_readiness_after_start(domain, builder, &container_id, config_fingerprint)?;
+    Ok(true)
+}
+
+fn ensure_conflicting_builder_creator_or_readiness(
+    expected_container_id: &str,
+    config_fingerprint: &str,
+    timeout: Duration,
+    mut attest_candidate: impl FnMut() -> Result<Option<String>>,
+    mut readiness_matches: impl FnMut() -> Result<bool>,
+    mut other_create_in_flight: impl FnMut() -> Result<bool>,
+    mut recover_unbound_created: impl FnMut(&str) -> Result<bool>,
+    mut live_creator: impl FnMut() -> Result<Option<BuilderCreatorLeaseRecord>>,
+    sleep: impl FnMut(Duration),
+) -> Result<()> {
+    if readiness_matches()? {
+        return Ok(());
+    }
+    let Some(creator) = live_creator()? else {
+        if readiness_matches()? {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "refuse conflicting BuildKit container without a live matching creator lease"
+        );
+    };
+    if creator.config_fingerprint != config_fingerprint {
+        anyhow::bail!("live BuildKit creator config does not match the conflicting builder");
+    }
+    let attested_id = attest_candidate()?
+        .context("conflicting BuildKit container disappeared before creator wait")?;
+    if attested_id != expected_container_id {
+        anyhow::bail!("conflicting BuildKit name changed immutable ID before creator wait");
+    }
+    match creator.container_id.as_deref() {
+        Some(id) if id != expected_container_id => {
+            anyhow::bail!("live BuildKit creator is bound to another immutable container ID");
+        }
+        Some(_) => {}
+        None if other_create_in_flight()? => {}
+        None => {
+            if recover_unbound_created(expected_container_id)? && readiness_matches()? {
+                return Ok(());
+            }
+        }
+    };
+    wait_for_live_creator_readiness_with(
+        expected_container_id,
+        config_fingerprint,
+        timeout,
+        &mut readiness_matches,
+        &mut other_create_in_flight,
+        &mut recover_unbound_created,
+        &mut live_creator,
+        sleep,
+    )
+}
+
+fn wait_for_live_creator_readiness_with(
+    expected_container_id: &str,
+    config_fingerprint: &str,
+    timeout: Duration,
+    mut readiness_matches: impl FnMut() -> Result<bool>,
+    mut other_create_in_flight: impl FnMut() -> Result<bool>,
+    mut recover_unbound_created: impl FnMut(&str) -> Result<bool>,
+    mut live_creator: impl FnMut() -> Result<Option<BuilderCreatorLeaseRecord>>,
+    mut sleep: impl FnMut(Duration),
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if readiness_matches()? {
+            return Ok(());
+        }
+        let Some(creator) = live_creator()? else {
+            if readiness_matches()? {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "refuse conflicting BuildKit container {expected_container_id} without a live creator lease or exact readiness proof"
+            );
+        };
+        if creator.config_fingerprint != config_fingerprint {
+            anyhow::bail!("live BuildKit creator config does not match the conflicting builder");
+        }
+        match creator.container_id.as_deref() {
+            Some(id) if id != expected_container_id => {
+                anyhow::bail!("live BuildKit creator is bound to another immutable container ID");
+            }
+            Some(_) => {}
+            None if other_create_in_flight()? => {}
+            None => {
+                if recover_unbound_created(expected_container_id)? && readiness_matches()? {
+                    return Ok(());
+                }
+            }
+        }
+        if creator
+            .archived_config_fingerprint
+            .as_deref()
+            .is_some_and(|fingerprint| fingerprint != config_fingerprint)
+        {
+            anyhow::bail!("live BuildKit creator archive does not match the expected config");
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            anyhow::bail!(
+                "live BuildKit creator did not publish exact readiness for {expected_container_id} before timeout"
+            );
+        }
+        sleep(Duration::from_millis(50).min(remaining));
+    }
+}
+
+fn ensure_conflicting_builder_ready_with_attestation<G>(
+    expected_container_id: &str,
+    acquire_volume_lock: impl FnOnce() -> Result<G>,
+    inspect_volume: impl FnOnce() -> Result<bool>,
+    inspect_container: impl FnOnce() -> Result<Option<String>>,
+    timeout: Duration,
+    sleep: impl FnMut(Duration),
+    inspect_state: impl FnMut(&str, Duration) -> Result<crate::docker::client::ExitInfo>,
+    start_if_attested: impl FnMut(&str) -> Result<bool>,
+    wait_ready: impl FnMut(&str) -> Result<()>,
+) -> Result<bool> {
+    // Hold the Engine-wide volume flock only for the identity check. Created
+    // may be waiting for the winning Buildx request to call ContainerStart;
+    // retaining this lock while polling would block that request from starting.
+    let container_id = {
+        let _volume_lock = acquire_volume_lock()?;
+        if !inspect_volume()? {
+            return Ok(false);
+        }
+        inspect_container()?
+            .context("persistent BuildKit container has no attested immutable ID")?
+    };
+    if container_id != expected_container_id {
+        anyhow::bail!("attested BuildKit container ID changed before conflict recovery");
+    }
+    ensure_conflicting_container_ready_with(
+        &container_id,
+        timeout,
+        sleep,
+        inspect_state,
+        start_if_attested,
+        wait_ready,
+    )?;
+    Ok(true)
+}
+
+fn ensure_conflicting_container_ready_with(
+    container_id: &str,
+    timeout: Duration,
+    mut sleep: impl FnMut(Duration),
+    mut inspect: impl FnMut(&str, Duration) -> Result<crate::docker::client::ExitInfo>,
+    mut start_if_attested: impl FnMut(&str) -> Result<bool>,
+    mut wait_ready: impl FnMut(&str) -> Result<()>,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            anyhow::bail!("conflicting BuildKit container {container_id} remained unstarted after bounded wait");
+        }
+        let inspect_timeout = remaining.min(Duration::from_secs(2));
+        let state = inspect(container_id, inspect_timeout)
+            .context("inspect conflicting BuildKit container")?;
+        match state.status {
+            Some(crate::docker::client::ContainerState::Running) => {
+                return wait_ready(container_id)
+                    .context("wait for conflicting BuildKit daemon workers");
+            }
+            Some(crate::docker::client::ContainerState::Created) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    anyhow::bail!("conflicting BuildKit container {container_id} remained unstarted after bounded wait");
+                }
+                sleep(Duration::from_millis(250).min(remaining));
+            }
+            Some(
+                crate::docker::client::ContainerState::Exited
+                | crate::docker::client::ContainerState::Dead,
+            ) if state.finished.is_some() => {
+                if !start_if_attested(container_id)? {
+                    anyhow::bail!("conflicting BuildKit container disappeared before restart");
+                }
+                return wait_ready(container_id)
+                    .context("wait for restarted conflicting BuildKit daemon workers");
+            }
+            status => anyhow::bail!(
+                "cannot safely reuse conflicting BuildKit container in state {status:?}"
+            ),
+        }
+    }
+}
+
+/// Buildx registrations are job-local, so host `docker buildx` cannot address
+/// these builders. Run buildctl inside the already attested immutable daemon
+/// container instead; the explicit socket ignores any inherited BUILDKIT_HOST.
+fn buildctl_prune_args(container_id: &str) -> Vec<String> {
+    vec![
+        "exec".into(),
+        container_id.into(),
+        "buildctl".into(),
+        "--addr".into(),
+        "unix:///run/buildkit/buildkitd.sock".into(),
+        "prune".into(),
+    ]
+}
+
+fn buildctl_ready_args(container_id: &str) -> Vec<String> {
+    vec![
+        "exec".into(),
+        container_id.into(),
+        "buildctl".into(),
+        "--addr".into(),
+        "unix:///run/buildkit/buildkitd.sock".into(),
+        "debug".into(),
+        "workers".into(),
+    ]
+}
+
+fn retry_until_buildkit_ready(
+    timeout: Duration,
+    mut probe: impl FnMut(Duration) -> Result<()>,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    let mut last_error = None;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match probe(remaining.min(Duration::from_secs(2))) {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = Some(error),
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if !remaining.is_zero() {
+            std::thread::sleep(remaining.min(Duration::from_millis(250)));
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("BuildKit readiness deadline elapsed")))
+        .context("BuildKit daemon did not become ready before the pressure-prune deadline")
+}
+
+fn ensure_attested_builder_running(container_id: &str) -> Result<()> {
+    let mut docker = crate::docker::Docker::host();
+    let exit = docker
+        .inspect_exit(container_id)
+        .context("inspect attested BuildKit daemon before cache pruning")?;
+    match exit.status {
+        Some(crate::docker::client::ContainerState::Running) => {
+            return wait_for_attested_buildkit_ready(container_id);
+        }
+        Some(
+            crate::docker::client::ContainerState::Created
+            | crate::docker::client::ContainerState::Exited
+            | crate::docker::client::ContainerState::Dead,
+        ) => {}
+        state => anyhow::bail!("cannot safely run buildctl in BuildKit daemon state {state:?}"),
+    }
+    if let Err(start_error) = docker.container_start(container_id) {
+        let recovered = crate::docker::Docker::host()
+            .inspect_exit(container_id)
+            .context("verify BuildKit daemon after ambiguous start")?;
+        if recovered.status == Some(crate::docker::client::ContainerState::Running) {
+            tracing::warn!(
+                target: "velnor.buildkit",
+                container_id,
+                error = format!("{start_error:#}"),
+            "BuildKit start returned an error but inspect confirms the daemon is running"
+            );
+            return wait_for_attested_buildkit_ready(container_id);
+        }
+        return Err(start_error).context(format!(
+            "start attested BuildKit daemon; inspect reports {:?}",
+            recovered.status
+        ));
+    }
+    wait_for_attested_buildkit_ready(container_id)
+}
+
+fn wait_for_attested_buildkit_ready(container_id: &str) -> Result<()> {
+    let args = buildctl_ready_args(container_id);
+    retry_until_buildkit_ready(Duration::from_secs(30), |timeout| {
+        crate::docker::client::host_call_bounded(&args, timeout).map(|_| ())
+    })
+}
+
+fn stop_attested_builder_confirmed(container_id: &str) -> Result<bool> {
+    stop_attested_builder_confirmed_with(
+        container_id,
+        |id| {
+            crate::docker::Docker::host()
+                .container_stop(id, None)
+                .map(|_| ())
+        },
+        |id| crate::docker::Docker::host().inspect_exit(id),
+    )
+}
+
+fn stop_attested_builder_confirmed_with(
+    container_id: &str,
+    mut stop: impl FnMut(&str) -> Result<()>,
+    mut inspect: impl FnMut(&str) -> Result<crate::docker::client::ExitInfo>,
+) -> Result<bool> {
+    match stop(container_id) {
+        Ok(_) => Ok(true),
+        Err(error) if crate::docker::client::is_not_found(&error) => Ok(false),
+        Err(stop_error) => {
+            let inspected = inspect(container_id)
+                .context("inspect attested BuildKit daemon after ambiguous stop")?;
+            if inspected
+                .status
+                .is_some_and(crate::docker::client::ContainerState::safe_to_reclaim)
+            {
+                tracing::warn!(
+                    target: "velnor.buildkit",
+                    container_id,
+                    error = format!("{stop_error:#}"),
+                    "BuildKit stop returned an error but inspect confirms it stopped"
+                );
+                Ok(true)
+            } else {
+                Err(stop_error).context(format!(
+                    "BuildKit stop returned an error; inspect reports {:?}",
+                    inspected.status
+                ))
+            }
+        }
+    }
+}
+
+fn start_attested_builder_confirmed(container_id: &str) -> Result<bool> {
+    start_attested_builder_confirmed_with(
+        container_id,
+        |id| crate::docker::Docker::host().inspect_exit(id),
+        |id| {
+            crate::docker::Docker::host()
+                .container_start(id)
+                .map(|_| ())
+        },
+    )
+}
+
+fn start_attested_builder_confirmed_with(
+    container_id: &str,
+    mut inspect: impl FnMut(&str) -> Result<crate::docker::client::ExitInfo>,
+    mut start: impl FnMut(&str) -> Result<()>,
+) -> Result<bool> {
+    let before = inspect(container_id).context("inspect attested BuildKit daemon before start")?;
+    match before.status {
+        Some(crate::docker::client::ContainerState::Running) => return Ok(true),
+        Some(
+            crate::docker::client::ContainerState::Created
+            | crate::docker::client::ContainerState::Exited
+            | crate::docker::client::ContainerState::Dead,
+        ) => {}
+        state => anyhow::bail!("cannot safely start BuildKit daemon in state {state:?}"),
+    }
+    match start(container_id) {
+        Ok(()) => Ok(true),
+        Err(error) if crate::docker::client::is_not_found(&error) => Ok(false),
+        Err(start_error) => {
+            let after = inspect(container_id)
+                .context("verify attested BuildKit daemon after ambiguous start")?;
+            if after.status == Some(crate::docker::client::ContainerState::Running) {
+                tracing::warn!(
+                    target: "velnor.buildkit",
+                    container_id,
+                    error = format!("{start_error:#}"),
+                    "BuildKit start returned an error but inspect confirms the daemon is running"
+                );
+                Ok(true)
+            } else {
+                Err(start_error).context(format!(
+                    "BuildKit start returned an error; inspect reports {:?}",
+                    after.status
+                ))
+            }
+        }
+    }
+}
+
+fn inspect_domain_builder_exit(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+) -> Result<Option<crate::docker::client::ExitInfo>> {
+    with_attested_domain_builder(domain, builder, |_, daemon, _, volume_present, id| {
+        if !volume_present {
+            return Ok(None);
+        }
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        crate::docker::Docker::host()
+            .inspect_exit(id)
+            .map(Some)
+            .with_context(|| format!("inspect BuildKit daemon {daemon} after stop"))
+    })
 }
 
 /// Delete one builder's daemon and state volume, then its claim file. The
@@ -1191,22 +2877,43 @@ fn remove_builder_and_claims_with(
             return Err(error);
         }
     }
-    if let Some(registry_root) = registry_root {
-        ensure_owner_record(registry_root, builder)?;
+    if let Some(registry_root) = registry_root
+        && is_current_domained_persistent_builder(builder)
+    {
+        let owner = read_owner_record(registry_root, builder)?
+            .context("refuse BuildKit cleanup without a durable owner record")?;
+        if owner.phase != BuilderOwnerPhase::Deleting {
+            mark_owner_record_deleting(registry_root, builder)?;
+        }
     }
     // Keep the same per-builder lock from the final empty-claim proof through
-    // exact daemon/volume removal and durable owner-record deletion. Setup
-    // cannot publish a replacement claim between these steps.
+    // a durable Deleting tombstone, exact daemon/volume absence proof, owner
+    // unlink, and claims unlink. Setup rejects Deleting and cannot publish a
+    // replacement claim between these steps.
     remove(builder)?;
-    match std::fs::remove_file(&path) {
-        Ok(()) => sync_parent(&path)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error).with_context(|| format!("remove {}", path.display())),
-    }
+    remove_builder_auxiliary_metadata(run_root, builder)?;
+    unlink_owner_before_claims(registry_root, builder, &path, || Ok(()))?;
+    Ok(true)
+}
+
+fn unlink_owner_before_claims(
+    registry_root: Option<&Path>,
+    builder: &str,
+    claims_path: &Path,
+    after_owner_unlink: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     if let Some(registry_root) = registry_root {
         remove_owner_record(registry_root, builder)?;
     }
-    Ok(true)
+    after_owner_unlink()?;
+    match std::fs::remove_file(claims_path) {
+        Ok(()) => sync_parent(claims_path)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("remove {}", claims_path.display()))
+        }
+    }
+    Ok(())
 }
 
 fn delete_registered_builder(
@@ -1221,28 +2928,124 @@ fn delete_registered_builder(
 /// Delete one builder's daemon container and state volume. Only ever called
 /// with zero holders past the idle horizon: the next build recreates a cold
 /// daemon from the same stable name.
-pub(crate) fn remove_builder(builder: &str) -> Result<()> {
-    let daemon = daemon_container_name(builder);
-    if let Err(error) = crate::docker::Docker::host().container_remove(&daemon, true, false) {
-        return Err(error).with_context(|| format!("remove BuildKit daemon {daemon}"));
-    }
-    let volume = daemon_state_volume(builder);
-    let rm_volume = vec![
-        "volume".to_string(),
-        "rm".to_string(),
-        "--force".to_string(),
-        volume.clone(),
-    ];
-    match crate::docker::client::host_call(&rm_volume) {
-        Ok(_) => Ok(()),
-        Err(error) => {
-            if crate::docker::client::is_not_found(&error) {
-                Ok(())
-            } else {
-                Err(error).with_context(|| format!("remove BuildKit state volume {volume}"))
+pub(crate) fn remove_builder(domain: &PersistentBuildKitDomain, builder: &str) -> Result<()> {
+    remove_builder_with(
+        domain,
+        builder,
+        |identity_root, engine_id, volume| {
+            crate::docker_lease::lock_host_volume_name_for_domain(identity_root, engine_id, volume)
+        },
+        attest_buildkit_removal_volume,
+        attest_buildkit_removal_container,
+        |container_id, daemon| {
+            if let Err(error) =
+                crate::docker::Docker::host().container_remove(container_id, true, false)
+                && !crate::docker::client::is_not_found(&error)
+            {
+                return Err(error).with_context(|| format!("remove BuildKit daemon {daemon}"));
             }
-        }
+            Ok(())
+        },
+        |volume| {
+            let args = vec![
+                "volume".to_string(),
+                "rm".to_string(),
+                "--force".to_string(),
+                "--".to_string(),
+                volume.to_string(),
+            ];
+            match crate::docker::client::host_call(&args) {
+                Ok(_) => Ok(()),
+                Err(error) if crate::docker::client::is_not_found(&error) => Ok(()),
+                Err(error) => {
+                    Err(error).with_context(|| format!("remove BuildKit state volume {volume}"))
+                }
+            }
+        },
+    )
+}
+
+fn remove_builder_with<G>(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    acquire_volume_lock: impl FnOnce(&Path, &str, &str) -> Result<G>,
+    mut inspect_volume: impl FnMut(&PersistentBuildKitDomain, &str) -> Result<bool>,
+    mut inspect_container: impl FnMut(
+        &PersistentBuildKitDomain,
+        &str,
+        &str,
+        &str,
+    ) -> Result<Option<String>>,
+    mut remove_container: impl FnMut(&str, &str) -> Result<()>,
+    mut remove_volume: impl FnMut(&str) -> Result<()>,
+) -> Result<()> {
+    if persistent_builder_domain_token(builder) != Some(domain.token.as_str()) {
+        anyhow::bail!("refuse removal of a BuildKit builder from another domain");
     }
+    let daemon = daemon_container_name(builder);
+    let volume = daemon_state_volume(builder);
+    let _volume_lock = acquire_volume_lock(&domain.identity_root, &domain.engine_id, &volume)?;
+
+    // Only a definitive 404 means absent; inspect uncertainty prevents every
+    // mutation. The container's inspected immutable ID survives a name race.
+    let _volume_present = inspect_volume(domain, &volume)?;
+    let container_id = inspect_container(domain, builder, &daemon, &volume)?;
+    if let Some(container_id) = container_id {
+        remove_container(&container_id, &daemon)?;
+    }
+
+    // Docker volumes have no immutable ID. Re-attest after container removal
+    // and immediately before rm so a same-name replacement survives.
+    if inspect_volume(domain, &volume)? {
+        remove_volume(&volume)?;
+    }
+    if inspect_container(domain, builder, &daemon, &volume)?.is_some() {
+        anyhow::bail!("BuildKit daemon {daemon} remains after removal");
+    }
+    if inspect_volume(domain, &volume)? {
+        anyhow::bail!("BuildKit state volume {volume} remains after removal");
+    }
+    Ok(())
+}
+
+fn attest_buildkit_removal_volume(domain: &PersistentBuildKitDomain, volume: &str) -> Result<bool> {
+    let args = crate::docker_lease::inspect_persistent_buildkit_volume_args(volume);
+    let output = match crate::docker::client::host_call(&args) {
+        Ok(output) => output,
+        Err(error) if crate::docker::client::is_not_found(&error) => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect BuildKit state volume {volume}"));
+        }
+    };
+    crate::docker_lease::attest_persistent_buildkit_volume_identity(
+        &output,
+        volume,
+        &domain.token,
+    )?;
+    Ok(true)
+}
+
+fn attest_buildkit_removal_container(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    daemon: &str,
+    volume: &str,
+) -> Result<Option<String>> {
+    let args = crate::docker_lease::inspect_persistent_buildkit_container_args(daemon);
+    let output = match crate::docker::client::host_call(&args) {
+        Ok(output) => output,
+        Err(error) if crate::docker::client::is_not_found(&error) => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect BuildKit daemon {daemon}"));
+        }
+    };
+    crate::docker_lease::attest_persistent_buildkit_container_identity(
+        &output,
+        builder,
+        volume,
+        &domain.token,
+    )
+    .map(Some)
 }
 
 // ---------------------------------------------------------------------------
@@ -1257,179 +3060,269 @@ pub(crate) struct PressurePruneReport {
     pub failures: Vec<String>,
 }
 
-/// Stop and fully prune unclaimed persistent builders, largest first, until
-/// `target_bytes` are freed or no unclaimed builder remains. The claim
-/// boundary is what the old dead reclaim lacked: a builder with any holder
-/// is skipped no matter how large, and holds from vanished job containers
-/// are repaired first so a crash cannot pin disk forever.
-pub(crate) fn pressure_prune_builders(run_root: &Path, target_bytes: u64) -> PressurePruneReport {
-    let mut report = PressurePruneReport::default();
+/// Reclaim BuildKit cache only when the exact domain volume is a local host
+/// mount on the pressured filesystem. `buildctl du` deltas do not prove host
+/// space was released, so this returns only the observed `statvfs` increase
+/// at the attested mountpoint.
+pub(crate) fn reclaim_domain_buildkit_for_device(
+    domain: &PersistentBuildKitDomain,
+    target_bytes: u64,
+    pressure_device: u64,
+) -> Result<u64> {
     if target_bytes == 0 {
-        return report;
+        return Ok(0);
     }
-    let mut docker = crate::docker::Docker::host();
-    let builders = match docker.buildx_builders() {
-        Ok(builders) => builders,
-        Err(error) => {
-            report
-                .failures
-                .push(format!("list builders for pressure prune: {error:#}"));
-            return report;
-        }
-    };
-    let registry_root = claims_registry_root();
-    let mut persistent = Vec::new();
-    for builder in builders.into_iter().filter(|builder| {
-        is_persistent_builder_name(builder) && !is_legacy_capped_builder_name(builder)
-    }) {
-        match read_claims_for_reaping(
-            &claims_file(run_root, &builder),
-            &builder,
-            registry_root.as_deref(),
-        ) {
-            Ok(Some(_)) => persistent.push(builder),
-            Ok(None) => report.failures.push(format!(
-                "skip BuildKit builder {builder}: Velnor ownership record is absent or mismatched"
-            )),
-            Err(error) => report.failures.push(format!(
-                "skip BuildKit builder {builder}: ownership record is unreadable ({:#})",
-                error.source
-            )),
-        }
+    let docker_root = trusted_host_docker_root_for_pressure(domain)?;
+    let _coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(&domain.root)
+        .context("lock BuildKit domain for device-bound pressure reclaim")?;
+    let registry_root = owner_registry_root(&domain.root);
+    let builders = registered_domain_builders(&registry_root, &domain.token)
+        .context("list domain BuildKit owners for device-bound pressure reclaim")?;
+    if builders.is_empty() {
+        return Ok(0);
     }
-    if persistent.is_empty() {
-        return report;
-    }
-    let present = match running_container_names() {
-        Ok(present) => present,
-        Err(error) => {
-            report
-                .failures
-                .push(format!("list containers for claim repair: {error:#}"));
-            return report;
-        }
-    };
-    // Largest first: one unlocked du per builder as an ordering hint, then
-    // prune in that order. Unmeasurable builders (stopped daemons refuse du)
-    // sort last; the prune still measures them after starting. The hint is
-    // never a decision: the holder check below runs under each builder's
-    // claim lock, then the prune and stop run unlocked with a recheck that
-    // restarts the daemon when a setup raced.
-    let mut sized: Vec<(String, Option<u64>)> = Vec::new();
-    for builder in &persistent {
-        match docker.buildx_disk_usage(builder) {
-            Ok(usage) => sized.push((builder.clone(), Some(usage))),
-            Err(_) => sized.push((builder.clone(), None)),
-        }
-    }
-    sized.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    for (builder, _hint) in sized {
-        if report.freed_bytes >= target_bytes {
+    let present = running_container_names()
+        .context("list Engine containers before device-bound BuildKit pressure reclaim")?;
+    let mut freed_bytes = 0_u64;
+    for builder in builders {
+        if freed_bytes >= target_bytes {
             break;
         }
-        let path = claims_file(run_root, &builder);
-        // Locked repair and holder check only: the prune and stop below run
-        // unlocked, then a recheck restarts the daemon when a setup raced.
-        // A torn claim file reads as claimed and is skipped.
-        let unclaimed = {
-            let _lock = match lock_claims(&builder, &path) {
-                Ok(lock) => lock,
-                Err(error) => {
-                    report
-                        .failures
-                        .push(format!("lock claims for {builder}: {error:#}"));
-                    continue;
-                }
-            };
-            let mut claims = match read_claims_for_reaping(
-                &path,
-                &builder,
-                registry_root.as_deref(),
-            ) {
-                Ok(Some(claims)) => claims,
-                Ok(None) => {
-                    report.failures.push(format!(
-                        "skip BuildKit builder {builder}: Velnor ownership record is absent or mismatched"
-                    ));
-                    continue;
-                }
-                Err(error) => {
-                    log_unreadable_ownership(&builder, &error.path, &error.source);
-                    report
-                        .failures
-                        .push(format!("read claims for {builder}: {:#}", error.source));
-                    continue;
-                }
-            };
-            if let Some(registry_root) = registry_root.as_deref()
-                && let Err(error) = ensure_owner_record(registry_root, &builder)
-            {
-                report
-                    .failures
-                    .push(format!("ensure durable ownership for {builder}: {error:#}"));
-                continue;
-            }
-            repair_absent_unlocked(&mut claims, &present);
-            if write_claims(&path, &claims).is_err() {
-                report
-                    .failures
-                    .push(format!("repair claims for {builder}: write failed"));
-                continue;
-            }
-            claims.holders.is_empty()
-        };
-        if !unclaimed {
+        if !repair_pressure_claims(&domain.root, &registry_root, &builder, &present)
+            .with_context(|| format!("repair pressure claims for {builder}"))?
+        {
             continue;
         }
-        // Prune while running, then stop: buildx refuses both du and prune
-        // on a stopped daemon, so stop-first would prune nothing.
-        let prune_started = Instant::now();
-        match prune_builder(&builder) {
-            Ok(freed) => {
-                report.freed_bytes = report.freed_bytes.saturating_add(freed);
-                report.pruned.push(builder.clone());
-            }
+        match prune_domain_builder_on_device(domain, &builder, &docker_root, pressure_device) {
+            Ok(Some(bytes)) => freed_bytes = freed_bytes.saturating_add(bytes),
+            Ok(None) => {}
             Err(error) => {
-                report
-                    .failures
-                    .push(format!("prune builder {builder}: {error:#}"));
-                continue;
-            }
-        }
-        tracing::debug!(
-            target: "velnor.buildkit",
-            builder,
-            prune_ms = prune_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
-            "pressure prune ran outside the claim lock"
-        );
-        if let Err(error) = stop_builder_daemon(&builder) {
-            report
-                .failures
-                .push(format!("stop builder {builder}: {error:#}"));
-        }
-        let raced = match holders_remain(&path, &builder, registry_root.as_deref()) {
-            Ok(raced) => raced,
-            Err(error) => {
-                report
-                    .failures
-                    .push(format!("relock claims for {builder}: {error:#}"));
-                continue;
-            }
-        };
-        if raced {
-            tracing::warn!(
-                target: "velnor.buildkit",
-                builder,
-                "holders arrived during pressure prune; restarting daemon"
-            );
-            if let Err(error) = start_builder_daemon(&builder) {
-                report
-                    .failures
-                    .push(format!("restart builder {builder}: {error:#}"));
+                tracing::warn!(
+                    target: "velnor.buildkit",
+                    builder,
+                    error = format!("{error:#}"),
+                    "skipping BuildKit pressure prune because host storage identity is unproven"
+                );
             }
         }
     }
-    report
+    Ok(freed_bytes)
+}
+
+fn prune_domain_builder_on_device(
+    domain: &PersistentBuildKitDomain,
+    builder: &str,
+    docker_root: &Path,
+    pressure_device: u64,
+) -> Result<Option<u64>> {
+    with_attested_domain_builder(domain, builder, |builder, daemon, _, volume_present, id| {
+        if !volume_present {
+            return Ok(None);
+        }
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        let Some(proof) = read_builder_readiness(domain, builder)? else {
+            return Ok(None);
+        };
+        if proof.container_id != id {
+            anyhow::bail!(
+                "refuse pressure prune of daemon {daemon} without matching readiness proof"
+            );
+        }
+        let volume = daemon_state_volume(builder);
+        let projection = crate::docker::client::host_call(
+            &crate::docker_lease::inspect_persistent_buildkit_volume_pressure_args(&volume),
+        )
+        .with_context(|| format!("inspect BuildKit pressure volume {volume}"))?;
+        let mountpoint = crate::docker_lease::attest_persistent_buildkit_volume_mountpoint(
+            &projection,
+            &volume,
+            &domain.token,
+        )?;
+        let mountpoint = PathBuf::from(mountpoint);
+        let freed = prune_candidate_for_device_with(
+            Some(&mountpoint),
+            docker_root,
+            pressure_device,
+            pressure_mountpoint_matches_device,
+            || {
+                let before = crate::host_capacity::HostCapacity::probe(&mountpoint)
+                    .context("measure BuildKit volume host free space before prune")?
+                    .available_bytes;
+                ensure_attested_builder_running(id).with_context(|| {
+                    format!("start BuildKit daemon {daemon} for pressure prune")
+                })?;
+                crate::docker::client::host_call(&buildctl_prune_args(id))
+                    .with_context(|| format!("prune BuildKit cache in {daemon}"))?;
+                stop_attested_builder_confirmed(id).with_context(|| {
+                    format!("stop BuildKit daemon {daemon} after pressure prune")
+                })?;
+                let after = crate::host_capacity::HostCapacity::probe(&mountpoint)
+                    .context("measure BuildKit volume host free space after prune")?
+                    .available_bytes;
+                Ok(after.saturating_sub(before))
+            },
+        )?;
+        Ok(Some(freed))
+    })
+}
+
+fn prune_candidate_for_device_with(
+    mountpoint: Option<&Path>,
+    docker_root: &Path,
+    pressure_device: u64,
+    same_device: impl Fn(&Path, &Path, u64) -> Result<bool>,
+    prune: impl FnOnce() -> Result<u64>,
+) -> Result<u64> {
+    let Some(mountpoint) = mountpoint else {
+        return Ok(0);
+    };
+    if !same_device(mountpoint, docker_root, pressure_device)? {
+        return Ok(0);
+    }
+    prune()
+}
+
+fn pressure_mountpoint_matches_device(
+    mountpoint: &Path,
+    docker_root: &Path,
+    pressure_device: u64,
+) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let entry = std::fs::symlink_metadata(mountpoint)
+            .with_context(|| format!("inspect BuildKit mountpoint {}", mountpoint.display()))?;
+        if !entry.file_type().is_dir() {
+            anyhow::bail!("BuildKit volume mountpoint is not a real directory");
+        }
+        let root = std::fs::canonicalize(docker_root)
+            .with_context(|| format!("resolve Docker root {}", docker_root.display()))?;
+        let mounted = std::fs::canonicalize(mountpoint)
+            .with_context(|| format!("resolve BuildKit mountpoint {}", mountpoint.display()))?;
+        if !mounted.starts_with(&root) {
+            return Ok(false);
+        }
+        Ok(std::fs::metadata(&mounted)
+            .with_context(|| format!("stat BuildKit mountpoint {}", mounted.display()))?
+            .dev()
+            == pressure_device)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (mountpoint, docker_root, pressure_device);
+        anyhow::bail!("device-bound BuildKit pressure reclaim requires Unix filesystem identity")
+    }
+}
+
+fn trusted_host_docker_root_for_pressure(domain: &PersistentBuildKitDomain) -> Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let endpoint = crate::docker::engine::resolve_docker_endpoint()
+            .context("resolve local Docker Engine for pressure reclaim")?;
+        let identity = crate::docker::engine::daemon_identity_blocking(&endpoint.socket)
+            .context("read local Docker Engine identity for pressure reclaim")?;
+        if identity.id != domain.engine_id {
+            anyhow::bail!("Docker Engine changed before pressure reclaim");
+        }
+        let host_kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .context("read host kernel identity for pressure reclaim")?;
+        if identity.kernel_version.trim() != host_kernel.trim() {
+            anyhow::bail!("Docker Engine does not share the host kernel namespace");
+        }
+        let host_mount_namespace = std::fs::read_link("/proc/self/ns/mnt")
+            .context("read host mount namespace for pressure reclaim")?;
+        let stream =
+            std::os::unix::net::UnixStream::connect(&endpoint.socket).with_context(|| {
+                format!("connect local Docker socket {}", endpoint.socket.display())
+            })?;
+        let mut credentials = std::mem::MaybeUninit::<libc::ucred>::uninit();
+        let mut credentials_len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: the returned struct is initialized by SO_PEERCRED when the
+        // call succeeds, and its length matches the supplied buffer.
+        let peer_status = unsafe {
+            libc::getsockopt(
+                std::os::fd::AsRawFd::as_raw_fd(&stream),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                credentials.as_mut_ptr().cast(),
+                &mut credentials_len,
+            )
+        };
+        if peer_status != 0 || credentials_len as usize != std::mem::size_of::<libc::ucred>() {
+            anyhow::bail!("cannot identify the local Docker socket peer");
+        }
+        // SAFETY: getsockopt succeeded and wrote the full ucred structure.
+        let credentials = unsafe { credentials.assume_init() };
+        if credentials.pid <= 0 {
+            anyhow::bail!("Docker socket peer has no process identity");
+        }
+        let peer_namespace_path = PathBuf::from(format!("/proc/{}/ns/mnt", credentials.pid));
+        let peer_mount_namespace = std::fs::read_link(&peer_namespace_path).with_context(|| {
+            format!(
+                "read Docker peer mount namespace {}",
+                peer_namespace_path.display()
+            )
+        })?;
+        if peer_mount_namespace != host_mount_namespace {
+            anyhow::bail!("Docker Engine does not share the host mount namespace");
+        }
+        let host_root = Path::new("/proc/self/root");
+        let peer_root = PathBuf::from(format!("/proc/{}/root", credentials.pid));
+        if !same_filesystem_object(host_root, &peer_root).with_context(|| {
+            format!(
+                "compare host and Docker peer roots {} and {}",
+                host_root.display(),
+                peer_root.display()
+            )
+        })? {
+            anyhow::bail!("Docker Engine does not share the host filesystem root");
+        }
+        let peer_name = std::fs::read_to_string(format!("/proc/{}/comm", credentials.pid))
+            .context("read Docker socket peer process name")?;
+        if peer_name.trim() != "dockerd" {
+            anyhow::bail!("Docker socket is served by an untrusted host proxy");
+        }
+        drop(stream);
+
+        let info = crate::docker::client::host_call(&[
+            "info".to_owned(),
+            "--format".to_owned(),
+            "{{.ID}}\n{{json .DockerRootDir}}".to_owned(),
+        ])
+        .context("read Docker Engine root for pressure reclaim")?;
+        let mut lines = info.lines();
+        let engine_id = lines.next().context("Docker info omitted Engine ID")?;
+        let root_json = lines.next().context("Docker info omitted root directory")?;
+        if lines.next().is_some() || engine_id != domain.engine_id {
+            anyhow::bail!("Docker CLI root identity does not match the Engine API domain");
+        }
+        let root: String = serde_json::from_str(root_json)
+            .context("parse Docker root directory from Engine info")?;
+        let root = PathBuf::from(root);
+        if !root.is_absolute() {
+            anyhow::bail!("Docker Engine root directory is not absolute");
+        }
+        std::fs::canonicalize(&root)
+            .with_context(|| format!("resolve trusted Docker root {}", root.display()))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = domain;
+        anyhow::bail!("BuildKit pressure pruning requires a native Linux Docker Engine")
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn same_filesystem_object(left: &Path, right: &Path) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let left = std::fs::metadata(left)
+        .with_context(|| format!("stat filesystem identity {}", left.display()))?;
+    let right = std::fs::metadata(right)
+        .with_context(|| format!("stat filesystem identity {}", right.display()))?;
+    Ok(left.dev() == right.dev() && left.ino() == right.ino())
 }
 
 /// What one horizon pass did.
@@ -1445,10 +3338,9 @@ pub(crate) struct HorizonReport {
 }
 
 fn reconcile_orphan_owner_records(
-    run_root: &Path,
     registry_root: &Path,
+    domain_token: Option<&str>,
     registered_builders: &BTreeSet<String>,
-    present: &BTreeSet<String>,
     report: &mut HorizonReport,
 ) {
     let entries = match std::fs::read_dir(registry_root) {
@@ -1478,30 +3370,55 @@ fn reconcile_orphan_owner_records(
     }
     paths.sort();
     for path in paths {
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+        let bytes = match read_control_file_no_follow(&path) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => continue,
             Err(error) => {
-                report
-                    .failures
-                    .push(format!("read owner record {}: {error:#}", path.display()));
+                report.failures.push(format!(
+                    "open owner record {} safely: {error:#}",
+                    path.display()
+                ));
                 continue;
             }
         };
+        let identity: BuilderOwnerIdentity = match serde_json::from_slice(&bytes) {
+            Ok(record) => record,
+            Err(error) => {
+                report.failures.push(format!(
+                    "parse owner identity {}: {error:#}",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        if identity.version != OWNER_REGISTRY_VERSION {
+            let belongs_to_domain = domain_token.map_or_else(
+                || is_current_domained_persistent_builder(&identity.builder),
+                |token| is_current_domain_builder_name(&identity.builder, token),
+            );
+            if belongs_to_domain {
+                report.failures.push(format!(
+                    "retain current BuildKit owner record {} with unsupported schema version {}",
+                    path.display(),
+                    identity.version
+                ));
+            }
+            continue;
+        }
         let record: BuilderOwnerRecord = match serde_json::from_slice(&bytes) {
             Ok(record) => record,
             Err(error) => {
-                report
-                    .failures
-                    .push(format!("parse owner record {}: {error:#}", path.display()));
+                report.failures.push(format!(
+                    "parse current owner record {}: {error:#}",
+                    path.display()
+                ));
                 continue;
             }
         };
-        if record.version != OWNER_REGISTRY_VERSION
-            || !record
-                .builder
-                .starts_with(CURRENT_PERSISTENT_BUILDER_PREFIX)
-            || owner_registry_file(registry_root, &record.builder) != path
+        if !domain_token.map_or_else(
+            || is_current_domained_persistent_builder(&record.builder),
+            |token| is_current_domain_builder_name(&record.builder, token),
+        ) || owner_registry_file(registry_root, &record.builder) != path
         {
             report.failures.push(format!(
                 "keep mismatched BuildKit owner record {}",
@@ -1512,91 +3429,156 @@ fn reconcile_orphan_owner_records(
         if registered_builders.contains(&record.builder) {
             continue;
         }
+        // Owner inventory absence says nothing about the corresponding
+        // Docker daemon or volume. Only the normal Deleting tombstone path,
+        // with strict Docker re-attestation, may remove durable metadata.
+        report.failures.push(format!(
+            "retain BuildKit owner record for {}: absent from owner inventory without Docker absence proof",
+            record.builder
+        ));
+    }
+}
 
-        let claim_path = claims_file(run_root, &record.builder);
-        let _lock = match lock_claims(&record.builder, &claim_path) {
-            Ok(lock) => lock,
+/// Recover the claims-first crash cut. Setup writes a valid claim before its
+/// Active owner record and performs no Docker side effect until both exist;
+/// deletion removes the owner only after Docker absence is proved, then
+/// unlinks claims. Thus a current-domain claims-only file is either a setup
+/// interrupted before Docker work or a completed deletion interrupted during
+/// metadata cleanup. Recheck holders under the claim lock and never infer
+/// Docker deletion authority from an absent owner record.
+fn reconcile_claims_without_owner(
+    run_root: &Path,
+    registry_root: &Path,
+    domain_token: Option<&str>,
+    present: &BTreeSet<String>,
+    report: &mut HorizonReport,
+) -> Vec<String> {
+    let claims_root = run_root.join(CLAIMS_DIR);
+    let entries = match std::fs::read_dir(&claims_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            report.failures.push(format!(
+                "list BuildKit claims without owner under {}: {error:#}",
+                claims_root.display()
+            ));
+            return Vec::new();
+        }
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry)
+                if entry.path().extension().and_then(|value| value.to_str()) == Some("json") =>
+            {
+                paths.push(entry.path());
+            }
+            Ok(_) => {}
+            Err(error) => report
+                .failures
+                .push(format!("read BuildKit claims entry: {error:#}")),
+        }
+    }
+    paths.sort();
+    let mut recovered = Vec::new();
+    for path in paths {
+        let bytes = match read_control_file_no_follow(&path) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => continue,
             Err(error) => {
                 report.failures.push(format!(
-                    "lock orphan BuildKit ownership for {}: {error:#}",
-                    record.builder
+                    "read ownerless BuildKit claims {}: {error:#}",
+                    path.display()
                 ));
                 continue;
             }
         };
-        match read_owner_record(registry_root, &record.builder) {
-            Ok(Some(_)) => {}
-            Ok(None) => continue,
+        let claims = match parse_claims(&path, &bytes) {
+            Ok(claims) => claims,
             Err(error) => {
                 report.failures.push(format!(
-                    "recheck owner record for {}: {error:#}",
-                    record.builder
+                    "keep unreadable ownerless BuildKit claims {}: {error:#}",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        let builder = claims.builder.as_str();
+        if !domain_token.map_or_else(
+            || is_current_domained_persistent_builder(builder),
+            |token| is_current_domain_builder_name(builder, token),
+        ) || claims_file(run_root, builder) != path
+        {
+            report.failures.push(format!(
+                "keep mismatched ownerless BuildKit claims {}",
+                path.display()
+            ));
+            continue;
+        }
+        let _lock = match lock_claims(builder, &path) {
+            Ok(lock) => lock,
+            Err(error) => {
+                report.failures.push(format!(
+                    "lock ownerless BuildKit claims for {builder}: {error:#}"
+                ));
+                continue;
+            }
+        };
+        match read_owner_record(registry_root, builder) {
+            Ok(Some(_)) => continue,
+            Ok(None) => {}
+            Err(error) => {
+                report.failures.push(format!(
+                    "read owner for ownerless BuildKit claims {builder}: {error:#}"
                 ));
                 continue;
             }
         }
-        let mut claims = match read_registered_claims(&claim_path, &record.builder) {
+        let mut claims = match read_registered_claims(&path, builder) {
             Ok(Some(claims)) => claims,
-            Ok(None) => match std::fs::symlink_metadata(&claim_path) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => BuilderClaims {
-                    builder: record.builder.clone(),
-                    ..BuilderClaims::default()
-                },
-                Ok(_) => {
-                    report.failures.push(format!(
-                        "keep orphan BuildKit owner record {}: runtime claim mismatches",
-                        record.builder
-                    ));
-                    continue;
-                }
-                Err(error) => {
-                    report.failures.push(format!(
-                        "stat runtime claims for {}: {error:#}",
-                        record.builder
-                    ));
-                    continue;
-                }
-            },
+            Ok(None) => continue,
             Err(error) => {
                 report.failures.push(format!(
-                    "keep orphan BuildKit owner record {}: runtime claims unreadable ({error:#})",
-                    record.builder
+                    "keep ownerless BuildKit claims for {builder}: {error:#}"
                 ));
                 continue;
             }
         };
         repair_absent_unlocked(&mut claims, present);
-        if !claims.holders.is_empty() {
+        if let Err(error) = write_claims(&path, &claims) {
+            report.failures.push(format!(
+                "repair ownerless BuildKit claims for {builder}: {error:#}"
+            ));
             continue;
         }
-        if claim_path.exists() {
-            match std::fs::remove_file(&claim_path) {
+        if claims.holders.is_empty() {
+            // No owner record means this setup never gained Docker mutation
+            // authority, or an earlier tombstoned removal already proved both
+            // objects absent. Claim-lock + exclusive coordinator prevents a
+            // new setup from racing this metadata-only cleanup.
+            match std::fs::remove_file(&path) {
                 Ok(()) => {
-                    if let Err(error) = sync_parent(&claim_path) {
+                    if let Err(error) = sync_parent(&path) {
                         report.failures.push(format!(
-                            "sync removed claims for {}: {error:#}",
-                            record.builder
+                            "sync removed ownerless claims for {builder}: {error:#}"
                         ));
-                        continue;
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    report.failures.push(format!(
-                        "remove orphan claims for {}: {error:#}",
-                        record.builder
-                    ));
-                    continue;
-                }
+                Err(error) => report
+                    .failures
+                    .push(format!("remove ownerless claims for {builder}: {error:#}")),
+            }
+        } else {
+            match ensure_active_owner_record(registry_root, builder) {
+                Ok(()) => recovered.push(builder.to_owned()),
+                Err(error) => report.failures.push(format!(
+                    "publish Active owner after claims recovery for {builder}: {error:#}"
+                )),
             }
         }
-        if let Err(error) = remove_owner_record(registry_root, &record.builder) {
-            report.failures.push(format!(
-                "remove orphan owner record for {}: {error:#}",
-                record.builder
-            ));
-        }
     }
+    recovered
 }
 
 /// Locked holder recheck after unlocked Docker work. A torn claim file
@@ -1618,7 +3600,11 @@ fn holders_remain(path: &Path, builder: &str, registry_root: Option<&Path>) -> R
 /// names require matching owner records and readable runtime claims. Missing
 /// claims fail closed because a Docker snapshot cannot prove runner admission
 /// quiescence.
-pub(crate) fn reap_idle_builders(run_root: &Path, now: SystemTime) -> HorizonReport {
+pub(crate) fn reap_idle_builders(
+    domain: &PersistentBuildKitDomain,
+    now: SystemTime,
+) -> HorizonReport {
+    let run_root = &domain.root;
     let _coordinator = match crate::capacity::FilesystemCoordinator::lock_exclusive(run_root) {
         Ok(coordinator) => coordinator,
         Err(error) => {
@@ -1630,17 +3616,26 @@ pub(crate) fn reap_idle_builders(run_root: &Path, now: SystemTime) -> HorizonRep
             };
         }
     };
-    let registry_root = claims_registry_root();
-    reap_idle_builders_with_registry(
+    let registry_root = owner_registry_root(run_root);
+    reap_idle_builders_with_domain_and_volume_gate(
         run_root,
-        registry_root.as_deref(),
+        Some(&registry_root),
+        Some(&domain.token),
         now,
-        || crate::docker::Docker::host().buildx_builders(),
+        || registered_domain_builders(&registry_root, &domain.token),
         running_container_names,
+        |builder| {
+            let _lock = crate::docker_lease::lock_host_volume_name_for_domain(
+                &domain.identity_root,
+                &domain.engine_id,
+                &daemon_state_volume(builder),
+            )?;
+            Ok(())
+        },
         |daemon| crate::docker::Docker::host().inspect_exit(daemon),
-        stop_builder_daemon,
-        start_builder_daemon,
-        remove_builder,
+        |builder| stop_builder_in_domain(domain, builder),
+        |builder| start_builder_in_domain(domain, builder),
+        |builder| remove_builder(domain, builder),
     )
 }
 
@@ -1648,9 +3643,40 @@ pub(crate) fn reap_idle_builders(run_root: &Path, now: SystemTime) -> HorizonRep
     clippy::too_many_arguments,
     reason = "injected Docker operations keep destructive reaper paths hermetic in tests"
 )]
+#[cfg(test)]
 fn reap_idle_builders_with_registry(
     run_root: &Path,
     registry_root: Option<&Path>,
+    now: SystemTime,
+    list_builders: impl FnOnce() -> Result<Vec<String>>,
+    list_present_containers: impl FnOnce() -> Result<BTreeSet<String>>,
+    inspect_exit: impl FnMut(&str) -> Result<crate::docker::client::ExitInfo>,
+    stop: impl FnMut(&str) -> Result<bool>,
+    start: impl FnMut(&str) -> Result<bool>,
+    remove: impl FnMut(&str) -> Result<()>,
+) -> HorizonReport {
+    reap_idle_builders_with_domain(
+        run_root,
+        registry_root,
+        None,
+        now,
+        list_builders,
+        list_present_containers,
+        inspect_exit,
+        stop,
+        start,
+        remove,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "injected Docker operations keep destructive reaper paths hermetic in tests"
+)]
+fn reap_idle_builders_with_domain(
+    run_root: &Path,
+    registry_root: Option<&Path>,
+    domain_token: Option<&str>,
     now: SystemTime,
     list_builders: impl FnOnce() -> Result<Vec<String>>,
     list_present_containers: impl FnOnce() -> Result<BTreeSet<String>>,
@@ -1659,8 +3685,40 @@ fn reap_idle_builders_with_registry(
     mut start: impl FnMut(&str) -> Result<bool>,
     mut remove: impl FnMut(&str) -> Result<()>,
 ) -> HorizonReport {
+    reap_idle_builders_with_domain_and_volume_gate(
+        run_root,
+        registry_root,
+        domain_token,
+        now,
+        list_builders,
+        list_present_containers,
+        |_| Ok(()),
+        inspect_exit,
+        stop,
+        start,
+        remove,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "injected Docker operations keep destructive reaper paths hermetic in tests"
+)]
+fn reap_idle_builders_with_domain_and_volume_gate(
+    run_root: &Path,
+    registry_root: Option<&Path>,
+    domain_token: Option<&str>,
+    now: SystemTime,
+    list_builders: impl FnOnce() -> Result<Vec<String>>,
+    list_present_containers: impl FnOnce() -> Result<BTreeSet<String>>,
+    mut check_volume_gate: impl FnMut(&str) -> Result<()>,
+    mut inspect_exit: impl FnMut(&str) -> Result<crate::docker::client::ExitInfo>,
+    mut stop: impl FnMut(&str) -> Result<bool>,
+    mut start: impl FnMut(&str) -> Result<bool>,
+    mut remove: impl FnMut(&str) -> Result<()>,
+) -> HorizonReport {
     let mut report = HorizonReport::default();
-    let builders = match list_builders() {
+    let mut builders = match list_builders() {
         Ok(builders) => builders,
         Err(error) => {
             report
@@ -1678,22 +3736,36 @@ fn reap_idle_builders_with_registry(
             return report;
         }
     };
+    if let Some(registry_root) = registry_root {
+        builders.extend(reconcile_claims_without_owner(
+            run_root,
+            registry_root,
+            domain_token,
+            &present,
+            &mut report,
+        ));
+        builders.sort();
+        builders.dedup();
+    }
     let registered_builders: BTreeSet<String> = builders.iter().cloned().collect();
-    for builder in builders
-        .into_iter()
-        .filter(|builder| is_persistent_builder_name(builder))
-    {
+    for builder in builders.into_iter().filter(|builder| {
+        domain_token.map_or_else(
+            || is_current_domained_persistent_builder(builder),
+            |token| is_current_domain_builder_name(builder, token),
+        )
+    }) {
+        if let Err(error) = check_volume_gate(&builder) {
+            report.failures.push(format!(
+                "keep BuildKit builder {builder}: Engine-volume create fence blocks reaping: {error:#}"
+            ));
+            continue;
+        }
         let path = claims_file(run_root, &builder);
-        match read_claims_for_reaping(&path, &builder, registry_root) {
-            Ok(Some(_)) => {}
+        let initial_claims = match read_claims_for_reaping(&path, &builder, registry_root) {
+            Ok(Some(claims)) => claims,
             Ok(None) => {
-                let reason = if is_legacy_capped_builder_name(&builder) {
-                    "legacy runtime claims are absent or mismatched; runner admission quiescence cannot be proven"
-                } else {
-                    "Velnor ownership record is absent or mismatched"
-                };
                 report.failures.push(format!(
-                    "leave BuildKit builder {builder} untouched: {reason}"
+                    "leave BuildKit builder {builder} untouched: Velnor ownership record is absent or mismatched"
                 ));
                 continue;
             }
@@ -1706,6 +3778,36 @@ fn reap_idle_builders_with_registry(
                     .unreadable_claims
                     .push(error.path.display().to_string());
                 continue;
+            }
+        };
+        if let Some(registry_root) = registry_root
+            && is_current_domained_persistent_builder(&builder)
+        {
+            match read_owner_record(registry_root, &builder) {
+                Ok(Some(owner)) if owner.phase == BuilderOwnerPhase::Deleting => {
+                    if !initial_claims.holders.is_empty() {
+                        report.failures.push(format!(
+                            "keep Deleting BuildKit builder {builder}: its claims are not empty"
+                        ));
+                        continue;
+                    }
+                    match delete_registered_builder(run_root, registry_root, &builder, &mut remove)
+                    {
+                        Ok(true) => report.deleted.push(builder.clone()),
+                        Ok(false) => {}
+                        Err(error) => report.failures.push(format!(
+                            "retry deletion of BuildKit builder {builder}: {error:#}"
+                        )),
+                    }
+                    continue;
+                }
+                Ok(Some(_)) | Ok(None) => {}
+                Err(error) => {
+                    report.failures.push(format!(
+                        "read owner record for BuildKit builder {builder}: {error:#}"
+                    ));
+                    continue;
+                }
             }
         }
         // Locked repair and holder check only: inspect, stop, and delete
@@ -1761,7 +3863,6 @@ fn reap_idle_builders_with_registry(
         if !unclaimed {
             continue;
         }
-        let legacy_capped = is_legacy_capped_builder_name(&builder);
         let daemon = daemon_container_name(&builder);
         let exit = match inspect_exit(&daemon) {
             Ok(exit) => exit,
@@ -1796,26 +3897,59 @@ fn reap_idle_builders_with_registry(
                 continue;
             }
         };
+        if exit.status == Some(crate::docker::client::ContainerState::Created) {
+            // Buildx can leave a container in Created if setup crashes before
+            // its config transfer/start sequence completes. Created is never
+            // proof that the daemon is safe to start. With the exclusive
+            // lifecycle coordinator, valid empty claims, and exact removal
+            // re-attestation, delete this disposable cache and let the next
+            // setup create it from scratch.
+            if registry_root.is_none() {
+                report.failures.push(format!(
+                    "keep Created BuildKit builder {builder}: durable owner inventory is unavailable"
+                ));
+                continue;
+            }
+            match holders_remain(&path, &builder, registry_root) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    report.failures.push(format!(
+                        "relock claims for Created builder {builder}: {error:#}"
+                    ));
+                    continue;
+                }
+            }
+            match delete_registered_builder(run_root, registry_root, &builder, &mut remove) {
+                Ok(true) => report.deleted.push(builder.clone()),
+                Ok(false) => {}
+                Err(error) => report.failures.push(format!(
+                    "delete unstarted BuildKit builder {builder}: {error:#}"
+                )),
+            }
+            continue;
+        }
         if exit.status.is_some_and(|state| !state.safe_to_reclaim()) {
             // Running with no holders: a release-time stop that failed, or a
             // daemon started outside any claim. Stopping is safe — the next
             // build restarts it — but deleting is not considered; a setup
             // that raced the stop gets the daemon restarted.
             let stop_started = Instant::now();
-            match stop(&builder) {
+            let stop_result = stop(&builder);
+            match &stop_result {
                 Ok(true) => report.stopped.push(builder.clone()),
                 Ok(false) => {}
                 Err(error) => {
                     report
                         .failures
                         .push(format!("stop builder {builder}: {error:#}"));
-                    continue;
                 }
             }
             tracing::debug!(
                 target: "velnor.buildkit",
                 builder,
                 stop_ms = stop_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                stop_uncertain = stop_result.is_err(),
                 "horizon stop ran outside the claim lock"
             );
             let raced = match holders_remain(&path, &builder, registry_root) {
@@ -1825,10 +3959,30 @@ fn reap_idle_builders_with_registry(
                         builder,
                         "holders arrived during horizon stop; restarting daemon"
                     );
-                    if let Err(error) = start(&builder) {
+                    if let Err(error) = require_buildkit_restart(start(&builder)) {
                         report
                             .failures
                             .push(format!("restart builder {builder}: {error:#}"));
+                        match inspect_exit(&daemon) {
+                            Ok(recovered)
+                                if recovered
+                                    .status
+                                    .is_some_and(|state| !state.safe_to_reclaim()) =>
+                            {
+                                tracing::warn!(
+                                    target: "velnor.buildkit",
+                                    builder,
+                                    "restart returned an error, but inspect confirms the daemon is running"
+                                );
+                            }
+                            Ok(recovered) => report.failures.push(format!(
+                                "cannot prove BuildKit daemon {builder} running after restart error: {:?}",
+                                recovered.status
+                            )),
+                            Err(inspect_error) => report.failures.push(format!(
+                                "inspect BuildKit daemon {builder} after restart error: {inspect_error:#}"
+                            )),
+                        }
                     }
                     true
                 }
@@ -1837,46 +3991,56 @@ fn reap_idle_builders_with_registry(
                     report
                         .failures
                         .push(format!("relock claims for {builder}: {error:#}"));
+                    // A lock error cannot prove there are no new holders.
+                    // Start even when stop returned false; the Engine may
+                    // have changed state between its response and this read.
+                    if let Err(start_error) = require_buildkit_restart(start(&builder)) {
+                        report
+                            .failures
+                            .push(format!("recover builder {builder}: {start_error:#}"));
+                        match inspect_exit(&daemon) {
+                            Ok(recovered)
+                                if recovered
+                                    .status
+                                    .is_some_and(|state| !state.safe_to_reclaim()) =>
+                            {
+                                tracing::warn!(
+                                    target: "velnor.buildkit",
+                                    builder,
+                                    "recovery returned an error, but inspect confirms the daemon is running"
+                                );
+                            }
+                            Ok(recovered) => report.failures.push(format!(
+                                "cannot prove BuildKit daemon {builder} running after claim recheck failure: {:?}",
+                                recovered.status
+                            )),
+                            Err(inspect_error) => report.failures.push(format!(
+                                "inspect BuildKit daemon {builder} after claim recheck failure: {inspect_error:#}"
+                            )),
+                        }
+                    }
                     true
                 }
             };
-            if legacy_capped && !raced {
-                match delete_registered_builder(run_root, registry_root, &builder, &mut remove) {
-                    Ok(true) => report.deleted.push(builder.clone()),
-                    Ok(false) => {}
-                    Err(error) => report
-                        .failures
-                        .push(format!("delete builder {builder}: {error:#}")),
+            if stop_result.is_err() && !raced {
+                // A timeout/error can follow a successful stop. Inspect the
+                // result before reporting it and before any later deletion.
+                match inspect_exit(&daemon) {
+                    Ok(recovered)
+                        if recovered.status.is_some_and(
+                            crate::docker::client::ContainerState::safe_to_reclaim,
+                        ) =>
+                    {
+                        report.stopped.push(builder.clone());
+                    }
+                    Ok(recovered) => report.failures.push(format!(
+                        "BuildKit daemon {builder} remains active after ambiguous stop: {:?}",
+                        recovered.status
+                    )),
+                    Err(inspect_error) => report.failures.push(format!(
+                        "inspect BuildKit daemon {builder} after ambiguous stop: {inspect_error:#}"
+                    )),
                 }
-            }
-            continue;
-        }
-        if legacy_capped {
-            if !exit
-                .status
-                .is_some_and(crate::docker::client::ContainerState::safe_to_reclaim)
-            {
-                report.failures.push(format!(
-                    "keep legacy BuildKit builder {builder}: daemon state is not proven inactive"
-                ));
-                continue;
-            }
-            match holders_remain(&path, &builder, registry_root) {
-                Ok(true) => continue,
-                Ok(false) => {}
-                Err(error) => {
-                    report
-                        .failures
-                        .push(format!("relock claims for {builder}: {error:#}"));
-                    continue;
-                }
-            }
-            match delete_registered_builder(run_root, registry_root, &builder, &mut remove) {
-                Ok(true) => report.deleted.push(builder.clone()),
-                Ok(false) => {}
-                Err(error) => report
-                    .failures
-                    .push(format!("delete builder {builder}: {error:#}")),
             }
             continue;
         }
@@ -1911,10 +4075,9 @@ fn reap_idle_builders_with_registry(
     }
     if let Some(registry_root) = registry_root {
         reconcile_orphan_owner_records(
-            run_root,
             registry_root,
+            domain_token,
             &registered_builders,
-            &present,
             &mut report,
         );
     }
@@ -2012,68 +4175,1817 @@ mod tests {
             std::env::var_os("VELNOR_STORAGE_ROOT").is_none(),
             "unset VELNOR_STORAGE_ROOT to run the suite hermetically"
         );
-        assert!(claims_run_root().is_none());
+        assert!(crate::storage::StorageLayout::resolve().is_none());
     }
 
     fn test_builder() -> String {
         persistent_builder_name("velnor-builder", "trusted", TRUST_TIER_BRANCH, Some("o/r"))
     }
 
+    #[test]
+    fn configured_builder_fingerprint_matches_buildx_normalized_archive_payload() {
+        let source = "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]";
+        assert_eq!(
+            persistent_buildkit_config_fingerprint(Some(source)).unwrap(),
+            "sha256:333c40f4fee6f473bee299aed751bb40967b9e8315af90378a5de0b5dc69a76b"
+        );
+        assert_eq!(
+            persistent_buildkit_config_fingerprint(None).unwrap(),
+            "no-config-v1"
+        );
+    }
+
     /// Test helper: drop every hold on `builder`.
     fn abandon_claims(run_root: &Path, builder: &str) {
         let path = claims_file(run_root, builder);
         let _lock = lock_claims(builder, &path).unwrap();
-        let mut claims = read_claims(&path).unwrap();
+        let mut claims = read_claims(&path, builder).unwrap();
         claims.holders.clear();
         write_claims(&path, &claims).unwrap();
     }
 
     #[test]
     fn persistent_names_partition_by_trust_repo_and_request() {
-        // Default requested name: short form.
+        let default = persistent_builder_name(
+            "velnor-builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("octocat/hello-world"),
+        );
+        assert!(default.starts_with(CURRENT_PERSISTENT_BUILDER_PREFIX));
         assert_eq!(
-            persistent_builder_name(
-                "velnor-builder",
+            persistent_builder_domain_token(&default),
+            Some(TEST_BUILDKIT_DOMAIN_TOKEN)
+        );
+        assert!(persistent_builder_name(
+            "mybuilder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("octocat/hello-world")
+        )
+        .starts_with(&default));
+
+        // Fork-PR jobs never share with trusted jobs; `None` is distinct from
+        // any real repository after tagged full-input hashing.
+        let untrusted = persistent_builder_name(
+            "velnor-builder",
+            "untrusted",
+            TRUST_TIER_BRANCH,
+            Some("octocat/hello-world"),
+        );
+        assert_ne!(default, untrusted);
+        let case_distinct_scope = persistent_builder_name(
+            "velnor-builder",
+            "Trusted",
+            TRUST_TIER_BRANCH,
+            Some("octocat/hello-world"),
+        );
+        assert_ne!(default, case_distinct_scope);
+        assert!(case_distinct_scope.is_ascii_lowercase());
+        let no_repo = persistent_builder_name("velnor-builder", "trusted", TRUST_TIER_BRANCH, None);
+        let named_no_repo = persistent_builder_name(
+            "velnor-builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("no/repo"),
+        );
+        assert_ne!(no_repo, named_no_repo);
+        assert_ne!(
+            persistent_builder_name("velnor-builder", "trusted", TRUST_TIER_BRANCH, Some("o/r")),
+            persistent_builder_name("velnor-builder", "trusted", TRUST_TIER_BRANCH, Some("o_r")),
+        );
+        assert!(persistent_builder_domain_token(
+            "velnor-builder-shared-unbounded-v1-trusted-branch-o_r"
+        )
+        .is_none());
+
+        // Hostile input is sanitized, and all generated resource IDs stay
+        // within Docker's name length budget.
+        let hostile = persistent_builder_name("../../X", "TRUSTED", TRUST_TIER_BRANCH, Some("O/R"));
+        assert!(hostile.is_ascii());
+        let long = persistent_builder_name(
+            &format!("{}A", "x".repeat(200)),
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some(&format!("{}/{}A", "owner".repeat(100), "repo".repeat(100))),
+        );
+        let long_other = persistent_builder_name(
+            &format!("{}B", "x".repeat(200)),
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some(&format!("{}/{}B", "owner".repeat(100), "repo".repeat(100))),
+        );
+        assert_ne!(long, long_other);
+        let component = bounded_builder_segment("r", Some("same-long-prefix-a"), 48);
+        assert_eq!(
+            component.rsplit_once("-r").map(|(_, digest)| digest.len()),
+            Some(32),
+            "name-component digest carries 128 bits"
+        );
+        assert!(long.len() <= 240);
+        assert!(daemon_state_volume(&long).len() <= 255);
+    }
+
+    #[test]
+    fn persistent_domain_partitions_engine_and_storage_but_reuses_slots() {
+        let root = temp_root("domain-partition");
+        let same =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let same_again =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let other_storage =
+            PersistentBuildKitDomain::from_identities(&root, "storage-b", "engine-a").unwrap();
+        let other_engine =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-b").unwrap();
+        assert_eq!(same.token, same_again.token);
+        assert_eq!(same.root, same_again.root);
+        assert_ne!(same.token, other_storage.token);
+        assert_ne!(same.token, other_engine.token);
+        assert_eq!(
+            persistent_builder_name_for_domain(
+                &same.token,
+                "builder",
                 "trusted",
                 TRUST_TIER_BRANCH,
-                Some("octocat/hello-world")
+                Some("org/repo"),
             ),
-            "velnor-builder-shared-unbounded-v1-trusted-branch-octocat_hello-world"
-        );
-        // Custom requested name rides along.
-        assert_eq!(
-            persistent_builder_name(
-                "mybuilder",
+            persistent_builder_name_for_domain(
+                &same_again.token,
+                "builder",
                 "trusted",
                 TRUST_TIER_BRANCH,
-                Some("octocat/hello-world")
+                Some("org/repo"),
             ),
-            "velnor-builder-shared-unbounded-v1-trusted-branch-octocat_hello-world-mybuilder"
+            "same Engine/storage domain reuses across runner slots"
         );
-        // Fork-PR jobs never share with trusted jobs.
+        assert!(PersistentBuildKitDomain::from_identities(&root, " ", "engine-a").is_err());
+        assert!(PersistentBuildKitDomain::from_identities(&root, "storage-a", "").is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn first_domain_claim_uses_initialized_owner_registry() {
+        let root = temp_root("first-domain-claim-owner-registry");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let registry_root = owner_registry_root(&domain.root);
+        assert!(registry_root.is_dir());
+        assert!(registered_domain_builders(&registry_root, &domain.token)
+            .unwrap()
+            .is_empty());
+
+        claim_domain_builder(&domain, &builder, "slot-1", "first-job").unwrap();
+
         assert_eq!(
-            persistent_builder_name(
-                "velnor-builder",
-                "untrusted",
-                TRUST_TIER_BRANCH,
-                Some("octocat/hello-world")
+            registered_domain_builders(&registry_root, &domain.token).unwrap(),
+            [builder.clone()]
+        );
+        assert_eq!(
+            read_claims(&claims_file(&domain.root, &builder), &builder)
+                .unwrap()
+                .holders
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn setup_claims_publish_before_owner_and_owner_failure_leaves_recoverable_claims_only() {
+        let root = temp_root("claims-before-owner-crash-cut");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let path = claims_file(&domain.root, &builder);
+        let claims = BuilderClaims {
+            holders: BTreeMap::from([(
+                "job-container".to_owned(),
+                BuilderHolder {
+                    container: "job-container".to_owned(),
+                    slot: "slot-1".to_owned(),
+                    claimed_unix: unix_now(),
+                },
+            )]),
+            builder: builder.clone(),
+        };
+        let error = publish_claims_before_owner(&path, &claims, || {
+            assert_eq!(read_claims(&path, &builder)?.holders.len(), 1);
+            Err(anyhow::anyhow!("simulated owner write failure"))
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("simulated owner write failure"));
+        assert_eq!(read_claims(&path, &builder).unwrap().holders.len(), 1);
+        assert!(
+            read_owner_record(&owner_registry_root(&domain.root), &builder)
+                .unwrap()
+                .is_none()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deleting_tombstone_and_empty_claims_survive_failed_removal_then_retry() {
+        let root = temp_root("deleting-tombstone-retry");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let registry_root = owner_registry_root(&domain.root);
+        claim_domain_builder(&domain, &builder, "slot-1", "job-container").unwrap();
+        let path = claims_file(&domain.root, &builder);
+        let readiness_path = builder_readiness_file(&domain, &builder);
+        write_atomic_document(&readiness_path, b"stale readiness proof").unwrap();
+        let lifecycle_lock = lock_builder_lifecycle(&domain.root, &builder).unwrap();
+        drop(lifecycle_lock);
+        let lifecycle_lock_path = domain.root.join(BUILDER_LIFECYCLE_LOCKS_DIR).join(format!(
+            "{}.lock",
+            blake3::hash(builder.as_bytes()).to_hex()
+        ));
+        let mut claims = read_claims(&path, &builder).unwrap();
+        claims.holders.clear();
+        write_claims(&path, &claims).unwrap();
+
+        let failed =
+            remove_builder_and_claims_with(&domain.root, Some(&registry_root), &builder, |name| {
+                assert_eq!(name, builder);
+                assert_eq!(
+                    read_owner_record(&registry_root, &builder)?.unwrap().phase,
+                    BuilderOwnerPhase::Deleting
+                );
+                assert!(read_claims(&path, &builder)?.holders.is_empty());
+                Err(anyhow::anyhow!(
+                    "simulated crash after partial daemon removal"
+                ))
+            });
+        assert!(failed.is_err());
+        assert_eq!(
+            read_owner_record(&registry_root, &builder)
+                .unwrap()
+                .unwrap()
+                .phase,
+            BuilderOwnerPhase::Deleting
+        );
+        assert!(read_claims(&path, &builder).unwrap().holders.is_empty());
+
+        assert!(remove_builder_and_claims_with(
+            &domain.root,
+            Some(&registry_root),
+            &builder,
+            |_| Ok(())
+        )
+        .unwrap());
+        assert!(read_owner_record(&registry_root, &builder)
+            .unwrap()
+            .is_none());
+        assert!(read_claims(&path, &builder).is_err());
+        assert!(!readiness_path.exists());
+        assert!(!lifecycle_lock_path.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deleting_owner_rejects_new_claims_without_changing_the_claim_file() {
+        let root = temp_root("deleting-owner-blocks-claim");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        claim_domain_builder(&domain, &builder, "slot-1", "job-container").unwrap();
+        let registry_root = owner_registry_root(&domain.root);
+        let claims_path = claims_file(&domain.root, &builder);
+        let before = std::fs::read(&claims_path).unwrap();
+        mark_owner_record_deleting(&registry_root, &builder).unwrap();
+
+        assert!(claim_domain_builder(&domain, &builder, "slot-2", "new-job").is_err());
+        assert_eq!(std::fs::read(&claims_path).unwrap(), before);
+        assert_eq!(
+            read_owner_record(&registry_root, &builder)
+                .unwrap()
+                .unwrap()
+                .phase,
+            BuilderOwnerPhase::Deleting
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn horizon_retries_deleting_owner_before_inspection_or_stop() {
+        let root = temp_root("horizon-deleting-owner-retry");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let registry_root = owner_registry_root(&domain.root);
+        claim_domain_builder(&domain, &builder, "slot-1", "job-container").unwrap();
+        let claims_path = claims_file(&domain.root, &builder);
+        let mut claims = read_claims(&claims_path, &builder).unwrap();
+        claims.holders.clear();
+        write_claims(&claims_path, &claims).unwrap();
+        mark_owner_record_deleting(&registry_root, &builder).unwrap();
+
+        let report = reap_idle_builders_with_registry(
+            &domain.root,
+            Some(&registry_root),
+            SystemTime::now(),
+            || Ok(vec![builder.clone()]),
+            || Ok(BTreeSet::new()),
+            |_| panic!("Deleting owner retry does not inspect or stop first"),
+            |_| panic!("Deleting owner retry does not stop first"),
+            |_| panic!("Deleting owner retry does not restart"),
+            |name| {
+                assert_eq!(name, builder);
+                assert_eq!(
+                    read_owner_record(&registry_root, &builder)?.unwrap().phase,
+                    BuilderOwnerPhase::Deleting
+                );
+                assert!(read_claims(&claims_path, &builder)?.holders.is_empty());
+                Ok(())
+            },
+        );
+
+        assert_eq!(report.deleted, [builder.clone()]);
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert!(read_owner_record(&registry_root, &builder)
+            .unwrap()
+            .is_none());
+        assert!(read_claims(&claims_path, &builder).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn horizon_deletes_unstarted_created_builder_without_starting_it() {
+        use crate::docker::client::{ContainerState, ExitInfo};
+
+        let root = temp_root("horizon-created-unstarted-recovery");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let registry_root = owner_registry_root(&domain.root);
+        claim_domain_builder(&domain, &builder, "slot-old", "old-job").unwrap();
+        let claims_path = claims_file(&domain.root, &builder);
+        let mut claims = read_claims(&claims_path, &builder).unwrap();
+        claims.holders.clear();
+        write_claims(&claims_path, &claims).unwrap();
+
+        let report = reap_idle_builders_with_registry(
+            &domain.root,
+            Some(&registry_root),
+            SystemTime::now(),
+            || Ok(vec![builder.clone()]),
+            || Ok(BTreeSet::new()),
+            |_| {
+                Ok(ExitInfo {
+                    status: Some(ContainerState::Created),
+                    finished: None,
+                })
+            },
+            |_| panic!("uninitialized Created daemon must never be started/stopped"),
+            |_| panic!("uninitialized Created daemon must never be started"),
+            |name| {
+                assert_eq!(name, builder);
+                assert_eq!(
+                    read_owner_record(&registry_root, &builder)?.unwrap().phase,
+                    BuilderOwnerPhase::Deleting
+                );
+                assert!(read_claims(&claims_path, &builder)?.holders.is_empty());
+                Ok(())
+            },
+        );
+
+        assert_eq!(report.deleted, [builder.clone()]);
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert!(read_owner_record(&registry_root, &builder)
+            .unwrap()
+            .is_none());
+        assert!(read_claims(&claims_path, &builder).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn crash_after_owner_unlink_leaves_claims_only_and_next_setup_recovers() {
+        let root = temp_root("owner-before-claims-unlink-crash-cut");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let registry_root = owner_registry_root(&domain.root);
+        claim_domain_builder(&domain, &builder, "slot-old", "old-job").unwrap();
+        let path = claims_file(&domain.root, &builder);
+        let mut claims = read_claims(&path, &builder).unwrap();
+        claims.holders.clear();
+        write_claims(&path, &claims).unwrap();
+
+        let error = unlink_owner_before_claims(Some(&registry_root), &builder, &path, || {
+            Err(anyhow::anyhow!("simulated crash after owner unlink"))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("simulated crash"));
+        assert!(read_owner_record(&registry_root, &builder)
+            .unwrap()
+            .is_none());
+        assert!(read_claims(&path, &builder).unwrap().holders.is_empty());
+
+        claim_domain_builder(&domain, &builder, "slot-new", "new-job").unwrap();
+        assert_eq!(read_claims(&path, &builder).unwrap().holders.len(), 1);
+        assert_eq!(
+            read_owner_record(&registry_root, &builder)
+                .unwrap()
+                .unwrap()
+                .phase,
+            BuilderOwnerPhase::Active
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reaper_recovers_ownerless_claims_after_setup_cut_and_cleans_empty_delete_cut() {
+        let root = temp_root("ownerless-claims-recovery");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let registry_root = owner_registry_root(&domain.root);
+        let path = claims_file(&domain.root, &builder);
+        let claims = BuilderClaims {
+            builder: builder.clone(),
+            holders: BTreeMap::from([(
+                "job-container".to_owned(),
+                BuilderHolder {
+                    container: "job-container".to_owned(),
+                    slot: "slot-1".to_owned(),
+                    claimed_unix: unix_now(),
+                },
+            )]),
+        };
+        write_claims(&path, &claims).unwrap();
+
+        let present = BTreeSet::from(["job-container".to_owned()]);
+        let mut report = HorizonReport::default();
+        assert_eq!(
+            reconcile_claims_without_owner(
+                &domain.root,
+                &registry_root,
+                Some(&domain.token),
+                &present,
+                &mut report,
             ),
-            "velnor-builder-shared-unbounded-v1-untrusted-branch-octocat_hello-world"
+            [builder.clone()]
         );
-        // No repository: parseable, never collides with owner_repo.
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert_eq!(
-            persistent_builder_name("velnor-builder", "trusted", TRUST_TIER_BRANCH, None),
-            "velnor-builder-shared-unbounded-v1-trusted-branch-no_repo"
+            read_owner_record(&registry_root, &builder)
+                .unwrap()
+                .unwrap()
+                .phase,
+            BuilderOwnerPhase::Active
+        );
+
+        // Simulate the deletion crash cut after the Deleting owner was
+        // unlinked but before the empty claims file was removed.
+        write_claims(
+            &path,
+            &BuilderClaims {
+                builder: builder.clone(),
+                holders: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        remove_owner_record(&registry_root, &builder).unwrap();
+        let mut report = HorizonReport::default();
+        assert!(reconcile_claims_without_owner(
+            &domain.root,
+            &registry_root,
+            Some(&domain.token),
+            &BTreeSet::new(),
+            &mut report,
+        )
+        .is_empty());
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert!(!path.exists());
+        assert!(read_owner_record(&registry_root, &builder)
+            .unwrap()
+            .is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn one_domain_reaper_leaves_another_domains_claim_and_owner_bytes_untouched() {
+        let root = temp_root("domain-owner-reaper-isolation");
+        let domain_a =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let domain_b =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-b").unwrap();
+        let builder_a = persistent_builder_name_for_domain(
+            &domain_a.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let builder_b = persistent_builder_name_for_domain(
+            &domain_b.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        claim_domain_builder(&domain_a, &builder_a, "slot-1", "velnor-job-a").unwrap();
+        claim_domain_builder(&domain_b, &builder_b, "slot-2", "velnor-job-b").unwrap();
+        let claim_b = claims_file(&domain_b.root, &builder_b);
+        let owner_b = owner_registry_file(&owner_registry_root(&domain_b.root), &builder_b);
+        let claim_b_before = std::fs::read(&claim_b).unwrap();
+        let owner_b_before = std::fs::read(&owner_b).unwrap();
+        assert_eq!(
+            registered_domain_builders(&owner_registry_root(&domain_a.root), &domain_a.token)
+                .unwrap(),
+            [builder_a.clone()],
+            "domain owner registry is the candidate source, not host Buildx state"
+        );
+
+        let report = reap_idle_builders_with_domain(
+            &domain_a.root,
+            Some(&owner_registry_root(&domain_a.root)),
+            Some(&domain_a.token),
+            SystemTime::now(),
+            || Ok(vec![builder_a.clone(), builder_b.clone()]),
+            || Ok(BTreeSet::from(["velnor-job-a".to_string()])),
+            |_| panic!("active same-domain claim prevents inspect"),
+            |_| panic!("active same-domain claim prevents stop"),
+            |_| panic!("active same-domain claim prevents restart"),
+            |_| panic!("other-domain builder must not be removed"),
+        );
+
+        assert!(report.deleted.is_empty());
+        assert!(report.stopped.is_empty());
+        assert!(report.failures.is_empty());
+        assert_eq!(std::fs::read(&claim_b).unwrap(), claim_b_before);
+        assert_eq!(std::fs::read(&owner_b).unwrap(), owner_b_before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copied_storage_roots_with_the_same_uuid_and_engine_are_isolated() {
+        let root = temp_root("copied-domain-roots");
+        let first_root = root.join("first");
+        let copied_root = root.join("copy");
+        std::fs::create_dir_all(&first_root).unwrap();
+        std::fs::create_dir_all(&copied_root).unwrap();
+        let first = PersistentBuildKitDomain::from_identities(
+            &first_root,
+            "copied-storage-uuid",
+            "same-engine-id",
+        )
+        .unwrap();
+        let copy = PersistentBuildKitDomain::from_identities(
+            &copied_root,
+            "copied-storage-uuid",
+            "same-engine-id",
+        )
+        .unwrap();
+        let first_builder = persistent_builder_name_for_domain(
+            &first.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let copied_builder = persistent_builder_name_for_domain(
+            &copy.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        assert_ne!(first.token, copy.token);
+        assert_ne!(first_builder, copied_builder);
+        claim_domain_builder(&first, &first_builder, "slot-1", "job-first").unwrap();
+        abandon_claims(&first.root, &first_builder);
+        claim_domain_builder(&copy, &copied_builder, "slot-2", "job-copy").unwrap();
+        let copied_claim = claims_file(&copy.root, &copied_builder);
+        let copied_owner = owner_registry_file(&owner_registry_root(&copy.root), &copied_builder);
+        let claim_before = std::fs::read(&copied_claim).unwrap();
+        let owner_before = std::fs::read(&copied_owner).unwrap();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(20_000_000);
+        let old_finished = now
+            .checked_sub(IDLE_DELETE_AFTER + Duration::from_secs(1))
+            .unwrap();
+        let removed = std::cell::RefCell::new(Vec::new());
+
+        let report = reap_idle_builders_with_domain(
+            &first.root,
+            Some(&owner_registry_root(&first.root)),
+            Some(&first.token),
+            now,
+            || Ok(vec![first_builder.clone(), copied_builder.clone()]),
+            || Ok(BTreeSet::new()),
+            |daemon| {
+                assert_eq!(daemon, daemon_container_name(&first_builder));
+                Ok(crate::docker::client::ExitInfo {
+                    status: Some(crate::docker::client::ContainerState::Exited),
+                    finished: Some(old_finished),
+                })
+            },
+            |_| panic!("stopped daemon needs no stop"),
+            |_| panic!("copied-root claim must not reach restart"),
+            |builder| {
+                removed.borrow_mut().push(builder.to_string());
+                Ok(())
+            },
+        );
+
+        assert_eq!(removed.borrow().as_slice(), [first_builder.as_str()]);
+        assert_eq!(report.deleted, [first_builder]);
+        assert_eq!(std::fs::read(copied_claim).unwrap(), claim_before);
+        assert_eq!(std::fs::read(copied_owner).unwrap(), owner_before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn horizon_reaper_skips_every_action_when_create_fence_gate_fails() {
+        let root = temp_root("unresolved-create-reaper-gate");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        claim_domain_builder(&domain, &builder, "slot-a", "job-a").unwrap();
+        abandon_claims(&domain.root, &builder);
+        let registry = owner_registry_root(&domain.root);
+        let claim_path = claims_file(&domain.root, &builder);
+        let owner_path = owner_registry_file(&registry, &builder);
+        let claim_before = std::fs::read(&claim_path).unwrap();
+        let owner_before = std::fs::read(&owner_path).unwrap();
+
+        let report = reap_idle_builders_with_domain_and_volume_gate(
+            &domain.root,
+            Some(&registry),
+            Some(&domain.token),
+            SystemTime::now(),
+            || Ok(vec![builder.clone()]),
+            || Ok(BTreeSet::new()),
+            |candidate| {
+                assert_eq!(candidate, builder);
+                anyhow::bail!("persistent BuildKit create remains unresolved")
+            },
+            |_| panic!("fenced builder must not be inspected"),
+            |_| panic!("fenced builder must not be stopped"),
+            |_| panic!("fenced builder must not be restarted"),
+            |_| panic!("fenced builder must not be removed"),
+        );
+
+        assert!(report.failures.iter().any(|failure| {
+            failure.contains(&builder) && failure.contains("create fence blocks reaping")
+        }));
+        assert!(report.stopped.is_empty());
+        assert!(report.deleted.is_empty());
+        assert_eq!(std::fs::read(&claim_path).unwrap(), claim_before);
+        assert_eq!(std::fs::read(&owner_path).unwrap(), owner_before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn slot_roots_share_only_the_explicit_storage_domain_and_engine_identity() {
+        let root = temp_root("slot-domain-identity");
+        let identity_root = root.join("shared-durable-lib");
+        std::fs::create_dir_all(&identity_root).unwrap();
+        let slot_a = crate::storage::StorageLayout {
+            cache_root: root.join("slot-a/cache"),
+            lib_root: root.join("slot-a/lib"),
+            run_root: root.join("slot-a/run"),
+            log_root: root.join("slot-a/log"),
+            mode: "test-slot-a",
+        };
+        let slot_b = crate::storage::StorageLayout {
+            cache_root: root.join("slot-b/cache"),
+            lib_root: root.join("slot-b/lib"),
+            run_root: root.join("slot-b/run"),
+            log_root: root.join("slot-b/log"),
+            mode: "test-slot-b",
+        };
+        assert_ne!(slot_a.lib_root, slot_b.lib_root);
+        assert_ne!(slot_a.run_root, slot_b.run_root);
+        let identity_a = slot_a.buildkit_identity_root_for_override(Some(&identity_root));
+        let identity_b = slot_b.buildkit_identity_root_for_override(Some(&identity_root));
+        assert_eq!(identity_a, identity_b);
+
+        let domain_a =
+            PersistentBuildKitDomain::from_identities(&identity_a, "storage-uuid", "engine-id")
+                .unwrap();
+        let domain_b =
+            PersistentBuildKitDomain::from_identities(&identity_b, "storage-uuid", "engine-id")
+                .unwrap();
+        let builder_a = persistent_builder_name_for_domain(
+            &domain_a.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let builder_b = persistent_builder_name_for_domain(
+            &domain_b.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        assert_eq!(domain_a.token, domain_b.token);
+        assert_eq!(builder_a, builder_b);
+        claim_domain_builder(&domain_a, &builder_a, "slot-a", "job-a").unwrap();
+        claim_domain_builder(&domain_b, &builder_b, "slot-b", "job-b").unwrap();
+        let holders = builder_holders(&domain_a.root, &builder_a, None).unwrap();
+        assert_eq!(holders.len(), 2);
+        assert_eq!(
+            holders
+                .iter()
+                .map(|holder| holder.slot.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["slot-a", "slot-b"])
+        );
+
+        let other_engine =
+            PersistentBuildKitDomain::from_identities(&identity_a, "storage-uuid", "other-engine")
+                .unwrap();
+        let other_builder = persistent_builder_name_for_domain(
+            &other_engine.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        assert_ne!(domain_a.token, other_engine.token);
+        assert_ne!(builder_a, other_builder);
+        claim_domain_builder(&other_engine, &other_builder, "slot-a", "job-other-engine").unwrap();
+        assert_eq!(
+            builder_holders(&other_engine.root, &other_builder, None)
+                .unwrap()
+                .iter()
+                .map(|holder| holder.container.as_str())
+                .collect::<Vec<_>>(),
+            ["job-other-engine"]
         );
         assert_eq!(
-            persistent_builder_name("velnor-builder", "trusted", TRUST_TIER_BRANCH, Some("  ")),
-            "velnor-builder-shared-unbounded-v1-trusted-branch-no_repo"
+            builder_holders(&domain_a.root, &builder_a, None)
+                .unwrap()
+                .len(),
+            2
         );
-        // Hostile segments sanitize identically everywhere the name travels.
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_claim_file_pins_orphan_owner_even_when_job_container_is_live() {
+        let root = temp_root("missing-claim-live-job-pin");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        claim_domain_builder(&domain, &builder, "slot-1", "live-job-container").unwrap();
+        let claim_path = claims_file(&domain.root, &builder);
+        let owner_path = owner_registry_file(&owner_registry_root(&domain.root), &builder);
+        let owner_before = std::fs::read(&owner_path).unwrap();
+        std::fs::remove_file(&claim_path).unwrap();
+        let mut report = HorizonReport::default();
+
+        reconcile_orphan_owner_records(
+            &owner_registry_root(&domain.root),
+            Some(&domain.token),
+            &BTreeSet::new(),
+            &mut report,
+        );
+
+        assert!(report
+            .failures
+            .iter()
+            .any(|failure| failure.contains("without Docker absence proof")));
+        assert!(!claim_path.exists());
+        assert_eq!(std::fs::read(owner_path).unwrap(), owner_before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn persisted_claim_records_require_both_holders_and_builder_fields() {
+        let builder =
+            persistent_builder_name("builder", "trusted", TRUST_TIER_BRANCH, Some("org/repo"));
+        assert!(parse_claims(
+            Path::new("claims.json"),
+            format!(
+                r#"{{"builder":{}}}"#,
+                serde_json::to_string(&builder).unwrap()
+            )
+            .as_bytes(),
+        )
+        .is_err());
+        assert!(parse_claims(Path::new("claims.json"), br#"{"holders":{}}"#).is_err());
         assert_eq!(
-            persistent_builder_name("../../x", "trusted", TRUST_TIER_BRANCH, Some("o/r")),
-            "velnor-builder-shared-unbounded-v1-trusted-branch-o_r-.._.._x"
+            parse_claims(Path::new("claims.json"), br#"{"builder":"x","holders":{}}"#)
+                .unwrap()
+                .holders
+                .len(),
+            0
         );
+    }
+
+    #[test]
+    fn malformed_persisted_claims_preserve_owner_and_prevent_reaping() {
+        let root = temp_root("malformed-claims-pin-builder");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        claim_domain_builder(&domain, &builder, "slot-1", "live-job").unwrap();
+        let claim_path = claims_file(&domain.root, &builder);
+        let owner_path = owner_registry_file(&owner_registry_root(&domain.root), &builder);
+        let malformed = format!(
+            r#"{{"builder":{}}}"#,
+            serde_json::to_string(&builder).unwrap()
+        );
+        std::fs::write(&claim_path, &malformed).unwrap();
+        let owner_before = std::fs::read(&owner_path).unwrap();
+
+        let report = reap_idle_builders_with_domain(
+            &domain.root,
+            Some(&owner_registry_root(&domain.root)),
+            Some(&domain.token),
+            SystemTime::now(),
+            || Ok(vec![builder.clone()]),
+            || Ok(BTreeSet::new()),
+            |_| panic!("malformed claims must prevent daemon inspection"),
+            |_| panic!("malformed claims must prevent stop"),
+            |_| panic!("malformed claims must prevent restart"),
+            |_| panic!("malformed claims must prevent removal"),
+        );
+
+        assert!(!report.failures.is_empty());
+        assert_eq!(std::fs::read(&claim_path).unwrap(), malformed.as_bytes());
+        assert_eq!(std::fs::read(&owner_path).unwrap(), owner_before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_claims_fail_closed_and_preserve_owner_state() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("symlink-claims-pin-builder");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        claim_domain_builder(&domain, &builder, "slot-1", "live-job").unwrap();
+        let claim_path = claims_file(&domain.root, &builder);
+        let owner_path = owner_registry_file(&owner_registry_root(&domain.root), &builder);
+        let owner_before = std::fs::read(&owner_path).unwrap();
+        let target = root.join("matching-empty-claims.json");
+        let target_bytes = serde_json::to_vec(&BuilderClaims {
+            holders: BTreeMap::new(),
+            builder: builder.clone(),
+        })
+        .unwrap();
+        std::fs::write(&target, &target_bytes).unwrap();
+        std::fs::remove_file(&claim_path).unwrap();
+        symlink(&target, &claim_path).unwrap();
+
+        assert!(read_claims(&claim_path, &builder).is_err());
+        assert!(read_registered_claims(&claim_path, &builder).is_err());
+
+        let report = reap_idle_builders_with_domain(
+            &domain.root,
+            Some(&owner_registry_root(&domain.root)),
+            Some(&domain.token),
+            SystemTime::now(),
+            || Ok(vec![builder.clone()]),
+            || Ok(BTreeSet::new()),
+            |_| panic!("symlinked claims must prevent daemon inspection"),
+            |_| panic!("symlinked claims must prevent stop"),
+            |_| panic!("symlinked claims must prevent restart"),
+            |_| panic!("symlinked claims must prevent removal"),
+        );
+
+        assert!(!report.failures.is_empty());
+        assert_eq!(std::fs::read(&target).unwrap(), target_bytes);
+        assert_eq!(std::fs::read(&owner_path).unwrap(), owner_before);
+        assert!(std::fs::symlink_metadata(&claim_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_owner_records_fail_closed_for_lookup_and_reaping() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("symlink-owner-record-pin-builder");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        claim_domain_builder(&domain, &builder, "slot-1", "live-job").unwrap();
+        let registry_root = owner_registry_root(&domain.root);
+        let owner_path = owner_registry_file(&registry_root, &builder);
+        let target = root.join("matching-owner-record.json");
+        let target_bytes = std::fs::read(&owner_path).unwrap();
+        std::fs::write(&target, &target_bytes).unwrap();
+        std::fs::remove_file(&owner_path).unwrap();
+        symlink(&target, &owner_path).unwrap();
+
+        assert!(read_owner_record(&registry_root, &builder).is_err());
+        assert!(registered_domain_builders(&registry_root, &domain.token).is_err());
+        let mut report = HorizonReport::default();
+        reconcile_orphan_owner_records(
+            &registry_root,
+            Some(&domain.token),
+            &BTreeSet::new(),
+            &mut report,
+        );
+        assert!(!report.failures.is_empty());
+        assert_eq!(std::fs::read(&target).unwrap(), target_bytes);
+        assert!(std::fs::symlink_metadata(&owner_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claims_and_owner_metadata_reads_reject_fifo_and_oversized_files() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let root = temp_root("fifo-and-large-buildkit-control-files");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let claims_path = claims_file(&domain.root, &builder);
+        let claims_parent = claims_path.parent().unwrap();
+        std::fs::create_dir_all(claims_parent).unwrap();
+        let fifo = CString::new(claims_path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: the path is a valid NUL-terminated string and mkfifo only
+        // creates the named FIFO; the no-follow reader must reject its type.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(read_claims(&claims_path, &builder).is_err());
+        std::fs::remove_file(&claims_path).unwrap();
+
+        let oversized = vec![b'x'; (MAX_BUILDKIT_CONTROL_FILE_BYTES + 1) as usize];
+        std::fs::write(&claims_path, &oversized).unwrap();
+        assert!(read_claims(&claims_path, &builder).is_err());
+        assert!(read_registered_claims(&claims_path, &builder).is_err());
+        let owner_path = owner_registry_file(&owner_registry_root(&domain.root), &builder);
+        std::fs::write(&owner_path, &oversized).unwrap();
+        assert!(read_owner_record(&owner_registry_root(&domain.root), &builder).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mismatched_claim_builder_cannot_release_or_overwrite_claims() {
+        let root = temp_root("mismatched-claim-builder");
+        let run_root = root.join("run");
+        let builder = test_builder();
+        let other_builder = persistent_builder_name(
+            "another-builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let path = claims_file(&run_root, &builder);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let claims = BuilderClaims {
+            holders: BTreeMap::from([(
+                "velnor-job-live".to_string(),
+                BuilderHolder {
+                    container: "velnor-job-live".to_string(),
+                    slot: "slot-1".to_string(),
+                    claimed_unix: 1,
+                },
+            )]),
+            builder: other_builder,
+        };
+        write_claims(&path, &claims).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        assert!(read_claims(&path, &builder).is_err());
+        assert!(claim_builder(&run_root, &builder, "slot-2", "velnor-job-new").is_err());
+        let outcome = release_and_stop_if_last(
+            &run_root,
+            &builder,
+            "velnor-job-live",
+            || panic!("mismatched claims must prevent stop"),
+            || panic!("mismatched claims must prevent restart"),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            ReleaseOutcome {
+                removed_last: false,
+                stopped: false,
+                restarted: false,
+            }
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn builder_removal_never_deletes_when_lock_or_inspection_is_uncertain() {
+        use std::cell::Cell;
+
+        let root = temp_root("remove-builder-fail-closed");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let inspect_called = Cell::new(false);
+        let delete_called = Cell::new(false);
+        let lock_error = remove_builder_with(
+            &domain,
+            &builder,
+            |_, _, _| Err(anyhow::anyhow!("lock uncertainty")),
+            |_, _| {
+                inspect_called.set(true);
+                Ok(true)
+            },
+            |_, _, _, _| panic!("must not inspect without the volume lock"),
+            |_, _| {
+                delete_called.set(true);
+                Ok(())
+            },
+            |_| {
+                delete_called.set(true);
+                Ok(())
+            },
+        );
+        assert!(lock_error.is_err());
+        assert!(!inspect_called.get());
+        assert!(!delete_called.get());
+
+        let delete_called = Cell::new(false);
+        let volume_error = remove_builder_with(
+            &domain,
+            &builder,
+            |_, _, _| Ok(()),
+            |_, _| Err(anyhow::anyhow!("volume inspect uncertainty")),
+            |_, _, _, _| panic!("must not inspect the container after volume uncertainty"),
+            |_, _| {
+                delete_called.set(true);
+                Ok(())
+            },
+            |_| {
+                delete_called.set(true);
+                Ok(())
+            },
+        );
+        assert!(volume_error.is_err());
+        assert!(!delete_called.get());
+
+        let delete_called = Cell::new(false);
+        let container_error = remove_builder_with(
+            &domain,
+            &builder,
+            |_, _, _| Ok(()),
+            |_, _| Ok(true),
+            |_, _, _, _| Err(anyhow::anyhow!("container inspect uncertainty")),
+            |_, _| {
+                delete_called.set(true);
+                Ok(())
+            },
+            |_| {
+                delete_called.set(true);
+                Ok(())
+            },
+        );
+        assert!(container_error.is_err());
+        assert!(!delete_called.get());
+
+        let operation_called = Cell::new(false);
+        let pressure_lock_error = with_attested_domain_builder_with(
+            &domain,
+            &builder,
+            |_, _, _| Err(anyhow::anyhow!("lock uncertainty")),
+            |_, _| panic!("must not inspect without the volume lock"),
+            |_, _, _, _| panic!("must not inspect the container without the lock"),
+            |_, _, _, _, _| {
+                operation_called.set(true);
+                Ok(())
+            },
+        );
+        assert!(pressure_lock_error.is_err());
+        assert!(!operation_called.get());
+
+        let pressure_inspect_error = with_attested_domain_builder_with(
+            &domain,
+            &builder,
+            |_, _, _| Ok(()),
+            |_, _| Err(anyhow::anyhow!("volume inspect uncertainty")),
+            |_, _, _, _| panic!("must not inspect container after volume uncertainty"),
+            |_, _, _, _, _| {
+                operation_called.set(true);
+                Ok(())
+            },
+        );
+        assert!(pressure_inspect_error.is_err());
+        assert!(!operation_called.get());
+
+        let pressure_container_error = with_attested_domain_builder_with(
+            &domain,
+            &builder,
+            |_, _, _| Ok(()),
+            |_, _| Ok(true),
+            |_, _, _, _| Err(anyhow::anyhow!("container inspect uncertainty")),
+            |_, _, _, _, _| {
+                operation_called.set(true);
+                Ok(())
+            },
+        );
+        assert!(pressure_container_error.is_err());
+        assert!(!operation_called.get());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn builder_removal_reattests_volume_before_name_based_delete() {
+        use std::cell::Cell;
+
+        let root = temp_root("remove-builder-volume-reattest");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let volume_inspections = Cell::new(0);
+        let container_removed = Cell::new(false);
+        let volume_removed = Cell::new(false);
+        let result = remove_builder_with(
+            &domain,
+            &builder,
+            |_, _, _| Ok(()),
+            |_, _| {
+                let inspection = volume_inspections.get() + 1;
+                volume_inspections.set(inspection);
+                if inspection == 1 {
+                    Ok(true)
+                } else {
+                    Err(anyhow::anyhow!("volume identity changed before deletion"))
+                }
+            },
+            |_, _, _, _| Ok(Some("immutable-container-id".to_string())),
+            |container_id, _| {
+                assert_eq!(container_id, "immutable-container-id");
+                container_removed.set(true);
+                Ok(())
+            },
+            |_| {
+                volume_removed.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(volume_inspections.get(), 2);
+        assert!(container_removed.get());
+        assert!(!volume_removed.get());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn buildctl_pressure_commands_use_attested_immutable_id() {
+        let id = "0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            buildctl_prune_args(id),
+            [
+                "exec",
+                id,
+                "buildctl",
+                "--addr",
+                "unix:///run/buildkit/buildkitd.sock",
+                "prune",
+            ]
+        );
+        assert_eq!(
+            buildctl_ready_args(id),
+            [
+                "exec",
+                id,
+                "buildctl",
+                "--addr",
+                "unix:///run/buildkit/buildkitd.sock",
+                "debug",
+                "workers",
+            ]
+        );
+    }
+
+    #[test]
+    fn buildkit_readiness_retries_until_success_and_reports_last_error() {
+        let attempts = std::cell::Cell::new(0);
+        retry_until_buildkit_ready(Duration::from_secs(1), |probe_timeout| {
+            assert!(probe_timeout <= Duration::from_secs(2));
+            let attempt = attempts.get() + 1;
+            attempts.set(attempt);
+            if attempt < 3 {
+                anyhow::bail!("probe {attempt} failed");
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(attempts.get(), 3);
+
+        let attempts = std::cell::Cell::new(0);
+        let error = retry_until_buildkit_ready(Duration::from_millis(5), |_| {
+            attempts.set(attempts.get() + 1);
+            anyhow::bail!("daemon is not ready")
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("daemon is not ready"));
+        assert!(attempts.get() > 0);
+    }
+
+    #[test]
+    fn conflicting_create_waits_for_created_container_and_only_restarts_initialized_daemon() {
+        use crate::docker::client::{ContainerState, ExitInfo};
+
+        let inspections = std::cell::Cell::new(0);
+        let starts = std::cell::Cell::new(0);
+        let waits = std::cell::Cell::new(0);
+        let sleeps = std::cell::Cell::new(0);
+        ensure_conflicting_container_ready_with(
+            "immutable-container-id",
+            Duration::from_secs(1),
+            |_| sleeps.set(sleeps.get() + 1),
+            |_, timeout| {
+                assert!(timeout > Duration::ZERO);
+                assert!(timeout <= Duration::from_secs(2));
+                inspections.set(inspections.get() + 1);
+                Ok(ExitInfo {
+                    status: Some(if inspections.get() == 1 {
+                        ContainerState::Created
+                    } else {
+                        ContainerState::Running
+                    }),
+                    finished: None,
+                })
+            },
+            |_| {
+                starts.set(starts.get() + 1);
+                Ok(true)
+            },
+            |_| {
+                waits.set(waits.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(inspections.get(), 2);
+        assert_eq!(sleeps.get(), 1);
+        assert_eq!(
+            starts.get(),
+            0,
+            "do not start before winning create copies config"
+        );
+        assert_eq!(waits.get(), 1);
+
+        let starts = std::cell::Cell::new(0);
+        let waits = std::cell::Cell::new(0);
+        let finished = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        ensure_conflicting_container_ready_with(
+            "previously-started-container-id",
+            Duration::from_secs(1),
+            |_| panic!("stopped daemon does not wait for another creator"),
+            |_, _| {
+                Ok(ExitInfo {
+                    status: Some(ContainerState::Exited),
+                    finished: Some(finished),
+                })
+            },
+            |_| {
+                starts.set(starts.get() + 1);
+                Ok(true)
+            },
+            |_| {
+                waits.set(waits.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(starts.get(), 1);
+        assert_eq!(
+            waits.get(),
+            1,
+            "container start ack is not worker readiness"
+        );
+
+        let starts = std::cell::Cell::new(0);
+        let error = ensure_conflicting_container_ready_with(
+            "uninitialized-container-id",
+            Duration::from_secs(1),
+            |_| {},
+            |_, _| {
+                Ok(ExitInfo {
+                    status: Some(ContainerState::Exited),
+                    finished: None,
+                })
+            },
+            |_| {
+                starts.set(starts.get() + 1);
+                Ok(true)
+            },
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot safely reuse"));
+        assert_eq!(starts.get(), 0, "unknown initialization must fail closed");
+
+        let starts = std::cell::Cell::new(0);
+        let error = ensure_conflicting_container_ready_with(
+            "stuck-created-container-id",
+            Duration::from_millis(3),
+            std::thread::sleep,
+            |_, timeout| {
+                assert!(timeout <= Duration::from_secs(2));
+                Ok(ExitInfo {
+                    status: Some(ContainerState::Created),
+                    finished: None,
+                })
+            },
+            |_| {
+                starts.set(starts.get() + 1);
+                Ok(true)
+            },
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("remained unstarted"));
+        assert_eq!(starts.get(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn created_conflict_wait_releases_same_engine_volume_flock_for_winning_start() {
+        use crate::docker::client::{ContainerState, ExitInfo};
+        use std::collections::BTreeSet;
+
+        let lock_namespace = temp_root("buildkit-created-conflict-lock");
+        std::fs::create_dir_all(&lock_namespace).unwrap();
+        let volume = "buildx_buildkit_builder0_state";
+        let policy = crate::docker_lease::DockerLeasePolicy::new_with_volume_lock_root(
+            "conflict-wait-test",
+            Some(lock_namespace.clone()),
+        )
+        .unwrap();
+        let inspections = std::cell::Cell::new(0);
+        let starts = std::cell::Cell::new(0);
+        let ready = std::cell::Cell::new(0);
+        let report = ensure_conflicting_builder_ready_with_attestation(
+            "immutable-container-id",
+            || policy.lock_volume_names(&BTreeSet::from([volume.to_owned()])),
+            || Ok(true),
+            || Ok(Some("immutable-container-id".to_owned())),
+            Duration::from_secs(1),
+            |_| {
+                // This is the same Engine/volume flock that the winner's
+                // Docker POST /start must take before reaching dockerd.
+                let acquired =
+                    crate::docker_lease::try_lock_volume_name_at_for_test(&lock_namespace, volume)
+                        .unwrap();
+                assert!(
+                    acquired.is_some(),
+                    "start path was blocked by conflict wait"
+                );
+                drop(acquired);
+            },
+            |_, _| {
+                inspections.set(inspections.get() + 1);
+                Ok(ExitInfo {
+                    status: Some(if inspections.get() == 1 {
+                        ContainerState::Created
+                    } else {
+                        ContainerState::Running
+                    }),
+                    finished: None,
+                })
+            },
+            |_| {
+                starts.set(starts.get() + 1);
+                Ok(false)
+            },
+            |_| {
+                ready.set(ready.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(report);
+        assert_eq!(inspections.get(), 2);
+        assert_eq!(starts.get(), 0, "the creator's start request wins");
+        assert_eq!(ready.get(), 1);
+        std::fs::remove_dir_all(lock_namespace).unwrap();
+    }
+
+    #[test]
+    fn device_bound_pressure_skips_unmatched_or_missing_mountpoints() {
+        let docker_root = Path::new("/docker-root");
+        let mountpoint = Path::new("/docker-root/volumes/builder");
+        let calls = std::cell::Cell::new(0);
+        let freed = prune_candidate_for_device_with(
+            Some(mountpoint),
+            docker_root,
+            11,
+            |mount, root, device| Ok(mount.starts_with(root) && device == 11),
+            || {
+                calls.set(calls.get() + 1);
+                Ok(700)
+            },
+        )
+        .unwrap();
+        assert_eq!(freed, 700);
+        assert_eq!(calls.get(), 1);
+
+        let other_device = prune_candidate_for_device_with(
+            Some(mountpoint),
+            docker_root,
+            12,
+            |mount, root, device| Ok(mount.starts_with(root) && device == 11),
+            || {
+                calls.set(calls.get() + 1);
+                Ok(1000)
+            },
+        )
+        .unwrap();
+        assert_eq!(other_device, 0);
+        let missing_mountpoint = prune_candidate_for_device_with(
+            None,
+            docker_root,
+            11,
+            |_, _, _| panic!("missing mountpoint must not be inspected"),
+            || {
+                calls.set(calls.get() + 1);
+                Ok(1000)
+            },
+        )
+        .unwrap();
+        assert_eq!(missing_mountpoint, 0);
+        assert_eq!(calls.get(), 1, "unproven candidates must not prune");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pressure_prune_skips_a_different_docker_process_root() {
+        let host_root = temp_root("pressure-host-root");
+        let daemon_root = temp_root("pressure-daemon-root");
+        assert!(same_filesystem_object(&host_root, &host_root).unwrap());
+        assert!(!same_filesystem_object(&host_root, &daemon_root).unwrap());
+
+        let mountpoint = host_root.join("volumes/builder");
+        let prunes = std::cell::Cell::new(0);
+        let freed = prune_candidate_for_device_with(
+            Some(&mountpoint),
+            &host_root,
+            1,
+            |_, _, _| same_filesystem_object(&host_root, &daemon_root),
+            || {
+                prunes.set(prunes.get() + 1);
+                Ok(1_000)
+            },
+        )
+        .unwrap();
+        assert_eq!(freed, 0);
+        assert_eq!(prunes.get(), 0, "different-root candidate must not prune");
+    }
+
+    #[test]
+    fn conflict_created_recovers_own_unbound_lease_but_rejects_stale_unleased_record() {
+        let root = temp_root("conflict-created-creator-lease");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let config = "no-config-v1";
+        let container_id = "immutable-container-id";
+        let lease = begin_persistent_builder_creator_lease(&domain, &builder, config, 1).unwrap();
+        let attested = std::cell::Cell::new(0);
+        let ready = std::cell::Cell::new(false);
+        let recovered = std::cell::Cell::new(0);
+        ensure_conflicting_builder_creator_or_readiness(
+            container_id,
+            config,
+            Duration::from_secs(1),
+            || {
+                attested.set(attested.get() + 1);
+                Ok(Some(container_id.to_owned()))
+            },
+            || Ok(ready.get()),
+            || Ok(false),
+            |id| {
+                assert_eq!(id, container_id);
+                recovered.set(recovered.get() + 1);
+                ready.set(true);
+                Ok(true)
+            },
+            || read_live_builder_creator(&domain, &builder),
+            |_| panic!("recovered stale Created container should be ready"),
+        )
+        .unwrap();
+        assert_eq!(attested.get(), 1, "candidate must be attested first");
+        assert_eq!(recovered.get(), 1, "only the current lease may recover");
+
+        // A crash/drop before create attestation leaves a stale unbound
+        // record, but the flock makes it non-authoritative for the next 409.
+        drop(lease);
+        let unauthenticated_attests = std::cell::Cell::new(0);
+        let error = ensure_conflicting_builder_creator_or_readiness(
+            container_id,
+            config,
+            Duration::from_millis(1),
+            || {
+                unauthenticated_attests.set(unauthenticated_attests.get() + 1);
+                Ok(Some(container_id.to_owned()))
+            },
+            || Ok(false),
+            || Ok(false),
+            |_| panic!("stale unleased creator must not authorize recovery"),
+            || read_live_builder_creator(&domain, &builder),
+            |_| panic!("stale creator must not enter Created polling"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("live matching creator lease"));
+        assert_eq!(unauthenticated_attests.get(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn conflict_wait_rechecks_readiness_when_creator_disappears() {
+        let root = temp_root("conflict-readiness-published-before-creator-disappears");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let config = "no-config-v1";
+        let container_id = "immutable-container-id";
+        let ready = std::cell::Cell::new(false);
+        let attestations = std::cell::Cell::new(0);
+
+        ensure_conflicting_builder_creator_or_readiness(
+            container_id,
+            config,
+            Duration::from_secs(1),
+            || {
+                attestations.set(attestations.get() + 1);
+                Ok(Some(container_id.to_owned()))
+            },
+            || builder_readiness_matches(&domain, &builder, container_id, config),
+            || Ok(false),
+            |_| panic!("readiness was published by the winner"),
+            || {
+                let proof = BuilderReadinessRecord {
+                    version: BUILDER_READINESS_VERSION,
+                    builder: builder.clone(),
+                    domain_token: domain.token.clone(),
+                    state_volume: daemon_state_volume(&builder),
+                    container_id: container_id.to_owned(),
+                    config_fingerprint: config.to_owned(),
+                };
+                write_atomic_document(
+                    &builder_readiness_file(&domain, &builder),
+                    &serde_json::to_vec(&proof).unwrap(),
+                )?;
+                ready.set(true);
+                Ok(None)
+            },
+            |_| panic!("exact readiness must win over a vanished creator record"),
+        )
+        .unwrap();
+
+        assert!(ready.get());
+        assert_eq!(attestations.get(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn conflict_created_waits_for_distinct_create_to_bind_and_publish_readiness() {
+        let root = temp_root("conflict-created-distinct-creator");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let config = "no-config-v1";
+        let container_id = "immutable-container-id";
+        let _lease = begin_persistent_builder_creator_lease(&domain, &builder, config, 1).unwrap();
+        let attested = std::cell::Cell::new(0);
+        let mut winner_published = false;
+
+        ensure_conflicting_builder_creator_or_readiness(
+            container_id,
+            config,
+            Duration::from_secs(1),
+            || {
+                attested.set(attested.get() + 1);
+                Ok(Some(container_id.to_owned()))
+            },
+            || builder_readiness_matches(&domain, &builder, container_id, config),
+            || Ok(true),
+            |_| panic!("distinct live create must win; do not recover its container"),
+            || read_live_builder_creator(&domain, &builder),
+            |_| {
+                if !winner_published {
+                    // This models the separate POST /containers/create that
+                    // owns the successful 201 response; only its observer may
+                    // bind the immutable ID and archive fingerprint.
+                    bind_persistent_builder_creator_container(
+                        &domain,
+                        &builder,
+                        config,
+                        container_id,
+                    )
+                    .unwrap();
+                    record_persistent_builder_creator_archive(
+                        &domain,
+                        &builder,
+                        config,
+                        container_id,
+                        config,
+                    )
+                    .unwrap();
+                    let proof = BuilderReadinessRecord {
+                        version: BUILDER_READINESS_VERSION,
+                        builder: builder.clone(),
+                        domain_token: domain.token.clone(),
+                        state_volume: daemon_state_volume(&builder),
+                        container_id: container_id.to_owned(),
+                        config_fingerprint: config.to_owned(),
+                    };
+                    write_atomic_document(
+                        &builder_readiness_file(&domain, &builder),
+                        &serde_json::to_vec(&proof).unwrap(),
+                    )
+                    .unwrap();
+                    winner_published = true;
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(attested.get(), 1);
+        assert!(winner_published);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ambiguous_buildkit_lifecycle_errors_use_immutable_id_inspection() {
+        let start_inspections = std::cell::Cell::new(0);
+        assert!(start_attested_builder_confirmed_with(
+            "immutable-container-id",
+            |_| {
+                let inspection = start_inspections.get() + 1;
+                start_inspections.set(inspection);
+                Ok(crate::docker::client::ExitInfo {
+                    status: Some(if inspection == 1 {
+                        crate::docker::client::ContainerState::Exited
+                    } else {
+                        crate::docker::client::ContainerState::Running
+                    }),
+                    finished: None,
+                })
+            },
+            |_| anyhow::bail!("start response was lost"),
+        )
+        .unwrap());
+        assert_eq!(start_inspections.get(), 2);
+
+        assert!(stop_attested_builder_confirmed_with(
+            "immutable-container-id",
+            |_| anyhow::bail!("stop response was lost"),
+            |_| {
+                Ok(crate::docker::client::ExitInfo {
+                    status: Some(crate::docker::client::ContainerState::Exited),
+                    finished: None,
+                })
+            },
+        )
+        .unwrap());
+
+        let stop_inspections = std::cell::Cell::new(0);
+        assert!(stop_attested_builder_confirmed_with(
+            "immutable-container-id",
+            |_| anyhow::bail!("stop response was lost"),
+            |_| {
+                stop_inspections.set(stop_inspections.get() + 1);
+                Err(anyhow::anyhow!("inspect unavailable"))
+            },
+        )
+        .is_err());
+        assert_eq!(stop_inspections.get(), 1);
+
+        let start_attempts = std::cell::Cell::new(0);
+        assert!(start_attested_builder_confirmed_with(
+            "immutable-container-id",
+            |_| Err(anyhow::anyhow!("inspect unavailable")),
+            |_| {
+                start_attempts.set(start_attempts.get() + 1);
+                Ok(())
+            },
+        )
+        .is_err());
+        assert_eq!(start_attempts.get(), 0);
     }
 
     #[test]
@@ -2139,31 +6051,58 @@ mod tests {
         let current =
             persistent_builder_name("velnor-builder", "trusted", TRUST_TIER_BRANCH, Some("o/r"));
         assert!(is_persistent_builder_name(&current));
-        assert!(!is_legacy_capped_builder_name(&current));
+        assert!(is_current_domained_persistent_builder(&current));
         assert!(is_persistent_builder_name(
             "velnor-builder-shared-trusted-branch-o_r"
         ));
-        assert!(is_legacy_capped_builder_name(
+        assert!(!is_current_domained_persistent_builder(
             "velnor-builder-shared-trusted-branch-o_r"
         ));
-        assert!(!is_legacy_capped_builder_name("arbitrary-external-builder"));
+        assert!(is_persistent_builder_name(
+            "velnor-builder-shared-unbounded-v1-trusted-branch-o_r"
+        ));
+        assert!(!is_current_domained_persistent_builder(
+            "velnor-builder-shared-unbounded-v1-trusted-branch-o_r"
+        ));
         assert!(!is_persistent_builder_name("velnor-builder-slot-3"));
         assert!(!is_persistent_builder_name(
             "velnor-builder-mybuilder-slot-3"
         ));
-        // The legacy adversarial case: an old-daemon builder whose requested
-        // name starts with the marker matches persistent and is therefore
-        // SKIPPED by teardown (orphaned until the horizon path) rather than
-        // destroyed while potentially shared.
+        // The legacy adversarial case: a marker-bearing old name remains
+        // reserved from guest/generic cleanup. Without current domain proof it
+        // stays for explicit operator cleanup.
         assert!(is_persistent_builder_name(
             "velnor-builder-shared-foo-slot-3"
         ));
-        // Object embedding preserves the marker.
+        // Exact Buildx object shapes preserve both current and retired
+        // canonical resources, while arbitrary marker-bearing job names are
+        // ordinary cleanup targets.
         assert!(is_persistent_builder_object(
             "buildx_buildkit_velnor-builder-shared-trusted-branch-o_r0"
         ));
         assert!(is_persistent_builder_object(
             "buildx_buildkit_velnor-builder-shared-trusted-branch-o_r0_state"
+        ));
+        assert!(is_persistent_builder_object(&daemon_container_name(
+            &current
+        )));
+        assert!(is_persistent_builder_object(&format!(
+            "buildx_buildkit_{current}10_state"
+        )));
+        assert!(is_velnor_buildkit_daemon_name(
+            "buildx_buildkit_velnor-builder-custom10"
+        ));
+        assert!(is_persistent_builder_object(
+            "buildx_buildkit_velnor-builder-shared-unbounded-v1-trusted-branch-o_r0"
+        ));
+        assert!(!is_persistent_builder_object(
+            "guest-velnor-builder-shared-cache"
+        ));
+        assert!(!is_persistent_builder_object(
+            "buildx_buildkit_guest-velnor-builder-shared-cache0_state"
+        ));
+        assert!(!is_velnor_buildkit_daemon_name(
+            "guest-buildx_buildkit_velnor-builder-marker0"
         ));
         assert!(!is_persistent_builder_object(
             "buildx_buildkit_velnor-builder-slot-30"
@@ -2200,7 +6139,7 @@ mod tests {
             "buildx_buildkit_velnor-builder-shared-unbounded-v1-trusted-branch-o_r0_state"
         );
         let old = "velnor-builder-shared-trusted-branch-o_r";
-        assert!(is_legacy_capped_builder_name(old));
+        assert!(!is_current_domained_persistent_builder(old));
         assert_eq!(
             daemon_container_name(old),
             "buildx_buildkit_velnor-builder-shared-trusted-branch-o_r0"
@@ -2212,19 +6151,45 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_reaper_deletes_only_registered_legacy_builders_immediately() {
-        let root = temp_root("upgrade-reap-legacy");
+    fn upgrade_reaper_leaves_every_unscoped_generation_untouched() {
+        let root = temp_root("upgrade-reap-unscoped");
         let run_root = root.join("run");
         let legacy = "velnor-builder-shared-trusted-branch-o_r".to_string();
+        let old_unbounded = "velnor-builder-shared-unbounded-v1-trusted-branch-o_r".to_string();
         let current = test_builder();
         let external = "external-buildx-cache".to_string();
-        let unregistered_current = "velnor-builder-shared-unbounded-v1-external-cache".to_string();
-        claim_builder(&run_root, &legacy, "slot-old", "velnor-job-old").unwrap();
+        let mut legacy_claims = BuilderClaims {
+            builder: legacy.clone(),
+            ..BuilderClaims::default()
+        };
+        legacy_claims.holders.insert(
+            "velnor-job-old".to_string(),
+            BuilderHolder {
+                container: "velnor-job-old".to_string(),
+                slot: "slot-old".to_string(),
+                claimed_unix: 1,
+            },
+        );
+        let mut v1_claims = BuilderClaims {
+            builder: old_unbounded.clone(),
+            ..BuilderClaims::default()
+        };
+        v1_claims.holders.insert(
+            "velnor-job-v1".to_string(),
+            BuilderHolder {
+                container: "velnor-job-v1".to_string(),
+                slot: "slot-v1".to_string(),
+                claimed_unix: 2,
+            },
+        );
+        let legacy_path = claims_file(&run_root, &legacy);
+        let v1_path = claims_file(&run_root, &old_unbounded);
+        write_claims(&legacy_path, &legacy_claims).unwrap();
+        write_claims(&v1_path, &v1_claims).unwrap();
+        let legacy_bytes = std::fs::read(&legacy_path).unwrap();
+        let v1_bytes = std::fs::read(&v1_path).unwrap();
         claim_builder(&run_root, &current, "slot-new", "velnor-job-new").unwrap();
-        abandon_claims(&run_root, &current);
-
-        let inspected = std::cell::RefCell::new(Vec::new());
-        let removed = std::cell::RefCell::new(Vec::new());
+        let present = BTreeSet::from(["velnor-job-new".to_string()]);
         let now = SystemTime::now();
         let report = reap_idle_builders_with(
             &run_root,
@@ -2232,94 +6197,59 @@ mod tests {
             || {
                 Ok(vec![
                     legacy.clone(),
+                    old_unbounded.clone(),
                     external.clone(),
-                    unregistered_current.clone(),
                     current.clone(),
                 ])
             },
-            || Ok(BTreeSet::new()),
-            |daemon| {
-                inspected.borrow_mut().push(daemon.to_string());
-                Ok(crate::docker::client::ExitInfo {
-                    status: Some(crate::docker::client::ContainerState::Exited),
-                    // Legacy cleanup is immediate, not an idle-horizon wait.
-                    finished: Some(now),
-                })
-            },
-            |_| panic!("stopped builders need no stop call"),
-            |_| panic!("no holder race exists"),
-            |builder| {
-                removed.borrow_mut().push(builder.to_string());
-                Ok(())
-            },
+            || Ok(present.clone()),
+            |_| panic!("unscoped/current-held builders must not be inspected"),
+            |_| panic!("unscoped/current-held builders must not be stopped"),
+            |_| panic!("unscoped/current-held builders must not be restarted"),
+            |_| panic!("unscoped/current-held builders must not be removed"),
         );
 
-        assert_eq!(report.deleted, vec![legacy.clone()]);
-        assert_eq!(*removed.borrow(), vec![legacy.clone()]);
-        assert_eq!(
-            *inspected.borrow(),
-            vec![
-                daemon_container_name(&legacy),
-                daemon_container_name(&current)
-            ]
-        );
-        assert!(!claims_file(&run_root, &legacy).exists());
+        assert!(report.deleted.is_empty());
+        assert!(report.stopped.is_empty());
+        assert!(report.failures.is_empty());
+        assert_eq!(std::fs::read(legacy_path).unwrap(), legacy_bytes);
+        assert_eq!(std::fs::read(v1_path).unwrap(), v1_bytes);
         assert!(claims_file(&run_root, &current).exists());
-        assert!(!inspected.borrow().contains(&external));
-        assert!(report.failures.iter().any(|failure| {
-            failure.contains(&unregistered_current) && failure.contains("untouched")
-        }));
+        assert!(!claims_file(&run_root, &external).exists());
 
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn legacy_builder_missing_claim_stays_pinned_without_admission_proof() {
+    fn retired_unscoped_missing_claim_stays_untouched() {
         let root = temp_root("legacy-reap-after-reboot");
         let run_root = root.join("run");
         let legacy = "velnor-builder-shared-trusted-branch-o_r".to_string();
-        let inspected = std::cell::RefCell::new(Vec::new());
-        let stopped = std::cell::RefCell::new(Vec::new());
-        let restarted = std::cell::RefCell::new(Vec::new());
-        let removed = std::cell::RefCell::new(Vec::new());
-
-        // A Docker snapshot cannot prove that another runner has not already
-        // acquired a job and is waiting to create its job container.
+        let old_unbounded = "velnor-builder-shared-unbounded-v1-trusted-branch-o_r".to_string();
+        // Missing old-generation claims are not evidence of quiescence; the
+        // retired resource remains outside this generation's ownership.
         assert!(!claims_file(&run_root, &legacy).exists());
         let report = reap_idle_builders_with(
             &run_root,
             SystemTime::now(),
-            || Ok(vec![legacy.clone(), "external-builder".to_string()]),
+            || {
+                Ok(vec![
+                    legacy.clone(),
+                    old_unbounded.clone(),
+                    "external-builder".to_string(),
+                ])
+            },
             || Ok(BTreeSet::new()),
-            |name| {
-                inspected.borrow_mut().push(name.to_string());
-                Ok(crate::docker::client::ExitInfo {
-                    status: None,
-                    finished: None,
-                })
-            },
-            |name| {
-                stopped.borrow_mut().push(name.to_string());
-                Ok(true)
-            },
-            |name| {
-                restarted.borrow_mut().push(name.to_string());
-                Ok(true)
-            },
-            |builder| {
-                removed.borrow_mut().push(builder.to_string());
-                Ok(())
-            },
+            |_| panic!("unscoped builders must not be inspected"),
+            |_| panic!("unscoped builders must not be stopped"),
+            |_| panic!("unscoped builders must not be restarted"),
+            |_| panic!("unscoped builders must not be removed"),
         );
 
         assert!(report.deleted.is_empty());
-        assert!(inspected.borrow().is_empty());
-        assert!(stopped.borrow().is_empty());
-        assert!(restarted.borrow().is_empty());
-        assert!(removed.borrow().is_empty());
-        assert!(report.failures.iter().any(|failure| {
-            failure.contains(&legacy) && failure.contains("admission quiescence")
-        }));
+        assert!(report.failures.is_empty());
+        assert!(!claims_file(&run_root, &legacy).exists());
+        assert!(!claims_file(&run_root, &old_unbounded).exists());
         assert!(!claims_file(&run_root, &legacy).exists());
 
         std::fs::remove_dir_all(&root).unwrap();
@@ -2648,6 +6578,62 @@ mod tests {
     }
 
     #[test]
+    fn horizon_stop_error_rechecks_claims_and_restarts_after_possible_stop() {
+        let root = temp_root("horizon-ambiguous-stop");
+        let run_root = root.join("run");
+        let registry_root = owner_registry_root(&root.join("lib"));
+        let builder = test_builder();
+        claim_builder_with_registry(
+            &run_root,
+            Some(&registry_root),
+            &builder,
+            "slot-old",
+            "velnor-job-old",
+        )
+        .unwrap();
+        abandon_claims(&run_root, &builder);
+        let restarted = std::cell::RefCell::new(Vec::new());
+
+        let report = reap_idle_builders_with_registry(
+            &run_root,
+            Some(&registry_root),
+            SystemTime::now(),
+            || Ok(vec![builder.clone()]),
+            || Ok(BTreeSet::new()),
+            |_| {
+                Ok(crate::docker::client::ExitInfo {
+                    status: Some(crate::docker::client::ContainerState::Running),
+                    finished: None,
+                })
+            },
+            |_| {
+                claim_builder_with_registry(
+                    &run_root,
+                    Some(&registry_root),
+                    &builder,
+                    "slot-new",
+                    "velnor-job-new",
+                )?;
+                Err(anyhow::anyhow!("stop timed out after acting"))
+            },
+            |_| {
+                restarted.borrow_mut().push(builder.clone());
+                Ok(true)
+            },
+            |_| panic!("a racing holder prevents removal"),
+        );
+
+        assert!(report.deleted.is_empty());
+        assert!(report
+            .failures
+            .iter()
+            .any(|failure| failure.contains("stop timed out after acting")));
+        assert_eq!(*restarted.borrow(), vec![builder.clone()]);
+        assert_eq!(builder_holders(&run_root, &builder, None).unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn current_builder_missing_claim_with_live_job_is_not_stopped_or_removed() {
         let root = temp_root("current-reap-missing-claim-live-job");
         let run_root = root.join("run");
@@ -2743,7 +6729,34 @@ mod tests {
     }
 
     #[test]
-    fn orphan_owner_record_is_removed_only_after_successful_empty_builder_listing() {
+    fn current_domain_owner_with_old_schema_is_reported_and_preserved() {
+        let root = temp_root("old-owner-schema-current-domain");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let registry_root = owner_registry_root(&domain.root);
+        let path = owner_registry_file(&registry_root, &builder);
+        let legacy_current_record = serde_json::json!({
+            "version": OWNER_REGISTRY_VERSION - 1,
+            "builder": builder,
+        });
+        let bytes = serde_json::to_vec(&legacy_current_record).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+
+        let error = registered_domain_builders(&registry_root, &domain.token).unwrap_err();
+        assert!(error.to_string().contains("unsupported schema version"));
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn owner_record_absent_from_inventory_is_retained_without_docker_absence_proof() {
         let root = temp_root("orphan-owner-record");
         let run_root = root.join("run");
         let registry_root = owner_registry_root(&root.join("lib"));
@@ -2764,14 +6777,16 @@ mod tests {
             |_| panic!("orphan record has no daemon to remove"),
         );
 
-        assert!(report.failures.is_empty(), "{:?}", report.failures);
-        assert!(!owner_path.exists());
+        assert!(report.failures.iter().any(|failure| {
+            failure.contains(&builder) && failure.contains("without Docker absence proof")
+        }));
+        assert!(owner_path.exists());
         assert!(!claims_file(&run_root, &builder).exists());
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn orphan_owner_record_repairs_vanished_claim_holders_before_cleanup() {
+    fn owner_record_absent_from_inventory_does_not_repair_or_delete_claims() {
         let root = temp_root("orphan-owner-vanished-holder");
         let run_root = root.join("run");
         let registry_root = owner_registry_root(&root.join("lib"));
@@ -2786,6 +6801,8 @@ mod tests {
         )
         .unwrap();
         let owner_path = owner_registry_file(&registry_root, &builder);
+        let claims_path = claims_file(&run_root, &builder);
+        let claims_before = std::fs::read(&claims_path).unwrap();
 
         let report = reap_idle_builders_with_registry(
             &run_root,
@@ -2799,9 +6816,11 @@ mod tests {
             |_| panic!("orphan record has no daemon to remove"),
         );
 
-        assert!(report.failures.is_empty(), "{:?}", report.failures);
-        assert!(!owner_path.exists());
-        assert!(!claims_file(&run_root, &builder).exists());
+        assert!(report.failures.iter().any(|failure| {
+            failure.contains(&builder) && failure.contains("without Docker absence proof")
+        }));
+        assert!(owner_path.exists());
+        assert_eq!(std::fs::read(claims_path).unwrap(), claims_before);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -3131,6 +7150,66 @@ mod tests {
     }
 
     #[test]
+    fn setup_lifecycle_lock_prevents_final_release_stop_during_new_claim() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Arc};
+
+        let root = temp_root("setup-release-lifecycle-lock");
+        let domain =
+            PersistentBuildKitDomain::from_identities(&root, "storage-a", "engine-a").unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        claim_domain_builder(&domain, &builder, "slot-1", "old-job").unwrap();
+
+        // Model setup after it acquired the per-builder lifecycle lock and
+        // before it publishes its new claim. Release must wait until setup
+        // completes, then observe both holders and skip stop.
+        let setup_lock = lock_builder_lifecycle(&domain.root, &builder).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let stop_called = Arc::new(AtomicBool::new(false));
+        let release_domain = domain.clone();
+        let release_builder = builder.clone();
+        let stop_flag = Arc::clone(&stop_called);
+        let release_thread = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            release_domain_builder_if_last(
+                &release_domain,
+                &release_builder,
+                "old-job",
+                || {
+                    stop_flag.store(true, Ordering::SeqCst);
+                    Ok(true)
+                },
+                || panic!("no stop means no restart"),
+            )
+        });
+        started_rx.recv().unwrap();
+        claim_domain_builder(&domain, &builder, "slot-2", "new-job").unwrap();
+        drop(setup_lock);
+
+        let outcome = release_thread.join().unwrap().unwrap();
+        assert_eq!(
+            outcome,
+            ReleaseOutcome {
+                removed_last: false,
+                stopped: false,
+                restarted: false,
+            }
+        );
+        assert!(!stop_called.load(Ordering::SeqCst));
+        assert_eq!(
+            builder_holders(&domain.root, &builder, None).unwrap().len(),
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn claim_reader_ignores_retired_entitlement_metadata() {
         let root = temp_root("claim-schema");
         let run_root = root.join("run");
@@ -3158,7 +7237,7 @@ mod tests {
         });
         std::fs::write(&path, serde_json::to_vec(&legacy_shape).unwrap()).unwrap();
 
-        let claims = read_claims(&path).unwrap();
+        let claims = read_claims(&path, &builder).unwrap();
         assert_eq!(claims.holders.len(), 1);
         let holders = builder_holders(&run_root, &builder, None).unwrap();
         assert_eq!(holders.len(), 1);
@@ -3226,6 +7305,42 @@ mod tests {
         assert_eq!(builder_holders(&run_root, &builder, None).unwrap().len(), 1);
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn release_stop_error_rechecks_claims_and_restarts_after_possible_stop() {
+        let root = temp_root("release-ambiguous-stop");
+        let run_root = root.join("run");
+        let builder = test_builder();
+        claim_builder(&run_root, &builder, "slot-1", "velnor-job-a").unwrap();
+        let restarted = std::cell::RefCell::new(Vec::new());
+
+        let outcome = release_and_stop_if_last(
+            &run_root,
+            &builder,
+            "velnor-job-a",
+            || {
+                // Simulate a new setup arriving while Docker stop times out
+                // after it may already have stopped the daemon.
+                claim_builder(&run_root, &builder, "slot-2", "velnor-job-b").unwrap();
+                Err(anyhow::anyhow!("stop timed out after acting"))
+            },
+            || {
+                restarted.borrow_mut().push(builder.clone());
+                Ok(true)
+            },
+        )
+        .unwrap();
+
+        assert!(outcome.removed_last);
+        assert!(
+            !outcome.stopped,
+            "ambiguous stop cannot be reported as acted"
+        );
+        assert!(outcome.restarted);
+        assert_eq!(*restarted.borrow(), vec![builder.clone()]);
+        assert_eq!(builder_holders(&run_root, &builder, None).unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3397,7 +7512,45 @@ mod tests {
         // Torn marker: due.
         std::fs::write(&marker, b"not-a-number").unwrap();
         assert!(horizon_reap_due(&marker, now));
+        std::fs::write(
+            &marker,
+            vec![b'0'; (MAX_HORIZON_REAP_MARKER_BYTES + 1) as usize],
+        )
+        .unwrap();
+        assert!(
+            horizon_reap_due(&marker, now),
+            "oversized marker is unreadable"
+        );
 
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn horizon_marker_symlink_is_not_followed_for_read_or_write() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("reap-marker-symlink");
+        let marker = root.join("marker");
+        let external = root.join("external-marker");
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(20_000_000);
+        std::fs::write(&external, b"19999999").unwrap();
+        symlink(&external, &marker).unwrap();
+
+        assert!(horizon_reap_due(&marker, now));
+        let runs = std::cell::Cell::new(0);
+        maybe_reap_idle_builders_with(&marker, now, |_, _| {
+            runs.set(runs.get() + 1);
+            HorizonReport::default()
+        })
+        .unwrap();
+
+        assert_eq!(runs.get(), 1);
+        assert_eq!(std::fs::read(&external).unwrap(), b"19999999");
+        assert!(std::fs::symlink_metadata(&marker)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         std::fs::remove_dir_all(&root).unwrap();
     }
 
