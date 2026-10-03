@@ -938,9 +938,11 @@ impl CommandRunner for ProcessCommandRunner {
         own_process_group(&mut command);
         let child_timeout = timeout.saturating_sub(started.elapsed());
         if child_timeout.is_zero() {
-            return Err(anyhow::Error::new(crate::docker::DockerTimeout::new(
-                op, timeout,
-            )));
+            let error = match op {
+                Some(op) => anyhow::Error::new(crate::docker::DockerTimeout::new(op, timeout)),
+                None => anyhow::anyhow!("{program} command deadline elapsed before spawn"),
+            };
+            return Err(error);
         }
         let child = command
             .spawn()
@@ -16506,7 +16508,7 @@ mod tests {
             DEFAULT_STEP_TIMEOUT,
         );
 
-        assert!(op.is_some_and(|op| op == crate::docker::DockerOp::Start));
+        assert!(op.is_some_and(|op| op == crate::docker::DockerOp::Payload));
         assert!(!deadline.is_zero());
         assert!(deadline <= startup_budget);
     }
