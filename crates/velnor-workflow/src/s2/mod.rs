@@ -14121,6 +14121,7 @@ mod tests {
             concat!("runners", " = \""),
             concat!("automatic", " = \""),
         ];
+        const RUNNER_ENVIRONMENT: &str = concat!("runner", ".environment");
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         assert!(
             !root
@@ -14135,6 +14136,7 @@ mod tests {
         // The schema-1 tree beside this module legitimately keeps the
         // legacy lane path; the sweep covers the schema-2 fork only.
         let mut sources = vec![root.join("src/s2")];
+        let runner_environment_guard_source = root.join("src/s2/primitives/check_profiles.rs");
         let mut checked = 0_usize;
         while let Some(dir) = sources.pop() {
             let entries = must(fs::read_dir(&dir), "read generator source");
@@ -14144,9 +14146,29 @@ mod tests {
                     sources.push(path);
                 } else if path.extension().is_some_and(|ext| ext == "rs") {
                     let content = must(fs::read_to_string(&path), "read generator source");
+                    // The one allowed context is the fail-closed hosted verifier guard.
+                    let content_without_guard_context = if path == runner_environment_guard_source {
+                        let guard_assignment =
+                            format!("VERIFIER_RUNNER_ENVIRONMENT: ${{{{ {RUNNER_ENVIRONMENT} }}}}");
+                        assert_eq!(
+                            content.matches(RUNNER_ENVIRONMENT).count(),
+                            2,
+                            "{} must keep the context to the guard and its assertion",
+                            path.display()
+                        );
+                        assert_eq!(
+                            content.matches(&guard_assignment).count(),
+                            2,
+                            "{} must keep both references in the hosted guard assignment",
+                            path.display()
+                        );
+                        content.replace(RUNNER_ENVIRONMENT, "")
+                    } else {
+                        content.clone()
+                    };
                     for pattern in LEGACY {
                         assert!(
-                            !content.contains(pattern),
+                            !content_without_guard_context.contains(pattern),
                             "{} carries legacy vocabulary `{pattern}`",
                             path.display()
                         );
@@ -14191,9 +14213,69 @@ mod tests {
             ("release", release_files),
         ] {
             for (path, content) in &files {
+                let guard_assignment =
+                    format!("VERIFIER_RUNNER_ENVIRONMENT: ${{{{ {RUNNER_ENVIRONMENT} }}}}");
+                let fail_closed_comparison =
+                    "if [[ \"${VERIFIER_RUNNER_ENVIRONMENT:-}\" != \"github-hosted\" ]]; then";
+                let mut content_without_guard_context = content.clone();
+                let mut allowed_context_occurrences = 0;
+                for (job, block) in static_workflow_job_blocks(content) {
+                    let context_occurrences = block.matches(RUNNER_ENVIRONMENT).count();
+                    if context_occurrences == 0 {
+                        continue;
+                    }
+                    assert_eq!(
+                        context_occurrences,
+                        1,
+                        "{name} {} job {job} uses the runner context more than once",
+                        path.display()
+                    );
+                    let verifier_profile = job
+                        .strip_prefix("verify-")
+                        .and_then(|suffix| suffix.strip_suffix("-artifacts"));
+                    let verifier_name = verifier_profile
+                        .map(|profile| format!("name: Verify {profile} artifacts"))
+                        .unwrap_or_default();
+                    let steps = named_workflow_steps(&block);
+                    let guard_steps = steps
+                        .iter()
+                        .filter(|(step_name, _)| step_name == "Require GitHub-hosted runner")
+                        .collect::<Vec<_>>();
+                    let first_step_is_guard = block
+                        .lines()
+                        .find(|line| line.trim_start().starts_with("- "))
+                        .is_some_and(|line| {
+                            line.trim_start() == "- name: Require GitHub-hosted runner"
+                        });
+                    assert!(
+                        verifier_profile.is_some()
+                            && block.contains(&verifier_name)
+                            && block.contains("runs-on: ubuntu-latest")
+                            && first_step_is_guard
+                            && guard_steps.len() == 1
+                            && guard_steps[0].1.matches(RUNNER_ENVIRONMENT).count() == 1
+                            && guard_steps[0].1.contains(&guard_assignment)
+                            && guard_steps[0].1.contains(fail_closed_comparison)
+                            && steps.iter().all(|(step_name, step)| {
+                                step_name == "Require GitHub-hosted runner"
+                                    || !step.contains(RUNNER_ENVIRONMENT)
+                            }),
+                        "{name} {} job {job} must be the hosted-only artifact verifier guard",
+                        path.display()
+                    );
+                    content_without_guard_context =
+                        content_without_guard_context.replacen(RUNNER_ENVIRONMENT, "", 1);
+                    allowed_context_occurrences += context_occurrences;
+                }
+                assert_eq!(
+                    content.matches(RUNNER_ENVIRONMENT).count(),
+                    allowed_context_occurrences,
+                    "{name} {} has runner context outside parsed verifier jobs",
+                    path.display()
+                );
                 for pattern in LEGACY {
                     assert!(
-                        !content.contains(pattern),
+                        !content_without_guard_context.contains(pattern),
                         "{name} {} carries legacy vocabulary `{pattern}`",
                         path.display()
                     );

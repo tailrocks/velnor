@@ -1349,7 +1349,7 @@ mod tests {
         );
         assert!(
             verifier.contains("VERIFIER_RUNNER_ENVIRONMENT: ${{ runner.environment }}"),
-            "the guard binds its value from runner.environment: {verifier}"
+            "the guard binds its environment value: {verifier}"
         );
         assert!(
             verifier.contains(
