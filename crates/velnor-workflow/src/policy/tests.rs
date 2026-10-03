@@ -1390,6 +1390,7 @@ fn required_artifact_tree_with_settings(
         &root.join("Cargo.toml"),
         "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
     );
+    write_required_artifact_mise_tasks(&root, &["check", "consume"]);
     write(
         &root.join("rust-toolchain.toml"),
         "[toolchain]\nchannel = \"1.91.1\"\n",
@@ -1397,6 +1398,28 @@ fn required_artifact_tree_with_settings(
     write(&root.join("src/lib.rs"), "// fixture\n");
     write(&root.join(".github/workflows/checks.yml"), workflow);
     root
+}
+
+fn write_required_artifact_mise_tasks(root: &Path, tasks: &[&str]) {
+    let declarations = tasks
+        .iter()
+        .map(|task| format!("[tasks.{task}]\nrun = \"true\"\n"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    write(&root.join("mise.toml"), &declarations);
+}
+
+fn append_required_artifact_mise_tasks(root: &Path, tasks: &[&str]) {
+    let path = root.join("mise.toml");
+    let mut declarations = must(
+        fs::read_to_string(&path),
+        "read required-artifact mise tasks",
+    );
+    declarations.push('\n');
+    for task in tasks {
+        declarations.push_str(&format!("[tasks.{task}]\nrun = \"true\"\n\n"));
+    }
+    write(&path, &declarations);
 }
 
 fn render_required_artifact_workflow(root: &Path) -> Result<String, String> {
@@ -1432,6 +1455,7 @@ fn render_required_artifact_workflows(root: &Path) -> Result<Vec<(PathBuf, Strin
 
 fn required_artifact_transitive_tree(name: &str, workflow: &str) -> PathBuf {
     let root = required_artifact_tree(name, workflow);
+    append_required_artifact_mise_tasks(&root, &["prep", "build", "tail"]);
     let config_path = root.join(GENERATION_CONFIG);
     let generation = must(
         fs::read_to_string(&config_path),
@@ -1459,6 +1483,7 @@ fn required_artifact_transitive_tree(name: &str, workflow: &str) -> PathBuf {
 
 fn required_artifact_optional_dependency_tree(name: &str, workflow: &str) -> PathBuf {
     let root = required_artifact_tree(name, workflow);
+    append_required_artifact_mise_tasks(&root, &["optional"]);
     let config_path = root.join(GENERATION_CONFIG);
     let generation = must(
         fs::read_to_string(&config_path),
@@ -1482,10 +1507,6 @@ fn required_artifact_optional_dependency_tree(name: &str, workflow: &str) -> Pat
 
 fn required_artifact_split_workflow_tree(name: &str) -> PathBuf {
     let root = required_artifact_tree(name, "");
-    write(
-        &root.join("mise.toml"),
-        "[tasks.check]\nrun = \"true\"\n\n[tasks.consume]\nrun = \"true\"\n",
-    );
     let config_path = root.join(GENERATION_CONFIG);
     let generation = must(
         fs::read_to_string(&config_path),
