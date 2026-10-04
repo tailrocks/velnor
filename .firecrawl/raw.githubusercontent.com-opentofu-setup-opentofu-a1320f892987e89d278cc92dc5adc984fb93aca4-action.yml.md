@@ -1,0 +1,54 @@
+name: 'OpenTofu - Setup Tofu'
+description: 'Sets up OpenTofu CLI in your GitHub Actions workflow.'
+author: 'OpenTofu'
+inputs:
+  cli_config_credentials_hostname:
+    description: 'The hostname of a Terraform Cloud/Enterprise instance to place within the credentials block of the OpenTofu CLI configuration file. Defaults to `app.terraform.io`.'
+    default: 'app.terraform.io'
+    required: false
+  cli_config_credentials_token:
+    description: 'The API token for a Terraform Cloud/Enterprise instance to place within the credentials block of the OpenTofu CLI configuration file.'
+    required: false
+  tofu_version:
+    description: 'The version of OpenTofu CLI to install. If no version is given, it will default to `latest`.'
+    default: 'latest'
+    required: false
+  tofu_version_file:
+    description: 'Path to a file containing the OpenTofu version to install. Takes precedence over `tofu_version` if both are provided.'
+    required: false
+  tofu_wrapper:
+    description: 'Whether or not to install a wrapper to wrap subsequent calls of the `tofu` binary and expose its STDOUT, STDERR, and exit code as outputs named `stdout`, `stderr`, and `exitcode` respectively. Defaults to `true`.'
+    default: 'true'
+    required: false
+  cache:
+    description: 'Whether to use GitHub Actions tool-cache to store and reuse downloaded OpenTofu binaries. Defaults to `false`.'
+    default: 'false'
+    required: false
+  github_token:
+    description: 'API token for GitHub to increase the rate limit. Defaults to the GITHUB_TOKEN environment variable unless running on Forgejo/Gitea.'
+    default: ''
+    required: false
+  provider_acceptance_tests:
+    description: 'Whether to automatically set environment variables for running OpenTofu provider acceptance tests (TF_ACC, TF_ACC_PROVIDER_NAMESPACE, TF_ACC_PROVIDER_HOST, TF_ACC_TERRAFORM_PATH). Defaults to `false`.'
+    default: 'false'
+    required: false
+  checksums:
+    description: Newline-delimited list of valid checksums (SHA256 hashes) for the downloaded OpenTofu binary. When set, the action verifies the binary matches one of these checksums before proceeding. When unset, the action verifies the binary against the SHA-256 checksum published in the release's SHA256SUMS file by default.
+    required: false
+outputs:
+  stdout:
+    description: 'The STDOUT stream of the call to the `tofu` binary.'
+    value: ''
+  stderr:
+    description: 'The STDERR stream of the call to the `tofu` binary.'
+    value: 'Wrapper was not activated'
+  exitcode:
+    description: 'The exit code of the call to the `tofu` binary.'
+    value: '126'
+
+branding:
+  icon: 'box'
+  color: 'yellow'
+runs:
+  using: 'node24'
+  main: 'dist/index.js'

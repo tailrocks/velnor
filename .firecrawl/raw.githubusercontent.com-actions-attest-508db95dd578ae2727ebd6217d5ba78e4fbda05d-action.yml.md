@@ -1,0 +1,104 @@
+name: 'Generate Generic Attestations'
+description: 'Generate attestations for build artifacts'
+author: 'GitHub'
+branding:
+  color: 'blue'
+  icon: 'link'
+
+inputs:
+  subject-path:
+    description: >
+      Path to the artifact serving as the subject of the attestation. At most
+      one of "subject-path", "subject-digest", or "subject-checksums" may be
+      provided. May contain a glob pattern or list of paths (total subject
+      count cannot exceed 1024). If none of these inputs are provided, subjects
+      are discovered from the runner-provided $GITHUB_ARTIFACTS_LIST
+      environment variable.
+    required: false
+  subject-digest:
+    description: >
+      Digest of the subject for the attestation. Must be in the form
+      "algorithm:hex_digest" (e.g. "sha256:abc123..."). At most one of
+      "subject-path", "subject-digest", or "subject-checksums" may be provided.
+      If none are provided, subjects are discovered from
+      $GITHUB_ARTIFACTS_LIST.
+    required: false
+  subject-name:
+    description: >
+      Subject name as it should appear in the attestation. Required when
+      identifying the subject with the "subject-digest" input.
+    required: false
+  subject-checksums:
+    description: >
+      Path to checksums file containing digest and name of subjects for
+      attestation. At most one of "subject-path", "subject-digest", or
+      "subject-checksums" may be provided. If none are provided, subjects are
+      discovered from $GITHUB_ARTIFACTS_LIST.
+    required: false
+  subject-version:
+    description: >
+      Version of the subject for the attestation. Only used when
+      "push-to-registry" and "create-storage-record" are both set to true.
+    required: false
+  sbom-path:
+    description: >
+      Path to the JSON-formatted SBOM file (SPDX or CycloneDX) to attest.
+      File size cannot exceed 16MB. When provided, creates an SBOM attestation.
+      Cannot be used together with "predicate-type", "predicate", or
+      "predicate-path".
+    required: false
+  predicate-type:
+    description: >
+      URI identifying the type of the predicate. Required when using "predicate"
+      or "predicate-path" for custom attestations.
+    required: false
+  predicate:
+    description: >
+      String containing the value for the attestation predicate. String length
+      cannot exceed 16MB. Must supply exactly one of "predicate-path" or
+      "predicate" when creating custom attestations.
+    required: false
+  predicate-path:
+    description: >
+      Path to the file which contains the content for the attestation predicate.
+      File size cannot exceed 16MB. Must supply exactly one of "predicate-path"
+      or "predicate" when creating custom attestations.
+    required: false
+  push-to-registry:
+    description: >
+      Whether to push the attestation to the image registry. Requires that the
+      resolved subject is a single fully-qualified OCI image reference with a
+      SHA-256 digest, whether specified explicitly (via any subject input) or
+      discovered from the runner-provided artifacts list. Defaults to false.
+    default: false
+    required: false
+  create-storage-record:
+    description: >
+      Whether to create a storage record for the artifact.
+      Requires that push-to-registry is set to true. Defaults to true.
+    default: true
+    required: false
+  show-summary:
+    description: >
+      Whether to attach a list of generated attestations to the workflow run
+      summary page. Defaults to true.
+    default: true
+    required: false
+  github-token:
+    description: >
+      The GitHub token used to make authenticated API requests.
+    default: ${{ github.token }}
+    required: false
+outputs:
+  bundle-path:
+    description: 'The path to the file containing the attestation bundle.'
+  attestation-id:
+    description: 'The ID of the attestation.'
+  attestation-url:
+    description: 'The URL for the attestation summary.'
+  storage-record-ids:
+    description: 'The IDs of the storage records created for the artifact.'
+
+runs:
+  using: node24
+  main: ./dist/index.js

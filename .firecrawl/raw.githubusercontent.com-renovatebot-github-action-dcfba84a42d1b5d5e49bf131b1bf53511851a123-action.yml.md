@@ -1,0 +1,71 @@
+name: 'Renovate Bot GitHub Action'
+description: 'GitHub Action to run self-hosted Renovate.'
+author: 'Jeroen de Bruijn'
+branding:
+  icon: refresh-cw
+  color: blue
+inputs:
+  configurationFile:
+    description: |
+      Configuration file to configure Renovate. Either use this input or the
+      'RENOVATE_CONFIG_FILE' environment variable.
+    required: false
+  token:
+    description: |
+      GitHub personal access token that Renovate should use. This should be
+      configured using a Secret. Either use this input or the 'RENOVATE_TOKEN'
+      environment variable.
+    required: false
+  env-regex:
+    description: |
+      Override the environment variables which will be passed into the renovate container.
+      Defaults to `^(?:RENOVATE_\\w+|LOG_LEVEL|GITHUB_COM_TOKEN|NODE_OPTIONS|NO_COLOR|(?:HTTPS?|NO)_PROXY|(?:https?|no)_proxy)$`
+    required: false
+  additional-env-list:
+    description: |
+      A newline-separated list of environment variable names to pass through to the Renovate container, in addition to those already matched by env-regex.
+    required: false
+  renovate-version:
+    description: |
+      Renovate version to use.
+    required: false
+    default: '44' # renovate
+  renovate-image:
+    description: |
+      Renovate docker image name.
+    required: false
+    default: ghcr.io/renovatebot/renovate
+  mount-docker-socket:
+    description: |
+      Mount the Docker socket inside the renovate container so that the commands
+      can use Docker. Also add the user inside the renovate container to the
+      docker group for socket permissions.
+    required: false
+  docker-socket-host-path:
+    description: |
+      Allows the overriding of the host path for the Docker socket that is mounted into the container.
+      Useful on systems where the host Docker socket is located somewhere other than '/var/run/docker.sock' (the default).
+      Only applicable when 'mount-docker-socket' is true.
+    required: false
+    default: /var/run/docker.sock
+  docker-cmd-file:
+    description: |
+      Override docker command. Default command is `renovate`
+    required: false
+  docker-network:
+    description: |
+      Docker network.
+    required: false
+  docker-user:
+    description: |
+      Docker user. Default to an unprivileged user
+    required: false
+  docker-volumes:
+    description: |
+      Docker volume mounts. Default to /tmp:/tmp
+    default: /tmp:/tmp
+    required: false
+
+runs:
+  using: node24
+  main: dist/index.js

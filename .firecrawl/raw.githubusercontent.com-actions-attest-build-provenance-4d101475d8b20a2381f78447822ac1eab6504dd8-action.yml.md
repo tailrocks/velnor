@@ -1,0 +1,107 @@
+name: "Attest Build Provenance"
+description: "Generate provenance attestations for build artifacts"
+author: "GitHub"
+branding:
+  color: "blue"
+  icon: "lock"
+
+inputs:
+  subject-path:
+    description: >
+      Path to the artifact serving as the subject of the attestation. Must
+      specify exactly one of "subject-path", "subject-digest", or
+      "subject-checksums". May contain a glob pattern or list of paths (total
+      subject count cannot exceed 1024).
+    required: false
+  subject-digest:
+    description: >
+      Digest of the subject for which provenance will be generated. Must be in
+      the form "algorithm:hex_digest" (e.g. "sha256:abc123..."). Must specify
+      exactly one of "subject-path", "subject-digest", or "subject-checksums".
+    required: false
+  subject-name:
+    description: >
+      Subject name as it should appear in the attestation. Required when
+      identifying the subject with the "subject-digest" input.
+  subject-checksums:
+    description: >
+      Path to checksums file containing digest and name of subjects for
+      attestation. Must specify exactly one of "subject-path", "subject-digest",
+      or "subject-checksums".
+    required: false
+  predicate-type:
+    description: >
+      URI identifying the type of the predicate. Required when using "predicate"
+      or "predicate-path" for custom attestations.
+    required: false
+  predicate:
+    description: >
+      String containing the value for the attestation predicate. String length
+      cannot exceed 16MB. Must supply exactly one of "predicate-path" or
+      "predicate" when creating custom attestations.
+    required: false
+  predicate-path:
+    description: >
+      Path to the file which contains the content for the attestation predicate.
+      File size cannot exceed 16MB. Must supply exactly one of "predicate-path"
+      or "predicate" when creating custom attestations.
+    required: false
+  push-to-registry:
+    description: >
+      Whether to push the provenance statement to the image registry. Requires
+      that the "subject-name" parameter specify the fully-qualified image name
+      and that the "subject-digest" parameter be specified. Defaults to false.
+    default: false
+    required: false
+  create-storage-record:
+    description: >
+      Whether to create a storage record for the artifact. Requires that
+      push-to-registry is set to true. Defaults to true.
+    default: true
+    required: false
+  show-summary:
+    description: >
+      Whether to attach a list of generated attestations to the workflow run
+      summary page. Defaults to true.
+    default: true
+    required: false
+  github-token:
+    description: >
+      The GitHub token used to make authenticated API requests.
+    default: ${{ github.token }}
+    required: false
+
+outputs:
+  bundle-path:
+    description: "The path to the file containing the attestation bundle."
+    value: ${{ steps.attest.outputs.bundle-path }}
+  attestation-id:
+    description: "The ID of the attestation."
+    value: ${{ steps.attest.outputs.attestation-id }}
+  attestation-url:
+    description: "The URL for the attestation summary."
+    value: ${{ steps.attest.outputs.attestation-url }}
+  storage-record-ids:
+    description: "GitHub IDs for the storage records"
+    value: ${{ steps.attest.outputs.storage-record-ids }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Attest
+      id: attest
+      env:
+        NODE_OPTIONS: "--max-http-header-size=32768"
+      uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+      with:
+        subject-path: ${{ inputs.subject-path }}
+        subject-name: ${{ inputs.subject-name }}
+        subject-digest: ${{ inputs.subject-digest }}
+        subject-checksums: ${{ inputs.subject-checksums }}
+        predicate-type: ${{ inputs.predicate-type }}
+        predicate: ${{ inputs.predicate }}
+        predicate-path: ${{ inputs.predicate-path }}
+        push-to-registry: ${{ inputs.push-to-registry }}
+        create-storage-record: ${{ inputs.create-storage-record }}
+        show-summary: ${{ inputs.show-summary }}
+        github-token: ${{ inputs.github-token }}

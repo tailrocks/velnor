@@ -1,0 +1,74 @@
+name: mr boxington
+description: Set up mbx with local storage, GitHub Actions cache, or an mbx cache server
+author: jdx
+
+branding:
+  icon: archive
+  color: orange
+
+inputs:
+  backend:
+    description: Cache backend, either "local", "github", or "server"
+    default: github
+  version:
+    description: mbx release version to install, such as "0.4.0", or "latest"; when omitted, use mbx from PATH or install latest
+    required: false
+  github-token:
+    description: GitHub token used to resolve mbx release metadata
+    default: ${{ github.token }}
+  cache-key:
+    description: Complete primary key for the GitHub cache backend
+    required: false
+  restore-keys:
+    description: Newline-separated restore key prefixes for the GitHub cache backend
+    required: false
+  cache-generation:
+    description: Value included in generated GitHub cache keys; change it to start fresh
+    default: v1
+  github-cache-mode:
+    description: GitHub cache payload, either the warm Cargo "target" tree or portable mbx "objects"
+    default: target
+  save-on-workflow-dispatch:
+    description: Save the GitHub cache after a successful workflow_dispatch run; enable only in trusted workflows
+    default: "false"
+  toolchain:
+    description: Rust toolchain the build names on its own command line, such as "1.91"; the generated cache key follows it instead of the default rustc
+    required: false
+  working-directory:
+    description: Cargo workspace directory, relative to the job's working directory; the "target" payload caches its target tree and prunes it against that workspace
+    default: .
+  cache-links:
+    description: Cache native links; "auto" enables this on Linux
+    default: auto
+  server-url:
+    description: Base URL for the server backend
+    required: false
+  namespace:
+    description: Cache namespace for the server backend
+    required: false
+  token:
+    description: Bearer token for the server backend
+    required: false
+  token-file:
+    description: File containing a bearer token for the server backend
+    required: false
+  oidc-audience:
+    description: OIDC audience for the server backend; the job needs id-token write permission
+    required: false
+  server-mode:
+    description: Requested server mode (read-write, read-only, or write-only)
+    default: read-write
+
+outputs:
+  cache-hit:
+    description: Whether the exact GitHub cache key was restored
+  cache-primary-key:
+    description: Primary GitHub cache key used by the action
+  mbx-version:
+    description: Installed mbx version
+
+runs:
+  using: node24
+  main: dist/index.js
+  post: dist/index.js
+  post-if: success()

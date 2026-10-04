@@ -1,0 +1,142 @@
+name: mise action
+description: Actions for working with mise runtime manager
+author: Jeff Dickey <@jdx>
+branding:
+  icon: arrow-down-circle
+  color: purple
+inputs:
+  version:
+    required: false
+    description: The version of mise to use. If not specified, will use the latest release.
+  minimum_release_age:
+    required: false
+    description: |
+      When version is not specified, only install stable mise releases older than this threshold.
+      Accepts relative durations such as 24h, 7d, 6mo, or 1y, and absolute ISO dates or timestamps.
+  sha256:
+    required: false
+    description: The SHA256 checksum of the mise binary to verify the download.
+  mise_dir:
+    required: false
+    description: |
+      The directory that mise will be installed to, defaults to $HOME/.local/share/mise
+      Or $XDG_DATA_HOME/mise if $XDG_DATA_HOME is set.
+      Or $MISE_DATA_DIR if $MISE_DATA_DIR is set.
+  tool_versions:
+    required: false
+    description: If present, this value will be written to the .tool-versions file
+  mise_toml:
+    required: false
+    description: If present, this value will be written to the mise.toml file
+  install:
+    required: false
+    default: "true"
+    description: if false, will not run `mise install` or `mise bootstrap`
+  install_args:
+    required: false
+    description: Arguments to pass to `mise install` such as "bun" to only install bun. When a repo mise lock file is present, the action automatically adds `--locked` unless you already provided it.
+  bootstrap:
+    required: false
+    default: "false"
+    description: if true, will run `mise bootstrap` instead of `mise install`
+  bootstrap_skip:
+    required: false
+    description: Comma-separated bootstrap parts to skip, such as "tools,task". Passed as `mise bootstrap --skip`.
+  bootstrap_args:
+    required: false
+    description: Additional arguments to pass to `mise bootstrap`.
+  install_dir:
+    required: false
+    description: deprecated
+  cache:
+    required: false
+    default: "true"
+    description: if false, action will not read or write to cache
+  cache_save:
+    required: false
+    default: "true"
+    description: if false, action will not write to cache
+  cache_key_prefix:
+    required: false
+    default: "mise-v1"
+    description: The prefix key to use for the cache, change this to invalidate the cache
+  cache_key:
+    required: false
+    description: |
+      Override the complete cache key (ignores all other cache key options).
+      Supports template variables: {{version}}, {{cache_key_prefix}}, {{platform}}, {{file_hash}},
+      {{mise_env}}, {{install_args_hash}}, {{bootstrap_hash}}, {{default}}, {{env.VAR_NAME}} for environment variables,
+      and conditional logic like {{#if version}}...{{/if}}
+  experimental:
+    required: false
+    default: "false"
+    description: if true, will use experimental features
+  log_level:
+    required: false
+    default: "info"
+    description: The log level to use for the action
+  working_directory:
+    required: false
+    description: The directory that mise runs in
+  reshim:
+    required: false
+    default: "false"
+    description: if true, will run `mise reshim --all` after setting up mise
+  add_shims_to_path:
+    required: false
+    default: "true"
+    description: if false, will not add mise shims directory to PATH
+  github_token:
+    required: false
+    description: |
+      GitHub token for API authentication to avoid rate limits when installing GitHub-hosted tools.
+      Defaults to the automatic GitHub token.
+    default: ${{ github.token }}
+  fetch_from_github:
+    required: false
+    default: "true"
+    description: If true (default), fetch the mise binary from GitHub. If false and using the latest version, fetch from mise.jdx.dev instead.
+  env:
+    description: Automatically load mise environment variables for subsequent steps.
+    required: false
+    default: "true"
+  export_path:
+    description: Add PATH entries produced by mise, including [env] _.path, to subsequent steps through GITHUB_PATH.
+    required: false
+    default: "true"
+  wings_enabled:
+    description: |
+      [experimental] Opt in to the mise-wings asset cache
+      (https://mise-wings.en.dev) for this action invocation.
+
+      When `true`, the action exports `MISE_WINGS_ENABLED=1` so
+      the installed mise binary routes tool-install URLs (npm
+      tarballs, GitHub release artifacts) through the per-org
+      wings cache subdomains.
+
+      Authentication is automatic via the runner's GitHub OIDC
+      identity — no `mise wings login` step, no long-lived
+      secret to rotate. The workflow must declare
+      `permissions: id-token: write` so the OIDC token-issuer
+      env vars are populated; without that, mise falls through
+      to direct-origin fetches transparently.
+
+      Default `false` is the conservative posture: a workflow
+      with `id-token: write` (used for SLSA / AWS-OIDC /
+      Sigstore / etc.) should not have its OIDC token sent to
+      a third-party cache without explicit opt-in. Older mise
+      binaries that don't speak wings ignore the env var
+      entirely, so this is forward-compatible.
+
+      Requires an active mise-wings subscription on the Clerk
+      org linked to the GitHub org running the workflow;
+      without one, the proxy 402s and mise leaves the cache
+      off without affecting the workflow's success.
+    required: false
+    default: "false"
+outputs:
+  cache-hit:
+    description: A boolean value to indicate if a cache was hit.
+runs:
+  using: node24
+  main: dist/index.js

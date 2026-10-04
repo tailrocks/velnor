@@ -1,0 +1,34 @@
+# https://help.github.com/en/articles/metadata-syntax-for-github-actions
+name: 'Docker Setup QEMU'
+description: 'Install QEMU static binaries'
+author: 'docker'
+branding:
+  icon: 'anchor'
+  color: 'blue'
+
+inputs:
+  image:
+    description: 'QEMU static binaries Docker image (e.g. tonistiigi/binfmt:latest)'
+    default: 'docker.io/tonistiigi/binfmt:latest'
+    required: false
+  platforms:
+    description: 'Platforms to install (e.g. arm64,riscv64,arm)'
+    default: 'all'
+    required: false
+  reset:
+    description: 'Uninstall current emulators before installation'
+    default: 'false'
+    required: false
+  cache-image:
+    description: 'Cache binfmt image to GitHub Actions cache backend'
+    default: 'true'
+    required: false
+
+outputs:
+  platforms:
+    description: 'Available platforms (comma separated)'
+
+runs:
+  using: 'node24'
+  main: 'dist/index.cjs'
+  post: 'dist/index.cjs'
