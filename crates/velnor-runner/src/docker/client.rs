@@ -1679,7 +1679,8 @@ fn stable_container_rm_hash(bytes: &[u8]) -> u64 {
 fn shared_container_rm_lock_root() -> Result<PathBuf> {
     #[cfg(test)]
     {
-        return Ok(std::env::temp_dir().join(format!(
+        let temp_root = std::fs::canonicalize(std::env::temp_dir())?;
+        return Ok(temp_root.join(format!(
             "velnor-docker-container-rm-locks-test-{}",
             std::process::id()
         )));
@@ -3593,7 +3594,8 @@ mod tests {
             return;
         }
 
-        let root = std::env::temp_dir().join(format!(
+        let temp_root = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let root = temp_root.join(format!(
             "velnor-rm-lock-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -3626,7 +3628,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rm_quarantine_persists_across_reopens_until_explicitly_cleared() {
-        let root = std::env::temp_dir().join(format!(
+        let temp_root = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let root = temp_root.join(format!(
             "velnor-rm-quarantine-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -3658,7 +3661,8 @@ mod tests {
             return;
         }
 
-        let root = std::env::temp_dir().join(format!(
+        let temp_root = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let root = temp_root.join(format!(
             "velnor-rm-quarantine-process-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()

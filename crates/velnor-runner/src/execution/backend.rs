@@ -1,7 +1,8 @@
 //! Typed backend session. Wrong-phase calls fail; teardown cannot be skipped.
 
 use velnor_model::{
-    ExecutionBackendKind, ExecutionConfigError, JobConclusion, MicroVmPreflightFailure,
+    ContextValue, ExecutionBackendKind, ExecutionConfigError, JobConclusion,
+    MicroVmPreflightFailure,
 };
 
 use super::docker::DockerBackend;
@@ -64,7 +65,7 @@ pub struct ValidatedPlan {
     pub outputs: Vec<(String, String)>,
     pub env: Vec<(String, String)>,
     pub workspace: String,
-    pub context_data: Vec<(String, serde_json::Value)>,
+    pub context_data: Vec<(String, ContextValue)>,
     pub cache: Vec<String>,
     pub artifacts: Vec<(String, String)>,
     pub annotations: Vec<String>,

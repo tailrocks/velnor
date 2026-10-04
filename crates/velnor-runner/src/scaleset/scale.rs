@@ -37,7 +37,7 @@ use velnor_model::{
 
 use crate::protocol::TaskResult;
 use crate::scaleset::capacity::{
-    reserve_for_offer, CapacityLedger, LedgerLane, LedgerPermitState, ReserveOutcome,
+    reserve_for_offer_with_token, CapacityLedger, LedgerLane, LedgerPermitState, ReserveOutcome,
 };
 use crate::scaleset::converge::{
     ensure_provision_intent, local_population, reconcile_population, PopulationDecision,
@@ -48,7 +48,7 @@ use crate::scaleset::intents::{
     mint_batch_id, permit_holder, reconcile_returned_ids, AcquireBatchStore, ProvisionIntentStore,
 };
 use crate::scaleset::metrics::Metrics;
-use crate::scaleset::reconcile::{transition_or_adopt, unknown_event};
+use crate::scaleset::reconcile::unknown_event;
 
 /// The queue calls the loop needs. [`SessionQueue`] adapts the real
 /// session client; tests script this trait.
@@ -219,6 +219,8 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
     /// batches can outlive the message that created them, so grants,
     /// acquires, and provisions must not depend on another queue message.
     async fn scale_idle(&mut self) -> Result<ScaleOutcome, ScaleError<Q::Error, W::Error>> {
+        self.recover_demand_release_stages()?;
+        self.require_no_pending_worker_releases()?;
         let generation = self.generation()?;
         let eligible = self
             .demand
@@ -238,7 +240,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
             self.observe_global_demand(row)?;
         }
         let (acquired, missing, uncertain) = self.acquire_pass(self.cached_stats).await?;
-        let canceled = self.drain_canceled_acquisitions(generation)?;
+        let canceled = self.drain_canceled_acquisitions()?;
         let provisioned = self.provision_pass().await?;
         let decision = self
             .cached_stats
@@ -290,7 +292,19 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         outcome.kind = ScaleKind::Message {
             message_id: message.message_id,
         };
+        let offered_request_ids: std::collections::HashSet<i64> = message
+            .job_available_messages
+            .iter()
+            .map(|offer| crate::scaleset::demand::resolve_job_request_id(&offer.base))
+            .collect();
+        // Parser buckets event types, losing wire order. If this batch has
+        // both JobAvailable and JobAssigned for one request, acquirejobs
+        // must establish token ownership before the assignment observation.
         for assigned in &message.job_assigned_messages {
+            let request_id = crate::scaleset::demand::resolve_job_request_id(&assigned.base);
+            if offered_request_ids.contains(&request_id) {
+                continue;
+            }
             if self.observe_assigned(assigned)? {
                 outcome.assigned += 1;
             }
@@ -305,11 +319,14 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
                 outcome.completed += 1;
             }
         }
+        self.recover_demand_release_stages()?;
+        self.require_no_pending_worker_releases()?;
 
         // Step 2: queue offers, then grant the oldest grantable ones.
         let generation = self.generation()?;
         outcome.offers_seen = message.job_available_messages.len();
         for offer in &message.job_available_messages {
+            let request_id = crate::scaleset::demand::resolve_job_request_id(&offer.base);
             match self
                 .demand
                 .submit_offer(self.config.scale_set_id, offer, generation)
@@ -318,11 +335,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
                 SubmitOutcome::Inserted { .. } => outcome.offers_submitted += 1,
                 SubmitOutcome::Redelivered { .. } | SubmitOutcome::ReofferedTerminal => {}
             }
-            if let Some(row) = self
-                .demand
-                .get(offer.base.runner_request_id)
-                .map_err(ScaleError::Store)?
-            {
+            if let Some(row) = self.demand.get(request_id).map_err(ScaleError::Store)? {
                 self.sync_global_demand(&row)?;
             }
         }
@@ -347,7 +360,16 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         outcome.missing = missing;
         outcome.uncertain = uncertain;
 
-        outcome.completed += self.drain_canceled_acquisitions(self.generation()?)?;
+        // Process assignments for same-batch offers only after acquirejobs
+        // has either persisted their exact token or left them unacquired.
+        for assigned in &message.job_assigned_messages {
+            let request_id = crate::scaleset::demand::resolve_job_request_id(&assigned.base);
+            if offered_request_ids.contains(&request_id) && self.observe_assigned(assigned)? {
+                outcome.assigned += 1;
+            }
+        }
+
+        outcome.completed += self.drain_canceled_acquisitions()?;
 
         // Step 5: provision every acquired row still missing its intent.
         outcome.provisioned = self.provision_pass().await?;
@@ -355,15 +377,14 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         // Offer-validity guard: every offer in this batch must have a
         // durable row before `Ok` licenses the ACK.
         for offer in &message.job_available_messages {
+            let request_id = crate::scaleset::demand::resolve_job_request_id(&offer.base);
             let present = self
                 .demand
-                .get(offer.base.runner_request_id)
+                .get(request_id)
                 .map_err(ScaleError::Store)?
                 .is_some();
             if !present {
-                return Err(ScaleError::OfferWithoutRow {
-                    request_id: offer.base.runner_request_id,
-                });
+                return Err(ScaleError::OfferWithoutRow { request_id });
             }
         }
 
@@ -383,6 +404,103 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         self.ledger
             .generation()
             .map_err(|error| ScaleError::Ledger(ledger_error(error)))
+    }
+
+    fn release_with_projection(
+        &mut self,
+        request_id: i64,
+        attempt_token: &str,
+        kind: OwnedReleaseKind,
+        next_state: DemandState,
+    ) -> Result<bool, ScaleError<Q::Error, W::Error>> {
+        self.release_with_projection_batch(request_id, attempt_token, kind, next_state, None)
+    }
+
+    fn release_with_projection_batch(
+        &mut self,
+        request_id: i64,
+        attempt_token: &str,
+        kind: OwnedReleaseKind,
+        next_state: DemandState,
+        batch_id: Option<&str>,
+    ) -> Result<bool, ScaleError<Q::Error, W::Error>> {
+        let holder = permit_holder(self.config.scale_set_id, request_id);
+        let ledger_state = match kind {
+            OwnedReleaseKind::Eligible => velnor_control::permit_ledger::DemandState::Eligible,
+            OwnedReleaseKind::Canceled => velnor_control::permit_ledger::DemandState::Cancelled,
+            OwnedReleaseKind::Terminal => velnor_control::permit_ledger::DemandState::Terminal,
+        };
+        match batch_id {
+            Some(batch_id) => self.demand.stage_attempt_release_for_batch(
+                &holder,
+                self.config.scale_set_id,
+                request_id,
+                attempt_token,
+                ledger_state,
+                Some(next_state),
+                batch_id,
+            ),
+            None => self.demand.stage_attempt_release(
+                &holder,
+                self.config.scale_set_id,
+                request_id,
+                attempt_token,
+                ledger_state,
+                Some(next_state),
+                None,
+            ),
+        }
+        .map_err(ScaleError::Store)?;
+        let released = release_attempt(&mut self.ledger, &holder, attempt_token, kind)
+            .map_err(ScaleError::Ledger)?;
+        self.demand
+            .finish_attempt_release(&holder, self.generation()?)
+            .map_err(ScaleError::Store)?;
+        Ok(released)
+    }
+
+    fn recover_demand_release_stages(&mut self) -> Result<(), ScaleError<Q::Error, W::Error>> {
+        let stages = self
+            .demand
+            .pending_attempt_releases()
+            .map_err(ScaleError::Store)?;
+        for stage in stages {
+            if stage.worker_ownership_id.is_some() {
+                continue;
+            }
+            let kind = match stage.ledger_demand_state {
+                velnor_control::permit_ledger::DemandState::Eligible => OwnedReleaseKind::Eligible,
+                velnor_control::permit_ledger::DemandState::Cancelled => OwnedReleaseKind::Canceled,
+                velnor_control::permit_ledger::DemandState::Terminal => OwnedReleaseKind::Terminal,
+                _ => {
+                    return Err(ScaleError::Store(anyhow::anyhow!(
+                        "staged release for {} has invalid ledger demand state",
+                        stage.holder
+                    )));
+                }
+            };
+            release_attempt(&mut self.ledger, &stage.holder, &stage.attempt_token, kind)
+                .map_err(ScaleError::Ledger)?;
+            self.demand
+                .finish_attempt_release(&stage.holder, self.generation()?)
+                .map_err(ScaleError::Store)?;
+        }
+        Ok(())
+    }
+
+    fn require_no_pending_worker_releases(&self) -> Result<(), ScaleError<Q::Error, W::Error>> {
+        if self
+            .demand
+            .pending_attempt_releases()
+            .map_err(ScaleError::Store)?
+            .into_iter()
+            .any(|stage| stage.worker_ownership_id.is_some())
+        {
+            return Err(ScaleError::Store(anyhow::anyhow!(
+                "Scale Set worker release awaits lane recovery; refusing new work"
+            )));
+        }
+        Ok(())
     }
 
     fn local_count(&self) -> Result<u32, ScaleError<Q::Error, W::Error>> {
@@ -416,6 +534,16 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         match row.state {
             DemandState::Observed | DemandState::Declined => {
                 let holder = permit_holder(row.scale_set_id, row.request_id);
+                if self
+                    .ledger
+                    .holder_state(&holder)
+                    .map_err(|error| ScaleError::Ledger(ledger_error(error)))?
+                    .is_some()
+                {
+                    return Err(ScaleError::Store(anyhow::anyhow!(
+                        "non-permit demand {holder:?} still has a held permit"
+                    )));
+                }
                 self.ledger
                     .cancel_demand(&holder)
                     .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
@@ -424,9 +552,28 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
             DemandState::CanceledPending | DemandState::CanceledAcquired => {}
             DemandState::CanceledDone => {
                 let holder = permit_holder(row.scale_set_id, row.request_id);
-                self.ledger
-                    .release_cancelled(&holder)
-                    .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
+                if let Some(attempt_token) = row.permit_attempt_token.as_deref() {
+                    self.release_with_projection(
+                        row.request_id,
+                        attempt_token,
+                        OwnedReleaseKind::Canceled,
+                        DemandState::CanceledDone,
+                    )?;
+                } else {
+                    if self
+                        .ledger
+                        .holder_state(&holder)
+                        .map_err(|error| ScaleError::Ledger(ledger_error(error)))?
+                        .is_some()
+                    {
+                        return Err(ScaleError::Store(anyhow::anyhow!(
+                            "canceled demand {holder:?} has a permit but no attempt token"
+                        )));
+                    }
+                    self.ledger
+                        .cancel_demand(&holder)
+                        .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
+                }
             }
             DemandState::Eligible
             | DemandState::Granted
@@ -438,10 +585,32 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         Ok(())
     }
 
-    fn drain_canceled_acquisitions(
-        &mut self,
-        generation: u64,
-    ) -> Result<usize, ScaleError<Q::Error, W::Error>> {
+    /// Require the token captured by reserve or serialized startup recovery.
+    /// Runtime events never create ownership from a holder-only row.
+    fn ensure_attempt_token(&self, row: &Demand) -> Result<String, ScaleError<Q::Error, W::Error>> {
+        let holder = permit_holder(row.scale_set_id, row.request_id);
+        let Some(attempt_token) = row
+            .permit_attempt_token
+            .as_deref()
+            .filter(|token| !token.is_empty())
+        else {
+            return Err(ScaleError::Store(anyhow::anyhow!(
+                "active demand {holder:?} has no captured attempt token; refusing holder-only ownership"
+            )));
+        };
+        if !self
+            .ledger
+            .is_current_attempt(&holder, attempt_token)
+            .map_err(|error| ScaleError::Ledger(ledger_error(error)))?
+        {
+            return Err(ScaleError::Store(anyhow::anyhow!(
+                "persisted permit token for {holder:?} is stale"
+            )));
+        }
+        Ok(attempt_token.to_owned())
+    }
+
+    fn drain_canceled_acquisitions(&mut self) -> Result<usize, ScaleError<Q::Error, W::Error>> {
         let canceled = self
             .demand
             .list_in_states(
@@ -451,18 +620,25 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
             .map_err(ScaleError::Store)?;
         let mut completed = 0;
         for (request_id, state) in canceled {
+            let row = self
+                .demand
+                .get(request_id)
+                .map_err(ScaleError::Store)?
+                .ok_or_else(|| {
+                    ScaleError::Store(anyhow::anyhow!("canceled demand row {request_id} vanished"))
+                })?;
+            let attempt_token = required_attempt_token(&row).map_err(ScaleError::Store)?;
             if state == DemandState::CanceledAcquired {
                 self.lane
-                    .note_canceled(request_id)
+                    .note_canceled(request_id, attempt_token)
                     .map_err(ScaleError::Lane)?;
             }
-            let holder = permit_holder(self.config.scale_set_id, request_id);
-            self.ledger
-                .release_cancelled(&holder)
-                .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
-            self.demand
-                .set_state(request_id, DemandState::Terminal, None, generation)
-                .map_err(ScaleError::Store)?;
+            self.release_with_projection(
+                request_id,
+                attempt_token,
+                OwnedReleaseKind::Canceled,
+                DemandState::Terminal,
+            )?;
             completed += 1;
         }
         Ok(completed)
@@ -473,20 +649,66 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         request_id: i64,
     ) -> Result<(), ScaleError<Q::Error, W::Error>> {
         let generation = self.generation()?;
-        self.demand
-            .set_state(request_id, DemandState::CanceledDone, None, generation)
-            .map_err(ScaleError::Store)?;
-        self.ledger
-            .release_cancelled(&permit_holder(self.config.scale_set_id, request_id))
-            .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
-        self.demand
-            .set_state(request_id, DemandState::Terminal, None, generation)
-            .map_err(ScaleError::Store)
+        let row = self
+            .demand
+            .get(request_id)
+            .map_err(ScaleError::Store)?
+            .ok_or_else(|| {
+                ScaleError::Store(anyhow::anyhow!("canceled demand row {request_id} vanished"))
+            })?;
+        let holder = permit_holder(self.config.scale_set_id, request_id);
+        let held = self
+            .ledger
+            .holder_state(&holder)
+            .map_err(|error| ScaleError::Ledger(ledger_error(error)))?
+            .is_some();
+        let attempt_token = row.permit_attempt_token.as_deref();
+        if held {
+            let attempt_token = required_attempt_token(&row).map_err(ScaleError::Store)?;
+            self.release_with_projection(
+                request_id,
+                attempt_token,
+                OwnedReleaseKind::Canceled,
+                DemandState::Terminal,
+            )?;
+        } else {
+            if let Some(attempt_token) = attempt_token {
+                self.demand
+                    .set_state_owned(
+                        request_id,
+                        DemandState::CanceledDone,
+                        None,
+                        generation,
+                        attempt_token,
+                    )
+                    .map_err(ScaleError::Store)?;
+            } else {
+                self.demand
+                    .set_state(request_id, DemandState::CanceledDone, None, generation)
+                    .map_err(ScaleError::Store)?;
+            }
+            self.ledger
+                .cancel_demand(&holder)
+                .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
+        }
+        if let Some(attempt_token) = attempt_token {
+            self.demand.set_state_owned(
+                request_id,
+                DemandState::Terminal,
+                None,
+                generation,
+                attempt_token,
+            )
+        } else {
+            self.demand
+                .set_state(request_id, DemandState::Terminal, None, generation)
+        }
+        .map_err(ScaleError::Store)
     }
 
-    /// Step-1 `JobAssigned`: only rows already confirmed by acquirejobs or
-    /// worker ownership reach the lane. This event alone never proves
-    /// acquire success.
+    /// Step-1 `JobAssigned`: only rows already backed by an acquire token
+    /// reach the lane. A direct assignment without prior offer/acquire proof
+    /// is recorded as unconfirmed and fails closed.
     /// Untracked IDs and stake-less rows (another adapter won the race)
     /// are not ours: counted, never claimed. Returns whether the
     /// observation matched tracked work.
@@ -508,15 +730,26 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         ) {
             return Ok(true);
         }
-        transition_or_adopt(
+        let row = self
+            .demand
+            .get(request_id)
+            .map_err(ScaleError::Store)?
+            .ok_or_else(|| {
+                ScaleError::Store(anyhow::anyhow!("assigned demand row {request_id} vanished"))
+            })?;
+        let attempt_token = self.ensure_attempt_token(&row)?;
+        self.observe_global_demand(&row)?;
+        let holder = permit_holder(self.config.scale_set_id, request_id);
+        fenced_transition(
             &mut self.ledger,
-            &permit_holder(self.config.scale_set_id, request_id),
+            &holder,
             LedgerPermitState::Acquiring,
             generation,
+            &attempt_token,
         )
         .map_err(ScaleError::Store)?;
         self.lane
-            .note_assigned(assigned)
+            .note_assigned(assigned, &attempt_token)
             .map_err(ScaleError::Lane)?;
         Ok(true)
     }
@@ -546,43 +779,67 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         let holder = permit_holder(self.config.scale_set_id, request_id);
         if row.state == DemandState::CanceledPending {
             let generation = self.generation()?;
+            let attempt_token = required_attempt_token(&row).map_err(ScaleError::Store)?;
             self.demand
-                .set_state(request_id, DemandState::CanceledAcquired, None, generation)
+                .set_state_owned(
+                    request_id,
+                    DemandState::CanceledAcquired,
+                    None,
+                    generation,
+                    attempt_token,
+                )
                 .map_err(ScaleError::Store)?;
-            transition_or_adopt(
+            fenced_transition(
                 &mut self.ledger,
                 &holder,
                 LedgerPermitState::Acquiring,
                 generation,
+                &attempt_token,
             )
             .map_err(ScaleError::Store)?;
-            self.lane.note_started(started).map_err(ScaleError::Lane)?;
+            self.lane
+                .note_started(started, &attempt_token)
+                .map_err(ScaleError::Lane)?;
             return Ok(true);
         }
         if row.state == DemandState::CanceledAcquired {
-            self.lane.note_started(started).map_err(ScaleError::Lane)?;
+            let attempt_token = required_attempt_token(&row).map_err(ScaleError::Store)?;
+            self.lane
+                .note_started(started, &attempt_token)
+                .map_err(ScaleError::Lane)?;
             return Ok(true);
         }
         if !row.state.holds_permit() {
             return Ok(true);
         }
         let generation = self.generation()?;
+        self.observe_global_demand(&row)?;
+        let attempt_token = self.ensure_attempt_token(&row)?;
         if matches!(
             row.state,
             DemandState::Granted | DemandState::AcquireIntent | DemandState::Uncertain
         ) {
             self.demand
-                .set_state(request_id, DemandState::ProvisionIntent, None, generation)
+                .set_state_owned(
+                    request_id,
+                    DemandState::ProvisionIntent,
+                    None,
+                    generation,
+                    &attempt_token,
+                )
                 .map_err(ScaleError::Store)?;
         }
-        transition_or_adopt(
+        fenced_transition(
             &mut self.ledger,
             &holder,
             LedgerPermitState::Acquiring,
             generation,
+            &attempt_token,
         )
         .map_err(ScaleError::Store)?;
-        self.lane.note_started(started).map_err(ScaleError::Lane)?;
+        self.lane
+            .note_started(started, &attempt_token)
+            .map_err(ScaleError::Lane)?;
         Ok(true)
     }
 
@@ -612,6 +869,7 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
             .holder_state(&holder)
             .map_err(|error| ScaleError::Ledger(ledger_error(error)))?
             .is_some();
+        let attempt_token = row.permit_attempt_token.as_deref();
         // The wire carries both `actions/runner` PascalCase and Velnor
         // lowercase spellings; parse via the protocol result type so a
         // `Canceled` completion takes the cancel path too.
@@ -621,9 +879,28 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         );
         if row.state == DemandState::Terminal && !held {
             if canceled {
-                self.ledger
-                    .release_cancelled(&holder)
-                    .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
+                if let Some(attempt_token) = attempt_token {
+                    self.release_with_projection(
+                        request_id,
+                        attempt_token,
+                        OwnedReleaseKind::Canceled,
+                        DemandState::Terminal,
+                    )?;
+                } else {
+                    if self
+                        .ledger
+                        .holder_state(&holder)
+                        .map_err(|error| ScaleError::Ledger(ledger_error(error)))?
+                        .is_some()
+                    {
+                        return Err(ScaleError::Store(anyhow::anyhow!(
+                            "canceled terminal demand {holder:?} has a permit but no attempt token"
+                        )));
+                    }
+                    self.ledger
+                        .cancel_demand(&holder)
+                        .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
+                }
             }
             return Ok(true);
         }
@@ -658,25 +935,27 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
                         return Ok(true);
                     }
                     let generation = self.generation()?;
-                    if !held {
-                        transition_or_adopt(
-                            &mut self.ledger,
-                            &holder,
-                            LedgerPermitState::Uncertain,
-                            generation,
-                        )
-                        .map_err(ScaleError::Store)?;
-                    } else {
-                        fenced_transition(
-                            &mut self.ledger,
-                            &holder,
-                            LedgerPermitState::Uncertain,
-                            generation,
-                        )
-                        .map_err(ScaleError::Ledger)?;
-                    }
+                    let attempt_token = attempt_token.ok_or_else(|| {
+                        ScaleError::Store(anyhow::anyhow!(
+                            "canceled held request {request_id} has no permit attempt token"
+                        ))
+                    })?;
+                    fenced_transition(
+                        &mut self.ledger,
+                        &holder,
+                        LedgerPermitState::Uncertain,
+                        generation,
+                        attempt_token,
+                    )
+                    .map_err(ScaleError::Ledger)?;
                     self.demand
-                        .set_state(request_id, DemandState::CanceledPending, None, generation)
+                        .set_state_owned(
+                            request_id,
+                            DemandState::CanceledPending,
+                            None,
+                            generation,
+                            attempt_token,
+                        )
                         .map_err(ScaleError::Store)?;
                     return Ok(true);
                 }
@@ -696,31 +975,49 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         let staked = row.state.holds_permit() || held;
         let generation = self.generation()?;
         if row.state != DemandState::Terminal {
-            self.demand
-                .set_state(request_id, DemandState::Terminal, None, generation)
-                .map_err(ScaleError::Store)?;
+            if let Some(attempt_token) = attempt_token {
+                self.demand
+                    .set_state_owned(
+                        request_id,
+                        DemandState::Terminal,
+                        None,
+                        generation,
+                        attempt_token,
+                    )
+                    .map_err(ScaleError::Store)?;
+            } else {
+                self.demand
+                    .set_state(request_id, DemandState::Terminal, None, generation)
+                    .map_err(ScaleError::Store)?;
+            }
         }
         if held {
+            let attempt_token = attempt_token.ok_or_else(|| {
+                ScaleError::Store(anyhow::anyhow!(
+                    "held request {request_id} has no permit attempt token"
+                ))
+            })?;
             fenced_transition(
                 &mut self.ledger,
                 &holder,
                 LedgerPermitState::Cleaning,
                 generation,
+                attempt_token,
             )
             .map_err(ScaleError::Ledger)?;
         }
         if staked {
+            let attempt_token = attempt_token.ok_or_else(|| {
+                ScaleError::Store(anyhow::anyhow!(
+                    "owned request {request_id} has no permit attempt token"
+                ))
+            })?;
             self.lane
-                .note_terminal(completed)
+                .note_terminal(completed, attempt_token)
                 .map_err(ScaleError::Lane)?;
-            if canceled {
-                self.ledger
-                    .release_cancelled(&holder)
-                    .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
-            }
-        } else {
+        } else if canceled {
             self.ledger
-                .release(&holder)
+                .cancel_demand(&holder)
                 .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
         }
         Ok(true)
@@ -760,26 +1057,54 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         // Step 3: reserve oldest-first; the first exhausted permit stops the
         // take and the rest stay granted for the next poll.
         let mut generation = self.generation()?;
-        let mut taken: Vec<(i64, String)> = Vec::new();
+        let mut taken: Vec<(i64, String, String)> = Vec::new();
+        let mut staged_acquires = Vec::new();
         for candidate in &candidates {
             let holder = permit_holder(self.config.scale_set_id, candidate.request_id);
-            match reserve_for_offer(&mut self.ledger, &holder, generation).map_err(|error| {
-                match error {
-                    crate::scaleset::capacity::ReserveError::Ledger(error) => {
-                        ScaleError::Ledger(ledger_error(error))
+            let attempt_token = uuid::Uuid::new_v4().to_string();
+            let stage = self
+                .demand
+                .stage_attempt_acquire(
+                    &holder,
+                    self.config.scale_set_id,
+                    candidate.request_id,
+                    candidate.permit_attempt_token.as_deref(),
+                    &attempt_token,
+                )
+                .map_err(ScaleError::Store)?;
+            let reserved =
+                reserve_for_offer_with_token(&mut self.ledger, &holder, generation, &attempt_token)
+                    .map_err(|error| {
+                        ScaleError::Ledger(anyhow::anyhow!("reserve permit: {error}"))
+                    })?;
+            match reserved {
+                (
+                    ReserveOutcome::Reserved {
+                        attempt_token: acquired_token,
+                    },
+                    landed,
+                ) => {
+                    if acquired_token != attempt_token {
+                        return Err(ScaleError::Store(anyhow::anyhow!(
+                            "ledger returned a different token for staged acquire {holder:?}"
+                        )));
                     }
-                    crate::scaleset::capacity::ReserveError::DoubleStale { seen } => {
-                        ScaleError::Ledger(anyhow::anyhow!(
-                            "ledger epoch moved twice during reserve (seen {seen})"
-                        ))
-                    }
-                }
-            })? {
-                (ReserveOutcome::Reserved, landed) => {
+                    self.demand
+                        .finish_attempt_acquire(&stage, true)
+                        .map_err(ScaleError::Store)?;
                     generation = landed;
-                    taken.push((candidate.request_id, holder));
+                    taken.push((candidate.request_id, holder, acquired_token));
+                    staged_acquires.push(stage);
+                }
+                (ReserveOutcome::AlreadyHeld, _) => {
+                    return Err(ScaleError::Store(anyhow::anyhow!(
+                        "ledger already holds {holder:?} without transferring ownership; startup recovery must prove prior attempt dead"
+                    )));
                 }
                 (ReserveOutcome::CapacityExhausted | ReserveOutcome::NotConfigured, landed) => {
+                    self.demand
+                        .finish_attempt_acquire(&stage, false)
+                        .map_err(ScaleError::Store)?;
                     generation = landed;
                     break;
                 }
@@ -788,8 +1113,12 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         if taken.is_empty() {
             return Ok((Vec::new(), Vec::new(), Vec::new()));
         }
-        let request_ids: Vec<i64> = taken.iter().map(|(id, _)| *id).collect();
-        let holders: Vec<String> = taken.iter().map(|(_, holder)| holder.clone()).collect();
+        let request_ids: Vec<i64> = taken.iter().map(|(id, _, _)| *id).collect();
+        let holders: Vec<String> = taken.iter().map(|(_, holder, _)| holder.clone()).collect();
+        let attempt_tokens: Vec<String> = taken
+            .iter()
+            .map(|(_, _, attempt_token)| attempt_token.clone())
+            .collect();
         let batch_id = mint_batch_id(self.config.scale_set_id);
         self.batches
             .record_intended(
@@ -797,16 +1126,37 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
                 self.config.scale_set_id,
                 &request_ids,
                 &holders,
+                &attempt_tokens,
                 generation,
             )
             .map_err(ScaleError::Store)?;
+        for stage in &staged_acquires {
+            self.demand
+                .finish_attempt_acquire_batch(stage)
+                .map_err(ScaleError::Store)?;
+        }
         // The batch record is the durable boundary before the network call.
         // If a crash lands while these row writes are partial, startup can
         // recover every member from the batch as uncertain. An unbatched
         // AcquireIntent therefore proves the request was never sent.
         for request_id in &request_ids {
+            let attempt_token = taken
+                .iter()
+                .find(|(id, _, _)| id == request_id)
+                .map(|(_, _, token)| token.as_str())
+                .ok_or_else(|| {
+                    ScaleError::Store(anyhow::anyhow!(
+                        "reserved request {request_id} has no captured permit token"
+                    ))
+                })?;
             self.demand
-                .set_state(*request_id, DemandState::AcquireIntent, None, generation)
+                .set_state_owned(
+                    *request_id,
+                    DemandState::AcquireIntent,
+                    None,
+                    generation,
+                    attempt_token,
+                )
                 .map_err(ScaleError::Store)?;
         }
         self.metrics.inc_acquire_batches();
@@ -817,8 +1167,23 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
             Ok(ids) => ids,
             Err(error) => {
                 for request_id in &request_ids {
+                    let attempt_token = taken
+                        .iter()
+                        .find(|(id, _, _)| id == request_id)
+                        .map(|(_, _, token)| token.as_str())
+                        .ok_or_else(|| {
+                            ScaleError::Store(anyhow::anyhow!(
+                                "uncertain request {request_id} has no captured permit token"
+                            ))
+                        })?;
                     self.demand
-                        .set_state(*request_id, DemandState::Uncertain, None, generation)
+                        .set_state_owned(
+                            *request_id,
+                            DemandState::Uncertain,
+                            None,
+                            generation,
+                            attempt_token,
+                        )
                         .map_err(ScaleError::Store)?;
                 }
                 self.batches
@@ -835,24 +1200,81 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         };
         let (acquired, missing) = reconcile_returned_ids(&request_ids, &returned);
         for request_id in &acquired {
+            let attempt_token = taken
+                .iter()
+                .find(|(id, _, _)| id == request_id)
+                .map(|(_, _, token)| token.as_str())
+                .ok_or_else(|| {
+                    ScaleError::Store(anyhow::anyhow!(
+                        "acquired request {request_id} has no captured permit token"
+                    ))
+                })?;
             self.demand
-                .set_state(*request_id, DemandState::Acquired, None, generation)
+                .set_state_owned(
+                    *request_id,
+                    DemandState::Acquired,
+                    None,
+                    generation,
+                    attempt_token,
+                )
                 .map_err(ScaleError::Store)?;
             fenced_transition(
                 &mut self.ledger,
                 &permit_holder(self.config.scale_set_id, *request_id),
                 LedgerPermitState::Acquiring,
                 generation,
+                taken
+                    .iter()
+                    .find(|(id, _, _)| id == request_id)
+                    .map(|(_, _, token)| token.as_str())
+                    .ok_or_else(|| {
+                        ScaleError::Store(anyhow::anyhow!(
+                            "acquired request {request_id} has no captured permit token"
+                        ))
+                    })?,
             )
             .map_err(ScaleError::Ledger)?;
         }
+        // Journal every missing member before the first ledger delete. The
+        // batch stays open until the final release transaction also resolves
+        // it, so a crash cannot erase the only per-member outcome evidence.
+        let mut missing_releases = Vec::with_capacity(missing.len());
         for request_id in &missing {
-            self.ledger
-                .release_to_eligible(&permit_holder(self.config.scale_set_id, *request_id))
-                .map_err(|error| ScaleError::Ledger(ledger_error(error)))?;
-            self.demand
-                .set_state(*request_id, DemandState::Eligible, None, generation)
-                .map_err(ScaleError::Store)?;
+            let attempt_token = taken
+                .iter()
+                .find(|(id, _, _)| id == request_id)
+                .map(|(_, _, token)| token.as_str())
+                .ok_or_else(|| {
+                    ScaleError::Store(anyhow::anyhow!(
+                        "missing request {request_id} has no captured permit token"
+                    ))
+                })?;
+            missing_releases.push((*request_id, attempt_token.to_owned()));
+        }
+        self.demand
+            .stage_attempt_releases_for_batch(
+                self.config.scale_set_id,
+                &batch_id,
+                &missing_releases,
+            )
+            .map_err(ScaleError::Store)?;
+        for request_id in &missing {
+            let attempt_token = taken
+                .iter()
+                .find(|(id, _, _)| id == request_id)
+                .map(|(_, _, token)| token.as_str())
+                .ok_or_else(|| {
+                    ScaleError::Store(anyhow::anyhow!(
+                        "missing request {request_id} has no captured permit token"
+                    ))
+                })?;
+            self.release_with_projection_batch(
+                *request_id,
+                attempt_token,
+                OwnedReleaseKind::Eligible,
+                DemandState::Eligible,
+                Some(&batch_id),
+            )?;
         }
         self.batches
             .resolve(&batch_id, false)
@@ -878,6 +1300,14 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
         let mut provisioned = Vec::new();
         for (request_id, _) in acquired.into_iter().take(self.config.max_acquire_batch) {
             let generation = self.generation()?;
+            let row = self
+                .demand
+                .get(request_id)
+                .map_err(ScaleError::Store)?
+                .ok_or_else(|| {
+                    ScaleError::Store(anyhow::anyhow!("acquired demand row {request_id} vanished"))
+                })?;
+            let attempt_token = required_attempt_token(&row).map_err(ScaleError::Store)?;
             ensure_provision_intent(
                 &mut self.provision,
                 &mut self.lane,
@@ -886,12 +1316,19 @@ impl<Q: QueueSession, L: CapacityLedger, W: WorkerLane> Processor<Q, L, W> {
                 0,
                 &self.config.images,
                 generation,
+                attempt_token,
                 &self.metrics,
             )
             .await
             .map_err(ScaleError::Store)?;
             self.demand
-                .set_state(request_id, DemandState::ProvisionIntent, None, generation)
+                .set_state_owned(
+                    request_id,
+                    DemandState::ProvisionIntent,
+                    None,
+                    generation,
+                    attempt_token,
+                )
                 .map_err(ScaleError::Store)?;
             provisioned.push(request_id);
         }
@@ -958,20 +1395,67 @@ fn ledger_error(error: impl std::error::Error + Send + Sync + 'static) -> anyhow
 }
 
 /// Fenced ledger transition: stale generations re-read and retry once.
+fn required_attempt_token(row: &Demand) -> Result<&str> {
+    row.permit_attempt_token
+        .as_deref()
+        .filter(|attempt_token| !attempt_token.is_empty())
+        .with_context(|| {
+            format!(
+                "held request {} has no permit attempt token",
+                row.request_id
+            )
+        })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OwnedReleaseKind {
+    Eligible,
+    Canceled,
+    Terminal,
+}
+
+fn release_attempt<L: CapacityLedger>(
+    ledger: &mut L,
+    holder: &str,
+    attempt_token: &str,
+    kind: OwnedReleaseKind,
+) -> Result<bool> {
+    if attempt_token.is_empty() {
+        anyhow::bail!("refusing tokenless permit release for {holder:?}");
+    }
+    let target = match kind {
+        OwnedReleaseKind::Eligible => velnor_control::permit_ledger::DemandState::Eligible,
+        OwnedReleaseKind::Canceled => velnor_control::permit_ledger::DemandState::Cancelled,
+        OwnedReleaseKind::Terminal => velnor_control::permit_ledger::DemandState::Terminal,
+    };
+    match ledger
+        .release_staged(holder, attempt_token, target)
+        .map_err(|error| anyhow::anyhow!("release permit {holder:?}: {error}"))?
+    {
+        velnor_control::permit_ledger::OwnedReleaseOutcome::Released => Ok(true),
+        velnor_control::permit_ledger::OwnedReleaseOutcome::AlreadyAbsent => Ok(false),
+        velnor_control::permit_ledger::OwnedReleaseOutcome::StaleAttempt => {
+            anyhow::bail!("permit {holder:?} is held by a different attempt token")
+        }
+    }
+}
+
+/// Fenced ledger transition: stale generations re-read and retry once.
 fn fenced_transition<L: CapacityLedger>(
     ledger: &mut L,
     holder: &str,
     state: LedgerPermitState,
     generation: u64,
+    attempt_token: &str,
 ) -> Result<u64> {
-    match ledger.transition(holder, state, generation) {
+    match ledger.transition(holder, state, generation, attempt_token) {
         Ok(()) => Ok(generation),
         Err(error) if L::is_stale_generation(&error) => {
             let fresh = ledger
                 .generation()
                 .map_err(|error| anyhow::anyhow!("re-read ledger generation: {error}"))?;
             ledger
-                .transition(holder, state, fresh)
+                .transition(holder, state, fresh, attempt_token)
                 .map_err(|error| anyhow::anyhow!("transition ledger holder: {error}"))?;
             Ok(fresh)
         }
@@ -991,7 +1475,10 @@ fn fenced_transition<L: CapacityLedger>(
 )]
 mod tests {
     use super::*;
-    use crate::scaleset::capacity::MemLedger;
+    use crate::scaleset::capacity::{
+        AcquireOutcome, CapacityLedger, LedgerHolder, LedgerLane, LedgerPermitState,
+        MemLedger as CapacityMemLedger, ReconcileReport,
+    };
     use crate::scaleset::demand::DemandStore;
     use velnor_model::{
         ScaleSetJobAvailable, ScaleSetJobMessage, ScaleSetJobMessageType, ScaleSetJobStarted,
@@ -1026,13 +1513,309 @@ mod tests {
         }
     }
 
+    /// Test ledger that mirrors the durable retain semantics: a Cleaning
+    /// claim stays active with its demand untouched; other exact attempts
+    /// become Uncertain and terminalize served demand.
     #[derive(Debug, Default)]
+    struct MemLedger {
+        inner: CapacityMemLedger,
+        demand_states:
+            std::collections::HashMap<String, velnor_control::permit_ledger::DemandState>,
+    }
+
+    impl MemLedger {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn set_max_jobs(&self, max_jobs: u32) {
+            self.inner.set_max_jobs(max_jobs);
+        }
+
+        fn demand_state(&self, holder: &str) -> Option<velnor_control::permit_ledger::DemandState> {
+            self.demand_states.get(holder).copied()
+        }
+    }
+
+    impl CapacityLedger for MemLedger {
+        type Error = <CapacityMemLedger as CapacityLedger>::Error;
+
+        fn generation(&self) -> Result<u64, Self::Error> {
+            self.inner.generation()
+        }
+
+        fn advertised_free(&self) -> Result<Option<u32>, Self::Error> {
+            self.inner.advertised_free()
+        }
+
+        fn occupied(&self) -> Result<u32, Self::Error> {
+            self.inner.occupied()
+        }
+
+        fn holders(&self) -> Result<Vec<LedgerHolder>, Self::Error> {
+            self.inner.holders()
+        }
+
+        fn holder_state(&self, holder: &str) -> Result<Option<LedgerPermitState>, Self::Error> {
+            self.inner.holder_state(holder)
+        }
+
+        fn is_current_attempt(
+            &self,
+            holder: &str,
+            attempt_token: &str,
+        ) -> Result<bool, Self::Error> {
+            self.inner.is_current_attempt(holder, attempt_token)
+        }
+
+        fn acquire(
+            &mut self,
+            holder: &str,
+            lane: LedgerLane,
+            state: LedgerPermitState,
+            generation: u64,
+        ) -> Result<AcquireOutcome, Self::Error> {
+            let outcome = self.inner.acquire(holder, lane, state, generation)?;
+            if lane == LedgerLane::ScaleSet && matches!(&outcome, AcquireOutcome::Acquired { .. }) {
+                self.demand_states
+                    .entry(holder.to_owned())
+                    .or_insert(velnor_control::permit_ledger::DemandState::Granted);
+            }
+            Ok(outcome)
+        }
+
+        fn acquire_with_attempt_token(
+            &mut self,
+            holder: &str,
+            state: LedgerPermitState,
+            generation: u64,
+            attempt_token: &str,
+        ) -> Result<AcquireOutcome, Self::Error> {
+            let outcome =
+                self.inner
+                    .acquire_with_attempt_token(holder, state, generation, attempt_token)?;
+            if matches!(&outcome, AcquireOutcome::Acquired { .. }) {
+                self.demand_states
+                    .entry(holder.to_owned())
+                    .or_insert(velnor_control::permit_ledger::DemandState::Granted);
+            }
+            Ok(outcome)
+        }
+
+        fn transition(
+            &mut self,
+            holder: &str,
+            state: LedgerPermitState,
+            generation: u64,
+            attempt_token: &str,
+        ) -> Result<(), Self::Error> {
+            self.inner
+                .transition(holder, state, generation, attempt_token)
+        }
+
+        fn release_staged(
+            &mut self,
+            holder: &str,
+            attempt_token: &str,
+            target: velnor_control::permit_ledger::DemandState,
+        ) -> Result<velnor_control::permit_ledger::OwnedReleaseOutcome, Self::Error> {
+            use velnor_control::permit_ledger::{DemandState, OwnedReleaseOutcome};
+
+            if target == DemandState::Eligible
+                && !matches!(
+                    self.demand_states.get(holder),
+                    Some(DemandState::Eligible | DemandState::Granted)
+                )
+            {
+                return Ok(OwnedReleaseOutcome::StaleAttempt);
+            }
+            let outcome = self.inner.release_staged(holder, attempt_token, target)?;
+            if matches!(
+                outcome,
+                OwnedReleaseOutcome::Released | OwnedReleaseOutcome::AlreadyAbsent
+            ) {
+                self.demand_states.insert(holder.to_owned(), target);
+            }
+            Ok(outcome)
+        }
+
+        fn retain_uncertain(
+            &mut self,
+            holder: &str,
+            generation: u64,
+            attempt_token: &str,
+        ) -> Result<(), Self::Error> {
+            use velnor_control::permit_ledger::DemandState;
+
+            let state = self.inner.holder_state(holder)?;
+            self.inner
+                .retain_uncertain(holder, generation, attempt_token)?;
+            if state != Some(LedgerPermitState::Cleaning)
+                && matches!(
+                    self.demand_states.get(holder),
+                    Some(DemandState::Eligible | DemandState::Granted)
+                )
+            {
+                self.demand_states
+                    .insert(holder.to_owned(), DemandState::Terminal);
+            }
+            Ok(())
+        }
+
+        fn reconcile_attempts(
+            &mut self,
+            alive: &[(&str, LedgerLane, &str)],
+        ) -> Result<ReconcileReport, Self::Error> {
+            self.inner.reconcile_attempts(alive)
+        }
+
+        fn is_stale_generation(error: &Self::Error) -> bool {
+            <CapacityMemLedger as CapacityLedger>::is_stale_generation(error)
+        }
+    }
+
+    #[derive(Debug)]
     struct StubLane {
         provisioned: Vec<String>,
         terminals: Vec<i64>,
         assigned: Vec<i64>,
         started: Vec<i64>,
         canceled: Vec<i64>,
+        terminal_permit_states: Vec<Option<LedgerPermitState>>,
+        terminal_demand_states: Vec<Option<velnor_control::permit_ledger::DemandState>>,
+        terminal_attempt_tokens: Vec<String>,
+        ledger: SharedMemLedger,
+        scale_set_id: i32,
+        fail_terminal_cleanup: bool,
+    }
+
+    impl StubLane {
+        fn new(ledger: SharedMemLedger, scale_set_id: i32) -> Self {
+            Self {
+                provisioned: Vec::new(),
+                terminals: Vec::new(),
+                assigned: Vec::new(),
+                started: Vec::new(),
+                canceled: Vec::new(),
+                terminal_permit_states: Vec::new(),
+                terminal_demand_states: Vec::new(),
+                terminal_attempt_tokens: Vec::new(),
+                ledger,
+                scale_set_id,
+                fail_terminal_cleanup: false,
+            }
+        }
+    }
+
+    /// The processor and its lane must see the same in-memory permit state,
+    /// matching production where both adapters address the shared ledger.
+    #[derive(Debug, Clone)]
+    struct SharedMemLedger(std::sync::Arc<std::sync::Mutex<MemLedger>>);
+
+    impl SharedMemLedger {
+        fn lock(&self) -> std::sync::MutexGuard<'_, MemLedger> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+
+        fn demand_state(&self, holder: &str) -> Option<velnor_control::permit_ledger::DemandState> {
+            self.lock().demand_state(holder)
+        }
+    }
+
+    impl CapacityLedger for SharedMemLedger {
+        type Error = <MemLedger as CapacityLedger>::Error;
+
+        fn generation(&self) -> Result<u64, Self::Error> {
+            self.lock().generation()
+        }
+
+        fn advertised_free(&self) -> Result<Option<u32>, Self::Error> {
+            self.lock().advertised_free()
+        }
+
+        fn occupied(&self) -> Result<u32, Self::Error> {
+            self.lock().occupied()
+        }
+
+        fn holders(&self) -> Result<Vec<LedgerHolder>, Self::Error> {
+            self.lock().holders()
+        }
+
+        fn holder_state(&self, holder: &str) -> Result<Option<LedgerPermitState>, Self::Error> {
+            self.lock().holder_state(holder)
+        }
+
+        fn is_current_attempt(
+            &self,
+            holder: &str,
+            attempt_token: &str,
+        ) -> Result<bool, Self::Error> {
+            self.lock().is_current_attempt(holder, attempt_token)
+        }
+
+        fn acquire(
+            &mut self,
+            holder: &str,
+            lane: LedgerLane,
+            state: LedgerPermitState,
+            generation: u64,
+        ) -> Result<AcquireOutcome, Self::Error> {
+            self.lock().acquire(holder, lane, state, generation)
+        }
+
+        fn acquire_with_attempt_token(
+            &mut self,
+            holder: &str,
+            state: LedgerPermitState,
+            generation: u64,
+            attempt_token: &str,
+        ) -> Result<AcquireOutcome, Self::Error> {
+            self.lock()
+                .acquire_with_attempt_token(holder, state, generation, attempt_token)
+        }
+
+        fn transition(
+            &mut self,
+            holder: &str,
+            state: LedgerPermitState,
+            generation: u64,
+            attempt_token: &str,
+        ) -> Result<(), Self::Error> {
+            self.lock()
+                .transition(holder, state, generation, attempt_token)
+        }
+
+        fn release_staged(
+            &mut self,
+            holder: &str,
+            attempt_token: &str,
+            target: velnor_control::permit_ledger::DemandState,
+        ) -> Result<velnor_control::permit_ledger::OwnedReleaseOutcome, Self::Error> {
+            self.lock().release_staged(holder, attempt_token, target)
+        }
+
+        fn retain_uncertain(
+            &mut self,
+            holder: &str,
+            generation: u64,
+            attempt_token: &str,
+        ) -> Result<(), Self::Error> {
+            self.lock()
+                .retain_uncertain(holder, generation, attempt_token)
+        }
+
+        fn reconcile_attempts(
+            &mut self,
+            alive: &[(&str, LedgerLane, &str)],
+        ) -> Result<ReconcileReport, Self::Error> {
+            self.lock().reconcile_attempts(alive)
+        }
+
+        fn is_stale_generation(error: &Self::Error) -> bool {
+            <MemLedger as CapacityLedger>::is_stale_generation(error)
+        }
     }
 
     #[derive(Debug)]
@@ -1057,22 +1840,79 @@ mod tests {
             Ok(())
         }
 
-        fn note_assigned(&mut self, assigned: &ScaleSetJobAssigned) -> Result<(), Self::Error> {
+        fn note_assigned(
+            &mut self,
+            assigned: &ScaleSetJobAssigned,
+            _attempt_token: &str,
+        ) -> Result<(), Self::Error> {
             self.assigned.push(assigned.base.runner_request_id);
             Ok(())
         }
 
-        fn note_started(&mut self, started: &ScaleSetJobStarted) -> Result<(), Self::Error> {
+        fn note_started(
+            &mut self,
+            started: &ScaleSetJobStarted,
+            _attempt_token: &str,
+        ) -> Result<(), Self::Error> {
             self.started.push(started.base.runner_request_id);
             Ok(())
         }
 
-        fn note_terminal(&mut self, completed: &ScaleSetJobCompleted) -> Result<(), Self::Error> {
+        fn note_terminal(
+            &mut self,
+            completed: &ScaleSetJobCompleted,
+            attempt_token: &str,
+        ) -> Result<(), Self::Error> {
             self.terminals.push(completed.base.runner_request_id);
-            Ok(())
+            self.terminal_attempt_tokens.push(attempt_token.to_owned());
+            let request_id = crate::scaleset::intents::request_id_for_runner(
+                self.scale_set_id,
+                &completed.runner_name,
+                completed.base.runner_request_id,
+            )
+            .ok_or_else(|| LaneError("terminal runner belongs to another scale set".to_owned()))?;
+            let holder = permit_holder(self.scale_set_id, request_id);
+            self.terminal_permit_states.push(
+                self.ledger
+                    .holder_state(&holder)
+                    .map_err(|error| LaneError(format!("read terminal permit state: {error}")))?,
+            );
+            self.terminal_demand_states
+                .push(self.ledger.demand_state(&holder));
+            if self.fail_terminal_cleanup {
+                let generation = self
+                    .ledger
+                    .generation()
+                    .map_err(|error| LaneError(format!("read ledger generation: {error}")))?;
+                self.ledger
+                    .retain_uncertain(&holder, generation, attempt_token)
+                    .map_err(|error| {
+                        LaneError(format!("retain permit after cleanup failure: {error}"))
+                    })?;
+                return Err(LaneError("terminal cleanup failed".to_owned()));
+            }
+            match self
+                .ledger
+                .release_staged(
+                    &holder,
+                    attempt_token,
+                    velnor_control::permit_ledger::DemandState::Terminal,
+                )
+                .map_err(|error| LaneError(format!("release terminal permit: {error}")))?
+            {
+                velnor_control::permit_ledger::OwnedReleaseOutcome::Released
+                | velnor_control::permit_ledger::OwnedReleaseOutcome::AlreadyAbsent => Ok(()),
+                velnor_control::permit_ledger::OwnedReleaseOutcome::StaleAttempt => Err(LaneError(
+                    format!("terminal permit attempt for {holder:?} is stale"),
+                )),
+            }
         }
 
-        fn note_canceled(&mut self, request_id: i64) -> Result<(), Self::Error> {
+        fn note_canceled(
+            &mut self,
+            request_id: i64,
+            _attempt_token: &str,
+        ) -> Result<(), Self::Error> {
             self.canceled.push(request_id);
             Ok(())
         }
@@ -1190,14 +2030,18 @@ mod tests {
     fn processor(
         path: &std::path::Path,
         queue: ScriptedQueue,
-    ) -> Processor<ScriptedQueue, MemLedger, StubLane> {
-        let mut ledger = MemLedger::new();
-        ledger.set_max_jobs(4);
-        ledger.reconcile(&[]).unwrap();
+    ) -> Processor<ScriptedQueue, SharedMemLedger, StubLane> {
+        let ledger = std::sync::Arc::new(std::sync::Mutex::new(MemLedger::new()));
+        {
+            let mut inner = ledger.lock().unwrap();
+            inner.set_max_jobs(4);
+            inner.reconcile_attempts(&[]).unwrap();
+        }
+        let shared_ledger = SharedMemLedger(std::sync::Arc::clone(&ledger));
         Processor::new(
             queue,
-            ledger,
-            StubLane::default(),
+            shared_ledger.clone(),
+            StubLane::new(shared_ledger, 7),
             DemandStore::open(path).unwrap(),
             AcquireBatchStore::open(path).unwrap(),
             ProvisionIntentStore::open(path).unwrap(),
@@ -1208,6 +2052,40 @@ mod tests {
                 max_acquire_batch: MAX_ACQUIRE_BATCH,
             },
         )
+    }
+
+    #[test]
+    fn non_cleaning_retain_marks_exact_attempt_uncertain_and_terminal() {
+        let mut ledger = MemLedger::new();
+        ledger.set_max_jobs(1);
+        ledger.reconcile_attempts(&[]).unwrap();
+        let generation = ledger.generation().unwrap();
+        let holder = "scaleset/7/non-cleaning-retain";
+        let AcquireOutcome::Acquired { attempt_token } = ledger
+            .acquire(
+                holder,
+                LedgerLane::ScaleSet,
+                LedgerPermitState::Running,
+                generation,
+            )
+            .unwrap()
+        else {
+            panic!("permit acquisition failed");
+        };
+
+        ledger
+            .retain_uncertain(holder, generation, &attempt_token)
+            .unwrap();
+
+        assert_eq!(
+            ledger.holder_state(holder).unwrap(),
+            Some(LedgerPermitState::Uncertain)
+        );
+        assert_eq!(
+            ledger.demand_state(holder),
+            Some(velnor_control::permit_ledger::DemandState::Terminal)
+        );
+        assert_eq!(ledger.occupied().unwrap(), 1);
     }
 
     #[tokio::test]
@@ -1233,6 +2111,89 @@ mod tests {
                 headroom: 2,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn same_batch_assignment_runs_after_offer_acquire_proof() {
+        let path = temp_path("assigned-with-offer-same-batch");
+        let mut processor = processor(&path, ScriptedQueue::default());
+        let mut observed = message(11, vec![push_offer(505)]);
+        observed.job_assigned_messages = vec![ScaleSetJobAssigned {
+            base: base(505, ScaleSetJobMessageType::JobAssigned),
+        }];
+
+        let outcome = processor.scale(Some(&observed)).await.unwrap();
+        assert_eq!(outcome.acquired, vec![505]);
+        assert_eq!(outcome.assigned, 1);
+        assert_eq!(outcome.provisioned, vec![505]);
+        let demand = processor.demand_mut().get(505).unwrap().unwrap();
+        let attempt_token = demand.permit_attempt_token.unwrap();
+        assert!(!attempt_token.is_empty());
+        assert!(processor
+            .ledger_mut()
+            .is_current_attempt("scaleset/7/505", &attempt_token)
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn multiple_null_request_id_offers_keep_distinct_job_identity() {
+        let path = temp_path("null-request-identity");
+        let mut processor = processor(&path, ScriptedQueue::default());
+        let batch = serde_json::to_string(&vec![
+            serde_json::json!({
+                "messageType": "JobAvailable",
+                "runnerRequestId": null,
+                "jobId": "job-null-a",
+                "workflowRunId": 0,
+                "repositoryName": "velnor",
+                "ownerName": "tailrocks",
+                "eventName": "push",
+                "requestLabels": ["velnor"],
+                "acquireJobUrl": "https://scaleset-fixture.invalid/acquire"
+            }),
+            serde_json::json!({
+                "messageType": "JobAvailable",
+                "runnerRequestId": null,
+                "jobId": "job-null-b",
+                "workflowRunId": 0,
+                "repositoryName": "velnor",
+                "ownerName": "tailrocks",
+                "eventName": "push",
+                "requestLabels": ["velnor"],
+                "acquireJobUrl": "https://scaleset-fixture.invalid/acquire"
+            }),
+        ])
+        .unwrap();
+        let envelope = serde_json::json!({
+            "messageId": 10,
+            "messageType": crate::scaleset::session::JOB_MESSAGES_ENVELOPE,
+            "body": batch,
+            "statistics": {"totalAssignedJobs": 4}
+        });
+        let parsed = crate::scaleset::session::parse_message_response(
+            &serde_json::to_vec(&envelope).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parsed.job_available_messages.len(), 2);
+        assert!(parsed
+            .job_available_messages
+            .iter()
+            .all(|offer| offer.base.runner_request_id == 0));
+        let first_id =
+            crate::scaleset::demand::resolve_job_request_id(&parsed.job_available_messages[0].base);
+        let second_id =
+            crate::scaleset::demand::resolve_job_request_id(&parsed.job_available_messages[1].base);
+        assert_ne!(first_id, second_id);
+
+        let outcome = processor.scale(Some(&parsed)).await.unwrap();
+
+        assert_eq!(outcome.offers_submitted, 2);
+        assert_eq!(outcome.acquired.len(), 2);
+        assert!(outcome.acquired.contains(&first_id));
+        assert!(outcome.acquired.contains(&second_id));
+        assert!(processor.demand_mut().get(first_id).unwrap().is_some());
+        assert!(processor.demand_mut().get(second_id).unwrap().is_some());
+        assert!(processor.demand_mut().get(0).unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1326,10 +2287,24 @@ mod tests {
         );
         assert!(processor.demand_mut().get(999_999).unwrap().is_none());
         // Replay is a no-op once the lane released the permit.
-        processor
-            .ledger_mut()
-            .release(&permit_holder(7, 801))
+        let attempt_token = processor
+            .demand_mut()
+            .get(801)
+            .unwrap()
+            .unwrap()
+            .permit_attempt_token
             .unwrap();
+        assert_eq!(
+            processor
+                .ledger_mut()
+                .release_staged(
+                    &permit_holder(7, 801),
+                    &attempt_token,
+                    velnor_control::permit_ledger::DemandState::Terminal,
+                )
+                .unwrap(),
+            velnor_control::permit_ledger::OwnedReleaseOutcome::AlreadyAbsent
+        );
         let replay = processor.scale(Some(&observed)).await.unwrap();
         assert_eq!(replay.completed, 1);
     }
@@ -1369,6 +2344,38 @@ mod tests {
         assert!(processor.lane_mut().assigned.is_empty());
         assert!(processor.lane_mut().terminals.is_empty());
         assert!(processor.lane_mut().canceled.is_empty());
+    }
+
+    #[tokio::test]
+    async fn direct_assignment_without_acquire_proof_fails_closed() {
+        let path = temp_path("direct-assignment-unconfirmed");
+        let mut processor = processor(&path, ScriptedQueue::default());
+        let assigned = ScaleSetJobAssigned {
+            base: base(902, ScaleSetJobMessageType::JobAssigned),
+        };
+
+        assert!(processor.observe_assigned(&assigned).is_err());
+        let first = processor.demand_mut().get(902).unwrap().unwrap();
+        assert_eq!(first.state, DemandState::Acquired);
+        assert!(first.permit_attempt_token.is_none());
+        assert!(processor
+            .demand_mut()
+            .pending_attempt_acquires()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            processor
+                .ledger_mut()
+                .holder_state("scaleset/7/902")
+                .unwrap(),
+            None
+        );
+        assert_eq!(processor.ledger_mut().occupied().unwrap(), 0);
+
+        // Redelivery remains unconfirmed; JobAssigned does not mint a
+        // permit token or transfer a holder-only ledger row.
+        assert!(processor.observe_assigned(&assigned).is_err());
+        assert_eq!(processor.ledger_mut().occupied().unwrap(), 0);
     }
 
     #[tokio::test]
@@ -1429,6 +2436,92 @@ mod tests {
         assert_eq!(processor.lane_mut().terminals, vec![902]);
         assert!(processor.lane_mut().canceled.is_empty());
         assert_eq!(processor.ledger_mut().occupied().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn terminal_cleanup_failure_retains_occupancy_until_lane_releases_attempt() {
+        let path = temp_path("terminal-cleanup-release");
+        let mut processor = processor(&path, ScriptedQueue::default());
+        let acquired = processor
+            .scale(Some(&message(27, vec![push_offer(905)])))
+            .await
+            .unwrap();
+        assert_eq!(acquired.acquired, vec![905]);
+        assert_eq!(processor.ledger_mut().occupied().unwrap(), 1);
+        let holder = "scaleset/7/905";
+        let attempt_token = processor
+            .demand_mut()
+            .get(905)
+            .unwrap()
+            .unwrap()
+            .permit_attempt_token
+            .unwrap();
+        assert_eq!(
+            processor.ledger_ref().demand_state(holder),
+            Some(velnor_control::permit_ledger::DemandState::Granted)
+        );
+
+        let terminal = RunnerScaleSetMessage {
+            message_id: 28,
+            statistics: Some(stats(4)),
+            job_completed_messages: vec![completed(905, "succeeded")],
+            ..RunnerScaleSetMessage::default()
+        };
+        processor.lane_mut().fail_terminal_cleanup = true;
+        assert!(processor.scale(Some(&terminal)).await.is_err());
+        assert_eq!(processor.ledger_mut().occupied().unwrap(), 1);
+        assert_eq!(
+            processor.ledger_mut().holder_state(holder).unwrap(),
+            Some(LedgerPermitState::Cleaning)
+        );
+        assert_eq!(
+            processor.ledger_ref().demand_state(holder),
+            Some(velnor_control::permit_ledger::DemandState::Granted)
+        );
+        assert!(processor
+            .ledger_mut()
+            .is_current_attempt(holder, &attempt_token)
+            .unwrap());
+        assert_eq!(
+            processor.demand_mut().get(905).unwrap().unwrap().state,
+            DemandState::Terminal
+        );
+        assert_eq!(
+            processor.lane_mut().terminal_attempt_tokens,
+            vec![attempt_token.clone()]
+        );
+
+        processor.lane_mut().fail_terminal_cleanup = false;
+        let retried = processor.scale(Some(&terminal)).await.unwrap();
+        assert_eq!(retried.completed, 1);
+        assert_eq!(
+            processor.lane_mut().terminal_permit_states,
+            vec![
+                Some(LedgerPermitState::Cleaning),
+                Some(LedgerPermitState::Cleaning)
+            ]
+        );
+        assert_eq!(
+            processor.lane_mut().terminal_attempt_tokens,
+            vec![attempt_token.clone(), attempt_token]
+        );
+        assert_eq!(
+            processor.lane_mut().terminal_demand_states,
+            vec![
+                Some(velnor_control::permit_ledger::DemandState::Granted),
+                Some(velnor_control::permit_ledger::DemandState::Granted)
+            ]
+        );
+        assert_eq!(processor.ledger_mut().occupied().unwrap(), 0);
+        assert_eq!(processor.ledger_mut().holder_state(holder).unwrap(), None);
+        assert_eq!(
+            processor.ledger_ref().demand_state(holder),
+            Some(velnor_control::permit_ledger::DemandState::Terminal)
+        );
+        assert_eq!(
+            processor.demand_mut().get(905).unwrap().unwrap().state,
+            DemandState::Terminal
+        );
     }
 
     #[tokio::test]

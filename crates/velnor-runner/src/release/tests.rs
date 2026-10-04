@@ -70,11 +70,29 @@ fn debian_preinst_requires_whole_host_drain() {
     assert!(preinst.contains(
         "[ \"$(systemctl show --property=ActiveState --value velnor-guardian.service 2>/dev/null || true)\" = inactive ]"
     ));
+    // Enumerate every loaded unit of each relevant type, then classify Velnor
+    // units and any other service that can invoke the packaged runner.
     assert!(preinst.contains(
-        "systemctl list-units --type=service --all --no-legend --plain 'velnor*.service'"
+        "systemctl list-units --all --type=service --no-legend --no-pager --plain --full"
+    ));
+    assert!(preinst.contains(
+        "services_raw=$(systemctl list-units --all --type=service --no-legend --no-pager --plain --full 2>/dev/null) || {\n    active_units=unknown\n    return 1\n  }"
     ));
     assert!(preinst
-        .contains("systemctl list-units --type=timer --all --no-legend --plain 'velnor*.timer'"));
+        .contains("systemctl list-units --all --type=timer --no-legend --no-pager --plain --full"));
+    assert!(preinst.contains(
+        "timers_raw=$(systemctl list-units --all --type=timer --no-legend --no-pager --plain --full 2>/dev/null) || {\n    active_units=unknown\n    return 1\n  }"
+    ));
+    assert!(
+        preinst.contains("systemctl list-unit-files --type=service --no-legend --no-pager --full")
+    );
+    assert!(preinst.contains("systemctl list-units --all --type=\"$activation_kind\""));
+    assert!(preinst.contains("service_invokes_packaged_runner \"$unit\""));
+    assert!(preinst.contains("velnor*)"));
+    // Malformed manager rows must also fail closed.
+    assert!(preinst.contains(
+        "END { if (malformed) exit 1 }\n  ') || {\n    active_units=unknown\n    return 1\n  }"
+    ));
     assert!(preinst.contains("all_velnor_units_drained"));
     assert!(preinst.contains("guardian_inactive"));
     assert!(!preinst.contains("VELNOR_DRAINED_UNITS"));

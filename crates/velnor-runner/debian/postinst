@@ -9,7 +9,8 @@
 # coherence against the package's own shipped identity. The active pointer is
 # deliberately NOT checked here: during a drained upgrade it still names the
 # exact rollback predecessor until the operator activates the new record.
-# ExecStartPre fails closed on that temporary mismatch, so no daemon can start.
+# Packaged runner roles verify the active tuple inside their shared
+# ExecStart lock, so no daemon can start against that temporary mismatch.
 # Activation, image acquisition, and restart
 # are a separate, explicit `velnorctl release activate` step run by the
 # deployment flow, never here.

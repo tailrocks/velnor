@@ -62,6 +62,14 @@ fn write_heartbeat(
 }
 
 pub async fn run(args: SlotArgs) -> anyhow::Result<()> {
+    let package_guard = crate::release::package_execution_guard()?;
+    run_with_package_guard(args, package_guard).await
+}
+
+pub(crate) async fn run_with_package_guard(
+    args: SlotArgs,
+    _package_guard: crate::release::PackageExecutionGuard,
+) -> anyhow::Result<()> {
     std::fs::create_dir_all(&args.state_dir)?;
     let id = slot_id(&args.scope, args.slot_index);
     let generation = Generation(args.generation);

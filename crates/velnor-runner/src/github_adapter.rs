@@ -1,19 +1,24 @@
 #![allow(dead_code)]
 
 use crate::{
-    container::{split_container_options, JobContainerSpec, ServiceContainerSpec},
+    container::{
+        has_attached_memory_limit_value, is_quota_flag, split_container_options, JobContainerSpec,
+        ServiceContainerSpec,
+    },
     executor::ExecutableStep,
-    job_message::{AgentJobRequestMessage, ContainerResource, ServiceEndpoint},
+    job_message::{template_token_context_value, AgentJobRequestMessage, ServiceEndpoint},
     plan::{
         GitHubReportTarget, JobExecutionPlan, JobIdentity, NormalizedJobPlan,
         NormalizedRunDefaults, OutputExpression,
     },
 };
+use anyhow::Context;
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
+use velnor_model::{ContextValue, NonFinite};
 
 const PACKAGED_WORKFLOW_CLI_APT: &str = "/usr/bin/velnor-workflow";
 
@@ -66,6 +71,9 @@ pub fn github_job_container_spec(
             host_work_dir.display()
         );
     }
+    if let Some(container) = expanded_job_container(job)? {
+        let _ = container_ports(&container)?;
+    }
     if paths.execution_backend == velnor_model::ExecutionBackendKind::MicroVm {
         crate::manifest::validate_microvm_compiler_cache(job)?;
     }
@@ -94,9 +102,32 @@ pub fn github_job_container_spec(
     }
     let name = job_container_name(job);
     let store_trust_scope = crate::trust_scope::normalize_scope(trust_scope).to_owned();
+    let sccache_store_host = if paths.execution_backend
+        == velnor_model::ExecutionBackendKind::Docker
+        && explicit_sccache
+    {
+        Some(crate::sccache_compat::store_host(
+            job,
+            &paths.temp_host,
+            trust_scope,
+        )?)
+    } else {
+        None
+    };
+    let mbx_store_host = if paths.execution_backend == velnor_model::ExecutionBackendKind::Docker
+        && !explicit_sccache
+    {
+        Some(github_mbx_store_host(job, &paths.temp_host, trust_scope)?)
+    } else {
+        None
+    };
     Ok(JobContainerSpec {
         name,
-        image: job_container_image(job).unwrap_or(docker_image).to_string(),
+        completion_generation: uuid::Uuid::new_v4(),
+        image: job_container_image(job)?
+            .as_deref()
+            .unwrap_or(docker_image)
+            .to_string(),
         network: job_network_name(job),
         workspace_host: paths.workspace_host,
         temp_host: paths.temp_host.clone(),
@@ -106,9 +137,9 @@ pub fn github_job_container_spec(
         mount_docker_socket: github_trust_scope_allows_host_docker(trust_scope)
             && paths.execution_backend.uses_host_docker_socket(),
         slot_store_key: paths.slot_store_key,
-        env: backend_advertising_env(job_container_env(job), paths.execution_backend),
-        options: job_container_options(job, trust_scope),
-        services: service_containers(job, trust_scope),
+        env: backend_advertising_env(job_container_env(job)?, paths.execution_backend),
+        options: job_container_options(job, trust_scope)?,
+        services: service_containers(job, trust_scope)?,
         node_action_image: node_action_image.to_string(),
         docker_cli_host_path: None,
         docker_cli_plugin_host_dir: None,
@@ -117,21 +148,25 @@ pub fn github_job_container_spec(
         verify_bind_mounts: true,
         daemon_id,
         repository: job_variable(job, "github.repository").map(ToOwned::to_owned),
+        repository_store_key: github_repository_store_key(job),
         store_trust_scope,
-        sccache_store_host: (paths.execution_backend == velnor_model::ExecutionBackendKind::Docker
-            && explicit_sccache)
-            .then(|| crate::sccache_compat::store_host(job, &paths.temp_host, trust_scope)),
-        mbx_store_host: (paths.execution_backend == velnor_model::ExecutionBackendKind::Docker
-            && !explicit_sccache)
-            .then(|| github_mbx_store_host(job, &paths.temp_host, trust_scope)),
+        sccache_store_host,
+        mbx_store_host,
     })
+}
+
+pub(crate) fn github_repository_store_key(job: &AgentJobRequestMessage) -> Option<String> {
+    crate::store_catalog::repository_store_key(
+        job_variable(job, "github.server_url")?,
+        job_variable(job, "github.repository_id")?,
+    )
 }
 
 pub(crate) fn github_mbx_store_host(
     job: &AgentJobRequestMessage,
     temp_host: &std::path::Path,
     trust_scope: &str,
-) -> PathBuf {
+) -> anyhow::Result<PathBuf> {
     github_rust_store_host(job, temp_host, trust_scope, "mbx")
 }
 
@@ -145,34 +180,38 @@ pub(crate) fn github_rust_store_host(
     temp_host: &std::path::Path,
     trust_scope: &str,
     store: &str,
-) -> PathBuf {
+) -> anyhow::Result<PathBuf> {
+    github_rust_store_host_with_layout(job, temp_host, trust_scope, store, None)
+}
+
+fn github_rust_store_host_with_layout(
+    job: &AgentJobRequestMessage,
+    temp_host: &std::path::Path,
+    trust_scope: &str,
+    store: &str,
+    layout: Option<&crate::storage::StorageLayout>,
+) -> anyhow::Result<PathBuf> {
     let ephemeral = || {
         temp_host
             .join("_velnor/ephemeral")
             .join(store)
             .join(crate::container::sanitize_store_key(&job.job_id))
     };
-    let Some(repository_id) = job_variable(job, "github.repository_id")
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|id| *id != 0)
-    else {
+    let Some(repository_key) = github_repository_store_key(job) else {
         eprintln!(
-            "forensics.lifecycle: persistent {store} store refused: missing or invalid github.repository_id"
+            "forensics.lifecycle: persistent {store} store refused: missing or invalid github.server_url or github.repository_id"
         );
-        return ephemeral();
+        return Ok(ephemeral());
     };
     // Normalize once, without resolving: this is the job's admitted scope,
     // and re-resolving it through the process cell would hand back the pool.
     // The compiler stores are namespaced by that same scope — not collapsed
     // to a fixed class — so the mounts agree with the storage leases.
     let scope = crate::trust_scope::normalize_scope(trust_scope);
-    crate::storage::cache_class_path_for_trust(
-        &crate::container::daemon_store_root(temp_host),
-        scope,
-        &format!("compiler/{store}"),
-        &format!("_velnor_{store}"),
+    Ok(
+        crate::storage::cache_class_path_with_layout(scope, &format!("compiler/{store}"), layout)?
+            .join(repository_key),
     )
-    .join(repository_id.to_string())
 }
 
 /// Whether the scope in effect for a job unlocks host-level capability.
@@ -195,16 +234,16 @@ pub fn github_normalized_job_plan(
     job_container: JobContainerSpec,
     steps: Vec<ExecutableStep>,
     env: Vec<(String, String)>,
-    context_data: Vec<(String, Value)>,
-) -> NormalizedJobPlan {
+    context_data: Vec<(String, ContextValue)>,
+) -> anyhow::Result<NormalizedJobPlan> {
     let services = job_container.services.clone();
-    NormalizedJobPlan {
+    Ok(NormalizedJobPlan {
         identity: github_job_identity(job),
         github_report: Some(GitHubReportTarget {
             run_service_url: run_service_url.to_string(),
             billing_owner_id,
             system_connection_token: job
-                .system_connection()
+                .system_connection_single_or_default()?
                 .and_then(system_connection_access_token),
             timeline_id: Some(job.timeline.id.clone()),
             mask_values: github_mask_values(job),
@@ -225,15 +264,15 @@ pub fn github_normalized_job_plan(
         },
         steps,
         outputs: github_output_expressions(job.job_outputs.as_ref()),
-    }
+    })
 }
 
 pub fn system_connection_access_token(endpoint: &ServiceEndpoint) -> Option<String> {
     endpoint
         .authorization
         .as_ref()
-        .and_then(|authorization| authorization.parameters.get("AccessToken"))
-        .cloned()
+        .and_then(|authorization| authorization.parameter_string("AccessToken"))
+        .map(ToOwned::to_owned)
 }
 
 fn github_job_identity(job: &AgentJobRequestMessage) -> JobIdentity {
@@ -304,6 +343,19 @@ fn github_mask_values(job: &AgentJobRequestMessage) -> Vec<String> {
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
     );
+    for endpoint in &job.resources.endpoints {
+        let Some(authorization) = endpoint.authorization.as_ref() else {
+            continue;
+        };
+        values.extend(
+            authorization
+                .parameters
+                .values()
+                .filter_map(Option::as_deref)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
+        );
+    }
     values.sort_by_key(|value| std::cmp::Reverse(value.len()));
     values.dedup();
     values
@@ -414,30 +466,31 @@ fn job_network_name(job: &AgentJobRequestMessage) -> String {
     format!("velnor-net-{}", sanitize_path_segment(&job.job_id))
 }
 
-fn job_container_image(job: &AgentJobRequestMessage) -> Option<&str> {
-    job.job_container
-        .as_ref()
-        .and_then(container_image)
-        .or_else(|| {
-            job.resources
-                .containers
-                .iter()
-                .find(|container| {
-                    container
-                        .alias
-                        .as_deref()
-                        .is_some_and(|alias| alias == "__job" || alias.eq_ignore_ascii_case("job"))
-                })
-                .and_then(|container| container.image.as_deref())
-        })
+fn job_container_image(job: &AgentJobRequestMessage) -> anyhow::Result<Option<String>> {
+    let Some(container) = expanded_job_container(job)? else {
+        return Ok(None);
+    };
+    container_image(&container)
 }
 
-fn job_container_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
-    job.job_container
-        .as_ref()
-        .into_iter()
-        .flat_map(container_env)
-        .collect()
+fn job_container_env(job: &AgentJobRequestMessage) -> anyhow::Result<Vec<(String, String)>> {
+    let Some(container) = expanded_job_container(job)? else {
+        return Ok(Vec::new());
+    };
+    container_env(&container)
+}
+
+fn expanded_job_container(job: &AgentJobRequestMessage) -> anyhow::Result<Option<ContextValue>> {
+    let Some(template) = job.job_container.as_ref() else {
+        return Ok(None);
+    };
+    reject_unsupported_template_container_fields(template)?;
+    let container = expand_template_token(template)?;
+    if matches!(container, ContextValue::Null) {
+        return Ok(None);
+    }
+    validate_container_schema(&container, ContainerSchema::Job)?;
+    Ok(Some(container))
 }
 
 /// Advertise the operator-selected pool backend to jobs as
@@ -502,17 +555,22 @@ pub(crate) fn push_runner_identity_env(
     ));
 }
 
-fn job_container_options(job: &AgentJobRequestMessage, trust_scope: &str) -> Vec<String> {
-    let options = job
-        .job_container
-        .as_ref()
-        .and_then(container_options)
-        .unwrap_or_default();
-    filter_privileged_container_options(
+fn job_container_options(
+    job: &AgentJobRequestMessage,
+    trust_scope: &str,
+) -> anyhow::Result<Vec<String>> {
+    let options = match expanded_job_container(job)? {
+        Some(container) => match container_options(&container)? {
+            Some(options) => options,
+            None => Vec::new(),
+        },
+        None => Vec::new(),
+    };
+    Ok(filter_privileged_container_options(
         options,
         github_trust_scope_allows_host_docker(trust_scope)
             && privileged_container_options_allowed_from_env(),
-    )
+    ))
 }
 
 /// Names of the `services:` containers a job owns, for cancellation fan-out.
@@ -523,216 +581,401 @@ pub(crate) fn service_container_names(
     job: &AgentJobRequestMessage,
     trust_scope: &str,
 ) -> Vec<String> {
-    service_containers(job, trust_scope)
-        .into_iter()
-        .map(|service| service.name)
-        .collect()
+    match service_containers(job, trust_scope) {
+        Ok(services) => services.into_iter().map(|service| service.name).collect(),
+        Err(error) => {
+            // The job-spec path validates these properties and fails the job
+            // before starting containers. This earlier cancellation setup
+            // cannot return an error through its existing caller.
+            eprintln!("forensics.lifecycle: cannot derive service container names before spec validation: {error:#}");
+            Vec::new()
+        }
+    }
 }
 
 fn service_containers(
     job: &AgentJobRequestMessage,
     trust_scope: &str,
-) -> Vec<ServiceContainerSpec> {
+) -> anyhow::Result<Vec<ServiceContainerSpec>> {
+    // The wire DTO's OnDeserialized callback synthesizes this token from
+    // Resources.Containers only when JobSidecarContainers is non-empty and
+    // JobServiceContainers is absent/null. Do not enumerate resources here:
+    // unrelated resources are not service containers.
     let network = job_network_name(job);
     let allow_privileged = github_trust_scope_allows_host_docker(trust_scope)
         && privileged_container_options_allowed_from_env();
-    if let Some(services) = job
+    if let Some(template) = job.job_service_containers.as_ref() {
+        reject_unsupported_template_service_fields(template)?;
+    }
+    let service_container_token = job
         .job_service_containers
         .as_ref()
         .map(expand_template_token)
-        .and_then(|value| value.as_object().cloned())
-    {
-        return services
-            .into_iter()
-            .filter_map(|(alias, container)| {
-                let image = container_image(&container)?.to_string();
-                Some(ServiceContainerSpec {
-                    name: format!(
-                        "velnor-service-{}-{}",
-                        sanitize_path_segment(&job.job_id),
-                        sanitize_path_segment(&alias)
-                    ),
-                    image,
-                    network_alias: alias,
-                    network: network.clone(),
-                    env: container_env(&container),
-                    ports: if github_trust_scope_allows_host_docker(trust_scope) {
-                        container_ports(&container)
-                    } else {
-                        Vec::new()
-                    },
-                    options: filter_privileged_container_options(
-                        container_options(&container).unwrap_or_default(),
-                        allow_privileged,
-                    ),
-                })
-            })
-            .collect();
+        .transpose()?;
+    let Some(service_container_token) = service_container_token.as_ref() else {
+        return Ok(Vec::new());
+    };
+    if matches!(service_container_token, ContextValue::Null) {
+        return Ok(Vec::new());
     }
-    job.resources
-        .containers
+    let ContextValue::Object {
+        entries: services, ..
+    } = service_container_token
+    else {
+        anyhow::bail!("job service containers must be a mapping");
+    };
+
+    let mut result = Vec::with_capacity(services.len());
+    for (alias, container) in services {
+        if alias.is_empty() {
+            anyhow::bail!("job service container aliases must be non-empty strings");
+        }
+        validate_container_schema(container, ContainerSchema::Service)
+            .with_context(|| format!("service container {alias:?}"))?;
+        let image = container_image(container)?;
+        let env = container_env(container)?;
+        // Validate every workflow-schema field even if an empty image means
+        // the runner will skip this service before launch.
+        let ports = container_ports(container)?;
+        let options = container_options(container)?.unwrap_or_default();
+        let Some(image) = image else {
+            // The pinned runner's service converter drops empty images,
+            // including an empty `docker://` image, before launch.
+            continue;
+        };
+        result.push(ServiceContainerSpec {
+            name: format!(
+                "velnor-service-{}-{}",
+                sanitize_path_segment(&job.job_id),
+                sanitize_path_segment(&alias)
+            ),
+            image,
+            network_alias: (*alias).clone(),
+            network: network.clone(),
+            env,
+            ports: if github_trust_scope_allows_host_docker(trust_scope) {
+                ports
+            } else {
+                Vec::new()
+            },
+            options: filter_privileged_container_options(options, allow_privileged),
+        });
+    }
+    Ok(result)
+}
+
+fn container_ports(value: &ContextValue) -> anyhow::Result<Vec<String>> {
+    let Some(value) = exact_object_member(value, "ports") else {
+        return Ok(Vec::new());
+    };
+    let ContextValue::Array(values) = value else {
+        anyhow::bail!("container ports must be a sequence");
+    };
+    values
         .iter()
-        .filter_map(|container| {
-            let alias = container.alias.as_deref()?;
-            if alias == "__job" || alias.eq_ignore_ascii_case("job") {
-                return None;
+        .enumerate()
+        .map(|(index, value)| {
+            let port = context_scalar_string(value).with_context(|| {
+                format!("container port at index {index} must be a scalar string")
+            })?;
+            if port.is_empty() {
+                anyhow::bail!("container port at index {index} must be non-empty");
             }
-            let image = container.image.as_ref()?.clone();
-            Some(ServiceContainerSpec {
-                name: format!(
-                    "velnor-service-{}-{}",
-                    sanitize_path_segment(&job.job_id),
-                    sanitize_path_segment(alias)
-                ),
-                image,
-                network_alias: alias.to_string(),
-                network: network.clone(),
-                env: service_env(container),
-                ports: if github_trust_scope_allows_host_docker(trust_scope) {
-                    service_ports(container)
-                } else {
-                    Vec::new()
-                },
-                options: filter_privileged_container_options(
-                    container
-                        .options
-                        .as_deref()
-                        .map(split_container_options)
-                        .unwrap_or_default(),
-                    allow_privileged,
-                ),
-            })
+            Ok(port)
         })
         .collect()
 }
 
-fn container_ports(value: &Value) -> Vec<String> {
-    let mut ports = value
-        .as_object()
-        .and_then(|object| object.get("ports").or_else(|| object.get("Ports")))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    ports.sort();
-    ports
-}
-
-/// Convert the current V2 broker TemplateToken JSON (`map` entries with
-/// `Key`/`Value`) into ordinary JSON. `actions/runner` evaluates
-/// `JobServiceContainers` directly; `Resources.Containers` is only the legacy
-/// deserialization fallback retained for the old feature flag.
-fn expand_template_token(value: &Value) -> Value {
+/// Convert V2 TemplateToken JSON into ordered context values. Keeping map
+/// entries as vectors matches MappingToken's insertion order through service
+/// and environment construction.
+fn expand_template_token(value: &Value) -> anyhow::Result<ContextValue> {
     let Some(object) = value.as_object() else {
-        return value.clone();
+        return Ok(match value {
+            Value::Null => ContextValue::Null,
+            Value::Bool(value) => ContextValue::Bool(*value),
+            Value::Number(value) => ContextValue::Number(value.clone()),
+            Value::String(value) => ContextValue::String(value.clone()),
+            Value::Array(values) => ContextValue::Array(
+                values
+                    .iter()
+                    .map(expand_template_token)
+                    .collect::<anyhow::Result<_>>()?,
+            ),
+            Value::Object(_) => unreachable!("handled above"),
+        });
     };
-    if let Some(entries) = object
-        .get("map")
-        .or_else(|| object.get("Map"))
-        .and_then(Value::as_array)
-    {
-        let mut expanded = serde_json::Map::new();
-        for entry in entries {
-            let Some(pair) = entry.as_object() else {
-                continue;
+    let token_type = match object_member(object, "type") {
+        None => Some(0),
+        Some(Value::Number(value)) if !value.is_f64() => Some(
+            i32::try_from(
+                value
+                    .as_i64()
+                    .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+                    .context("TemplateToken type must be an integer")?,
+            )
+            .context("TemplateToken type is outside Int32")?,
+        ),
+        Some(_) => anyhow::bail!("TemplateToken type must be an integer"),
+    };
+    match token_type {
+        Some(0) => {
+            let literal = match object_member(object, "lit") {
+                Some(value) => template_scalar_string(value)
+                    .context("TemplateToken string literal must be scalar")?,
+                None => String::new(),
             };
-            let key = pair
-                .get("key")
-                .or_else(|| pair.get("Key"))
-                .map(expand_template_token)
-                .and_then(|value| value.as_str().map(ToOwned::to_owned));
-            let value = pair
-                .get("value")
-                .or_else(|| pair.get("Value"))
-                .map(expand_template_token);
-            if let (Some(key), Some(value)) = (key, value) {
-                expanded.insert(key, value);
-            }
+            return Ok(ContextValue::String(literal));
         }
-        return Value::Object(expanded);
+        Some(5) => {
+            return match template_token_context_value(value)? {
+                ContextValue::Bool(value) => Ok(ContextValue::Bool(value)),
+                _ => anyhow::bail!("TemplateToken boolean must be boolean"),
+            };
+        }
+        Some(6) => {
+            return match template_token_context_value(value)? {
+                ContextValue::Number(number) => Ok(ContextValue::Number(number)),
+                ContextValue::NonFinite(value) => Ok(ContextValue::NonFinite(value)),
+                _ => anyhow::bail!("TemplateToken number must be numeric"),
+            };
+        }
+        Some(7) => return Ok(ContextValue::Null),
+        Some(3 | 4) => anyhow::bail!("TemplateToken expression was not evaluated"),
+        Some(1) => {
+            let values = match object_member(object, "seq") {
+                Some(Value::Array(values)) => values.as_slice(),
+                Some(Value::Null) | None => &[],
+                Some(_) => anyhow::bail!("TemplateToken sequence must be an array or null"),
+            };
+            return Ok(ContextValue::Array(
+                values
+                    .iter()
+                    .map(expand_template_token)
+                    .collect::<anyhow::Result<_>>()?,
+            ));
+        }
+        Some(2) => {}
+        Some(kind) => anyhow::bail!("unknown TemplateToken type {kind}"),
+        None => anyhow::bail!("TemplateToken type is missing"),
     }
-    if let Some(sequence) = object
-        .get("seq")
-        .or_else(|| object.get("Seq"))
-        .and_then(Value::as_array)
-    {
-        return Value::Array(sequence.iter().map(expand_template_token).collect());
-    }
-    if let Some(scalar) = object
-        .get("lit")
-        .or_else(|| object.get("Lit"))
-        .or_else(|| object.get("value"))
-        .or_else(|| object.get("Value"))
-    {
-        return expand_template_token(scalar);
-    }
-    Value::Object(
-        object
-            .iter()
-            .map(|(key, value)| (key.clone(), expand_template_token(value)))
-            .collect(),
-    )
-}
-
-fn service_env(container: &ContainerResource) -> Vec<(String, String)> {
-    container
-        .environment_variables
-        .as_ref()
-        .map(container_env_value)
-        .unwrap_or_default()
-}
-
-fn service_ports(container: &ContainerResource) -> Vec<String> {
-    let mut ports = container
-        .ports
-        .iter()
-        .filter_map(|(container_port, host_port)| {
-            let container_port = container_port.trim();
-            let host_port = host_port.trim();
-            if container_port.is_empty() {
-                None
-            } else if host_port.is_empty() {
-                Some(container_port.to_string())
-            } else {
-                Some(format!("{host_port}:{container_port}"))
+    if token_type == Some(2) {
+        let entries = match object_member(object, "map") {
+            Some(Value::Array(entries)) => entries.as_slice(),
+            Some(Value::Null) | None => &[],
+            Some(_) => anyhow::bail!("TemplateToken map must be an array or null"),
+        };
+        let mut expanded: Vec<(String, ContextValue)> = Vec::with_capacity(entries.len());
+        for (index, entry) in entries.iter().enumerate() {
+            let pair = entry.as_object().with_context(|| {
+                format!("TemplateToken map item at index {index} must be an object")
+            })?;
+            let key_token = object_member(pair, "key")
+                .with_context(|| format!("TemplateToken map item at index {index} has no key"))?;
+            let key_value = expand_template_token(key_token)?;
+            if matches!(key_value, ContextValue::Null) {
+                anyhow::bail!("TemplateToken map key at index {index} must not be null");
             }
-        })
-        .collect::<Vec<_>>();
-    ports.sort();
-    ports
-}
-
-fn container_image(value: &Value) -> Option<&str> {
-    if let Some(image) = value.as_str().filter(|image| !image.is_empty()) {
-        return Some(image);
+            let key = context_scalar_string(&key_value).with_context(|| {
+                format!("TemplateToken map key at index {index} must be a scalar")
+            })?;
+            if key.is_empty() {
+                anyhow::bail!("TemplateToken map key at index {index} must be non-empty");
+            }
+            if expanded
+                .iter()
+                .any(|(existing, _)| velnor_model::ordinal_ignore_case_eq(existing, &key))
+            {
+                anyhow::bail!("case-insensitive duplicate TemplateToken map key {key:?}");
+            }
+            let mapped_value = object_member(pair, "value")
+                .with_context(|| format!("TemplateToken map item at index {index} has no value"))
+                .and_then(expand_template_token)?;
+            expanded.push((key, mapped_value));
+        }
+        return Ok(ContextValue::Object {
+            case_sensitive: false,
+            entries: expanded,
+        });
     }
-    value
-        .as_object()
-        .and_then(|object| {
-            object
-                .get("image")
-                .or_else(|| object.get("Image"))
-                .or_else(|| object.get("containerImage"))
-                .or_else(|| object.get("ContainerImage"))
-        })
-        .and_then(Value::as_str)
-        .filter(|image| !image.is_empty())
+    anyhow::bail!("unsupported TemplateToken shape")
 }
 
-fn container_options(value: &Value) -> Option<Vec<String>> {
-    value
-        .as_object()
-        .and_then(|object| {
-            object
-                .get("options")
-                .or_else(|| object.get("Options"))
-                .or_else(|| object.get("createOptions"))
-                .or_else(|| object.get("CreateOptions"))
-        })
-        .and_then(Value::as_str)
-        .map(split_container_options)
+#[derive(Clone, Copy)]
+enum ContainerSchema {
+    Job,
+    Service,
+}
+
+fn validate_container_schema(value: &ContextValue, schema: ContainerSchema) -> anyhow::Result<()> {
+    let ContextValue::Object {
+        entries: object, ..
+    } = value
+    else {
+        if matches!(
+            value,
+            ContextValue::Null
+                | ContextValue::Bool(_)
+                | ContextValue::Number(_)
+                | ContextValue::BigInteger(_)
+                | ContextValue::NonFinite(_)
+                | ContextValue::String(_)
+        ) {
+            return Ok(());
+        }
+        anyhow::bail!("container must be a string-compatible scalar or mapping");
+    };
+
+    for (name, value) in object {
+        match name.as_str() {
+            "image" | "options" => {
+                context_scalar_string(value)
+                    .with_context(|| format!("container {name} must be a scalar string"))?;
+            }
+            "env" => {
+                container_env_value(value)?;
+            }
+            "ports" => {
+                validate_container_ports_sequence(value)?;
+            }
+            // TemplateToken preflight rejects these fields before nested
+            // values are expanded. Keep this guard for typed ContextValue
+            // paths; errors expose only the field name.
+            "volumes" | "credentials" => {
+                anyhow::bail!("container field {name:?} is not supported");
+            }
+            "entrypoint" | "command" if matches!(schema, ContainerSchema::Service) => {
+                // The pinned runner gates these behind its disabled-by-default
+                // ServiceContainerCommand feature. Velnor has no matching
+                // feature switch, so fail instead of silently dropping them.
+                anyhow::bail!("service container key {name:?} is not enabled");
+            }
+            _ => anyhow::bail!("unexpected container key {name:?}"),
+        }
+    }
+    Ok(())
+}
+
+fn validate_container_ports_sequence(value: &ContextValue) -> anyhow::Result<()> {
+    let ContextValue::Array(values) = value else {
+        anyhow::bail!("container ports must be a sequence");
+    };
+    for (index, value) in values.iter().enumerate() {
+        let port = context_scalar_string(value)
+            .with_context(|| format!("container port at index {index} must be a scalar string"))?;
+        if port.is_empty() {
+            anyhow::bail!("container port at index {index} must be non-empty");
+        }
+    }
+    Ok(())
+}
+
+fn context_object_entries(value: &ContextValue) -> Option<&[(String, ContextValue)]> {
+    let ContextValue::Object { entries, .. } = value else {
+        return None;
+    };
+    Some(entries)
+}
+
+fn exact_object_member<'a>(value: &'a ContextValue, name: &str) -> Option<&'a ContextValue> {
+    context_object_entries(value)?
+        .iter()
+        .find(|(candidate, _)| candidate == name)
+        .map(|(_, value)| value)
+}
+
+fn object_member<'a>(object: &'a serde_json::Map<String, Value>, name: &str) -> Option<&'a Value> {
+    object
+        .iter()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value)
+}
+
+/// Reject unsupported service fields from their outer mapping tokens before
+/// recursively expanding service/container values.
+fn reject_unsupported_template_service_fields(value: &Value) -> anyhow::Result<()> {
+    for pair in template_mapping_entries(value).into_iter().flatten() {
+        let Some(pair) = pair.as_object() else {
+            continue;
+        };
+        let Some(container) = object_member(pair, "value") else {
+            continue;
+        };
+        reject_unsupported_template_container_fields(container)?;
+    }
+    Ok(())
+}
+
+/// Reject volumes and credentials by field presence, without expanding or
+/// formatting their payloads. The schema field names are exact strings.
+fn reject_unsupported_template_container_fields(value: &Value) -> anyhow::Result<()> {
+    for pair in template_mapping_entries(value).into_iter().flatten() {
+        let Some(pair) = pair.as_object() else {
+            continue;
+        };
+        let Some(key) = object_member(pair, "key").and_then(template_string_literal) else {
+            continue;
+        };
+        if matches!(key, "volumes" | "credentials") {
+            anyhow::bail!("container field {key:?} is not supported");
+        }
+    }
+    Ok(())
+}
+
+fn template_mapping_entries(value: &Value) -> Option<&[Value]> {
+    let object = value.as_object()?;
+    let Some(Value::Number(token_type)) = object_member(object, "type") else {
+        return None;
+    };
+    if token_type.is_f64() || token_type.as_i64() != Some(2) {
+        return None;
+    }
+    match object_member(object, "map") {
+        Some(Value::Array(entries)) => Some(entries),
+        _ => None,
+    }
+}
+
+fn template_string_literal(value: &Value) -> Option<&str> {
+    match value {
+        Value::String(value) => Some(value),
+        Value::Object(object) => {
+            if let Some(token_type) = object_member(object, "type")
+                && !matches!(token_type, Value::Number(token_type) if !token_type.is_f64() && token_type.as_i64() == Some(0))
+            {
+                return None;
+            }
+            object_member(object, "lit")?.as_str()
+        }
+        _ => None,
+    }
+}
+
+fn container_image(value: &ContextValue) -> anyhow::Result<Option<String>> {
+    let image = if matches!(value, ContextValue::Object { .. }) {
+        exact_object_member(value, "image").context("container mapping is missing image")?
+    } else {
+        value
+    };
+    let image = context_scalar_string(image).context("container image must be a scalar string")?;
+    Ok(normalize_container_image(&image))
+}
+
+/// The pinned runner's PipelineTemplateConverter removes this exact prefix
+/// from job and service container images before creating container specs.
+fn normalize_container_image(image: &str) -> Option<String> {
+    let image = image.strip_prefix("docker://").unwrap_or(image);
+    (!image.is_empty()).then(|| image.to_owned())
+}
+
+fn container_options(value: &ContextValue) -> anyhow::Result<Option<Vec<String>>> {
+    let Some(options) = exact_object_member(value, "options") else {
+        return Ok(None);
+    };
+    let options =
+        context_scalar_string(options).context("container options must be a scalar string")?;
+    Ok(Some(split_container_options(&options)))
 }
 
 fn privileged_container_options_allowed_from_env() -> bool {
@@ -844,50 +1087,25 @@ fn filter_privileged_container_options(
     filtered
 }
 
-/// Docker flags that would impose a CPU/RAM/PID ceiling on the workload.
-/// No HostConfig ceiling may arrive via workflow `container.options` on any
-/// trust path: these are stripped at admission (and again at emission).
-/// `--shm-size` stays allowed: shared-memory sizing is not a CPU/RAM
-/// ceiling, and browsers need it larger than Docker's default. (Accepted
-/// risk, audit F4: unbounded is spec-mandated; see `QUOTA_FLAGS`.)
-const QUOTA_CONTAINER_OPTIONS: [&str; 12] = [
-    "--cpus",
-    "--cpu-period",
-    "--cpu-quota",
-    "--cpu-shares",
-    "--cpuset-cpus",
-    "--cpuset-mems",
-    "-m",
-    "--memory",
-    "--memory-reservation",
-    "--memory-swap",
-    "--memory-swappiness",
-    "--pids-limit",
-];
-
-fn is_quota_container_option(option: &str) -> bool {
-    let name = option.split_once('=').map_or(option, |(name, _)| name);
-    QUOTA_CONTAINER_OPTIONS.contains(&name)
-}
-
 /// Drop quota flags (and their values) from admitted workflow options.
 /// Runs before the trust split so trusted and untrusted lanes strip
-/// identically; every drop is logged, never silent.
+/// identically to emission filtering; every drop is logged, never silent.
 fn strip_quota_container_options(options: Vec<String>) -> Vec<String> {
     let mut stripped = Vec::with_capacity(options.len());
     let mut index = 0;
     while index < options.len() {
         let option = options[index].as_str();
-        if is_quota_container_option(option) {
-            // `--flag=value` carries its value inline; only the bare `--flag`
-            // form consumes the following token.
-            let consumed = if option.contains('=') {
+        if is_quota_flag(option) {
+            // `--flag=value` and `-m<value>` carry values inline; only the
+            // bare quota-flag form consumes the following token.
+            let value_is_attached = option.contains('=') || has_attached_memory_limit_value(option);
+            let consumed = if value_is_attached {
                 option.to_owned()
             } else {
                 option_with_optional_value(&options, index)
             };
             log_dropped_container_option(&consumed, "CPU/RAM/PID ceilings are not admitted");
-            index += if option.contains('=') {
+            index += if value_is_attached {
                 1
             } else {
                 consumed_option_count(&options, index)
@@ -963,43 +1181,29 @@ fn log_dropped_container_option(option: &str, reason: &str) {
     );
 }
 
-fn container_env(value: &Value) -> Vec<(String, String)> {
-    let Some(environment) = value.as_object().and_then(|object| {
-        object
-            .get("environmentVariables")
-            .or_else(|| object.get("EnvironmentVariables"))
-            .or_else(|| object.get("env"))
-            .or_else(|| object.get("Env"))
-    }) else {
-        return Vec::new();
+fn container_env(value: &ContextValue) -> anyhow::Result<Vec<(String, String)>> {
+    let Some(environment) = exact_object_member(value, "env") else {
+        return Ok(Vec::new());
     };
     container_env_value(environment)
 }
 
-fn container_env_value(environment: &Value) -> Vec<(String, String)> {
-    match environment {
-        Value::Object(object) => object
-            .iter()
-            .filter(|(name, _)| !is_docker_control_env(name) && !is_runner_owned_env(name))
-            .map(|(name, value)| (name.clone(), scalar_env_value(value)))
-            .collect(),
-        Value::Array(values) => values
-            .iter()
-            .filter_map(|value| {
-                let object = value.as_object()?;
-                let name = object
-                    .get("name")
-                    .or_else(|| object.get("Name"))
-                    .and_then(Value::as_str)?;
-                if is_docker_control_env(name) || is_runner_owned_env(name) {
-                    return None;
-                }
-                let value = object.get("value").or_else(|| object.get("Value"))?;
-                Some((name.to_string(), scalar_env_value(value)))
-            })
-            .collect(),
-        _ => Vec::new(),
+fn container_env_value(environment: &ContextValue) -> anyhow::Result<Vec<(String, String)>> {
+    let object = context_object_entries(environment).context("container env must be a mapping")?;
+    let mut values = Vec::with_capacity(object.len());
+    for (name, value) in object {
+        if name.is_empty() {
+            anyhow::bail!("container env names must be non-empty strings");
+        }
+        // TemplateEvaluator stringifies scalar values before the runner drops
+        // runner-owned names. Complex values fail StringDefinition validation.
+        let value = context_scalar_string(value)
+            .with_context(|| format!("container env value for {name:?} must be a scalar string"))?;
+        if !is_docker_control_env(name) && !is_runner_owned_env(name) {
+            values.push((name.clone(), value));
+        }
     }
+    Ok(values)
 }
 
 /// Runner-owned env names that repository-controlled container env must not
@@ -1019,14 +1223,102 @@ fn is_docker_control_env(name: &str) -> bool {
         || name.eq_ignore_ascii_case("DOCKER_CONFIG")
 }
 
-fn scalar_env_value(value: &Value) -> String {
+/// Convert a wire scalar literal with the runner's invariant number format.
+fn template_scalar_string(value: &Value) -> Option<String> {
     match value {
-        Value::Null => String::new(),
-        Value::String(value) => value.clone(),
-        Value::Bool(value) => value.to_string(),
-        Value::Number(value) => value.to_string(),
-        _ => String::new(),
+        Value::Null => Some(String::new()),
+        Value::String(value) => Some(value.clone()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Number(value) if value.is_f64() => value.as_f64().map(runner_number_to_string),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Array(_) | Value::Object(_) => None,
     }
+}
+
+/// Match TemplateEvaluator's scalar-to-string conversion for StringDefinition.
+/// Complex values fail; null becomes the empty string.
+fn context_scalar_string(value: &ContextValue) -> Option<String> {
+    match value {
+        ContextValue::Null => Some(String::new()),
+        ContextValue::Bool(value) => Some(value.to_string()),
+        ContextValue::Number(value) if value.is_f64() => {
+            value.as_f64().map(runner_number_to_string)
+        }
+        ContextValue::Number(value) => Some(value.to_string()),
+        ContextValue::BigInteger(value) => Some(value.clone()),
+        ContextValue::NonFinite(NonFinite::NaN) => Some("NaN".to_owned()),
+        ContextValue::NonFinite(NonFinite::PositiveInfinity) => Some("Infinity".to_owned()),
+        ContextValue::NonFinite(NonFinite::NegativeInfinity) => Some("-Infinity".to_owned()),
+        ContextValue::String(value) => Some(value.clone()),
+        ContextValue::Undefined
+        | ContextValue::Array(_)
+        | ContextValue::Constructor { .. }
+        | ContextValue::Object { .. } => None,
+    }
+}
+
+/// Match `NumberToken.ToString()`'s `G15` invariant formatting.
+fn runner_number_to_string(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_owned();
+    }
+    if value == f64::INFINITY {
+        return "Infinity".to_owned();
+    }
+    if value == f64::NEG_INFINITY {
+        return "-Infinity".to_owned();
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() {
+            "-0".to_owned()
+        } else {
+            "0".to_owned()
+        };
+    }
+
+    let sign = if value.is_sign_negative() { "-" } else { "" };
+    let scientific = format!("{:.14e}", value.abs());
+    let Some((mantissa, exponent)) = scientific.split_once('e') else {
+        return value.to_string();
+    };
+    let Ok(exponent) = exponent.parse::<i32>() else {
+        return value.to_string();
+    };
+    let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+
+    if !(-4..15).contains(&exponent) {
+        let exponent_sign = if exponent < 0 { '-' } else { '+' };
+        return format!("{sign}{mantissa}E{exponent_sign}{:02}", exponent.abs());
+    }
+
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{whole}{fraction}");
+    let decimal_index = exponent + 1;
+    let mut result = if decimal_index <= 0 {
+        format!(
+            "0.{}{}",
+            "0".repeat(decimal_index.unsigned_abs() as usize),
+            digits
+        )
+    } else if decimal_index as usize >= digits.len() {
+        format!(
+            "{}{}",
+            digits,
+            "0".repeat(decimal_index as usize - digits.len())
+        )
+    } else {
+        let decimal_index = decimal_index as usize;
+        format!("{}.{}", &digits[..decimal_index], &digits[decimal_index..])
+    };
+    if result.contains('.') {
+        while result.ends_with('0') {
+            result.pop();
+        }
+        if result.ends_with('.') {
+            result.pop();
+        }
+    }
+    format!("{sign}{result}")
 }
 
 fn host_docker_cli_path() -> Option<PathBuf> {
@@ -1087,6 +1379,8 @@ fn sanitize_path_segment(value: &str) -> String {
 )]
 mod tests {
     use super::*;
+    use crate::job_message::ContainerResource;
+    use crate::job_message::WireAgentJobRequestMessage;
 
     #[test]
     fn packaged_workflow_cli_is_omitted_when_apt_file_is_missing() {
@@ -1119,6 +1413,82 @@ mod tests {
         .unwrap()
     }
 
+    fn template_string_token(value: &str) -> Value {
+        serde_json::json!({ "type": 0, "lit": value })
+    }
+
+    fn template_number_token(value: Value) -> Value {
+        serde_json::json!({ "type": 6, "num": value })
+    }
+
+    fn template_sequence_token(values: Vec<Value>) -> Value {
+        serde_json::json!({ "type": 1, "seq": values })
+    }
+
+    fn template_map_token(entries: Vec<(Value, Value)>) -> Value {
+        serde_json::json!({
+            "type": 2,
+            "map": entries
+                .into_iter()
+                .map(|(key, value)| serde_json::json!({ "key": key, "value": value }))
+                .collect::<Vec<_>>()
+        })
+    }
+
+    fn context_value(value: Value) -> ContextValue {
+        ContextValue::from_json(value).unwrap()
+    }
+
+    fn valid_service_container_token() -> Value {
+        template_map_token(vec![(
+            template_string_token("image"),
+            template_string_token("alpine:3.20"),
+        )])
+    }
+
+    fn test_container_paths() -> GitHubJobContainerPaths {
+        GitHubJobContainerPaths {
+            workspace_host: PathBuf::from("/tmp/velnor-test-workspace"),
+            temp_host: PathBuf::from("/tmp/velnor-test-temp"),
+            home_host: PathBuf::from("/tmp/velnor-test-home"),
+            actions_host: PathBuf::from("/tmp/velnor-test-actions"),
+            tools_host: PathBuf::from("/tmp/velnor-test-tools"),
+            docker_host_work_dir: None,
+            execution_backend: velnor_model::ExecutionBackendKind::Docker,
+            slot_store_key: None,
+        }
+    }
+
+    #[test]
+    fn github_mask_values_include_endpoint_authorization_values() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "RunnerJobRequest",
+            "plan": { "planId": "plan-1" },
+            "timeline": { "id": "timeline-1" },
+            "jobId": "job-1",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "authorization": {
+                        "parameters": {
+                            "AccessToken": "endpoint-only-secret",
+                            "Empty": "",
+                            "Null": null
+                        }
+                    }
+                }]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            github_mask_values(&job),
+            vec!["endpoint-only-secret".to_string()]
+        );
+    }
+
     #[test]
     fn github_adapter_builds_normalized_plan_metadata() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
@@ -1141,7 +1511,7 @@ mod tests {
                 "endpoints": [{
                     "name": "SystemVssConnection",
                     "authorization": {
-                        "parameters": { "AccessToken": "job-token" }
+                        "parameters": { "aCcEsStOkEn": "job-token" }
                     }
                 }]
             },
@@ -1154,6 +1524,7 @@ mod tests {
         let root = std::env::temp_dir().join("velnor-github-plan-test");
         let container = JobContainerSpec {
             name: "velnor-job-job-1".into(),
+            completion_generation: uuid::Uuid::new_v4(),
             image: "ubuntu:24.04".into(),
             network: "velnor-net-job-1".into(),
             workspace_host: root.join("workspace"),
@@ -1174,6 +1545,10 @@ mod tests {
             verify_bind_mounts: true,
             daemon_id: "test-daemon".into(),
             repository: Some("ChainArgos/java-monorepo".into()),
+            repository_store_key: crate::store_catalog::repository_store_key(
+                "https://github.com",
+                "42",
+            ),
             store_trust_scope: "trusted".to_owned(),
             mbx_store_host: None,
             sccache_store_host: None,
@@ -1186,7 +1561,8 @@ mod tests {
             Vec::new(),
             vec![("GITHUB_ACTIONS".into(), "true".into())],
             Vec::new(),
-        );
+        )
+        .unwrap();
 
         assert_eq!(plan.identity.plan_id, "plan-1");
         assert_eq!(
@@ -1313,17 +1689,21 @@ mod tests {
             "jobId": "job-1",
             "jobDisplayName": "Rust",
             "requestId": 42,
-            "jobContainer": { "image": "ubuntu:24.04", "options": "--privileged" },
-            "jobServiceContainers": {
-                "redis": {
-                    "image": "redis:7",
-                    "ports": ["6379:6379"],
-                    "options": "--privileged"
-                }
-            },
+            "jobContainer": { "type": 2, "map": [
+                { "key": { "type": 0, "lit": "image" }, "value": { "type": 0, "lit": "ubuntu:24.04" } },
+                { "key": { "type": 0, "lit": "options" }, "value": { "type": 0, "lit": "--privileged" } }
+            ] },
+            "jobServiceContainers": { "type": 2, "map": [
+                { "key": { "type": 0, "lit": "redis" }, "value": { "type": 2, "map": [
+                    { "key": { "type": 0, "lit": "image" }, "value": { "type": 0, "lit": "redis:7" } },
+                    { "key": { "type": 0, "lit": "ports" }, "value": { "type": 1, "seq": [{ "type": 0, "lit": "6379:6379" }] } },
+                    { "key": { "type": 0, "lit": "options" }, "value": { "type": 0, "lit": "--privileged" } }
+                ] } }
+            ] },
             "variables": {
                 "github.workflow": { "value": "CI", "isSecret": false },
                 "github.repository": { "value": "ChainArgos/java-monorepo", "isSecret": false },
+                "github.server_url": { "value": "https://github.com", "isSecret": false },
                 "github.repository_id": { "value": "42", "isSecret": false }
             }
         }))
@@ -1349,6 +1729,8 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(spec.repository.as_deref(), Some("ChainArgos/java-monorepo"));
+
         // The socket gate.
         assert!(!github_trust_scope_allows_host_docker(resolved.as_str()));
         assert!(!spec.mount_docker_socket);
@@ -1372,37 +1754,22 @@ mod tests {
         // the filesystem key for `public` now — the compiler stores used to
         // collapse to `untrusted` here while the leases pinned `public`. None
         // may ever carry the key for `trusted`.
+        let repository_key =
+            crate::store_catalog::repository_store_key("https://github.com", "42").unwrap();
         let scoped_stores = [
-            crate::container::cargo_executable_store_host(
-                temp,
-                resolved.as_str(),
-                "ChainArgos/java-monorepo",
-            ),
-            crate::container::mise_executable_store_host(
-                temp,
-                resolved.as_str(),
-                "ChainArgos/java-monorepo",
-            ),
-            crate::container::mise_binary_store_host(
-                temp,
-                resolved.as_str(),
-                "ChainArgos/java-monorepo",
-            ),
+            crate::container::cargo_executable_store_host(temp, resolved.as_str(), &repository_key)
+                .unwrap(),
+            crate::container::mise_executable_store_host(temp, resolved.as_str(), &repository_key)
+                .unwrap(),
+            crate::container::mise_binary_store_host(temp, resolved.as_str(), &repository_key)
+                .unwrap(),
             crate::container::playwright_browser_store_host(
                 temp,
                 resolved.as_str(),
-                "ChainArgos/java-monorepo",
-            ),
-            // The persistent actions cache, exactly as `executor.rs` composes it.
-            crate::storage::append_legacy_trust(
-                crate::storage::cache_class_path(
-                    temp,
-                    resolved.as_str(),
-                    "caches",
-                    "_velnor_caches",
-                ),
-                resolved.as_str(),
-            ),
+                &repository_key,
+            )
+            .unwrap(),
+            crate::storage::cache_class_path(resolved.as_str(), "caches").unwrap(),
             spec.mbx_store_host.clone().expect("mbx store"),
         ];
 
@@ -1520,15 +1887,16 @@ mod tests {
         let temp = work.join("slot-1").join("job-1").join("temp");
         std::fs::create_dir_all(&temp).unwrap();
 
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let job = AgentJobRequestMessage::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
             "jobDisplayName": "Custom pool scope test",
             "requestId": 1,
             "variables": {
                 "github.repository": { "value": "octo/base" },
+                "github.server_url": { "value": "https://github.com" },
                 "github.repository_id": { "value": "42" }
             }
         }))
@@ -1565,27 +1933,29 @@ mod tests {
             let mount_root = crate::container::daemon_store_root(&temp);
             assert_eq!(lease_root, mount_root, "pool={pool}");
 
-            let repository_key = crate::container::sanitize_store_key("octo/base");
+            let repository_key =
+                crate::store_catalog::repository_store_key("https://github.com", "42").unwrap();
             let trust_key = crate::trust_scope::filesystem_key(admitted);
             let untrusted_key = crate::trust_scope::filesystem_key(crate::trust_scope::FAIL_CLOSED);
             // Lease side, exactly as `runner.rs` composes it; mount side from
             // the spec's scope, exactly as `container.rs` composes it.
             for (lease, mount) in [
                 (
-                    crate::container::cargo_store_host(&lease_root, admitted),
+                    crate::container::cargo_store_host(&lease_root, admitted).unwrap(),
                     crate::container::cargo_store_host(
                         &mount_root,
                         spec.store_trust_scope.as_str(),
-                    ),
+                    )
+                    .unwrap(),
                 ),
                 (
-                    crate::container::mise_store_host(&lease_root, admitted),
-                    crate::container::mise_store_host(&mount_root, spec.store_trust_scope.as_str()),
+                    crate::container::mise_store_host(&lease_root, admitted).unwrap(),
+                    crate::container::mise_store_host(&mount_root, spec.store_trust_scope.as_str())
+                        .unwrap(),
                 ),
             ] {
-                // In the legacy layout these roots carry no trust segment
-                // (trust namespaces below them); the one-spelling proof here
-                // is that both sides resolve the identical root.
+                // Trust is encoded in the selected class root; the one-spelling
+                // proof here is that lease and mount resolve the identical root.
                 assert_eq!(lease, mount, "pool={pool}");
             }
             for (lease, mount) in [
@@ -1594,39 +1964,45 @@ mod tests {
                         &lease_root,
                         admitted,
                         &repository_key,
-                    ),
+                    )
+                    .unwrap(),
                     crate::container::cargo_executable_store_host(
                         &mount_root,
                         spec.store_trust_scope.as_str(),
                         &repository_key,
-                    ),
+                    )
+                    .unwrap(),
                 ),
                 (
                     crate::container::mise_executable_store_host(
                         &lease_root,
                         admitted,
                         &repository_key,
-                    ),
+                    )
+                    .unwrap(),
                     crate::container::mise_executable_store_host(
                         &mount_root,
                         spec.store_trust_scope.as_str(),
                         &repository_key,
-                    ),
+                    )
+                    .unwrap(),
                 ),
                 (
                     crate::container::mise_binary_store_host(
                         &lease_root,
                         admitted,
                         &repository_key,
-                    ),
+                    )
+                    .unwrap(),
                     crate::container::mise_binary_store_host(
                         &mount_root,
                         spec.store_trust_scope.as_str(),
                         &repository_key,
-                    ),
+                    )
+                    .unwrap(),
                 ),
                 (
-                    github_mbx_store_host(&job, &lease_root, admitted),
+                    github_mbx_store_host(&job, &lease_root, admitted).unwrap(),
                     spec.mbx_store_host.clone().expect("mbx store"),
                 ),
             ] {
@@ -1651,23 +2027,17 @@ mod tests {
             // namespace on both sides.
             let layout = crate::storage::StorageLayout::from_prefix(&root);
             let lease_catalog =
-                crate::store_catalog::StoreCatalog::for_work_root_with_layout(&work, Some(&layout));
+                crate::store_catalog::StoreCatalog::for_work_root_with_layout(&work, &layout);
             for (lease, mount) in [
                 (
+                    crate::storage::cache_class_path_with_layout(admitted, "cargo", Some(&layout))
+                        .unwrap(),
                     crate::storage::cache_class_path_with_layout(
-                        &lease_root,
-                        admitted,
-                        "cargo",
-                        "_velnor_cargo",
-                        Some(&layout),
-                    ),
-                    crate::storage::cache_class_path_with_layout(
-                        &mount_root,
                         spec.store_trust_scope.as_str(),
                         "cargo",
-                        "_velnor_cargo",
                         Some(&layout),
-                    ),
+                    )
+                    .unwrap(),
                 ),
                 (
                     lease_catalog.mbx(admitted),
@@ -1703,28 +2073,48 @@ mod tests {
                 "jobDisplayName": "Rust",
                 "requestId": 1,
                 "variables": {
+                    "github.server_url": { "value": "https://github.com" },
                     "github.repository_id": { "value": repository_id.to_string() }
                 }
             }))
             .unwrap()
         };
         let temp = std::path::Path::new("/var/lib/velnor/work/slot-1/job/temp");
+        let layout = crate::storage::StorageLayout::from_prefix(std::path::Path::new("/storage"));
 
+        let repo_41 =
+            crate::store_catalog::repository_store_key("https://github.com", "41").unwrap();
+        let repo_42 =
+            crate::store_catalog::repository_store_key("https://github.com", "42").unwrap();
         assert_eq!(
-            github_mbx_store_host(&job(41), temp, "trusted"),
-            std::path::Path::new("/var/lib/velnor/work/_velnor_mbx__trust_scope_v1")
-                .join(crate::trust_scope::filesystem_key("trusted"))
-                .join("41")
+            github_rust_store_host_with_layout(&job(41), temp, "trusted", "mbx", Some(&layout))
+                .unwrap(),
+            layout.cache_class("trusted", "compiler/mbx").join(&repo_41)
         );
         assert_eq!(
-            crate::sccache_compat::store_host(&job(42), temp, "trusted"),
-            std::path::Path::new("/var/lib/velnor/work/_velnor_sccache__trust_scope_v1")
-                .join(crate::trust_scope::filesystem_key("trusted"))
-                .join("42")
+            github_rust_store_host_with_layout(
+                &job(42),
+                temp,
+                "trusted",
+                "sccache",
+                Some(&layout),
+            )
+            .unwrap(),
+            layout
+                .cache_class("trusted", "compiler/sccache")
+                .join(&repo_42)
         );
         assert_ne!(
-            crate::sccache_compat::store_host(&job(41), temp, "trusted"),
-            crate::sccache_compat::store_host(&job(42), temp, "trusted")
+            github_rust_store_host_with_layout(&job(41), temp, "trusted", "mbx", Some(&layout))
+                .unwrap(),
+            github_rust_store_host_with_layout(
+                &job(42),
+                temp,
+                "trusted",
+                "sccache",
+                Some(&layout),
+            )
+            .unwrap()
         );
     }
 
@@ -1734,11 +2124,11 @@ mod tests {
         let temp = std::path::Path::new("/velnor/work/job/temp");
 
         assert_eq!(
-            github_mbx_store_host(&job, temp, "trusted"),
+            github_mbx_store_host(&job, temp, "trusted").unwrap(),
             temp.join("_velnor/ephemeral/mbx/job")
         );
         assert_eq!(
-            crate::sccache_compat::store_host(&job, temp, "trusted"),
+            crate::sccache_compat::store_host(&job, temp, "trusted").unwrap(),
             temp.join("_velnor/ephemeral/sccache/job")
         );
     }
@@ -1884,9 +2274,19 @@ mod tests {
     #[test]
     fn docker_preserves_compiler_cache_environment() {
         let mut job = microvm_job();
-        job.job_container = Some(serde_json::json!({
-            "environmentVariables": { "RUSTC_WRAPPER": "sccache" }
-        }));
+        job.job_container = Some(template_map_token(vec![
+            (
+                template_string_token("image"),
+                template_string_token("ubuntu:24.04"),
+            ),
+            (
+                template_string_token("env"),
+                template_map_token(vec![(
+                    template_string_token("RUSTC_WRAPPER"),
+                    template_string_token("sccache"),
+                )]),
+            ),
+        ]));
 
         let spec = github_job_container_spec(
             &job,
@@ -1915,49 +2315,426 @@ mod tests {
 
     #[test]
     fn job_container_image_prefers_explicit_job_container() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let job: AgentJobRequestMessage = AgentJobRequestMessage::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
             "jobDisplayName": "Container",
             "requestId": 1,
-            "jobContainer": {
-                "image": "ghcr.io/acme/job:latest"
-            },
+            "jobContainer": { "type": 2, "map": [
+                { "key": { "type": 0, "lit": "image" }, "value": { "type": 0, "lit": "ghcr.io/acme/job:latest" } }
+            ] },
             "resources": {
                 "containers": [{
                     "alias": "__job",
-                    "image": "ubuntu:24.04"
-                }]
-            }
-        }))
-        .unwrap();
-
-        assert_eq!(job_container_image(&job), Some("ghcr.io/acme/job:latest"));
-    }
-
-    #[test]
-    fn job_container_image_uses_job_resource_container() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
-            "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
-            "jobDisplayName": "Container",
-            "requestId": 1,
-            "resources": {
-                "containers": [{
-                    "alias": "__job",
-                    "image": "ghcr.io/acme/resource:latest"
+                    "properties": { "image": "ubuntu:24.04" }
                 }]
             }
         }))
         .unwrap();
 
         assert_eq!(
-            job_container_image(&job),
-            Some("ghcr.io/acme/resource:latest")
+            job_container_image(&job).unwrap().as_deref(),
+            Some("ghcr.io/acme/job:latest")
+        );
+    }
+
+    #[test]
+    fn job_container_image_does_not_enumerate_resources_without_a_string_token() {
+        let job = AgentJobRequestMessage::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "jobDisplayName": "Container",
+            "requestId": 1,
+            "resources": {
+                "containers": [null, {
+                    "alias": "__job",
+                    "properties": { "image": "ghcr.io/acme/resource:latest" }
+                }, {
+                    "alias": "job",
+                    "properties": { "image": "ghcr.io/acme/duplicate:latest" }
+                }]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(job_container_image(&job).unwrap(), None);
+
+        for job_container in [
+            serde_json::Value::Null,
+            serde_json::json!({"options": "--init"}),
+        ] {
+            let job = AgentJobRequestMessage::from_value(serde_json::json!({
+                "messageType": "PipelineAgentJobRequest",
+                "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+                "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+                "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                "jobDisplayName": "Container",
+                "requestId": 1,
+                "jobContainer": job_container,
+                "resources": {
+                    "containers": [null, {
+                        "alias": "__job",
+                        "properties": { "image": "ghcr.io/acme/resource:latest" }
+                    }, {
+                        "alias": "job",
+                        "properties": { "image": "ghcr.io/acme/duplicate:latest" }
+                    }]
+                }
+            }))
+            .unwrap();
+
+            assert_eq!(job_container_image(&job).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn direct_typed_job_container_strips_docker_uri_prefix() {
+        let job = AgentJobRequestMessage::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "jobDisplayName": "Container",
+            "requestId": 1,
+            "jobContainer": {
+                "type": 2,
+                "map": [{
+                    "key": { "type": 0, "lit": "image" },
+                    "value": { "type": 0, "lit": "docker://node:22" }
+                }]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            job_container_image(&job).unwrap().as_deref(),
+            Some("node:22")
+        );
+    }
+
+    #[test]
+    fn scalar_job_and_service_container_values_stringify_and_null_services_skip() {
+        let job_for = |container| AgentJobRequestMessage {
+            job_container: Some(container),
+            ..AgentJobRequestMessage::default()
+        };
+        assert_eq!(
+            job_container_image(&job_for(serde_json::json!({ "type": 5, "bool": true })))
+                .unwrap()
+                .as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            job_container_image(&job_for(Value::Number(
+                serde_json::Number::from_f64(42.0).unwrap(),
+            )))
+            .unwrap()
+            .as_deref(),
+            Some("42")
+        );
+        assert_eq!(
+            job_container_image(&job_for(serde_json::json!({ "type": 7 }))).unwrap(),
+            None
+        );
+
+        let job = AgentJobRequestMessage {
+            job_service_containers: Some(template_map_token(vec![
+                (
+                    serde_json::json!({ "type": 5, "bool": true }),
+                    serde_json::json!({ "type": 5, "bool": true }),
+                ),
+                (
+                    template_string_token("numeric"),
+                    Value::Number(serde_json::Number::from_f64(42.0).unwrap()),
+                ),
+                (
+                    template_string_token("null"),
+                    serde_json::json!({ "type": 7 }),
+                ),
+                (
+                    template_string_token("null-literal"),
+                    serde_json::json!({ "type": 0, "lit": null }),
+                ),
+            ])),
+            ..AgentJobRequestMessage::default()
+        };
+        let services = service_containers(&job, "trusted").unwrap();
+        assert_eq!(services.len(), 2);
+        assert_eq!(services[0].network_alias, "true");
+        assert_eq!(services[0].image, "true");
+        assert_eq!(services[1].network_alias, "numeric");
+        assert_eq!(services[1].image, "42");
+    }
+
+    #[test]
+    fn resolved_job_container_uses_resource_properties_and_is_not_a_service() {
+        let job = AgentJobRequestMessage::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "jobDisplayName": "Container",
+            "requestId": 1,
+            "jobContainer": "BUILD",
+            "resources": {
+                "containers": [{
+                    "alias": "build",
+                    "properties": {
+                        "image": "docker://node:22",
+                        "env": { "NODE_ENV": "test" },
+                        "options": "--init"
+                    }
+                }, {
+                    "alias": "db",
+                    "properties": { "image": "docker://postgres:16" }
+                }]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            job_container_image(&job).unwrap().as_deref(),
+            Some("node:22")
+        );
+        assert_eq!(
+            job_container_env(&job).unwrap(),
+            vec![("NODE_ENV".to_string(), "test".to_string())]
+        );
+        assert_eq!(
+            job_container_options(&job, "trusted").unwrap(),
+            vec!["--init"]
+        );
+
+        let services = service_containers(&job, "trusted").unwrap();
+        assert!(
+            services.is_empty(),
+            "an unrelated container resource is not a service without JobServiceContainers or JobSidecarContainers"
+        );
+    }
+
+    #[test]
+    fn service_images_require_a_field_but_skip_empty_values_after_prefix_removal() {
+        let string_token = |value: &str| serde_json::json!({ "type": 0, "lit": value });
+        let mapping_token = |entries: Vec<(&str, Value)>| {
+            serde_json::json!({
+                "type": 2,
+                "map": entries
+                    .into_iter()
+                    .map(|(name, value)| serde_json::json!({
+                        "key": string_token(name),
+                        "value": value
+                    }))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let missing_image = AgentJobRequestMessage {
+            job_service_containers: Some(mapping_token(vec![(
+                "missing-image",
+                mapping_token(Vec::new()),
+            )])),
+            ..AgentJobRequestMessage::default()
+        };
+        assert!(service_containers(&missing_image, "trusted").is_err());
+
+        let empty_images = AgentJobRequestMessage {
+            job_service_containers: Some(mapping_token(vec![
+                (
+                    "empty-image",
+                    mapping_token(vec![("image", string_token(""))]),
+                ),
+                (
+                    "empty-docker-image",
+                    mapping_token(vec![("image", string_token("docker://"))]),
+                ),
+            ])),
+            ..AgentJobRequestMessage::default()
+        };
+        assert!(service_containers(&empty_images, "trusted")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn malformed_container_resource_properties_fail_reads() {
+        let value = serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "jobDisplayName": "Container",
+            "requestId": 1,
+            "jobSidecarContainers": { "postgres": "postgres" },
+            "resources": {
+                "containers": [{
+                    "alias": "postgres",
+                    "properties": {
+                        "image": "postgres:16",
+                        "env": { "POSTGRES_PASSWORD": { "nested": true } }
+                    }
+                }]
+            }
+        });
+
+        assert!(
+            WireAgentJobRequestMessage::validate_deserialization_callback_from_value(&value)
+                .is_err(),
+            "the acquisition callback must reject malformed properties on a selected sidecar"
+        );
+        assert!(
+            AgentJobRequestMessage::from_value(value).is_err(),
+            "full message deserialization must reject malformed selected-sidecar properties"
+        );
+    }
+
+    #[test]
+    fn malformed_unselected_container_resource_properties_are_ignored() {
+        let value = serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "jobDisplayName": "Container",
+            "requestId": 1,
+            "jobContainer": "build",
+            "resources": {
+                "containers": [{
+                "alias": "build",
+                "properties": {
+                    "image": "docker://node:22"
+                }
+                }, {
+                    "alias": "postgres",
+                    "properties": {
+                        "image": "postgres:16",
+                        "env": { "POSTGRES_PASSWORD": { "nested": true } }
+                    }
+                }]
+            }
+        });
+
+        assert!(
+            WireAgentJobRequestMessage::validate_deserialization_callback_from_value(&value)
+                .is_ok(),
+            "the acquisition callback must ignore malformed properties on an unselected resource"
+        );
+        let job = AgentJobRequestMessage::from_value(value).unwrap();
+        assert_eq!(
+            job_container_image(&job).unwrap().as_deref(),
+            Some("node:22")
+        );
+        assert!(service_containers(&job, "trusted").unwrap().is_empty());
+    }
+
+    #[test]
+    fn service_schema_string_fields_stringify_scalar_tokens() {
+        let string_token = |value: &str| serde_json::json!({ "type": 0, "lit": value });
+        let job = AgentJobRequestMessage::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "jobDisplayName": "Container",
+            "requestId": 1,
+            "jobServiceContainers": {
+                "type": 2,
+                "map": [
+                    {
+                        "key": string_token("boolean-fields"),
+                        "value": {
+                            "type": 2,
+                            "map": [
+                                { "key": string_token("image"), "value": { "type": 5, "bool": true } },
+                                { "key": string_token("options"), "value": { "type": 6, "num": 23 } },
+                                { "key": string_token("env"), "value": {
+                                    "type": 2,
+                                    "map": [{ "key": string_token("EMPTY_ENV"), "value": { "type": 7 } }]
+                                } }
+                            ]
+                        }
+                    },
+                    {
+                        "key": string_token("numeric-fields"),
+                        "value": {
+                            "type": 2,
+                            "map": [
+                                { "key": string_token("image"), "value": { "type": 6, "num": 24 } },
+                                { "key": string_token("options"), "value": { "type": 5, "bool": false } }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+        let services = service_containers(&job, "trusted").unwrap();
+        let boolean_fields = services
+            .iter()
+            .find(|service| service.network_alias == "boolean-fields")
+            .unwrap();
+        assert_eq!(boolean_fields.image, "true");
+        assert_eq!(boolean_fields.options, vec!["23"]);
+        assert_eq!(
+            boolean_fields.env,
+            vec![("EMPTY_ENV".to_owned(), String::new())]
+        );
+        let numeric_fields = services
+            .iter()
+            .find(|service| service.network_alias == "numeric-fields")
+            .unwrap();
+        assert_eq!(numeric_fields.image, "24");
+        assert_eq!(numeric_fields.options, vec!["false"]);
+
+        for invalid_value in [
+            serde_json::json!({ "type": 1, "seq": [] }),
+            template_map_token(Vec::new()),
+        ] {
+            let job = AgentJobRequestMessage {
+                job_service_containers: Some(template_map_token(vec![(
+                    template_string_token("postgres"),
+                    template_map_token(vec![
+                        (
+                            template_string_token("image"),
+                            template_string_token("postgres:16"),
+                        ),
+                        (template_string_token("options"), invalid_value),
+                    ]),
+                )])),
+                ..AgentJobRequestMessage::default()
+            };
+            assert!(service_containers(&job, "trusted").is_err());
+        }
+    }
+
+    #[test]
+    fn selected_legacy_service_with_null_environment_value_uses_empty_string() {
+        let job = AgentJobRequestMessage::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "jobDisplayName": "Container",
+            "requestId": 1,
+            "jobSidecarContainers": { "postgres": "postgres" },
+            "resources": {
+                "containers": [{
+                    "alias": "postgres",
+                    "properties": {
+                        "image": "postgres:16",
+                        "env": { "POSTGRES_PASSWORD": null }
+                    }
+                }]
+            }
+        }))
+        .unwrap();
+        let services = service_containers(&job, "trusted").unwrap();
+        assert_eq!(services.len(), 1);
+        assert_eq!(
+            services[0].env,
+            vec![("POSTGRES_PASSWORD".to_string(), String::new())]
         );
     }
 
@@ -2012,18 +2789,18 @@ mod tests {
             "GITHUB_SHA": "evil",
         });
         assert_eq!(
-            container_env_value(&object),
+            container_env_value(&context_value(object)).unwrap(),
             vec![(
                 "NODE_OPTIONS".to_string(),
                 "--max-old-space-size=4096".to_string()
             )]
         );
-        let array = serde_json::json!([
-            { "name": "RUST_LOG", "value": "debug" },
-            { "name": "GITHUB_REF", "value": "refs/tags/v9.9.9" },
-        ]);
+        let map = serde_json::json!({
+            "RUST_LOG": "debug",
+            "GITHUB_REF": "refs/tags/v9.9.9"
+        });
         assert_eq!(
-            container_env_value(&array),
+            container_env_value(&context_value(map)).unwrap(),
             vec![("RUST_LOG".to_string(), "debug".to_string())]
         );
         // Belt and suspenders at the advertising layer: nothing GITHUB_*-
@@ -2053,45 +2830,51 @@ mod tests {
     }
 
     #[test]
-    fn job_container_env_reads_object_and_array_shapes() {
-        let object_job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
-            "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
-            "jobDisplayName": "Container",
-            "requestId": 1,
-            "jobContainer": {
-                "environmentVariables": {
-                    "NODE_OPTIONS": "--max-old-space-size=4096",
-                    "CACHE_ENABLED": true,
-                    "FETCH_DEPTH": 0,
-                    "EMPTY_VALUE": null,
-                    "DOCKER_HOST": "tcp://attacker.example:2376"
-                }
-            }
-        }))
-        .unwrap();
-        let array_job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
-            "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
-            "jobDisplayName": "Container",
-            "requestId": 1,
-            "jobContainer": {
-                "env": [
-                    { "name": "RUST_LOG", "value": "debug" },
-                    { "name": "RETRY_COUNT", "value": 3 },
-                    { "name": "STRICT_MODE", "value": false },
-                    { "name": "DOCKER_CONTEXT", "value": "attacker" }
-                ]
-            }
-        }))
-        .unwrap();
+    fn job_container_env_reads_mappings_and_rejects_sequences() {
+        let object_job = AgentJobRequestMessage {
+            job_container: Some(template_map_token(vec![
+                (
+                    template_string_token("image"),
+                    template_string_token("ubuntu:24.04"),
+                ),
+                (
+                    template_string_token("env"),
+                    template_map_token(vec![
+                        (
+                            template_string_token("NODE_OPTIONS"),
+                            template_string_token("--max-old-space-size=4096"),
+                        ),
+                        (
+                            template_string_token("CACHE_ENABLED"),
+                            serde_json::json!(true),
+                        ),
+                        (template_string_token("FETCH_DEPTH"), serde_json::json!(0)),
+                        (template_string_token("EMPTY_VALUE"), Value::Null),
+                        (
+                            template_string_token("DOCKER_HOST"),
+                            template_string_token("tcp://attacker.example:2376"),
+                        ),
+                    ]),
+                ),
+            ])),
+            ..AgentJobRequestMessage::default()
+        };
+        let array_job = AgentJobRequestMessage {
+            job_container: Some(template_map_token(vec![
+                (
+                    template_string_token("image"),
+                    template_string_token("ubuntu:24.04"),
+                ),
+                (
+                    template_string_token("env"),
+                    template_sequence_token(vec![template_string_token("invalid")]),
+                ),
+            ])),
+            ..AgentJobRequestMessage::default()
+        };
 
         assert_eq!(
-            job_container_env(&object_job),
+            job_container_env(&object_job).unwrap(),
             vec![
                 ("CACHE_ENABLED".into(), "true".into()),
                 ("EMPTY_VALUE".into(), "".into()),
@@ -2099,36 +2882,595 @@ mod tests {
                 ("NODE_OPTIONS".into(), "--max-old-space-size=4096".into()),
             ]
         );
+        assert!(job_container_env(&array_job).is_err());
+
+        let alias_job = AgentJobRequestMessage {
+            job_container: Some(template_map_token(vec![
+                (
+                    template_string_token("image"),
+                    template_string_token("ubuntu:24.04"),
+                ),
+                (
+                    template_string_token("environmentVariables"),
+                    template_map_token(vec![(
+                        template_string_token("NODE_OPTIONS"),
+                        template_string_token("--max-old-space-size=4096"),
+                    )]),
+                ),
+            ])),
+            ..AgentJobRequestMessage::default()
+        };
+        assert!(job_container_env(&alias_job).is_err());
+    }
+
+    #[test]
+    fn container_env_stringifies_scalars_and_rejects_complex_values() {
         assert_eq!(
-            job_container_env(&array_job),
+            container_env_value(&context_value(serde_json::json!({
+                "STRING": "value",
+                "BOOLEAN": false,
+                "NUMBER": 0,
+                "NULL": null
+            })))
+            .unwrap(),
             vec![
-                ("RUST_LOG".into(), "debug".into()),
-                ("RETRY_COUNT".into(), "3".into()),
-                ("STRICT_MODE".into(), "false".into()),
+                ("BOOLEAN".to_string(), "false".to_string()),
+                ("NULL".to_string(), String::new()),
+                ("NUMBER".to_string(), "0".to_string()),
+                ("STRING".to_string(), "value".to_string())
+            ]
+        );
+        assert!(container_env_value(&context_value(serde_json::json!("scalar"))).is_err());
+        assert!(container_env_value(&context_value(serde_json::json!(["sequence"]))).is_err());
+        assert!(container_env_value(&context_value(serde_json::json!({
+            "NESTED": { "value": true }
+        })))
+        .is_err());
+        assert!(container_env(&context_value(serde_json::json!({ "env": "scalar" }))).is_err());
+        assert!(container_env(&context_value(serde_json::json!({
+            "env": { "NESTED": { "value": true } }
+        })))
+        .is_err());
+
+        let big_integer = ContextValue::object(vec![(
+            "BIG_INTEGER".to_owned(),
+            ContextValue::big_integer("123456789012345678901234567890").unwrap(),
+        )])
+        .unwrap();
+        assert_eq!(
+            container_env_value(&big_integer).unwrap(),
+            vec![(
+                "BIG_INTEGER".to_owned(),
+                "123456789012345678901234567890".to_owned()
+            )]
+        );
+
+        let raw_integer = ContextValue::object(vec![(
+            "RAW_INTEGER".to_owned(),
+            ContextValue::Number(serde_json::Number::from(9_007_199_254_740_993_u64)),
+        )])
+        .unwrap();
+        assert_eq!(
+            container_env_value(&raw_integer).unwrap(),
+            vec![("RAW_INTEGER".to_owned(), "9007199254740993".to_owned())]
+        );
+    }
+
+    #[test]
+    fn container_scalar_projections_reject_undefined_and_constructor_tokens() {
+        for value in [
+            ContextValue::Undefined,
+            ContextValue::Constructor {
+                name: "Date".to_owned(),
+                arguments: vec![ContextValue::String("2024-01-01".to_owned())],
+            },
+        ] {
+            assert!(context_scalar_string(&value).is_none());
+            assert!(container_image(&value).is_err());
+
+            let options =
+                ContextValue::object(vec![("options".to_owned(), value.clone())]).unwrap();
+            assert!(container_options(&options).is_err());
+
+            let env = ContextValue::object(vec![("NAME".to_owned(), value.clone())]).unwrap();
+            assert!(container_env_value(&env).is_err());
+
+            let ports =
+                ContextValue::object(vec![("ports".to_owned(), ContextValue::Array(vec![value]))])
+                    .unwrap();
+            assert!(container_ports(&ports).is_err());
+        }
+    }
+
+    #[test]
+    fn container_env_and_ports_stringify_scalars_in_source_order() {
+        let string_token = |value: &str| serde_json::json!({ "type": 0, "lit": value });
+        let valid_container = serde_json::json!({
+            "type": 2,
+            "map": [
+                {
+                    "key": string_token("env"),
+                    "value": {
+                        "type": 2,
+                        "map": [
+                            { "key": string_token("z-first"), "value": string_token("one") },
+                            { "key": string_token("a-second"), "value": string_token("two") }
+                        ]
+                    }
+                },
+                {
+                    "key": string_token("ports"),
+                    "value": {
+                        "type": 1,
+                        "seq": [
+                            string_token("8081:8081"),
+                            string_token("8080:8080")
+                        ]
+                    }
+                }
+            ]
+        });
+        let expanded = expand_template_token(&valid_container).unwrap();
+
+        assert_eq!(
+            container_env(&expanded).unwrap(),
+            vec![
+                ("z-first".to_string(), "one".to_string()),
+                ("a-second".to_string(), "two".to_string()),
+            ]
+        );
+        assert_eq!(
+            container_ports(&expanded).unwrap(),
+            vec!["8081:8081".to_string(), "8080:8080".to_string()]
+        );
+
+        for invalid in [
+            (serde_json::json!(false), Some("false"), Some("false")),
+            (serde_json::json!(8080), Some("8080"), Some("8080")),
+            (string_token(""), Some(""), None),
+            (serde_json::json!(null), Some(""), None),
+            (serde_json::json!({ "type": 2, "map": [] }), None, None),
+            (
+                serde_json::json!({ "type": 5, "bool": true }),
+                Some("true"),
+                Some("true"),
+            ),
+            (
+                serde_json::json!({ "type": 6, "num": 8081 }),
+                Some("8081"),
+                Some("8081"),
+            ),
+            (serde_json::json!({ "type": 7 }), Some(""), None),
+        ] {
+            let (invalid, env_value, port_value) = invalid;
+            let ports = expand_template_token(&serde_json::json!({
+                "type": 2,
+                "map": [{
+                    "key": string_token("ports"),
+                    "value": { "type": 1, "seq": [invalid.clone()] }
+                }]
+            }))
+            .unwrap();
+            match port_value {
+                Some(expected) => {
+                    assert_eq!(container_ports(&ports).unwrap(), vec![expected.to_owned()])
+                }
+                None => assert!(container_ports(&ports).is_err()),
+            }
+
+            let env = expand_template_token(&serde_json::json!({
+                "type": 2,
+                "map": [{
+                    "key": string_token("env"),
+                    "value": {
+                        "type": 2,
+                        "map": [{ "key": string_token("VALUE"), "value": invalid }]
+                    }
+                }]
+            }))
+            .unwrap();
+            match env_value {
+                Some(expected) => assert_eq!(
+                    container_env(&env).unwrap(),
+                    vec![("VALUE".to_owned(), expected.to_owned())]
+                ),
+                None => assert!(container_env(&env).is_err()),
+            }
+        }
+    }
+
+    #[test]
+    fn job_service_container_mapping_shapes_match_runner_expectations() {
+        assert!(
+            service_containers(&AgentJobRequestMessage::default(), "trusted")
+                .unwrap()
+                .is_empty()
+        );
+
+        for null_token in [
+            Value::Null,
+            serde_json::json!({ "type": 7 }),
+            serde_json::json!({ "type": 2, "map": null }),
+        ] {
+            let job = AgentJobRequestMessage {
+                job_service_containers: Some(null_token),
+                ..AgentJobRequestMessage::default()
+            };
+            assert!(service_containers(&job, "trusted").unwrap().is_empty());
+        }
+
+        for invalid_shape in [
+            template_string_token("postgres:16"),
+            template_sequence_token(Vec::new()),
+        ] {
+            let job = AgentJobRequestMessage {
+                job_service_containers: Some(invalid_shape),
+                ..AgentJobRequestMessage::default()
+            };
+            assert!(service_containers(&job, "trusted").is_err());
+        }
+    }
+
+    #[test]
+    fn container_schema_keys_are_exact_and_unknown_keys_fail() {
+        for unsupported_key in [
+            "Ports",
+            "Image",
+            "containerImage",
+            "ContainerImage",
+            "createOptions",
+            "CreateOptions",
+            "Options",
+            "Env",
+            "unknown",
+        ] {
+            let mut entries = vec![(
+                template_string_token(unsupported_key),
+                template_string_token("ignored"),
+            )];
+            if unsupported_key != "Image" {
+                entries.push((
+                    template_string_token("image"),
+                    template_string_token("postgres:16"),
+                ));
+            }
+            let container = template_map_token(entries);
+            let job = AgentJobRequestMessage {
+                job_service_containers: Some(template_map_token(vec![(
+                    template_string_token("postgres"),
+                    container,
+                )])),
+                ..AgentJobRequestMessage::default()
+            };
+            let error = service_containers(&job, "trusted").unwrap_err();
+            assert!(
+                error.to_string().contains("unexpected container key"),
+                "{unsupported_key}: {error:#}"
+            );
+        }
+
+        let uppercase_job_image = AgentJobRequestMessage {
+            job_container: Some(template_map_token(vec![(
+                template_string_token("Image"),
+                template_string_token("ubuntu:24.04"),
+            )])),
+            ..AgentJobRequestMessage::default()
+        };
+        assert!(expanded_job_container(&uppercase_job_image).is_err());
+    }
+
+    #[test]
+    fn template_map_conversion_rejects_malformed_pairs_and_discriminators() {
+        for malformed in [
+            serde_json::json!({ "type": 2, "map": "not-a-sequence" }),
+            serde_json::json!({ "type": 2, "map": [null] }),
+            serde_json::json!({ "type": 2, "map": [{ "value": "missing key" }] }),
+            serde_json::json!({ "type": 2, "map": [{ "key": "missing value" }] }),
+            serde_json::json!({ "type": 2.5, "map": [] }),
+            serde_json::json!({ "type": "2", "map": [] }),
+            serde_json::json!({ "type": 99, "map": [] }),
+        ] {
+            assert!(expand_template_token(&malformed).is_err(), "{malformed}");
+        }
+    }
+
+    #[test]
+    fn literal_tokens_stringify_boolean_null_and_integer_without_rounding() {
+        for (literal, expected) in [
+            (serde_json::json!(false), "false"),
+            (serde_json::Value::Null, ""),
+            (
+                serde_json::json!(9_007_199_254_740_993_u64),
+                "9007199254740993",
+            ),
+        ] {
+            let token = serde_json::json!({ "type": 0, "lit": literal });
+            assert_eq!(
+                expand_template_token(&token).unwrap(),
+                ContextValue::String(expected.to_owned())
+            );
+        }
+
+        let typed_number = expand_template_token(&template_number_token(serde_json::json!(
+            1.234_567_890_123_456_7_f64
+        )))
+        .unwrap();
+        assert_eq!(
+            context_scalar_string(&typed_number).as_deref(),
+            Some("1.23456789012346")
+        );
+    }
+
+    #[test]
+    fn template_mapping_keys_are_stringified_and_validated_before_collapse() {
+        let numeric_alias = AgentJobRequestMessage {
+            job_service_containers: Some(template_map_token(vec![(
+                template_number_token(serde_json::json!(1)),
+                valid_service_container_token(),
+            )])),
+            ..AgentJobRequestMessage::default()
+        };
+        let services = service_containers(&numeric_alias, "trusted").unwrap();
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].network_alias, "1");
+
+        let boolean_alias = AgentJobRequestMessage {
+            job_service_containers: Some(template_map_token(vec![(
+                serde_json::json!({ "type": 5, "bool": true }),
+                valid_service_container_token(),
+            )])),
+            ..AgentJobRequestMessage::default()
+        };
+        let services = service_containers(&boolean_alias, "trusted").unwrap();
+        assert_eq!(services[0].network_alias, "true");
+
+        let duplicate_aliases = AgentJobRequestMessage {
+            job_service_containers: Some(template_map_token(vec![
+                (template_string_token("db"), valid_service_container_token()),
+                (template_string_token("DB"), valid_service_container_token()),
+            ])),
+            ..AgentJobRequestMessage::default()
+        };
+        assert!(service_containers(&duplicate_aliases, "trusted").is_err());
+
+        for invalid_key in [Value::Null, template_map_token(Vec::new())] {
+            let job = AgentJobRequestMessage {
+                job_service_containers: Some(template_map_token(vec![(
+                    invalid_key,
+                    valid_service_container_token(),
+                )])),
+                ..AgentJobRequestMessage::default()
+            };
+            assert!(service_containers(&job, "trusted").is_err());
+        }
+
+        let empty_alias = AgentJobRequestMessage {
+            job_service_containers: Some(template_map_token(vec![(
+                template_string_token(""),
+                valid_service_container_token(),
+            )])),
+            ..AgentJobRequestMessage::default()
+        };
+        assert!(service_containers(&empty_alias, "trusted").is_err());
+
+        assert!(expand_template_token(&template_map_token(vec![(
+            template_string_token(""),
+            template_string_token("value"),
+        )]))
+        .is_err());
+    }
+
+    #[test]
+    fn service_and_environment_entries_keep_template_order() {
+        let service = |image: &str, first_env: &str, second_env: &str| {
+            template_map_token(vec![
+                (template_string_token("image"), template_string_token(image)),
+                (
+                    template_string_token("env"),
+                    template_map_token(vec![
+                        (template_string_token(first_env), template_string_token("1")),
+                        (
+                            template_string_token(second_env),
+                            template_string_token("2"),
+                        ),
+                    ]),
+                ),
+            ])
+        };
+        let job = AgentJobRequestMessage {
+            job_service_containers: Some(template_map_token(vec![
+                (
+                    template_string_token("z-service"),
+                    service("postgres:16", "Z_FIRST", "A_SECOND"),
+                ),
+                (
+                    template_string_token("a-service"),
+                    service("redis:7", "Z_FIRST", "A_SECOND"),
+                ),
+            ])),
+            ..AgentJobRequestMessage::default()
+        };
+
+        let services = service_containers(&job, "trusted").unwrap();
+        assert_eq!(
+            services
+                .iter()
+                .map(|service| service.network_alias.as_str())
+                .collect::<Vec<_>>(),
+            ["z-service", "a-service"]
+        );
+        assert_eq!(
+            services[0].env,
+            vec![
+                ("Z_FIRST".to_owned(), "1".to_owned()),
+                ("A_SECOND".to_owned(), "2".to_owned())
             ]
         );
     }
 
     #[test]
-    fn job_container_options_read_create_options() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
-            "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
-            "jobDisplayName": "Container",
-            "requestId": 1,
-            "jobContainer": {
-                "createOptions": "--cpus 2 --memory 4g"
+    fn job_container_ports_reject_null_and_complex_values_through_shared_validator() {
+        for malformed_port in [Value::Null, template_map_token(Vec::new())] {
+            let job = AgentJobRequestMessage {
+                job_container: Some(template_map_token(vec![(
+                    template_string_token("ports"),
+                    template_sequence_token(vec![malformed_port]),
+                )])),
+                ..AgentJobRequestMessage::default()
+            };
+            let error = github_job_container_spec(
+                &job,
+                test_container_paths(),
+                "docker:latest",
+                "node:latest",
+                "daemon".to_owned(),
+                "trusted",
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("container port"), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn job_and_service_container_fields_reject_unsupported_payloads_without_leaking_values() {
+        let credential_secret = "registry-password-secret";
+        let unsupported_fields = [
+            (
+                "volumes",
+                template_sequence_token(vec![template_string_token(
+                    "/host/private:/container/private",
+                )]),
+            ),
+            (
+                "credentials",
+                template_map_token(vec![(
+                    template_string_token("password"),
+                    serde_json::json!({ "type": 3, "expr": credential_secret }),
+                )]),
+            ),
+        ];
+
+        for (field, value) in unsupported_fields {
+            let container_token = || {
+                template_map_token(vec![
+                    (
+                        template_string_token("image"),
+                        template_string_token("postgres:16"),
+                    ),
+                    (template_string_token(field), value.clone()),
+                ])
+            };
+
+            for trust_scope in ["trusted", "untrusted"] {
+                for backend in [
+                    velnor_model::ExecutionBackendKind::Docker,
+                    velnor_model::ExecutionBackendKind::MicroVm,
+                ] {
+                    let mut paths = test_container_paths();
+                    paths.execution_backend = backend;
+                    let job = AgentJobRequestMessage {
+                        job_container: Some(container_token()),
+                        ..AgentJobRequestMessage::default()
+                    };
+                    let error = github_job_container_spec(
+                        &job,
+                        paths,
+                        "ubuntu:24.04",
+                        "node:latest",
+                        "daemon".to_owned(),
+                        trust_scope,
+                    )
+                    .unwrap_err();
+                    let detail = format!("{error:#}");
+                    assert!(detail.contains(field), "{field}: {detail}");
+                    assert!(
+                        !detail.contains(credential_secret),
+                        "container error leaked a credential value: {detail}"
+                    );
+                }
+
+                let service_job = AgentJobRequestMessage {
+                    job_service_containers: Some(template_map_token(vec![(
+                        template_string_token("postgres"),
+                        container_token(),
+                    )])),
+                    ..AgentJobRequestMessage::default()
+                };
+                let error = service_containers(&service_job, trust_scope).unwrap_err();
+                let detail = format!("{error:#}");
+                assert!(detail.contains(field), "{field}: {detail}");
+                assert!(
+                    !detail.contains(credential_secret),
+                    "service error leaked a credential value: {detail}"
+                );
             }
-        }))
-        .unwrap();
+        }
+    }
+
+    #[test]
+    fn nonfinite_template_numbers_render_when_stringifying_map_keys() {
+        for (wire_value, expected, non_finite) in [
+            ("NaN", "NaN", NonFinite::NaN),
+            ("Infinity", "Infinity", NonFinite::PositiveInfinity),
+            ("-Infinity", "-Infinity", NonFinite::NegativeInfinity),
+        ] {
+            let token = template_number_token(Value::String(wire_value.to_owned()));
+            assert_eq!(
+                template_token_context_value(&token).unwrap(),
+                ContextValue::non_finite(non_finite)
+            );
+            let expanded = expand_template_token(&template_map_token(vec![(
+                token.clone(),
+                template_string_token("value"),
+            )]))
+            .unwrap();
+            let entries = context_object_entries(&expanded).unwrap();
+            assert_eq!(
+                entries
+                    .iter()
+                    .find(|(key, _)| key == expected)
+                    .map(|(_, value)| value),
+                Some(&ContextValue::String("value".to_owned()))
+            );
+
+            let expanded_env = expand_template_token(&template_map_token(vec![(
+                template_string_token("env"),
+                template_map_token(vec![(template_string_token("NONFINITE"), token)]),
+            )]))
+            .unwrap();
+            assert_eq!(
+                container_env(&expanded_env).unwrap(),
+                vec![("NONFINITE".to_owned(), expected.to_owned())]
+            );
+        }
+    }
+
+    #[test]
+    fn job_container_options_read_schema_options() {
+        let job = AgentJobRequestMessage {
+            job_container: Some(template_map_token(vec![
+                (
+                    template_string_token("image"),
+                    template_string_token("ubuntu:24.04"),
+                ),
+                (
+                    template_string_token("options"),
+                    template_string_token(
+                        "--cpus 2 --memory 4g -m1g -m=8g -m 16g -im1g -itm1g -im 32g",
+                    ),
+                ),
+            ])),
+            ..AgentJobRequestMessage::default()
+        };
 
         // Quota flags are stripped at admission on every trust path:
         // no HostConfig ceiling may arrive via workflow container.options.
-        assert_eq!(job_container_options(&job, "trusted"), Vec::<String>::new());
         assert_eq!(
-            job_container_options(&job, "untrusted"),
+            job_container_options(&job, "trusted").unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            job_container_options(&job, "untrusted").unwrap(),
             Vec::<String>::new()
         );
     }
@@ -2176,6 +3518,11 @@ mod tests {
                 "-m".to_string(),
                 "4g".to_string(),
                 "-m=8g".to_string(),
+                "-m1g".to_string(),
+                "-im".to_string(),
+                "6g".to_string(),
+                "-im1g".to_string(),
+                "-itm1g".to_string(),
                 "--cpu-quota".to_string(),
                 "50000".to_string(),
                 "--cpuset-cpus".to_string(),
@@ -2197,6 +3544,17 @@ mod tests {
                 "allow_privileged={allow_privileged}"
             );
         }
+    }
+
+    #[test]
+    fn attached_clustered_memory_flag_does_not_consume_following_token() {
+        assert_eq!(
+            filter_privileged_container_options(
+                vec!["-im1g".into(), "preserved-token".into()],
+                true,
+            ),
+            vec!["preserved-token"]
+        );
     }
 
     #[test]
@@ -2262,6 +3620,11 @@ mod tests {
             "--cpus".into(),
             "2".into(),
             "--memory=4g".into(),
+            "-m1g".into(),
+            "-im".into(),
+            "5g".into(),
+            "-im1g".into(),
+            "-itm1g".into(),
             "--health-cmd".into(),
             "true".into(),
             "--use-api-socket".into(),
@@ -2320,7 +3683,8 @@ mod tests {
             "--hostname".into(),
             "allowed".into(),
             "--name".into(),
-            "-malformed-name".into(),
+            "-zmalformed-name".into(),
+            "-m1g".into(),
             "--env".into(),
             "--cpus=2".into(),
             "-e".into(),
@@ -2331,7 +3695,7 @@ mod tests {
         // Quota flags are stripped on the trusted path too.
         assert_eq!(
             filter_privileged_container_options(options, true),
-            vec!["--hostname", "allowed", "-malformed-name"]
+            vec!["--hostname", "allowed", "-zmalformed-name"]
         );
     }
 
@@ -2346,43 +3710,151 @@ mod tests {
     }
 
     #[test]
-    fn service_containers_use_non_job_container_resources() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+    fn service_containers_use_legacy_sidecar_resources() {
+        let payload = serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job/1",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
             "jobDisplayName": "Services",
             "requestId": 1,
+            "jobSidecarContainers": { "network": "postgres" },
             "resources": {
                 "containers": [
-                    { "alias": "__job", "image": "ubuntu:24.04" },
+                    { "alias": "__job", "properties": { "image": "ubuntu:24.04" } },
                     {
                         "alias": "postgres",
-                        "image": "postgres:16",
-                        "options": "--health-cmd \"pg_isready -U postgres\" --use-api-socket --gpus=all",
-                        "environmentVariables": {
-                            "POSTGRES_PASSWORD": "postgres"
-                        },
-                        "ports": { "5432": "5432" }
+                        "properties": {
+                            "image": "postgres:16",
+                            "options": "--health-cmd \"pg_isready -U postgres\" --use-api-socket --gpus=all",
+                            "env": {
+                                "EMPTY": null,
+                                "POSTGRES_PASSWORD": "postgres",
+                                "DOCKER_HOST": "tcp://attacker.example:2376",
+                                "GITHUB_REF": "refs/tags/v9.9.9"
+                            },
+                            "ports": ["5432", "5433"]
+                        }
+                    },
+                    {
+                        "alias": "unrelated",
+                        "properties": { "image": "redis:7" }
                     }
                 ]
             }
+        });
+        let mut job = AgentJobRequestMessage::from_value(payload.clone()).unwrap();
+
+        let expected = vec![ServiceContainerSpec {
+            name: "velnor-service-cccccccc-cccc-cccc-cccc-cccccccccccc-network".into(),
+            image: "postgres:16".into(),
+            network_alias: "network".into(),
+            network: "velnor-net-cccccccc-cccc-cccc-cccc-cccccccccccc".into(),
+            env: vec![
+                ("EMPTY".into(), "".into()),
+                ("POSTGRES_PASSWORD".into(), "postgres".into()),
+            ],
+            ports: vec!["5432".into(), "5433".into()],
+            options: vec!["--health-cmd".into(), "pg_isready -U postgres".into()],
+        }];
+        assert_eq!(service_containers(&job, "trusted").unwrap(), expected);
+
+        // The wire callback has already resolved the legacy sidecar into the
+        // service token. Adapter behavior must not depend on re-reading the
+        // resource collection after that point.
+        assert!(job.job_service_containers.is_some());
+        let duplicate = ContainerResource {
+            alias: Some("postgres".into()),
+            endpoint: None,
+            properties: velnor_model::ContextValue::from_json_root_case_insensitive(
+                serde_json::json!({ "image": "wrong:latest" }),
+            )
+            .unwrap(),
+        };
+        job.resources.containers.push(None);
+        job.resources.containers.push(Some(duplicate));
+        assert_eq!(service_containers(&job, "trusted").unwrap(), expected);
+
+        let mut typed_null_payload = payload.clone();
+        typed_null_payload["jobServiceContainers"] = serde_json::json!({ "type": 7 });
+        let typed_null_job = AgentJobRequestMessage::from_value(typed_null_payload).unwrap();
+        assert_eq!(
+            service_containers(&typed_null_job, "trusted").unwrap(),
+            expected
+        );
+
+        let mut actual_null_payload = payload.clone();
+        actual_null_payload["jobServiceContainers"] = serde_json::Value::Null;
+        let actual_null_job = AgentJobRequestMessage::from_value(actual_null_payload).unwrap();
+        assert_eq!(
+            service_containers(&actual_null_job, "trusted").unwrap(),
+            expected
+        );
+
+        let mut non_null_payload = payload;
+        non_null_payload["jobServiceContainers"] = serde_json::json!("invalid");
+        let non_null_job = AgentJobRequestMessage::from_value(non_null_payload).unwrap();
+        assert!(service_containers(&non_null_job, "trusted").is_err());
+
+        let untrusted = service_containers(&job, "untrusted").unwrap();
+        assert!(untrusted[0].ports.is_empty());
+        assert_eq!(
+            untrusted[0].options,
+            vec!["--health-cmd", "pg_isready -U postgres"]
+        );
+    }
+
+    #[test]
+    fn service_containers_ignore_resources_without_sidecars() {
+        let job = AgentJobRequestMessage::from_value(serde_json::json!({
+            "resources": { "containers": [
+                null,
+                { "alias": "unrelated", "properties": { "image": "redis:7" } },
+                { "alias": "another-unrelated", "properties": { "image": "postgres:16" } }
+            ] }
         }))
         .unwrap();
 
-        assert_eq!(
-            service_containers(&job, "trusted"),
-            vec![ServiceContainerSpec {
-                name: "velnor-service-job_1-postgres".into(),
-                image: "postgres:16".into(),
-                network_alias: "postgres".into(),
-                network: "velnor-net-job_1".into(),
-                env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
-                ports: vec!["5432:5432".into()],
-                options: vec!["--health-cmd".into(), "pg_isready -U postgres".into()],
-            }]
-        );
+        assert!(job.job_sidecar_containers.is_empty());
+        assert!(job.job_service_containers.is_none());
+        assert!(service_containers(&job, "trusted").unwrap().is_empty());
+    }
+
+    #[test]
+    fn service_containers_reject_string_tokens_instead_of_falling_back() {
+        for containers in [
+            serde_json::json!([
+                { "alias": "postgres", "properties": { "image": "postgres:16" } }
+            ]),
+            serde_json::json!([]),
+        ] {
+            let job = AgentJobRequestMessage::from_value(serde_json::json!({
+                "jobServiceContainers": { "type": 0, "lit": null },
+                "jobSidecarContainers": { "network": "postgres" },
+                "resources": { "containers": containers }
+            }))
+            .unwrap();
+
+            assert!(service_containers(&job, "trusted").is_err());
+        }
+    }
+
+    #[test]
+    fn wire_callback_preserves_legacy_sidecar_single_errors() {
+        for containers in [
+            serde_json::json!([]),
+            serde_json::json!([null]),
+            serde_json::json!([
+                { "alias": "sidecar" },
+                { "alias": "sidecar" }
+            ]),
+        ] {
+            assert!(AgentJobRequestMessage::from_value(serde_json::json!({
+                "jobSidecarContainers": { "network": "sidecar" },
+                "resources": { "containers": containers }
+            }))
+            .is_err());
+        }
     }
 
     #[test]
@@ -2400,23 +3872,23 @@ mod tests {
                 ] } }
             ]
         });
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let job = AgentJobRequestMessage::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
             "jobDisplayName": "Services",
             "requestId": 1,
             "jobServiceContainers": { "type": 2, "map": [
                 { "Key": scalar("postgres"), "Value": service }
             ] },
             "resources": { "containers": [
-                { "alias": "legacy", "image": "redis:7" }
+                { "alias": "legacy", "properties": { "image": "redis:7" } }
             ] }
         }))
         .unwrap();
 
-        let services = service_containers(&job, "trusted");
+        let services = service_containers(&job, "trusted").unwrap();
         assert_eq!(services.len(), 1);
         assert_eq!(services[0].network_alias, "postgres");
         assert_eq!(services[0].image, "postgres:16");

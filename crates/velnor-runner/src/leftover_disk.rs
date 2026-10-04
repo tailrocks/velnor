@@ -15,6 +15,11 @@ use std::time::{Duration, SystemTime};
 pub const HARD_PRESSURE_PERCENT: u8 = 90;
 pub const LIVE_JOB_NAME_PREFIX: &str = "velnor-job-";
 
+const RECLAIM_QUARANTINE_PREFIX: &str = ".velnor-reclaim-";
+const RECLAIM_QUARANTINE_ENTRY: &str = "entry";
+const RECLAIM_QUARANTINE_JOURNAL: &str = "transaction";
+const RECLAIM_QUARANTINE_JOURNAL_TEMP: &str = "transaction.tmp";
+
 /// A job workspace untouched for less than this is presumed live regardless of
 /// any other evidence.
 ///
@@ -60,8 +65,14 @@ impl WorkspaceLiveness {
             min_idle: WORKSPACE_MIN_IDLE,
             ..Self::default()
         };
-        match crate::capacity::active_scopes(run_root, LEASE_STALE_AFTER) {
-            Ok(scopes) => liveness.leased = job_ids_from_lease_scopes(&scopes),
+        match crate::capacity::active_scope_leases(run_root, LEASE_STALE_AFTER) {
+            Ok(leases) => {
+                liveness.leased = leases
+                    .into_iter()
+                    .filter_map(|lease| lease.owner_job_id)
+                    .map(|owner| owner.as_str().to_owned())
+                    .collect();
+            }
             Err(error) => {
                 eprintln!("leftover reclaim: cannot read store leases: {error:#}");
                 liveness.evidence_incomplete = true;
@@ -97,21 +108,6 @@ impl WorkspaceLiveness {
             .and_then(|modified| now.duration_since(modified).ok())
             .is_none_or(|idle| idle < self.min_idle)
     }
-}
-
-/// Job ids named by active lease scopes.
-///
-/// Every job publishes its leases as `<class>/<store scope>/<job id>`, so the
-/// job id is the final segment. A lease therefore proves the job is alive for
-/// its whole store-holding lifetime, which is precisely the window `docker ps`
-/// cannot see.
-pub fn job_ids_from_lease_scopes(scopes: &BTreeSet<String>) -> BTreeSet<String> {
-    scopes
-        .iter()
-        .filter_map(|scope| scope.rsplit('/').next())
-        .filter(|id| looks_like_job_uuid(id))
-        .map(ToOwned::to_owned)
-        .collect()
 }
 
 fn workspace_idle_for(workspace: &Path, now: SystemTime) -> Option<Duration> {
@@ -176,14 +172,6 @@ pub fn looks_like_job_uuid(name: &str) -> bool {
         }
     }
     parts.next().is_none()
-}
-
-/// Fleet work roots: `$VELNOR_STORAGE_ROOT/lib/velnor*/work`, else `/var/lib/velnor*/work`.
-pub fn discover_daemon_work_roots() -> Vec<PathBuf> {
-    match crate::storage::selected_or_resolved_layout() {
-        Some(layout) => discover_daemon_work_roots_for_layout(&layout),
-        None => discover_daemon_work_roots_in(Path::new("/var/lib")),
-    }
 }
 
 pub(crate) fn discover_daemon_work_roots_for_layout(
@@ -411,7 +399,7 @@ fn modification_time_at(parent: &fs::File, name: &std::ffi::OsStr) -> Result<Sys
     #[cfg(target_os = "linux")]
     let (seconds, nanoseconds) = (stat.st_mtime, stat.st_mtime_nsec);
     #[cfg(target_os = "macos")]
-    let (seconds, nanoseconds) = (stat.st_mtimespec.tv_sec, stat.st_mtimespec.tv_nsec);
+    let (seconds, nanoseconds) = (stat.st_mtime, stat.st_mtime_nsec);
     let nanos = u32::try_from(nanoseconds).context("invalid workspace entry timestamp")?;
     let fraction = std::time::Duration::from_nanos(u64::from(nanos));
     if seconds >= 0 {
@@ -667,6 +655,19 @@ pub(crate) fn filesystem_directory_identity_under(
     path: &Path,
     expected_anchor: &FilesystemDirectoryIdentity,
 ) -> Result<FilesystemDirectoryIdentity> {
+    filesystem_pin_directory_under(trusted_anchor, path, expected_anchor)
+        .map(|(_, identity)| identity)
+}
+
+/// Pin a real directory beneath a trusted anchor without following any
+/// descendant symlink. The returned descriptor and identity can be passed to
+/// [`remove_dir_all_on_device_under_pinned`] so cleanup remains rooted in the
+/// same nofollow walk used for inventory.
+pub(crate) fn filesystem_pin_directory_under(
+    trusted_anchor: &Path,
+    path: &Path,
+    expected_anchor: &FilesystemDirectoryIdentity,
+) -> Result<(fs::File, FilesystemDirectoryIdentity)> {
     let (parent, name, _, anchor_identity) =
         open_parent_beneath_anchor(trusted_anchor, path, Some(expected_anchor))?;
     let candidate = open_directory_child(&parent, &name)
@@ -677,7 +678,100 @@ pub(crate) fn filesystem_directory_identity_under(
     {
         bail!("candidate directory crosses a mount boundary below its trusted anchor");
     }
-    Ok(candidate_identity)
+    Ok((candidate, candidate_identity))
+}
+
+/// Open the existing cache-entry sidecar lock below a pinned catalog anchor.
+/// The store directory is reopened through the same nofollow walk as cache
+/// inventory, and both the lock directory and lock file are descriptor
+/// relative so a replaced ancestor cannot redirect lock creation outside the
+/// catalog tree.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn filesystem_open_cache_lock_file_under_anchor(
+    trusted_anchor: &Path,
+    store_directory_path: &Path,
+    lock_name: &std::ffi::OsStr,
+    expected_anchor: &FilesystemDirectoryIdentity,
+) -> Result<fs::File> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let components: Vec<_> = Path::new(lock_name).components().collect();
+    if !matches!(components.as_slice(), [std::path::Component::Normal(_)]) {
+        bail!("cache lock name is not one normalized path component");
+    }
+    let (store_directory, anchor_identity) =
+        open_directory_under_anchor(trusted_anchor, store_directory_path, expected_anchor)?;
+    let lock_directory_name = std::ffi::OsStr::new(".velnor-locks");
+    let lock_directory = match open_directory_child(&store_directory, lock_directory_name) {
+        Ok(directory) => directory,
+        Err(error) if is_not_found_error(&error) => {
+            match rustix::fs::mkdirat(
+                &store_directory,
+                lock_directory_name,
+                rustix::fs::Mode::from_raw_mode(0o755),
+            ) {
+                Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                Err(error) => {
+                    return Err(std::io::Error::from(error))
+                        .context("create cache entry lock directory beneath pinned store");
+                }
+            }
+            open_directory_child(&store_directory, lock_directory_name)
+                .context("open created cache entry lock directory without following links")?
+        }
+        Err(error) => return Err(error).context("open cache entry lock directory"),
+    };
+    let lock_directory_identity = directory_identity(&lock_directory)?;
+    if lock_directory_identity.device != anchor_identity.device
+        || lock_directory_identity.mount != anchor_identity.mount
+    {
+        bail!("cache entry lock directory crosses its pinned catalog mount");
+    }
+    let lock_directory_metadata = lock_directory
+        .metadata()
+        .context("inspect pinned cache entry lock directory")?;
+    if lock_directory_metadata.uid() != rustix::process::geteuid().as_raw()
+        || lock_directory_metadata.mode() & 0o022 != 0
+    {
+        bail!("cache entry lock directory is not runner-owned and private");
+    }
+    let lock_file = rustix::fs::openat(
+        &lock_directory,
+        lock_name,
+        rustix::fs::OFlags::RDWR
+            | rustix::fs::OFlags::CREATE
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::NOCTTY
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::from_raw_mode(0o600),
+    )
+    .map_err(std::io::Error::from)
+    .context("open cache entry lock file without following links")?;
+    let lock_file: fs::File = lock_file.into();
+    let lock_metadata = lock_file
+        .metadata()
+        .context("inspect opened cache entry lock file")?;
+    if !lock_metadata.is_file() || lock_metadata.nlink() != 1 {
+        bail!("cache entry lock is not a single-link regular file");
+    }
+    Ok(lock_file)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn filesystem_open_cache_lock_file_under_anchor(
+    trusted_anchor: &Path,
+    store_directory_path: &Path,
+    lock_name: &std::ffi::OsStr,
+    expected_anchor: &FilesystemDirectoryIdentity,
+) -> Result<fs::File> {
+    let _ = (
+        trusted_anchor,
+        store_directory_path,
+        lock_name,
+        expected_anchor,
+    );
+    bail!("refusing cache lock traversal without native nofollow support")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -740,6 +834,127 @@ pub(crate) fn filesystem_entries_at(directory: &fs::File) -> Result<Vec<Filesyst
         .into_iter()
         .map(|snapshot| snapshot.entry)
         .collect())
+}
+
+/// Open one direct child directory from an already-pinned directory. The
+/// child name is resolved relative to the descriptor and `O_NOFOLLOW` keeps a
+/// candidate walk from adopting a symlink introduced below the anchor.
+pub(crate) fn filesystem_open_directory_child_at(
+    directory: &fs::File,
+    name: &std::ffi::OsStr,
+) -> Result<Option<(fs::File, FilesystemDirectoryIdentity)>> {
+    match open_directory_child(directory, name) {
+        Ok(child) => {
+            let identity = directory_identity(&child)?;
+            Ok(Some((child, identity)))
+        }
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Read a direct regular-file child through a nofollow descriptor. Returns
+/// its contents and mtime from the opened inode; no host pathname is
+/// resolved after the candidate directory was pinned.
+pub(crate) fn filesystem_read_regular_file_at(
+    directory: &fs::File,
+    name: &std::ffi::OsStr,
+    maximum_bytes: usize,
+) -> Result<Option<(Vec<u8>, SystemTime, FilesystemEntryIdentity)>> {
+    use std::io::Read as _;
+
+    let file = match open_regular_file_child(directory, name) {
+        Ok(file) => file,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata().context("inspect opened marker file")?;
+    if !metadata.is_file() {
+        bail!("pinned marker entry is not a regular file");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.nlink() != 1 {
+            bail!("pinned marker file has unexpected hard links");
+        }
+    }
+    let identity =
+        filesystem_object_identity(&file).context("capture pinned marker file identity")?;
+    if usize::try_from(metadata.len()).unwrap_or(usize::MAX) > maximum_bytes {
+        bail!("pinned marker file exceeds its maximum length");
+    }
+    let modified = metadata
+        .modified()
+        .context("read opened marker file timestamp")?;
+    let mut contents = Vec::new();
+    let read_limit = u64::try_from(maximum_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    file.take(read_limit)
+        .read_to_end(&mut contents)
+        .context("read opened marker file")?;
+    if contents.len() > maximum_bytes {
+        bail!("pinned marker file grew beyond its maximum length");
+    }
+    Ok(Some((contents, modified, identity)))
+}
+
+fn open_regular_file_child(parent: &fs::File, name: &std::ffi::OsStr) -> Result<fs::File> {
+    #[cfg(target_os = "linux")]
+    {
+        let file = rustix::fs::openat(
+            parent,
+            name,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::NONBLOCK
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(std::io::Error::from)
+        .context("open marker entry without following links")?;
+        Ok(file.into())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let name = std::ffi::CString::new(name.as_bytes()).context("marker name contains nul")?;
+        // SAFETY: parent is live and name is one directory entry. NOFOLLOW
+        // rejects a symlink and NONBLOCK avoids hanging on an operator FIFO.
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("open marker entry without following links");
+        }
+        // SAFETY: openat returned a new owned descriptor.
+        Ok(unsafe { fs::File::from_raw_fd(fd) })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (parent, name);
+        bail!("refusing marker read without native nofollow support")
+    }
 }
 
 /// Discover candidates at an exact depth and retain one descriptor per
@@ -848,19 +1063,16 @@ fn snapshot_directory_contents(
     let mut same_mount_tree = true;
     for child_snapshot in secure_filesystem_entries(directory)? {
         let child = child_snapshot.entry;
+        if !filesystem_entry_matches_mount(&child, anchor_identity) {
+            same_mount_tree = false;
+            continue;
+        }
         newest_modified = newest_modified.max(child_snapshot.modified);
         if child.kind == FilesystemEntryKind::RegularFile {
             logical_bytes = logical_bytes.saturating_add(child_snapshot.logical_bytes);
             continue;
         }
         if child.kind != FilesystemEntryKind::Directory {
-            continue;
-        }
-        if child.is_mountpoint
-            || child.identity.device != anchor_identity.device
-            || child.identity.mount != anchor_identity.mount
-        {
-            same_mount_tree = false;
             continue;
         }
         let child_directory = open_directory_child(directory, &child.name)
@@ -875,6 +1087,15 @@ fn snapshot_directory_contents(
         same_mount_tree &= child_same_mount;
     }
     Ok((logical_bytes, newest_modified, same_mount_tree))
+}
+
+fn filesystem_entry_matches_mount(
+    entry: &FilesystemEntry,
+    anchor_identity: &FilesystemDirectoryIdentity,
+) -> bool {
+    !entry.is_mountpoint
+        && entry.identity.device == anchor_identity.device
+        && entry.identity.mount == anchor_identity.mount
 }
 
 fn open_directory_under_anchor(
@@ -1133,7 +1354,7 @@ fn modified_time_from_stat(stat: &libc::stat) -> Result<SystemTime> {
     #[cfg(target_os = "linux")]
     let (seconds, nanoseconds) = (stat.st_mtime, stat.st_mtime_nsec);
     #[cfg(target_os = "macos")]
-    let (seconds, nanoseconds) = (stat.st_mtimespec.tv_sec, stat.st_mtimespec.tv_nsec);
+    let (seconds, nanoseconds) = (stat.st_mtime, stat.st_mtime_nsec);
     let nanos = u32::try_from(nanoseconds).context("invalid inventory entry timestamp")?;
     let fraction = std::time::Duration::from_nanos(u64::from(nanos));
     if seconds >= 0 {
@@ -1254,7 +1475,7 @@ pub fn orphan_job_workspace_paths(
     )
 }
 
-#[cfg(any(not(unix), test))]
+#[cfg(test)]
 pub fn disk_usage_percent_from_df(stdout: &str) -> Option<u8> {
     let line = stdout.lines().nth(1)?;
     let cols: Vec<&str> = line.split_whitespace().collect();
@@ -1274,6 +1495,7 @@ pub fn disk_usage_percent_from_df(stdout: &str) -> Option<u8> {
     None
 }
 
+#[cfg(test)]
 pub fn disk_usage_percent(path: &Path) -> Option<u8> {
     let probe = if path.exists() {
         path
@@ -1299,6 +1521,7 @@ pub fn disk_usage_percent(path: &Path) -> Option<u8> {
     }
 }
 
+#[cfg(test)]
 fn disk_usage_percent_from_statvfs(total_blocks: u64, available_blocks: u64) -> Option<u8> {
     if total_blocks == 0 {
         return None;
@@ -1419,9 +1642,11 @@ fn reclaim_leftover_under_coordinator_authorized(
     remove_dir: impl FnMut(&AuthorizedWorkspace) -> Result<()>,
     prune_dangling_images: bool,
 ) -> Result<LeftoverReclaimReport> {
+    let liveness = WorkspaceLiveness::collect(run_root, live_job_ids.clone());
+    recover_workspace_private_quarantines_for_roots(work_roots, &liveness);
     reclaim_with_liveness_authorized(
         work_roots,
-        &WorkspaceLiveness::collect(run_root, live_job_ids.clone()),
+        &liveness,
         docker,
         remove_dir,
         prune_dangling_images,
@@ -1513,6 +1738,9 @@ pub(crate) fn remove_dir_all_on_device_under_identity(
         expected_anchor,
         None,
         None,
+        None,
+        None,
+        &|_| Ok(()),
     )
 }
 
@@ -1530,8 +1758,32 @@ pub(crate) fn remove_dir_all_on_device_under_identities(
         path,
         expected_device,
         expected_anchor,
+        None,
+        None,
         Some(expected_candidate),
         None,
+        &|_| Ok(()),
+    )
+}
+
+pub(crate) fn remove_dir_all_on_device_under_identities_with_pre_unlink(
+    trusted_anchor: &Path,
+    path: &Path,
+    expected_device: u64,
+    expected_anchor: &FilesystemDirectoryIdentity,
+    expected_candidate: &FilesystemDirectoryIdentity,
+    before_unlink: &impl Fn(&Path) -> Result<()>,
+) -> Result<()> {
+    remove_dir_all_on_device_under_pins(
+        trusted_anchor,
+        path,
+        expected_device,
+        expected_anchor,
+        None,
+        None,
+        Some(expected_candidate),
+        None,
+        before_unlink,
     )
 }
 
@@ -1543,14 +1795,310 @@ pub(crate) fn remove_dir_all_on_device_under_pinned(
     expected_candidate: &FilesystemDirectoryIdentity,
     pinned_candidate: &fs::File,
 ) -> Result<()> {
+    remove_dir_all_on_device_under_pinned_with_pre_unlink(
+        trusted_anchor,
+        path,
+        expected_device,
+        expected_anchor,
+        expected_candidate,
+        pinned_candidate,
+        &|_| Ok(()),
+    )
+}
+
+pub(crate) fn remove_dir_all_on_device_under_pinned_with_pre_unlink(
+    trusted_anchor: &Path,
+    path: &Path,
+    expected_device: u64,
+    expected_anchor: &FilesystemDirectoryIdentity,
+    expected_candidate: &FilesystemDirectoryIdentity,
+    pinned_candidate: &fs::File,
+    before_unlink: &impl Fn(&Path) -> Result<()>,
+) -> Result<()> {
     remove_dir_all_on_device_under_pins(
         trusted_anchor,
         path,
         expected_device,
         expected_anchor,
+        None,
+        None,
         Some(expected_candidate),
         Some(pinned_candidate),
+        before_unlink,
     )
+}
+
+pub(crate) fn remove_dir_all_on_device_under_pinned_parent_with_pre_unlink(
+    trusted_anchor: &Path,
+    path: &Path,
+    expected_device: u64,
+    expected_anchor: &FilesystemDirectoryIdentity,
+    expected_parent: &FilesystemDirectoryIdentity,
+    pinned_parent: &fs::File,
+    expected_candidate: &FilesystemDirectoryIdentity,
+    pinned_candidate: &fs::File,
+    before_unlink: &impl Fn(&Path) -> Result<()>,
+) -> Result<()> {
+    remove_dir_all_on_device_under_pins(
+        trusted_anchor,
+        path,
+        expected_device,
+        expected_anchor,
+        Some(expected_parent),
+        Some(pinned_parent),
+        Some(expected_candidate),
+        Some(pinned_candidate),
+        before_unlink,
+    )
+}
+
+/// Remove one empty directory after pinning and revalidating both its parent
+/// path and child identity beneath a trusted anchor. `rmdir` remains the final
+/// emptiness check, so a concurrently added entry is preserved.
+pub(crate) fn remove_empty_directory_under_pinned_parent(
+    trusted_anchor: &Path,
+    path: &Path,
+    expected_anchor: &FilesystemDirectoryIdentity,
+    expected_parent: &FilesystemDirectoryIdentity,
+    pinned_parent: &fs::File,
+    expected_candidate: &FilesystemDirectoryIdentity,
+    pinned_candidate: &fs::File,
+) -> Result<bool> {
+    remove_empty_directory_under_pinned_parent_with_hook(
+        trusted_anchor,
+        path,
+        expected_anchor,
+        expected_parent,
+        pinned_parent,
+        expected_candidate,
+        pinned_candidate,
+        |_, _| Ok(()),
+    )
+}
+
+fn remove_empty_directory_under_pinned_parent_with_hook(
+    trusted_anchor: &Path,
+    path: &Path,
+    expected_anchor: &FilesystemDirectoryIdentity,
+    expected_parent: &FilesystemDirectoryIdentity,
+    pinned_parent: &fs::File,
+    expected_candidate: &FilesystemDirectoryIdentity,
+    pinned_candidate: &fs::File,
+    after_move: impl FnOnce(&fs::File, &std::ffi::OsStr) -> Result<()>,
+) -> Result<bool> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let anchor = open_configured_directory(trusted_anchor)?;
+        if &directory_identity(&anchor)? != expected_anchor {
+            bail!("trusted empty-directory anchor changed since inventory");
+        }
+        let pinned_parent_identity = directory_identity(pinned_parent)?;
+        if &pinned_parent_identity != expected_parent {
+            bail!("pinned cleanup parent changed since inventory");
+        }
+        if expected_parent.device != expected_anchor.device
+            || expected_parent.mount != expected_anchor.mount
+            || expected_candidate.device != expected_anchor.device
+            || expected_candidate.mount != expected_anchor.mount
+        {
+            bail!("empty cleanup path crossed the trusted anchor filesystem or mount");
+        }
+        let pinned_candidate_identity = directory_identity(pinned_candidate)?;
+        if &pinned_candidate_identity != expected_candidate {
+            bail!("pinned empty directory changed since inventory");
+        }
+
+        let (parent, name, _root_path, anchor_identity) =
+            open_parent_beneath_anchor(trusted_anchor, path, Some(expected_anchor))?;
+        if &anchor_identity != expected_anchor || &directory_identity(&parent)? != expected_parent {
+            bail!("empty-directory parent changed since inventory");
+        }
+        let candidate = open_directory_child(&parent, &name)
+            .context("open empty cleanup directory without following links")?;
+        if directory_identity(&candidate)? != pinned_candidate_identity {
+            bail!("empty cleanup directory changed since inventory");
+        }
+        if !secure_directory_entries(&candidate)?.is_empty() {
+            return Ok(false);
+        }
+
+        let source_relative_path = path
+            .strip_prefix(trusted_anchor)
+            .context("empty cleanup directory is outside its trusted anchor")?;
+        let (quarantine, quarantine_name) = create_private_quarantine_with_journal(
+            &anchor,
+            expected_anchor,
+            source_relative_path,
+            &parent,
+            expected_candidate,
+        )?;
+        let quarantine_identity = directory_identity(&quarantine)?;
+        let quarantine_entry = std::ffi::OsStr::new(RECLAIM_QUARANTINE_ENTRY);
+        let moved = match move_candidate_to_quarantine(
+            &parent,
+            &name,
+            &quarantine,
+            quarantine_entry,
+            expected_candidate,
+            pinned_candidate,
+            || Ok(()),
+        ) {
+            Ok(moved) => moved,
+            Err(error) => {
+                let cleanup = remove_quarantine_record_and_directory(
+                    &anchor,
+                    &quarantine,
+                    &quarantine_name,
+                    &quarantine_identity,
+                );
+                return Err(error)
+                    .context(format!("quarantine empty directory (cleanup: {cleanup:?})"));
+            }
+        };
+        if let Err(error) = persist_quarantine_move(&parent, &quarantine) {
+            let restore = restore_then_clear_quarantine(
+                &anchor,
+                &quarantine,
+                &quarantine_name,
+                &quarantine_identity,
+                &moved,
+                expected_candidate,
+                &parent,
+                &name,
+            );
+            return Err(error).context(format!(
+                "persist empty-directory quarantine (restore: {restore:?})"
+            ));
+        }
+        if let Err(error) = after_move(&quarantine, quarantine_entry) {
+            let restore = restore_then_clear_quarantine(
+                &anchor,
+                &quarantine,
+                &quarantine_name,
+                &quarantine_identity,
+                &moved,
+                expected_candidate,
+                &parent,
+                &name,
+            );
+            return Err(error).context(format!(
+                "restore empty directory after quarantine hook (restore: {restore:?})"
+            ));
+        }
+
+        let moved_identity = directory_identity(&moved)?;
+        if &moved_identity != expected_candidate {
+            let restore = restore_then_clear_quarantine(
+                &anchor,
+                &quarantine,
+                &quarantine_name,
+                &quarantine_identity,
+                &moved,
+                expected_candidate,
+                &parent,
+                &name,
+            );
+            return Err(anyhow::anyhow!(
+                "quarantined empty directory changed identity"
+            ))
+            .context(format!(
+                "preserve changed empty directory (restore: {restore:?})"
+            ));
+        }
+        let current = open_directory_child(&quarantine, quarantine_entry)
+            .context("reopen quarantined empty directory without following links")?;
+        if directory_identity(&current)? != *expected_candidate {
+            let restore = restore_then_clear_quarantine(
+                &anchor,
+                &quarantine,
+                &quarantine_name,
+                &quarantine_identity,
+                &moved,
+                expected_candidate,
+                &parent,
+                &name,
+            );
+            return Err(anyhow::anyhow!(
+                "quarantined empty directory name changed identity"
+            ))
+            .context(format!(
+                "preserve changed empty directory (restore: {restore:?})"
+            ));
+        }
+        if !secure_directory_entries(&current)?.is_empty() {
+            restore_then_clear_quarantine(
+                &anchor,
+                &quarantine,
+                &quarantine_name,
+                &quarantine_identity,
+                &moved,
+                expected_candidate,
+                &parent,
+                &name,
+            )?;
+            return Ok(false);
+        }
+        match rustix::fs::unlinkat(
+            &quarantine,
+            quarantine_entry,
+            rustix::fs::AtFlags::REMOVEDIR,
+        )
+        .map_err(std::io::Error::from)
+        {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                restore_then_clear_quarantine(
+                    &anchor,
+                    &quarantine,
+                    &quarantine_name,
+                    &quarantine_identity,
+                    &moved,
+                    expected_candidate,
+                    &parent,
+                    &name,
+                )?;
+                return Ok(false);
+            }
+            Err(error) => {
+                let restore = restore_then_clear_quarantine(
+                    &anchor,
+                    &quarantine,
+                    &quarantine_name,
+                    &quarantine_identity,
+                    &moved,
+                    expected_candidate,
+                    &parent,
+                    &name,
+                );
+                return Err(error).context(format!(
+                    "remove quarantined empty directory (restore: {restore:?})"
+                ));
+            }
+        }
+        sync_directory(&quarantine).context("persist quarantined empty-directory removal")?;
+        drop(moved);
+        remove_quarantine_record_and_directory(
+            &anchor,
+            &quarantine,
+            &quarantine_name,
+            &quarantine_identity,
+        )?;
+        Ok(true)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (
+            trusted_anchor,
+            path,
+            expected_anchor,
+            expected_parent,
+            pinned_parent,
+            expected_candidate,
+            pinned_candidate,
+            after_move,
+        );
+        bail!("refusing empty-directory cleanup without native mount-identity proof")
+    }
 }
 
 fn remove_dir_all_on_device_under_pins(
@@ -1558,12 +2106,24 @@ fn remove_dir_all_on_device_under_pins(
     path: &Path,
     expected_device: u64,
     expected_anchor: &FilesystemDirectoryIdentity,
+    expected_parent: Option<&FilesystemDirectoryIdentity>,
+    pinned_parent: Option<&fs::File>,
     expected_candidate: Option<&FilesystemDirectoryIdentity>,
     pinned_candidate: Option<&fs::File>,
+    before_unlink: &impl Fn(&Path) -> Result<()>,
 ) -> Result<()> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         use std::os::unix::fs::MetadataExt as _;
+
+        if expected_parent.is_some() != pinned_parent.is_some() {
+            bail!("pinned cleanup parent identity and descriptor must be supplied together");
+        }
+        if let (Some(expected), Some(pinned)) = (expected_parent, pinned_parent) {
+            if &directory_identity(pinned)? != expected {
+                bail!("pinned cleanup parent changed since inventory");
+            }
+        }
 
         let anchor = open_configured_directory(trusted_anchor)?;
         let anchor_identity = directory_identity(&anchor)?;
@@ -1572,6 +2132,14 @@ fn remove_dir_all_on_device_under_pins(
         }
         let (parent, name, root_path, opened_anchor_identity) =
             open_parent_beneath_anchor(trusted_anchor, path, Some(expected_anchor))?;
+        if let Some(expected) = expected_parent {
+            if &directory_identity(&parent)? != expected {
+                bail!("cleanup candidate parent changed since inventory");
+            }
+        }
+        let source_relative_path = path
+            .strip_prefix(trusted_anchor)
+            .context("leftover workspace is outside its trusted cleanup anchor")?;
         if opened_anchor_identity != anchor_identity {
             bail!("trusted cleanup anchor changed while opening candidate parent");
         }
@@ -1590,10 +2158,12 @@ fn remove_dir_all_on_device_under_pins(
             &anchor,
             &anchor_identity,
             &root_path,
+            source_relative_path,
             expected_device,
             anchor_identity.mount.clone(),
             expected_candidate,
             pinned_candidate,
+            before_unlink,
         )
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -1603,6 +2173,8 @@ fn remove_dir_all_on_device_under_pins(
             path,
             expected_device,
             expected_anchor,
+            expected_parent,
+            pinned_parent,
             expected_candidate,
             pinned_candidate,
         );
@@ -1625,6 +2197,9 @@ pub(crate) fn remove_dir_all_on_device_and_mount_under(
         let anchor_identity = directory_identity(&anchor)?;
         let (parent, name, root_path, opened_anchor_identity) =
             open_parent_beneath_anchor(trusted_anchor, path, Some(&anchor_identity))?;
+        let source_relative_path = path
+            .strip_prefix(trusted_anchor)
+            .context("leftover workspace is outside its trusted cleanup anchor")?;
         if opened_anchor_identity != anchor_identity {
             bail!("trusted cleanup anchor changed while opening candidate parent");
         }
@@ -1646,10 +2221,12 @@ pub(crate) fn remove_dir_all_on_device_and_mount_under(
             &anchor,
             &anchor_identity,
             &root_path,
+            source_relative_path,
             expected_device,
             expected_mount.clone(),
             None,
             None,
+            &|_| Ok(()),
         )
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -1665,10 +2242,12 @@ fn remove_dir_all_at(
     quarantine_anchor: &fs::File,
     expected_anchor: &FilesystemDirectoryIdentity,
     root_path: &Path,
+    source_relative_path: &Path,
     expected_device: u64,
     expected_mount: FilesystemMountIdentity,
     expected_candidate: Option<&FilesystemDirectoryIdentity>,
     pinned_candidate: Option<&fs::File>,
+    before_unlink: &impl Fn(&Path) -> Result<()>,
 ) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
@@ -1681,29 +2260,30 @@ fn remove_dir_all_at(
             quarantine_anchor,
             expected_anchor,
             root_path,
+            source_relative_path,
             expected_device,
             Some(expected_mount_id),
             expected_candidate,
             pinned_candidate,
             &|_, device, mount_id| (device, mount_id),
-            &|_| Ok(()),
+            before_unlink,
         )
     }
     #[cfg(target_os = "macos")]
     {
-        let FilesystemMountIdentity::MacOs(expected_mount) = expected_mount else {
-            bail!("refusing leftover cleanup with non-macOS mount identity");
-        };
+        let FilesystemMountIdentity::MacOs(expected_mount) = expected_mount;
         remove_dir_all_macos_at(
             parent,
             name,
             quarantine_anchor,
             expected_anchor,
             root_path,
+            source_relative_path,
             expected_device,
             &expected_mount,
             expected_candidate,
             pinned_candidate,
+            before_unlink,
         )
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -1714,10 +2294,12 @@ fn remove_dir_all_at(
             quarantine_anchor,
             expected_anchor,
             root_path,
+            source_relative_path,
             expected_device,
             expected_mount,
             expected_candidate,
             pinned_candidate,
+            before_unlink,
         );
         bail!("refusing leftover cleanup without native mount-identity proof")
     }
@@ -1731,6 +2313,15 @@ fn create_private_quarantine(
     anchor: &fs::File,
     expected_anchor: &FilesystemDirectoryIdentity,
 ) -> Result<(fs::File, std::ffi::OsString)> {
+    create_private_quarantine_with_hook(anchor, expected_anchor, || Ok(()))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn create_private_quarantine_with_hook(
+    anchor: &fs::File,
+    expected_anchor: &FilesystemDirectoryIdentity,
+    after_mkdir: impl FnOnce() -> Result<()>,
+) -> Result<(fs::File, std::ffi::OsString)> {
     use std::os::fd::AsRawFd as _;
     use std::os::unix::ffi::OsStringExt as _;
 
@@ -1738,9 +2329,13 @@ fn create_private_quarantine(
     if &anchor_identity != expected_anchor {
         bail!("trusted cleanup anchor changed before quarantine creation");
     }
+    let mut after_mkdir = Some(after_mkdir);
     for _ in 0..64 {
         let sequence = QUARANTINE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let name = format!(".velnor-reclaim-{}-{sequence}", std::process::id());
+        let name = format!(
+            "{RECLAIM_QUARANTINE_PREFIX}{}-{sequence}",
+            std::process::id()
+        );
         let encoded = std::ffi::CString::new(name.as_bytes())?;
         // SAFETY: `anchor` is a live directory fd and `encoded` is a single
         // terminated child name. mkdirat is exclusive and applies mode 0700.
@@ -1753,22 +2348,715 @@ fn create_private_quarantine(
             return Err(error).context("create private cleanup quarantine");
         }
         let name_os = std::ffi::OsString::from_vec(name.into_bytes());
-        let quarantine =
-            open_directory_child(anchor, &name_os).context("open private cleanup quarantine")?;
-        let identity = directory_identity(&quarantine)?;
-        if identity.device != expected_anchor.device || identity.mount != expected_anchor.mount {
-            bail!("cleanup quarantine crossed its trusted anchor mount");
-        }
-        use std::os::unix::fs::MetadataExt as _;
-        let metadata = quarantine
-            .metadata()
-            .context("inspect cleanup quarantine")?;
-        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o777 != 0o700 {
-            bail!("cleanup quarantine is not private to the daemon account");
-        }
-        return Ok((quarantine, name_os));
+        let setup = (|| {
+            after_mkdir
+                .take()
+                .expect("post-mkdir hook runs only after exclusive creation")()?;
+            sync_directory(anchor).context("persist created cleanup quarantine")?;
+            let quarantine = open_directory_child(anchor, &name_os)
+                .context("open private cleanup quarantine")?;
+            let identity = directory_identity(&quarantine)?;
+            if identity.device != expected_anchor.device || identity.mount != expected_anchor.mount
+            {
+                bail!("cleanup quarantine crossed its trusted anchor mount");
+            }
+            ensure_private_quarantine(&quarantine)?;
+            Ok(quarantine)
+        })();
+        return match setup {
+            Ok(quarantine) => Ok((quarantine, name_os)),
+            Err(error) => {
+                let cleanup = remove_private_quarantine(anchor, &name_os);
+                Err(error).context(format!(
+                    "validate created cleanup quarantine (empty-directory cleanup: {cleanup:?})"
+                ))
+            }
+        };
     }
     bail!("could not allocate a unique cleanup quarantine")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn create_private_quarantine_with_journal(
+    anchor: &fs::File,
+    expected_anchor: &FilesystemDirectoryIdentity,
+    source_relative_path: &Path,
+    source_parent: &fs::File,
+    source_identity: &FilesystemDirectoryIdentity,
+) -> Result<(fs::File, std::ffi::OsString)> {
+    let source_parent_identity = directory_identity(source_parent)?;
+    if source_parent_identity.device != expected_anchor.device
+        || source_parent_identity.mount != expected_anchor.mount
+    {
+        bail!("cleanup source parent crossed its trusted anchor mount");
+    }
+    let (quarantine, name) = create_private_quarantine(anchor, expected_anchor)?;
+    let _identity = match directory_identity(&quarantine) {
+        Ok(identity) => identity,
+        Err(error) => {
+            let cleanup = remove_private_quarantine(anchor, &name);
+            return Err(error).context(format!(
+                "pin cleanup quarantine before journaling (cleanup: {cleanup:?})"
+            ));
+        }
+    };
+    if let Err(error) = write_quarantine_journal(
+        &quarantine,
+        expected_anchor,
+        &source_parent_identity,
+        source_relative_path,
+        source_identity,
+    ) {
+        let cleanup = remove_private_quarantine_unrecorded(anchor, &name);
+        return Err(error).context(format!(
+            "record cleanup quarantine intent (empty-directory cleanup: {cleanup:?})"
+        ));
+    }
+    Ok((quarantine, name))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn write_quarantine_journal(
+    quarantine: &fs::File,
+    anchor_identity: &FilesystemDirectoryIdentity,
+    source_parent_identity: &FilesystemDirectoryIdentity,
+    source_relative_path: &Path,
+    source_identity: &FilesystemDirectoryIdentity,
+) -> Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let path_bytes = source_relative_path.as_os_str().as_bytes();
+    validate_quarantine_relative_path(path_bytes)?;
+    if anchor_identity.device != source_parent_identity.device
+        || anchor_identity.mount != source_parent_identity.mount
+    {
+        bail!("cleanup source parent crossed its trusted anchor mount");
+    }
+    let contents = format!(
+        "velnor-reclaim-v2\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+        anchor_identity.device,
+        anchor_identity.inode,
+        source_parent_identity.device,
+        source_parent_identity.inode,
+        source_identity.device,
+        source_identity.inode,
+        hex_encode(path_bytes),
+    );
+    let temporary_name = std::ffi::OsStr::new(RECLAIM_QUARANTINE_JOURNAL_TEMP);
+    let journal_name = std::ffi::OsStr::new(RECLAIM_QUARANTINE_JOURNAL);
+    let mut temporary = create_quarantine_file(quarantine, temporary_name)?;
+    temporary
+        .write_all(contents.as_bytes())
+        .context("write cleanup quarantine transaction journal")?;
+    temporary
+        .sync_all()
+        .context("persist cleanup quarantine transaction journal")?;
+    rename_entry_noreplace(quarantine, temporary_name, quarantine, journal_name)
+        .context("publish cleanup quarantine transaction journal")?;
+    sync_directory(quarantine).context("persist published cleanup quarantine journal")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn create_quarantine_file(parent: &fs::File, name: &std::ffi::OsStr) -> Result<fs::File> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let name = std::ffi::CString::new(name.as_bytes())?;
+    // SAFETY: parent is live and name is a terminated single component.
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("create cleanup quarantine journal file");
+    }
+    // SAFETY: openat returned a new owned descriptor.
+    let file = unsafe { fs::File::from_raw_fd(descriptor) };
+    // SAFETY: the new descriptor refers to the exclusively created journal.
+    if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("set private cleanup quarantine journal mode");
+    }
+    Ok(file)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn open_quarantine_file(parent: &fs::File, name: &std::ffi::OsStr) -> Result<fs::File> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let name = std::ffi::CString::new(name.as_bytes())?;
+    // SAFETY: parent is live and name is a terminated single component.
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error()).context("open cleanup quarantine journal");
+    }
+    // SAFETY: openat returned a new owned descriptor.
+    Ok(unsafe { fs::File::from_raw_fd(descriptor) })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct QuarantineJournal {
+    anchor_device: u64,
+    anchor_inode: u64,
+    source_parent_device: u64,
+    source_parent_inode: u64,
+    candidate_device: u64,
+    candidate_inode: u64,
+    relative_path: PathBuf,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn parse_quarantine_journal(quarantine: &fs::File) -> Result<QuarantineJournal> {
+    use std::io::Read as _;
+    use std::os::unix::ffi::OsStringExt as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    let mut journal =
+        open_quarantine_file(quarantine, std::ffi::OsStr::new(RECLAIM_QUARANTINE_JOURNAL))?;
+    let metadata = journal
+        .metadata()
+        .context("inspect cleanup quarantine journal")?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.len() > 8192
+    {
+        bail!("cleanup quarantine journal is not a bounded private regular file");
+    }
+    let mut contents = String::with_capacity(metadata.len() as usize);
+    journal
+        .read_to_string(&mut contents)
+        .context("read cleanup quarantine journal")?;
+    let mut lines = contents.lines();
+    if lines.next() != Some("velnor-reclaim-v2") {
+        bail!("unknown cleanup quarantine journal version");
+    }
+    let mut next_identity = |field: &str| -> Result<u64> {
+        lines
+            .next()
+            .with_context(|| format!("journal omitted {field}"))?
+            .parse::<u64>()
+            .with_context(|| format!("journal {field} is invalid"))
+    };
+    let anchor_device = next_identity("anchor device")?;
+    let anchor_inode = next_identity("anchor inode")?;
+    let source_parent_device = next_identity("source-parent device")?;
+    let source_parent_inode = next_identity("source-parent inode")?;
+    let candidate_device = next_identity("candidate device")?;
+    let candidate_inode = next_identity("candidate inode")?;
+    let path_hex = lines.next().context("journal omitted candidate path")?;
+    if lines.next().is_some() {
+        bail!("cleanup quarantine journal has trailing fields");
+    }
+    let path_bytes = hex_decode(path_hex)?;
+    validate_quarantine_relative_path(&path_bytes)?;
+    Ok(QuarantineJournal {
+        anchor_device,
+        anchor_inode,
+        source_parent_device,
+        source_parent_inode,
+        candidate_device,
+        candidate_inode,
+        relative_path: PathBuf::from(std::ffi::OsString::from_vec(path_bytes)),
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn hex_decode(encoded: &str) -> Result<Vec<u8>> {
+    if encoded.is_empty() || encoded.len() % 2 != 0 {
+        bail!("cleanup quarantine journal path encoding is invalid");
+    }
+    let mut decoded = Vec::with_capacity(encoded.len() / 2);
+    for pair in encoded.as_bytes().chunks_exact(2) {
+        let digit = |byte: u8| match byte {
+            b'0'..=b'9' => Ok(byte - b'0'),
+            b'a'..=b'f' => Ok(byte - b'a' + 10),
+            _ => bail!("cleanup quarantine journal path encoding is invalid"),
+        };
+        decoded.push((digit(pair[0])? << 4) | digit(pair[1])?);
+    }
+    Ok(decoded)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn validate_quarantine_relative_path(path: &[u8]) -> Result<()> {
+    if path.is_empty() || path.starts_with(b"/") || path.contains(&0) {
+        bail!("cleanup quarantine journal path is not relative and normalized");
+    }
+    let components = path.split(|byte| *byte == b'/').collect::<Vec<_>>();
+    if components.is_empty()
+        || components.len() > 32
+        || components
+            .iter()
+            .any(|component| component.is_empty() || *component == b"." || *component == b"..")
+        || std::str::from_utf8(components[components.len() - 1]).is_err()
+    {
+        bail!("cleanup quarantine journal path is not a normalized UTF-8 path");
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn ensure_private_quarantine(quarantine: &fs::File) -> Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = quarantine
+        .metadata()
+        .context("inspect cleanup quarantine")?;
+    if !metadata.is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o777 != 0o700
+    {
+        bail!("cleanup quarantine is not private to the daemon account");
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn sync_directory(directory: &fs::File) -> Result<()> {
+    directory
+        .sync_all()
+        .context("persist cleanup directory transaction")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn sync_two_directories_in_order(
+    first: &fs::File,
+    second: &fs::File,
+    mut sync: impl FnMut(&fs::File) -> Result<()>,
+) -> Result<()> {
+    sync(first)?;
+    sync(second)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn persist_quarantine_move(source_parent: &fs::File, quarantine: &fs::File) -> Result<()> {
+    sync_two_directories_in_order(quarantine, source_parent, sync_directory)
+        .context("persist quarantine destination before source removal")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn persist_quarantine_restore(quarantine: &fs::File, source_parent: &fs::File) -> Result<()> {
+    sync_two_directories_in_order(source_parent, quarantine, sync_directory)
+        .context("persist restored source before quarantine removal")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn unlink_private_quarantine_file_if_present(
+    quarantine: &fs::File,
+    name: &std::ffi::OsStr,
+) -> Result<()> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    let file = match open_quarantine_file(quarantine, name) {
+        Ok(file) => file,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(())
+        }
+        Err(error) => return Err(error),
+    };
+    let metadata = file
+        .metadata()
+        .context("inspect private cleanup journal file")?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o777 != 0o600
+    {
+        bail!("refusing to remove an untrusted cleanup journal file");
+    }
+    let name = std::ffi::CString::new(name.as_bytes())?;
+    // SAFETY: quarantine is live and name is one component.
+    if unsafe { libc::unlinkat(quarantine.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(error).context("remove cleanup quarantine journal file");
+        }
+    }
+    sync_directory(quarantine)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn remove_quarantine_record_and_directory(
+    anchor: &fs::File,
+    quarantine: &fs::File,
+    name: &std::ffi::OsStr,
+    expected_identity: &FilesystemDirectoryIdentity,
+) -> Result<()> {
+    ensure_private_quarantine(quarantine)?;
+    if &directory_identity(quarantine)? != expected_identity {
+        bail!("cleanup quarantine identity changed before transaction cleanup");
+    }
+    for entry in secure_directory_entries(quarantine)? {
+        if entry.name == RECLAIM_QUARANTINE_ENTRY {
+            bail!("refusing to remove cleanup quarantine while its workspace remains");
+        }
+        if entry.name != RECLAIM_QUARANTINE_JOURNAL && entry.name != RECLAIM_QUARANTINE_JOURNAL_TEMP
+        {
+            bail!("cleanup quarantine contains an unrecognized entry; freezing it");
+        }
+    }
+    unlink_private_quarantine_file_if_present(
+        quarantine,
+        std::ffi::OsStr::new(RECLAIM_QUARANTINE_JOURNAL_TEMP),
+    )?;
+    unlink_private_quarantine_file_if_present(
+        quarantine,
+        std::ffi::OsStr::new(RECLAIM_QUARANTINE_JOURNAL),
+    )?;
+    remove_private_quarantine_checked(anchor, quarantine, name, expected_identity)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn restore_then_clear_quarantine(
+    anchor: &fs::File,
+    quarantine: &fs::File,
+    quarantine_name: &std::ffi::OsStr,
+    quarantine_identity: &FilesystemDirectoryIdentity,
+    pinned_entry: &fs::File,
+    entry_identity: &FilesystemDirectoryIdentity,
+    source_parent: &fs::File,
+    source_name: &std::ffi::OsStr,
+) -> Result<()> {
+    if &directory_identity(pinned_entry)? != entry_identity {
+        bail!("refusing to restore a cleanup entry with uncertain identity");
+    }
+    restore_quarantined_entry(
+        quarantine,
+        std::ffi::OsStr::new(RECLAIM_QUARANTINE_ENTRY),
+        source_parent,
+        source_name,
+        entry_identity,
+    )?;
+    remove_quarantine_record_and_directory(anchor, quarantine, quarantine_name, quarantine_identity)
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+fn recover_private_quarantines_for_roots(work_roots: &[PathBuf], liveness: &WorkspaceLiveness) {
+    if liveness.evidence_incomplete {
+        return;
+    }
+    for work_root in work_roots {
+        recover_private_quarantines_for_root(work_root, liveness, &|_| Ok(true));
+    }
+}
+
+fn recover_workspace_private_quarantines_for_roots(
+    work_roots: &[PathBuf],
+    liveness: &WorkspaceLiveness,
+) {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        if liveness.evidence_incomplete {
+            return;
+        }
+        let Some(layout) = crate::storage::selected_or_resolved_layout() else {
+            eprintln!("leftover reclaim: cannot classify work-root cleanup quarantines without storage layout");
+            return;
+        };
+        for work_root in work_roots {
+            let allow_workspace = |relative_path: &Path| {
+                crate::cache::is_catalog_cache_candidate_path_for_recovery(
+                    work_root,
+                    &layout,
+                    relative_path,
+                )
+                .map(|is_cache_candidate| !is_cache_candidate)
+            };
+            recover_private_quarantines_for_root(work_root, liveness, &allow_workspace);
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = (work_roots, liveness);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn recover_private_quarantines_for_root(
+    work_root: &Path,
+    liveness: &WorkspaceLiveness,
+    allow_candidate: &impl Fn(&Path) -> Result<bool>,
+) {
+    if liveness.evidence_incomplete {
+        return;
+    }
+    let work = match open_configured_directory_leaf_nofollow(work_root) {
+        Ok(work) => work,
+        Err(error) => {
+            eprintln!(
+                "leftover reclaim: cannot inspect recovery root {}: {error:#}",
+                work_root.display()
+            );
+            return;
+        }
+    };
+    let identity = match directory_identity(&work) {
+        Ok(identity) => identity,
+        Err(error) => {
+            eprintln!(
+                "leftover reclaim: cannot pin recovery root {}: {error:#}",
+                work_root.display()
+            );
+            return;
+        }
+    };
+    recover_private_quarantines(&work, work_root, &identity, liveness, allow_candidate);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn recover_private_quarantines(
+    anchor: &fs::File,
+    anchor_path: &Path,
+    expected_anchor: &FilesystemDirectoryIdentity,
+    liveness: &WorkspaceLiveness,
+    allow_candidate: &impl Fn(&Path) -> Result<bool>,
+) {
+    if liveness.evidence_incomplete {
+        return;
+    }
+    let entries = match secure_directory_entries(anchor) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("leftover reclaim: cannot inspect quarantine entries: {error:#}");
+            return;
+        }
+    };
+    for entry in entries.into_iter().filter(|entry| {
+        entry
+            .name
+            .to_str()
+            .is_some_and(|name| name.starts_with(RECLAIM_QUARANTINE_PREFIX))
+    }) {
+        let path = anchor_path.join(&entry.name);
+        let result = recover_one_private_quarantine(
+            anchor,
+            &entry,
+            expected_anchor,
+            liveness,
+            allow_candidate,
+        );
+        if let Err(error) = result {
+            eprintln!(
+                "leftover reclaim: frozen cleanup quarantine {}: {error:#}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn recover_one_private_quarantine(
+    anchor: &fs::File,
+    entry: &SecureDirectoryEntry,
+    expected_anchor: &FilesystemDirectoryIdentity,
+    liveness: &WorkspaceLiveness,
+    allow_candidate: &impl Fn(&Path) -> Result<bool>,
+) -> Result<()> {
+    let name_text = entry
+        .name
+        .to_str()
+        .context("cleanup quarantine name is not UTF-8")?;
+    let allocation = name_text
+        .strip_prefix(RECLAIM_QUARANTINE_PREFIX)
+        .context("invalid cleanup quarantine prefix")?;
+    let (process, sequence) = allocation
+        .split_once('-')
+        .context("cleanup quarantine name has no process and sequence")?;
+    if process.parse::<u32>().is_err() || sequence.parse::<u64>().is_err() {
+        bail!("cleanup quarantine name is not an allocated Velnor quarantine");
+    }
+    if !entry.is_directory || entry.is_mountpoint {
+        bail!("cleanup quarantine entry is not a same-mount directory");
+    }
+    let quarantine = open_directory_child(anchor, &entry.name)?;
+    ensure_private_quarantine(&quarantine)?;
+    let quarantine_identity = directory_identity(&quarantine)?;
+    if quarantine_identity.device != expected_anchor.device
+        || quarantine_identity.mount != expected_anchor.mount
+    {
+        bail!("cleanup quarantine crossed its trusted work-root mount");
+    }
+    let contents = secure_directory_entries(&quarantine)?;
+    let has_journal = contents
+        .iter()
+        .any(|entry| entry.name == RECLAIM_QUARANTINE_JOURNAL);
+    let has_temporary = contents
+        .iter()
+        .any(|entry| entry.name == RECLAIM_QUARANTINE_JOURNAL_TEMP);
+    let has_entry = contents
+        .iter()
+        .any(|entry| entry.name == RECLAIM_QUARANTINE_ENTRY);
+    if contents.iter().any(|entry| {
+        entry.name != RECLAIM_QUARANTINE_JOURNAL
+            && entry.name != RECLAIM_QUARANTINE_JOURNAL_TEMP
+            && entry.name != RECLAIM_QUARANTINE_ENTRY
+    }) {
+        bail!("cleanup quarantine contains unrecognized entries");
+    }
+    if !has_journal {
+        if has_entry {
+            bail!("cleanup quarantine contains an unjournaled workspace; identity is uncertain");
+        }
+        if has_temporary {
+            unlink_private_quarantine_file_if_present(
+                &quarantine,
+                std::ffi::OsStr::new(RECLAIM_QUARANTINE_JOURNAL_TEMP),
+            )?;
+        }
+        remove_private_quarantine_checked(anchor, &quarantine, &entry.name, &quarantine_identity)?;
+        return Ok(());
+    }
+    if has_temporary {
+        bail!("cleanup quarantine has both published and temporary journals");
+    }
+
+    let journal = parse_quarantine_journal(&quarantine)?;
+    if !allow_candidate(&journal.relative_path)? {
+        return Ok(());
+    }
+    if journal.anchor_device != expected_anchor.device
+        || journal.anchor_inode != expected_anchor.inode
+    {
+        bail!("cleanup quarantine anchor does not match its journaled identity");
+    }
+    let (source_parent, source_name) =
+        open_quarantine_source_parent(anchor, &journal.relative_path, expected_anchor)?;
+    let source_parent_identity = directory_identity(&source_parent)?;
+    if source_parent_identity.device != journal.source_parent_device
+        || source_parent_identity.inode != journal.source_parent_inode
+        || source_parent_identity.mount != expected_anchor.mount
+    {
+        bail!("cleanup source parent does not match its journaled identity");
+    }
+    let job_id = source_name
+        .to_str()
+        .context("journaled workspace name is not UTF-8")?;
+    if liveness.running.contains(job_id)
+        || liveness.leased.contains(job_id)
+        || liveness.claimed.contains(job_id)
+    {
+        bail!("journaled workspace is live; leaving its quarantine frozen");
+    }
+    let source_entries = secure_directory_entries(&source_parent)?;
+    let source_entry = source_entries
+        .iter()
+        .find(|entry| entry.name == source_name);
+    let source_identity = match source_entry {
+        Some(entry) if entry.is_directory && !entry.is_mountpoint => {
+            let directory = open_directory_child(&source_parent, &source_name)?;
+            Some(directory_identity(&directory)?)
+        }
+        Some(_) => bail!("journaled workspace destination is occupied by an unexpected entry"),
+        None => None,
+    };
+    let quarantined_entry = contents
+        .iter()
+        .find(|entry| entry.name == RECLAIM_QUARANTINE_ENTRY);
+    let quarantined_directory = match quarantined_entry {
+        Some(entry) if entry.is_directory && !entry.is_mountpoint => {
+            let directory =
+                open_directory_child(&quarantine, std::ffi::OsStr::new(RECLAIM_QUARANTINE_ENTRY))?;
+            let identity = directory_identity(&directory)?;
+            if identity.device != journal.candidate_device
+                || identity.inode != journal.candidate_inode
+                || identity.mount != expected_anchor.mount
+            {
+                bail!("quarantined workspace does not match its journaled identity");
+            }
+            Some(directory)
+        }
+        Some(_) => bail!("quarantine entry is not the journaled workspace directory"),
+        None => None,
+    };
+    if quarantined_directory.is_some() && source_identity.is_some() {
+        bail!("both quarantine and workspace names are occupied; freezing uncertain state");
+    }
+    if let Some(quarantined_directory) = quarantined_directory {
+        let expected_identity = FilesystemEntryIdentity {
+            device: journal.candidate_device,
+            inode: journal.candidate_inode,
+            mount: expected_anchor.mount.clone(),
+        };
+        restore_quarantined_entry(
+            &quarantine,
+            std::ffi::OsStr::new(RECLAIM_QUARANTINE_ENTRY),
+            &source_parent,
+            &source_name,
+            &expected_identity,
+        )?;
+        if directory_identity(&quarantined_directory)? != expected_identity {
+            bail!("restored workspace changed identity during recovery");
+        }
+    } else if let Some(identity) = source_identity {
+        if identity.device != journal.candidate_device
+            || identity.inode != journal.candidate_inode
+            || identity.mount != expected_anchor.mount
+        {
+            bail!("restored workspace does not match its journaled identity");
+        }
+    }
+    remove_quarantine_record_and_directory(anchor, &quarantine, &entry.name, &quarantine_identity)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn open_quarantine_source_parent(
+    anchor: &fs::File,
+    relative_path: &Path,
+    expected_anchor: &FilesystemDirectoryIdentity,
+) -> Result<(fs::File, std::ffi::OsString)> {
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let bytes = relative_path.as_os_str().as_bytes();
+    validate_quarantine_relative_path(bytes)?;
+    let mut components = bytes
+        .split(|byte| *byte == b'/')
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let name = std::ffi::OsString::from_vec(
+        components
+            .pop()
+            .context("journaled workspace path has no final component")?,
+    );
+    let mut parent = open_directory_child(anchor, std::ffi::OsStr::new("."))?;
+    for component in components {
+        let child = std::ffi::OsString::from_vec(component);
+        parent = open_directory_child(&parent, &child)
+            .context("open journaled workspace parent without following links")?;
+        let identity = directory_identity(&parent)?;
+        if identity.device != expected_anchor.device || identity.mount != expected_anchor.mount {
+            bail!("journaled workspace parent crosses its trusted work-root mount");
+        }
+    }
+    Ok((parent, name))
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1825,15 +3113,54 @@ fn rename_entry_noreplace(
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn remove_private_quarantine(anchor: &fs::File, name: &std::ffi::OsStr) -> Result<()> {
+    let quarantine = open_directory_child(anchor, name)
+        .context("reopen private cleanup quarantine before removal")?;
+    let identity = directory_identity(&quarantine)?;
+    remove_private_quarantine_checked(anchor, &quarantine, name, &identity)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn remove_private_quarantine_checked(
+    anchor: &fs::File,
+    quarantine: &fs::File,
+    name: &std::ffi::OsStr,
+    expected_identity: &FilesystemDirectoryIdentity,
+) -> Result<()> {
     use std::os::fd::AsRawFd as _;
     use std::os::unix::ffi::OsStrExt as _;
 
+    ensure_private_quarantine(quarantine)?;
+    if &directory_identity(quarantine)? != expected_identity {
+        bail!("cleanup quarantine descriptor changed before removal");
+    }
+    let current = open_directory_child(anchor, name)
+        .context("reopen cleanup quarantine entry before removal")?;
+    if &directory_identity(&current)? != expected_identity {
+        bail!("cleanup quarantine entry changed before removal");
+    }
+    if !secure_directory_entries(&current)?.is_empty() {
+        bail!("refusing to remove non-empty cleanup quarantine");
+    }
     let name = std::ffi::CString::new(name.as_bytes())?;
-    // SAFETY: `anchor` is a live directory fd and `name` is one child name.
+    // SAFETY: `anchor` is live and `name` is a single child component. The
+    // descriptor and current entry were checked to be the same empty directory.
     if unsafe { libc::unlinkat(anchor.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
         return Err(std::io::Error::last_os_error()).context("remove private cleanup quarantine");
     }
-    Ok(())
+    sync_directory(anchor).context("persist removal of cleanup quarantine")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn remove_private_quarantine_unrecorded(anchor: &fs::File, name: &std::ffi::OsStr) -> Result<()> {
+    let quarantine = open_directory_child(anchor, name)
+        .context("open unrecorded cleanup quarantine for rollback")?;
+    ensure_private_quarantine(&quarantine)?;
+    let entries = secure_directory_entries(&quarantine)?;
+    if !entries.is_empty() {
+        bail!("unrecorded cleanup quarantine is not empty; refusing cleanup");
+    }
+    let identity = directory_identity(&quarantine)?;
+    remove_private_quarantine_checked(anchor, &quarantine, name, &identity)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1842,9 +3169,22 @@ fn restore_quarantined_entry(
     quarantine_name: &std::ffi::OsStr,
     source_parent: &fs::File,
     source_name: &std::ffi::OsStr,
+    expected_identity: &FilesystemDirectoryIdentity,
 ) -> Result<()> {
+    let pinned = open_directory_child(quarantine, quarantine_name)
+        .context("open quarantined cleanup entry before restore")?;
+    if &directory_identity(&pinned)? != expected_identity {
+        bail!("quarantined cleanup entry identity changed before restore");
+    }
     rename_entry_noreplace(quarantine, quarantine_name, source_parent, source_name)
-        .context("restore preserved cleanup entry without replacing its source name")
+        .context("restore preserved cleanup entry without replacing its source name")?;
+    let restored =
+        open_directory_child(source_parent, source_name).context("open restored cleanup entry")?;
+    if &directory_identity(&restored)? != expected_identity {
+        bail!("restored cleanup entry did not match its journaled identity");
+    }
+    persist_quarantine_restore(quarantine, source_parent)?;
+    Ok(())
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1865,19 +3205,37 @@ fn move_candidate_to_quarantine(
     let moved = match open_directory_child(quarantine, quarantine_name) {
         Ok(moved) => moved,
         Err(error) => {
-            restore_quarantined_entry(quarantine, quarantine_name, source_parent, source_name)?;
+            restore_quarantined_entry(
+                quarantine,
+                quarantine_name,
+                source_parent,
+                source_name,
+                expected_identity,
+            )?;
             return Err(error).context("open quarantined candidate without following links");
         }
     };
     let moved_identity = match directory_identity(&moved) {
         Ok(identity) => identity,
         Err(error) => {
-            restore_quarantined_entry(quarantine, quarantine_name, source_parent, source_name)?;
+            restore_quarantined_entry(
+                quarantine,
+                quarantine_name,
+                source_parent,
+                source_name,
+                expected_identity,
+            )?;
             return Err(error).context("verify quarantined cleanup candidate identity");
         }
     };
     if moved_identity != *expected_identity {
-        restore_quarantined_entry(quarantine, quarantine_name, source_parent, source_name)?;
+        restore_quarantined_entry(
+            quarantine,
+            quarantine_name,
+            source_parent,
+            source_name,
+            expected_identity,
+        )?;
         bail!("quarantined cleanup candidate did not match its pinned descriptor");
     }
     Ok(moved)
@@ -1982,12 +3340,16 @@ fn remove_dir_all_with_identity(
         let anchor_identity = directory_identity(&anchor)?;
         let (parent, name, root_path, _) =
             open_parent_beneath_anchor(anchor_path, path, Some(&anchor_identity))?;
+        let source_relative_path = path
+            .strip_prefix(anchor_path)
+            .context("leftover workspace is outside its trusted cleanup anchor")?;
         remove_dir_all_with_identity_at(
             &parent,
             &name,
             &anchor,
             &anchor_identity,
             &root_path,
+            source_relative_path,
             expected_device,
             expected_root_mount_id,
             None,
@@ -2010,12 +3372,13 @@ fn remove_dir_all_with_identity_at(
     quarantine_anchor: &fs::File,
     expected_anchor: &FilesystemDirectoryIdentity,
     root_path: &Path,
+    source_relative_path: &Path,
     expected_device: u64,
     expected_root_mount_id: Option<u64>,
     expected_candidate: Option<&FilesystemDirectoryIdentity>,
     pinned_candidate: Option<&fs::File>,
     identity_of: &impl Fn(&Path, u64, u64) -> (u64, u64),
-    after_unlink: &impl Fn(&Path) -> Result<()>,
+    before_unlink: &impl Fn(&Path) -> Result<()>,
 ) -> Result<()> {
     let anchor_mount_id = match &expected_anchor.mount {
         FilesystemMountIdentity::LinuxMountId(mount_id) => *mount_id,
@@ -2069,9 +3432,16 @@ fn remove_dir_all_with_identity_at(
         expected_root_mount_id,
         identity_of,
     )?;
-    let (quarantine, quarantine_name) =
-        create_private_quarantine(quarantine_anchor, expected_anchor)?;
-    let quarantined_name = std::ffi::OsStr::new("entry");
+    let (quarantine, quarantine_name) = create_private_quarantine_with_journal(
+        quarantine_anchor,
+        expected_anchor,
+        source_relative_path,
+        parent,
+        &source_identity,
+    )?;
+    let quarantine_identity = directory_identity(&quarantine)?;
+    let quarantined_name = std::ffi::OsStr::new(RECLAIM_QUARANTINE_ENTRY);
+    sync_directory(quarantine_anchor).context("persist cleanup quarantine directory entry")?;
     let quarantined_root = match move_candidate_to_quarantine(
         parent,
         name,
@@ -2083,14 +3453,31 @@ fn remove_dir_all_with_identity_at(
     ) {
         Ok(root) => root,
         Err(error) => {
-            drop(quarantine);
-            let cleanup = remove_private_quarantine(quarantine_anchor, &quarantine_name);
+            let cleanup = remove_quarantine_record_and_directory(
+                quarantine_anchor,
+                &quarantine,
+                &quarantine_name,
+                &quarantine_identity,
+            );
             return Err(error).context(format!(
                 "move authorized workspace {} into quarantine (cleanup: {cleanup:?})",
                 root_path.display()
             ));
         }
     };
+    if let Err(error) = persist_quarantine_move(parent, &quarantine) {
+        let restore = restore_then_clear_quarantine(
+            quarantine_anchor,
+            &quarantine,
+            &quarantine_name,
+            &quarantine_identity,
+            &quarantined_root,
+            &source_identity,
+            parent,
+            name,
+        );
+        return Err(error).context(format!("persist quarantine move (restore: {restore:?})"));
+    }
     let quarantined_stat = match rustix::fs::statat(
         &quarantine,
         quarantined_name,
@@ -2098,11 +3485,19 @@ fn remove_dir_all_with_identity_at(
     ) {
         Ok(stat) => stat,
         Err(error) => {
-            restore_quarantined_entry(&quarantine, quarantined_name, parent, name)?;
-            drop(quarantined_root);
-            drop(quarantine);
-            remove_private_quarantine(quarantine_anchor, &quarantine_name)?;
-            return Err(std::io::Error::from(error)).context("inspect quarantined cleanup entry");
+            let restore = restore_then_clear_quarantine(
+                quarantine_anchor,
+                &quarantine,
+                &quarantine_name,
+                &quarantine_identity,
+                &quarantined_root,
+                &source_identity,
+                parent,
+                name,
+            );
+            return Err(std::io::Error::from(error)).context(format!(
+                "inspect quarantined cleanup entry (restore: {restore:?})"
+            ));
         }
     };
     let quarantined_mount = match mount_id_at(
@@ -2112,11 +3507,17 @@ fn remove_dir_all_with_identity_at(
     ) {
         Ok(mount) => mount,
         Err(error) => {
-            restore_quarantined_entry(&quarantine, quarantined_name, parent, name)?;
-            drop(quarantined_root);
-            drop(quarantine);
-            remove_private_quarantine(quarantine_anchor, &quarantine_name)?;
-            return Err(error);
+            let restore = restore_then_clear_quarantine(
+                quarantine_anchor,
+                &quarantine,
+                &quarantine_name,
+                &quarantine_identity,
+                &quarantined_root,
+                &source_identity,
+                parent,
+                name,
+            );
+            return Err(error).context(format!("inspect quarantined mount (restore: {restore:?})"));
         }
     };
     let mut preflight_deletion_started = false;
@@ -2129,14 +3530,22 @@ fn remove_dir_all_with_identity_at(
         0,
         false,
         &mut preflight_deletion_started,
-        after_unlink,
+        &|_| Ok(()),
     );
     if let Err(error) = preflight {
-        restore_quarantined_entry(&quarantine, quarantined_name, parent, name)?;
-        drop(quarantined_root);
-        drop(quarantine);
-        remove_private_quarantine(quarantine_anchor, &quarantine_name)?;
-        return Err(error).context("preflight quarantined cleanup tree");
+        let restore = restore_then_clear_quarantine(
+            quarantine_anchor,
+            &quarantine,
+            &quarantine_name,
+            &quarantine_identity,
+            &quarantined_root,
+            &source_identity,
+            parent,
+            name,
+        );
+        return Err(error).context(format!(
+            "preflight quarantined cleanup tree (restore: {restore:?})"
+        ));
     }
     let deletion_root = match open_root_directory(
         &quarantine,
@@ -2147,30 +3556,38 @@ fn remove_dir_all_with_identity_at(
     ) {
         Ok(root) => root,
         Err(error) => {
-            restore_quarantined_entry(&quarantine, quarantined_name, parent, name)?;
-            drop(quarantined_root);
-            drop(quarantine);
-            remove_private_quarantine(quarantine_anchor, &quarantine_name)?;
-            return Err(error);
+            let restore = restore_then_clear_quarantine(
+                quarantine_anchor,
+                &quarantine,
+                &quarantine_name,
+                &quarantine_identity,
+                &quarantined_root,
+                &source_identity,
+                parent,
+                name,
+            );
+            return Err(error).context(format!("reopen quarantined entry (restore: {restore:?})"));
         }
     };
     let deletion_identity = match directory_identity(&deletion_root) {
         Ok(identity) => identity,
         Err(error) => {
-            restore_quarantined_entry(&quarantine, quarantined_name, parent, name)?;
-            drop(deletion_root);
-            drop(quarantined_root);
-            drop(quarantine);
-            remove_private_quarantine(quarantine_anchor, &quarantine_name)?;
-            return Err(error).context("verify quarantined cleanup entry before deletion");
+            let restore = restore_then_clear_quarantine(
+                quarantine_anchor,
+                &quarantine,
+                &quarantine_name,
+                &quarantine_identity,
+                &quarantined_root,
+                &source_identity,
+                parent,
+                name,
+            );
+            return Err(error).context(format!(
+                "verify quarantined cleanup entry before deletion (restore: {restore:?})"
+            ));
         }
     };
     if deletion_identity != source_identity {
-        restore_quarantined_entry(&quarantine, quarantined_name, parent, name)?;
-        drop(deletion_root);
-        drop(quarantined_root);
-        drop(quarantine);
-        remove_private_quarantine(quarantine_anchor, &quarantine_name)?;
         bail!(
             "quarantined workspace changed before deletion: {}",
             root_path.display()
@@ -2186,17 +3603,25 @@ fn remove_dir_all_with_identity_at(
         0,
         true,
         &mut deletion_started,
-        after_unlink,
+        before_unlink,
     ) {
-        if deletion_started {
-            return Err(error).context("partial workspace cleanup remains in quarantine");
-        }
-        restore_quarantined_entry(&quarantine, quarantined_name, parent, name)?;
-        return Err(error).context("delete quarantined workspace tree");
+        let restore = restore_then_clear_quarantine(
+            quarantine_anchor,
+            &quarantine,
+            &quarantine_name,
+            &quarantine_identity,
+            &quarantined_root,
+            &source_identity,
+            parent,
+            name,
+        );
+        return Err(error).context(format!(
+            "delete quarantined workspace tree (partial={deletion_started}, restore: {restore:?})"
+        ));
     }
     drop(deletion_root);
     drop(quarantined_root);
-    unlink_checked_directory(
+    if let Err(error) = unlink_checked_directory(
         &quarantine,
         quarantined_name,
         root_path,
@@ -2204,9 +3629,37 @@ fn remove_dir_all_with_identity_at(
         expected_device,
         root_identity.1,
         identity_of,
+        before_unlink,
+    ) {
+        let entry = open_directory_child(&quarantine, quarantined_name);
+        let restore = match entry {
+            Ok(entry) => restore_then_clear_quarantine(
+                quarantine_anchor,
+                &quarantine,
+                &quarantine_name,
+                &quarantine_identity,
+                &entry,
+                &source_identity,
+                parent,
+                name,
+            ),
+            Err(_) => remove_quarantine_record_and_directory(
+                quarantine_anchor,
+                &quarantine,
+                &quarantine_name,
+                &quarantine_identity,
+            ),
+        };
+        return Err(error).context(format!(
+            "remove quarantined workspace root (restore: {restore:?})"
+        ));
+    }
+    remove_quarantine_record_and_directory(
+        quarantine_anchor,
+        &quarantine,
+        &quarantine_name,
+        &quarantine_identity,
     )?;
-    drop(quarantine);
-    remove_private_quarantine(quarantine_anchor, &quarantine_name)?;
     Ok(())
 }
 
@@ -2483,10 +3936,12 @@ fn remove_dir_all_macos_at(
     quarantine_anchor: &fs::File,
     expected_anchor: &FilesystemDirectoryIdentity,
     root_path: &Path,
+    source_relative_path: &Path,
     expected_device: u64,
     expected_mount: &MacOsMountIdentity,
     expected_candidate: Option<&FilesystemDirectoryIdentity>,
     pinned_candidate: Option<&fs::File>,
+    before_unlink: &impl Fn(&Path) -> Result<()>,
 ) -> Result<()> {
     let parent_stat = macos_stat_fd(parent)?;
     if parent_stat.st_dev as u64 != expected_device
@@ -2535,9 +3990,16 @@ fn remove_dir_all_macos_at(
             );
         }
     }
-    let (quarantine, quarantine_name) =
-        create_private_quarantine(quarantine_anchor, expected_anchor)?;
-    let quarantined_name = std::ffi::OsStr::new("entry");
+    let (quarantine, quarantine_name) = create_private_quarantine_with_journal(
+        quarantine_anchor,
+        expected_anchor,
+        source_relative_path,
+        parent,
+        &source_identity,
+    )?;
+    let quarantine_identity = directory_identity(&quarantine)?;
+    let quarantined_name = std::ffi::OsStr::new(RECLAIM_QUARANTINE_ENTRY);
+    sync_directory(quarantine_anchor).context("persist cleanup quarantine directory entry")?;
     let quarantined_root = match move_candidate_to_quarantine(
         parent,
         name,
@@ -2549,39 +4011,68 @@ fn remove_dir_all_macos_at(
     ) {
         Ok(root) => root,
         Err(error) => {
-            drop(quarantine);
-            let cleanup = remove_private_quarantine(quarantine_anchor, &quarantine_name);
+            let cleanup = remove_quarantine_record_and_directory(
+                quarantine_anchor,
+                &quarantine,
+                &quarantine_name,
+                &quarantine_identity,
+            );
             return Err(error).context(format!(
                 "move authorized workspace {} into quarantine (cleanup: {cleanup:?})",
                 root_path.display()
             ));
         }
     };
+    if let Err(error) = persist_quarantine_move(parent, &quarantine) {
+        let restore = restore_then_clear_quarantine(
+            quarantine_anchor,
+            &quarantine,
+            &quarantine_name,
+            &quarantine_identity,
+            &quarantined_root,
+            &source_identity,
+            parent,
+            name,
+        );
+        return Err(error).context(format!("persist quarantine move (restore: {restore:?})"));
+    }
     let quarantined_stat = match macos_stat_at(&quarantine, quarantined_name, root_path) {
         Ok(stat) => stat,
         Err(error) => {
-            restore_quarantined_entry(&quarantine, quarantined_name, parent, name)?;
-            drop(quarantined_root);
-            drop(quarantine);
-            remove_private_quarantine(quarantine_anchor, &quarantine_name)?;
-            return Err(error).context("inspect quarantined macOS cleanup entry");
+            let restore = restore_then_clear_quarantine(
+                quarantine_anchor,
+                &quarantine,
+                &quarantine_name,
+                &quarantine_identity,
+                &quarantined_root,
+                &source_identity,
+                parent,
+                name,
+            );
+            return Err(error).context(format!(
+                "inspect quarantined macOS cleanup entry (restore: {restore:?})"
+            ));
         }
     };
     let quarantined_identity = match directory_identity(&quarantined_root) {
         Ok(identity) => identity,
         Err(error) => {
-            restore_quarantined_entry(&quarantine, quarantined_name, parent, name)?;
-            drop(quarantined_root);
-            drop(quarantine);
-            remove_private_quarantine(quarantine_anchor, &quarantine_name)?;
-            return Err(error).context("verify quarantined macOS cleanup entry");
+            let restore = restore_then_clear_quarantine(
+                quarantine_anchor,
+                &quarantine,
+                &quarantine_name,
+                &quarantine_identity,
+                &quarantined_root,
+                &source_identity,
+                parent,
+                name,
+            );
+            return Err(error).context(format!(
+                "verify quarantined macOS cleanup entry (restore: {restore:?})"
+            ));
         }
     };
     if quarantined_identity != source_identity {
-        restore_quarantined_entry(&quarantine, quarantined_name, parent, name)?;
-        drop(quarantined_root);
-        drop(quarantine);
-        remove_private_quarantine(quarantine_anchor, &quarantine_name)?;
         bail!(
             "quarantined workspace did not match pinned inventory: {}",
             root_path.display()
@@ -2596,12 +4087,21 @@ fn remove_dir_all_macos_at(
         0,
         false,
         &mut preflight_mutated,
+        &|_| Ok(()),
     ) {
-        restore_quarantined_entry(&quarantine, quarantined_name, parent, name)?;
-        drop(quarantined_root);
-        drop(quarantine);
-        remove_private_quarantine(quarantine_anchor, &quarantine_name)?;
-        return Err(error).context("preflight quarantined macOS cleanup tree");
+        let restore = restore_then_clear_quarantine(
+            quarantine_anchor,
+            &quarantine,
+            &quarantine_name,
+            &quarantine_identity,
+            &quarantined_root,
+            &source_identity,
+            parent,
+            name,
+        );
+        return Err(error).context(format!(
+            "preflight quarantined macOS cleanup tree (restore: {restore:?})"
+        ));
     }
     let deletion_root = match open_macos_directory_at(
         &quarantine,
@@ -2613,30 +4113,40 @@ fn remove_dir_all_macos_at(
     ) {
         Ok(root) => root,
         Err(error) => {
-            restore_quarantined_entry(&quarantine, quarantined_name, parent, name)?;
-            drop(quarantined_root);
-            drop(quarantine);
-            remove_private_quarantine(quarantine_anchor, &quarantine_name)?;
-            return Err(error).context("reopen quarantined macOS cleanup entry");
+            let restore = restore_then_clear_quarantine(
+                quarantine_anchor,
+                &quarantine,
+                &quarantine_name,
+                &quarantine_identity,
+                &quarantined_root,
+                &source_identity,
+                parent,
+                name,
+            );
+            return Err(error).context(format!(
+                "reopen quarantined macOS cleanup entry (restore: {restore:?})"
+            ));
         }
     };
     let deletion_identity = match directory_identity(&deletion_root) {
         Ok(identity) => identity,
         Err(error) => {
-            restore_quarantined_entry(&quarantine, quarantined_name, parent, name)?;
-            drop(deletion_root);
-            drop(quarantined_root);
-            drop(quarantine);
-            remove_private_quarantine(quarantine_anchor, &quarantine_name)?;
-            return Err(error).context("verify quarantined macOS cleanup entry before deletion");
+            let restore = restore_then_clear_quarantine(
+                quarantine_anchor,
+                &quarantine,
+                &quarantine_name,
+                &quarantine_identity,
+                &quarantined_root,
+                &source_identity,
+                parent,
+                name,
+            );
+            return Err(error).context(format!(
+                "verify quarantined macOS cleanup entry before deletion (restore: {restore:?})"
+            ));
         }
     };
     if deletion_identity != source_identity {
-        restore_quarantined_entry(&quarantine, quarantined_name, parent, name)?;
-        drop(deletion_root);
-        drop(quarantined_root);
-        drop(quarantine);
-        remove_private_quarantine(quarantine_anchor, &quarantine_name)?;
         bail!(
             "quarantined workspace changed before deletion: {}",
             root_path.display()
@@ -2651,24 +4161,61 @@ fn remove_dir_all_macos_at(
         0,
         true,
         &mut deletion_started,
+        before_unlink,
     ) {
         return finish_macos_delete_error(error, deletion_started, || {
-            restore_quarantined_entry(&quarantine, quarantined_name, parent, name)?;
-            remove_private_quarantine(quarantine_anchor, &quarantine_name)
+            restore_then_clear_quarantine(
+                quarantine_anchor,
+                &quarantine,
+                &quarantine_name,
+                &quarantine_identity,
+                &quarantined_root,
+                &source_identity,
+                parent,
+                name,
+            )
         });
     }
     drop(deletion_root);
     drop(quarantined_root);
-    unlink_macos_directory(
+    if let Err(error) = unlink_macos_directory(
         &quarantine,
         quarantined_name,
         root_path,
         &quarantined_stat,
         expected_device,
         Some(&source_identity),
+        before_unlink,
+    ) {
+        let entry = open_directory_child(&quarantine, quarantined_name);
+        let restore = match entry {
+            Ok(entry) => restore_then_clear_quarantine(
+                quarantine_anchor,
+                &quarantine,
+                &quarantine_name,
+                &quarantine_identity,
+                &entry,
+                &source_identity,
+                parent,
+                name,
+            ),
+            Err(_) => remove_quarantine_record_and_directory(
+                quarantine_anchor,
+                &quarantine,
+                &quarantine_name,
+                &quarantine_identity,
+            ),
+        };
+        return Err(error).context(format!(
+            "remove quarantined workspace root (restore: {restore:?})"
+        ));
+    }
+    remove_quarantine_record_and_directory(
+        quarantine_anchor,
+        &quarantine,
+        &quarantine_name,
+        &quarantine_identity,
     )?;
-    drop(quarantine);
-    remove_private_quarantine(quarantine_anchor, &quarantine_name)?;
     Ok(())
 }
 
@@ -2678,11 +4225,13 @@ fn finish_macos_delete_error(
     deletion_started: bool,
     restore_unchanged_candidate: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
-    if deletion_started {
-        return Err(error).context("partial macOS cleanup remains in quarantine");
-    }
-    restore_unchanged_candidate().context("restore unchanged quarantined macOS cleanup entry")?;
-    Err(error).context("delete quarantined macOS workspace tree")
+    restore_unchanged_candidate().context("restore preserved quarantined macOS cleanup entry")?;
+    let context = if deletion_started {
+        "delete macOS workspace tree after partial cleanup; remaining tree restored"
+    } else {
+        "delete quarantined macOS workspace tree"
+    };
+    Err(error).context(context)
 }
 
 #[cfg(target_os = "macos")]
@@ -2848,6 +4397,7 @@ fn walk_macos_directory_tree(
     depth: usize,
     remove: bool,
     deletion_started: &mut bool,
+    before_unlink: &impl Fn(&Path) -> Result<()>,
 ) -> Result<()> {
     const MAX_DEPTH: usize = 256;
     if depth > MAX_DEPTH {
@@ -2888,6 +4438,7 @@ fn walk_macos_directory_tree(
                 expected_device,
                 expected_mount,
             )?;
+            let child_identity = directory_identity(&child)?;
             walk_macos_directory_tree(
                 &child,
                 &child_path,
@@ -2896,6 +4447,7 @@ fn walk_macos_directory_tree(
                 depth + 1,
                 remove,
                 deletion_started,
+                before_unlink,
             )?;
             if remove {
                 unlink_macos_directory(
@@ -2904,6 +4456,8 @@ fn walk_macos_directory_tree(
                     &child_path,
                     &child_stat,
                     expected_device,
+                    Some(&child_identity),
+                    before_unlink,
                 )?;
                 *deletion_started = true;
             }
@@ -2914,6 +4468,7 @@ fn walk_macos_directory_tree(
                 &child_path,
                 &child_stat,
                 expected_device,
+                before_unlink,
             )?;
             *deletion_started = true;
         }
@@ -2928,6 +4483,7 @@ fn unlink_macos_entry(
     path: &Path,
     expected_stat: &libc::stat,
     expected_device: u64,
+    before_unlink: &impl Fn(&Path) -> Result<()>,
 ) -> Result<()> {
     use std::os::fd::AsRawFd as _;
     use std::os::unix::ffi::OsStrExt as _;
@@ -2940,14 +4496,23 @@ fn unlink_macos_entry(
     {
         bail!("leftover entry changed before removal: {}", path.display());
     }
-    let name = std::ffi::CString::new(name.as_bytes())
+    let name_cstring = std::ffi::CString::new(name.as_bytes())
         .with_context(|| format!("leftover path contains nul: {}", path.display()))?;
+    before_unlink(path)?;
+    let after = macos_stat_at(parent, name, path)?;
+    if after.st_dev != expected_stat.st_dev
+        || after.st_ino != expected_stat.st_ino
+        || after.st_mode & libc::S_IFMT != expected_stat.st_mode & libc::S_IFMT
+        || after.st_dev as u64 != expected_device
+    {
+        bail!("leftover entry changed before removal: {}", path.display());
+    }
     // SAFETY: the parent descriptor is live and name is terminated.
-    if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+    if unsafe { libc::unlinkat(parent.as_raw_fd(), name_cstring.as_ptr(), 0) } != 0 {
         return Err(std::io::Error::last_os_error())
             .with_context(|| format!("remove leftover entry {}", path.display()));
     }
-    Ok(())
+    sync_directory(parent).context("persist removal of leftover entry")
 }
 
 #[cfg(target_os = "macos")]
@@ -2986,6 +4551,7 @@ fn unlink_macos_directory(
     expected_stat: &libc::stat,
     expected_device: u64,
     expected_candidate: Option<&FilesystemDirectoryIdentity>,
+    before_unlink: &impl Fn(&Path) -> Result<()>,
 ) -> Result<()> {
     use std::os::fd::AsRawFd as _;
     use std::os::unix::ffi::OsStrExt as _;
@@ -3054,14 +4620,74 @@ fn unlink_macos_directory(
             path.display()
         );
     }
-    let name = std::ffi::CString::new(name.as_bytes())
+    let name_cstring = std::ffi::CString::new(name.as_bytes())
         .with_context(|| format!("leftover path contains nul: {}", path.display()))?;
+    before_unlink(path)?;
+    // `getattrlistbulk` consumes this open description's directory offset.
+    // Reopen from the pinned parent after the hook so the post-hook scan starts
+    // at offset zero; otherwise a partial-delete rollback can mistake an
+    // exhausted scan for an empty quarantine and lose the remaining tree.
+    let post_parent = reopen_macos_directory_for_bulk_scan(parent)?;
+    if directory_identity(&post_parent)? != parent_identity
+        || macos_directory_mount_identity(&post_parent)? != parent_mount
+    {
+        bail!(
+            "leftover workspace parent or mount changed before removal: {}",
+            path.display()
+        );
+    }
+    let post_entry = macos_bulk_directory_entries(&post_parent)?
+        .into_iter()
+        .find(|entry| entry.name == name)
+        .context("macOS bulk listing omitted leftover workspace after pre-unlink hook")?;
+    post_entry.require_same_mount(path)?;
+    if !post_entry.is_directory {
+        bail!(
+            "leftover workspace changed type before removal: {}",
+            path.display()
+        );
+    }
+    let post_stat = macos_stat_at(&post_parent, name, path)?;
+    if !macos_stat_is_directory(&post_stat)
+        || post_stat.st_dev != expected_stat.st_dev
+        || post_stat.st_ino != expected_stat.st_ino
+        || post_stat.st_dev as u64 != expected_device
+    {
+        bail!(
+            "leftover directory changed before removal: {}",
+            path.display()
+        );
+    }
+    let post_child = open_macos_directory_at(
+        &post_parent,
+        name,
+        path,
+        &post_stat,
+        expected_device,
+        &parent_mount,
+    )?;
+    if directory_identity(&post_child)? != opened_identity
+        || directory_identity(&post_parent)? != parent_identity
+        || macos_directory_mount_identity(&post_child)? != parent_mount
+    {
+        bail!(
+            "leftover directory or parent changed before removal: {}",
+            path.display()
+        );
+    }
     // SAFETY: the fresh parent descriptor is live and name is terminated.
-    if unsafe { libc::unlinkat(fresh_parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+    if unsafe {
+        libc::unlinkat(
+            post_parent.as_raw_fd(),
+            name_cstring.as_ptr(),
+            libc::AT_REMOVEDIR,
+        )
+    } != 0
+    {
         return Err(std::io::Error::last_os_error())
             .with_context(|| format!("remove leftover directory {}", path.display()));
     }
-    Ok(())
+    sync_directory(&post_parent).context("persist removal of leftover directory")
 }
 
 #[cfg(target_os = "linux")]
@@ -3316,7 +4942,7 @@ fn walk_directory_tree(
     depth: usize,
     remove: bool,
     deletion_started: &mut bool,
-    after_unlink: &impl Fn(&Path) -> Result<()>,
+    before_unlink: &impl Fn(&Path) -> Result<()>,
 ) -> Result<()> {
     use std::os::unix::ffi::OsStringExt as _;
 
@@ -3380,7 +5006,7 @@ fn walk_directory_tree(
                 depth + 1,
                 remove,
                 deletion_started,
-                after_unlink,
+                before_unlink,
             )?;
             if remove {
                 unlink_checked_directory(
@@ -3391,9 +5017,9 @@ fn walk_directory_tree(
                     expected_device,
                     expected_mount_id,
                     identity_of,
+                    before_unlink,
                 )?;
                 *deletion_started = true;
-                after_unlink(&child_path)?;
             }
         } else {
             if remove {
@@ -3405,9 +5031,9 @@ fn walk_directory_tree(
                     expected_device,
                     expected_mount_id,
                     identity_of,
+                    before_unlink,
                 )?;
                 *deletion_started = true;
-                after_unlink(&child_path)?;
             }
         }
     }
@@ -3455,7 +5081,18 @@ fn unlink_checked_entry(
     expected_device: u64,
     expected_mount_id: u64,
     identity_of: &impl Fn(&Path, u64, u64) -> (u64, u64),
+    before_unlink: &impl Fn(&Path) -> Result<()>,
 ) -> Result<()> {
+    checked_current_stat(
+        parent,
+        name,
+        path,
+        expected_stat,
+        expected_device,
+        expected_mount_id,
+        identity_of,
+    )?;
+    before_unlink(path)?;
     checked_current_stat(
         parent,
         name,
@@ -3467,7 +5104,8 @@ fn unlink_checked_entry(
     )?;
     rustix::fs::unlinkat(parent, name, rustix::fs::AtFlags::empty())
         .map_err(std::io::Error::from)
-        .with_context(|| format!("remove leftover entry {}", path.display()))
+        .with_context(|| format!("remove leftover entry {}", path.display()))?;
+    sync_directory(parent).context("persist removal of leftover entry")
 }
 
 #[cfg(target_os = "linux")]
@@ -3479,7 +5117,18 @@ fn unlink_checked_directory(
     expected_device: u64,
     expected_mount_id: u64,
     identity_of: &impl Fn(&Path, u64, u64) -> (u64, u64),
+    before_unlink: &impl Fn(&Path) -> Result<()>,
 ) -> Result<()> {
+    checked_current_stat(
+        parent,
+        name,
+        path,
+        expected_stat,
+        expected_device,
+        expected_mount_id,
+        identity_of,
+    )?;
+    before_unlink(path)?;
     checked_current_stat(
         parent,
         name,
@@ -3491,7 +5140,8 @@ fn unlink_checked_directory(
     )?;
     rustix::fs::unlinkat(parent, name, rustix::fs::AtFlags::REMOVEDIR)
         .map_err(std::io::Error::from)
-        .with_context(|| format!("remove leftover directory {}", path.display()))
+        .with_context(|| format!("remove leftover directory {}", path.display()))?;
+    sync_directory(parent).context("persist removal of leftover directory")
 }
 
 pub fn live_job_ids_from_host_docker() -> Result<BTreeSet<String>> {
@@ -3511,48 +5161,407 @@ pub fn live_job_ids_for_reclaim(
     }
 }
 
-pub(crate) fn reclaim_production_leftovers_for_roots(
+/// Recover only durable cleanup transactions during ordinary daemon polls.
+///
+/// A pressure-triggered reclaim may leave a quarantine when the process exits
+/// after a durable rename or partial unlink. Pressure can clear before the
+/// next poll, so recovery must run independently of the destructive reclaim
+/// path. The filesystem coordinator and complete liveness snapshot still fence
+/// restoration against a workspace that has become live again.
+pub(crate) fn recover_production_quarantines_for_roots(
     backend: Option<velnor_model::ExecutionBackendKind>,
     work_roots: &[PathBuf],
-    prune_dangling_images: bool,
-) -> Result<LeftoverReclaimReport> {
-    reclaim_production_leftovers_for_roots_authorized(
-        backend,
-        work_roots,
-        prune_dangling_images,
-        live_job_ids_from_host_docker,
-        host_docker_if_safe,
-        |workspace| remove_authorized_workspace(workspace, None),
-    )
+) -> Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let layout = crate::storage::selected_or_resolved_layout()
+            .context("resolve storage layout for cleanup recovery")?;
+        recover_quarantines_for_backend(
+            backend,
+            &layout.run_root,
+            work_roots,
+            &layout,
+            live_job_ids_from_host_docker,
+        )?;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (backend, work_roots);
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn recover_quarantines_for_backend(
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    run_root: &Path,
+    work_roots: &[PathBuf],
+    layout: &crate::storage::StorageLayout,
+    live_job_ids: impl FnOnce() -> Result<BTreeSet<String>>,
+) -> Result<()> {
+    // Cache transactions are independent of Docker/workspace liveness. Recover
+    // them first so a Docker outage cannot strand already-deleted cache data.
+    recover_cache_quarantines_if_pending(run_root, layout, work_roots)?;
+    if velnor_model::ExecutionBackendKind::permits_host_docker_maintenance(backend) {
+        recover_workspace_quarantines_if_pending(run_root, work_roots, live_job_ids)?;
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn private_quarantine_cache_roots(layout: &crate::storage::StorageLayout) -> Vec<PathBuf> {
+    let mut roots = vec![layout.cache_root.clone()];
+    roots.push(crate::trust_scope::filesystem_key_namespace(
+        &layout.cache_root,
+    ));
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+/// Recover cache-root transactions while the caller holds the filesystem
+/// coordinator. Lease and claim evidence protects in-use entries; Docker
+/// liveness is unnecessary because these paths are catalogued cache stores.
+pub(crate) fn recover_cache_quarantines_under_coordinator(
+    run_root: &Path,
+    layout: &crate::storage::StorageLayout,
+    work_roots: &[PathBuf],
+) -> Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let cache_roots = private_quarantine_cache_roots(layout);
+        let mut recovery_roots = cache_roots.clone();
+        recovery_roots.extend(work_roots.iter().cloned());
+        if !work_roots_have_private_quarantines(&recovery_roots)? {
+            return Ok(());
+        }
+        let liveness = WorkspaceLiveness::collect(run_root, BTreeSet::new());
+        if liveness.evidence_incomplete {
+            bail!("cannot recover cache quarantines with incomplete lease or claim evidence");
+        }
+        for cache_root in &cache_roots {
+            recover_private_quarantines_for_root(cache_root, &liveness, &|_| Ok(true));
+        }
+        for work_root in work_roots {
+            let allow_cache_candidate = |relative_path: &Path| {
+                crate::cache::is_catalog_cache_candidate_path_for_recovery(
+                    work_root,
+                    layout,
+                    relative_path,
+                )
+            };
+            recover_private_quarantines_for_root(work_root, &liveness, &allow_cache_candidate);
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = (run_root, layout, work_roots);
+    Ok(())
+}
+
+pub(crate) fn recover_cache_quarantines_if_pending(
+    run_root: &Path,
+    layout: &crate::storage::StorageLayout,
+    work_roots: &[PathBuf],
+) -> Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let mut recovery_roots = private_quarantine_cache_roots(layout);
+        recovery_roots.extend(work_roots.iter().cloned());
+        if !work_roots_have_private_quarantines(&recovery_roots)? {
+            Ok(())
+        } else {
+            let _coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(run_root)?;
+            recover_cache_quarantines_under_coordinator(run_root, layout, work_roots)
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (run_root, layout, work_roots);
+        Ok(())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn recover_workspace_quarantines_if_pending(
+    run_root: &Path,
+    work_roots: &[PathBuf],
+    live_job_ids: impl FnOnce() -> Result<BTreeSet<String>>,
+) -> Result<()> {
+    if !work_roots_have_private_quarantines(work_roots)? {
+        return Ok(());
+    }
+    let _coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(run_root)?;
+    let running = live_job_ids().context("collect running jobs for workspace recovery")?;
+    let liveness = WorkspaceLiveness::collect(run_root, running);
+    if liveness.evidence_incomplete {
+        bail!("cannot recover workspace quarantines with incomplete liveness evidence");
+    }
+    recover_workspace_private_quarantines_for_roots(work_roots, &liveness);
+    Ok(())
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+fn recover_private_quarantines_if_pending(
+    run_root: &Path,
+    work_roots: &[PathBuf],
+    live_job_ids: impl FnOnce() -> Result<BTreeSet<String>>,
+) -> Result<()> {
+    if !work_roots_have_private_quarantines(work_roots)? {
+        return Ok(());
+    }
+
+    // Hold the coordinator before collecting either Docker or filesystem
+    // liveness, then keep it through recovery. This matches workspace reclaim's
+    // lease publication fence and prevents recovery from racing a new claim.
+    let _coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(run_root)?;
+    let running = live_job_ids().context("collect running jobs for cleanup recovery")?;
+    let liveness = WorkspaceLiveness::collect(run_root, running);
+    if liveness.evidence_incomplete {
+        bail!("cannot recover cleanup quarantines with incomplete liveness evidence");
+    }
+    recover_private_quarantines_for_roots(work_roots, &liveness);
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn work_roots_have_private_quarantines(work_roots: &[PathBuf]) -> Result<bool> {
+    for work_root in work_roots {
+        let anchor = match open_configured_directory_leaf_nofollow(work_root) {
+            Ok(anchor) => anchor,
+            Err(error) if is_not_found_error(&error) => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("inspect cleanup recovery root {}", work_root.display())
+                });
+            }
+        };
+        let entries = secure_directory_entries(&anchor)
+            .with_context(|| format!("list cleanup recovery root {}", work_root.display()))?;
+        if entries.iter().any(|entry| {
+            entry
+                .name
+                .to_str()
+                .is_some_and(|name| name.starts_with(RECLAIM_QUARANTINE_PREFIX))
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn reclaim_production_leftovers_for_roots_with_pin(
     backend: Option<velnor_model::ExecutionBackendKind>,
     work_roots: &[PathBuf],
     expected_pressure: &crate::host_capacity::HostCapacityPin,
+    minimum_free_bytes: u64,
+) -> Result<LeftoverReclaimReport> {
+    reclaim_production_leftovers_for_roots_with_pressure(
+        backend,
+        work_roots,
+        expected_pressure,
+        move |capacity| capacity.available_bytes < minimum_free_bytes,
+    )
+}
+
+pub(crate) fn reclaim_production_leftovers_for_roots_with_usage_pressure_pin(
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    work_roots: &[PathBuf],
+    expected_pressure: &crate::host_capacity::HostCapacityPin,
+    hard_used_percent: u8,
+) -> Result<LeftoverReclaimReport> {
+    if hard_used_percent > 100 {
+        bail!("invalid hard utilization threshold: {hard_used_percent}%");
+    }
+    reclaim_production_leftovers_for_roots_with_pressure(
+        backend,
+        work_roots,
+        expected_pressure,
+        move |capacity| capacity.used_percent() >= hard_used_percent,
+    )
+}
+
+fn reclaim_production_leftovers_for_roots_with_pressure(
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    work_roots: &[PathBuf],
+    expected_pressure: &crate::host_capacity::HostCapacityPin,
+    pressure_predicate: impl Fn(&crate::host_capacity::HostCapacity) -> bool + Copy,
 ) -> Result<LeftoverReclaimReport> {
     if !velnor_model::ExecutionBackendKind::permits_host_docker_maintenance(backend) {
         return Ok(LeftoverReclaimReport::default());
     }
-    expected_pressure
-        .probe()
-        .context("validate pressure filesystem before leftover inventory")?;
+    let expected_volume_uuid = pressure_volume_uuid(expected_pressure)?;
+    let pressure_capacity =
+        || pressure_sample_matches_pin(expected_pressure, &expected_volume_uuid);
+    if !pressure_predicate(&pressure_capacity()?) {
+        return Ok(LeftoverReclaimReport::default());
+    }
     let pressure_device = expected_pressure.device_id();
-    reclaim_production_leftovers_for_roots_authorized(
-        backend,
+    let live = match live_job_ids_from_host_docker() {
+        Ok(ids) => ids,
+        Err(error) => {
+            eprintln!("leftover workspace reclaim skipped (cannot list live jobs): {error:#}");
+            return Ok(LeftoverReclaimReport {
+                skipped_docker: true,
+                ..LeftoverReclaimReport::default()
+            });
+        }
+    };
+    let pressure_recovered = std::cell::Cell::new(false);
+    let pressure_invalid = std::cell::Cell::new(false);
+    let still_pressured = || {
+        if pressure_recovered.get() || pressure_invalid.get() {
+            return Ok(false);
+        }
+        match pressure_capacity() {
+            Ok(capacity) => {
+                let active = pressure_predicate(&capacity);
+                if !active {
+                    pressure_recovered.set(true);
+                }
+                Ok(active)
+            }
+            Err(error) => {
+                pressure_invalid.set(true);
+                Err(error)
+            }
+        }
+    };
+    reclaim_leftover_after_velnor_authorized_while_pressured(
         work_roots,
-        false,
-        live_job_ids_from_host_docker,
-        host_docker_if_safe,
+        &live,
+        still_pressured,
         |workspace| {
             remove_authorized_workspace_for_pressure(workspace, pressure_device, &|| {
-                expected_pressure
-                    .probe()
-                    .map(|_| ())
-                    .context("revalidate pressure filesystem before workspace deletion")
+                if pressure_recovered.get() || pressure_invalid.get() {
+                    bail!("workspace pressure was no longer valid before unlink");
+                }
+                match pressure_capacity() {
+                    Ok(capacity) if pressure_predicate(&capacity) => Ok(()),
+                    Ok(_) => {
+                        pressure_recovered.set(true);
+                        bail!("workspace pressure cleared before unlink")
+                    }
+                    Err(error) => {
+                        pressure_invalid.set(true);
+                        Err(error).context("revalidate pressure filesystem before unlink")
+                    }
+                }
             })
         },
     )
+}
+
+fn pressure_volume_uuid(pressure: &crate::host_capacity::HostCapacityPin) -> Result<String> {
+    let capacity = pressure
+        .probe()
+        .context("probe pinned pressure filesystem")?;
+    if capacity.filesystem_device != pressure.device_id() {
+        bail!("pinned pressure filesystem device changed during capacity probe");
+    }
+    capacity
+        .volume_fingerprint
+        .filter(|uuid| !uuid.is_empty())
+        .context("pinned pressure filesystem has no stable UUID")
+}
+
+fn pressure_sample_matches_pin(
+    expected_pressure: &crate::host_capacity::HostCapacityPin,
+    expected_volume_uuid: &str,
+) -> Result<crate::host_capacity::HostCapacity> {
+    let capacity = expected_pressure
+        .probe()
+        .context("probe pinned pressure filesystem")?;
+    if capacity.filesystem_device != expected_pressure.device_id()
+        || capacity.volume_fingerprint.as_deref() != Some(expected_volume_uuid)
+    {
+        bail!("pinned pressure filesystem UUID or device changed");
+    }
+    Ok(capacity)
+}
+
+fn reclaim_leftover_after_velnor_authorized_while_pressured(
+    work_roots: &[PathBuf],
+    live_job_ids: &BTreeSet<String>,
+    still_pressured: impl FnMut() -> Result<bool>,
+    remove_dir: impl FnMut(&AuthorizedWorkspace) -> Result<()>,
+) -> Result<LeftoverReclaimReport> {
+    match runtime_root() {
+        Some(run_root) => {
+            let _coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(&run_root)?;
+            reclaim_with_liveness_authorized_while_pressured(
+                work_roots,
+                &WorkspaceLiveness::collect(&run_root, live_job_ids.clone()),
+                still_pressured,
+                remove_dir,
+            )
+        }
+        None => reclaim_with_liveness_authorized_while_pressured(
+            work_roots,
+            &WorkspaceLiveness {
+                running: live_job_ids.clone(),
+                min_idle: WORKSPACE_MIN_IDLE,
+                ..WorkspaceLiveness::default()
+            },
+            still_pressured,
+            remove_dir,
+        ),
+    }
+}
+
+#[cfg(test)]
+fn reclaim_with_liveness_authorized_until_free_space(
+    work_roots: &[PathBuf],
+    liveness: &WorkspaceLiveness,
+    minimum_free_bytes: u64,
+    mut available_bytes: impl FnMut() -> Result<u64>,
+    remove_dir: impl FnMut(&AuthorizedWorkspace) -> Result<()>,
+) -> Result<LeftoverReclaimReport> {
+    reclaim_with_liveness_authorized_while_pressured(
+        work_roots,
+        liveness,
+        || Ok(available_bytes()? < minimum_free_bytes),
+        remove_dir,
+    )
+}
+
+fn reclaim_with_liveness_authorized_while_pressured(
+    work_roots: &[PathBuf],
+    liveness: &WorkspaceLiveness,
+    mut still_pressured: impl FnMut() -> Result<bool>,
+    mut remove_dir: impl FnMut(&AuthorizedWorkspace) -> Result<()>,
+) -> Result<LeftoverReclaimReport> {
+    let mut report = LeftoverReclaimReport::default();
+    recover_workspace_private_quarantines_for_roots(work_roots, liveness);
+    let orphans = authorized_orphan_workspaces_with_liveness(work_roots, liveness);
+
+    // Inventory and liveness checks can take time. Sample the pinned
+    // filesystem after them, immediately before the first possible deletion.
+    if !still_pressured()? {
+        return Ok(report);
+    }
+
+    for workspace in orphans {
+        if !still_pressured()? {
+            break;
+        }
+        match remove_dir(&workspace) {
+            Ok(()) => report.deleted_workspaces.push(workspace.path),
+            Err(error) => {
+                eprintln!(
+                    "leftover workspace reclaim failed for {}: {error:#}",
+                    workspace.path.display()
+                );
+            }
+        }
+
+        // A fresh sample after each candidate attempt both decides whether
+        // more space is needed and becomes the pre-delete sample for the next
+        // candidate.
+        if !still_pressured()? {
+            break;
+        }
+    }
+    Ok(report)
 }
 
 fn remove_authorized_workspace(
@@ -3573,7 +5582,6 @@ fn remove_authorized_workspace_for_pressure(
     pressure_device: u64,
     validate_pressure: &impl Fn() -> Result<()>,
 ) -> Result<()> {
-    validate_pressure()?;
     if workspace.anchor_identity.device != pressure_device
         || workspace.candidate_identity.device != pressure_device
     {
@@ -3582,39 +5590,17 @@ fn remove_authorized_workspace_for_pressure(
             workspace.path.display()
         );
     }
-    remove_authorized_workspace(workspace, Some(pressure_device))
-}
-
-fn reclaim_production_leftovers_for_roots_authorized(
-    backend: Option<velnor_model::ExecutionBackendKind>,
-    work_roots: &[PathBuf],
-    prune_dangling_images: bool,
-    live_job_ids: impl FnOnce() -> Result<BTreeSet<String>>,
-    docker: impl FnMut(&[String]) -> Result<String>,
-    remove_dir: impl FnMut(&AuthorizedWorkspace) -> Result<()>,
-) -> Result<LeftoverReclaimReport> {
-    if !velnor_model::ExecutionBackendKind::permits_host_docker_maintenance(backend) {
-        return reclaim_microvm_leftovers();
-    }
-    let live = match live_job_ids() {
-        Ok(ids) => ids,
-        Err(error) => {
-            eprintln!("leftover workspace reclaim skipped (cannot list live jobs): {error:#}");
-            return Ok(LeftoverReclaimReport {
-                skipped_docker: true,
-                ..LeftoverReclaimReport::default()
-            });
-        }
-    };
-    reclaim_leftover_after_velnor_authorized(
-        work_roots,
-        &live,
-        docker,
-        remove_dir,
-        prune_dangling_images,
+    remove_dir_all_on_device_under_identities_with_pre_unlink(
+        &workspace.trusted_anchor,
+        &workspace.path,
+        pressure_device,
+        &workspace.anchor_identity,
+        &workspace.candidate_identity,
+        &|_| validate_pressure(),
     )
 }
 
+#[cfg(test)]
 fn reclaim_production_leftovers_for_roots_with(
     backend: Option<velnor_model::ExecutionBackendKind>,
     work_roots: &[PathBuf],
@@ -3639,24 +5625,9 @@ fn reclaim_production_leftovers_for_roots_with(
     reclaim_leftover_after_velnor(work_roots, &live, docker, remove_dir, prune_dangling_images)
 }
 
-/// Reclaim leftover workspaces. The microVM backend never lists or prunes
-/// through the host Docker socket.
-pub fn reclaim_production_leftovers_for(
-    backend: velnor_model::ExecutionBackendKind,
-    prune_dangling_images: bool,
-) -> Result<LeftoverReclaimReport> {
-    if backend.uses_host_docker_socket() {
-        let work_roots = discover_daemon_work_roots();
-        reclaim_production_leftovers_for_roots(Some(backend), &work_roots, prune_dangling_images)
-    } else {
-        reclaim_microvm_leftovers()
-    }
-}
-
-/// [`reclaim_production_leftovers_for`] for a caller that already holds the
-/// filesystem coordinator of `run_root` (the destructive `cache gc` path,
-/// which takes it before its own eviction pass and must keep holding it
-/// through this reclaim instead of locking twice).
+/// Reclaim leftover workspaces for a caller that already holds the filesystem
+/// coordinator of `run_root` (the destructive `cache gc` path, which takes it
+/// before its own eviction pass and keeps it through this reclaim).
 pub fn reclaim_production_leftovers_under_coordinator(
     coordinator: &crate::capacity::FilesystemCoordinator,
     run_root: &Path,
@@ -3695,45 +5666,6 @@ fn reclaim_microvm_leftovers() -> Result<LeftoverReclaimReport> {
     // Leave reclamation to the coordinator until it supplies a pool-scoped
     // ownership lease.
     Ok(LeftoverReclaimReport::default())
-}
-
-/// Hard-pressure reclaim that skips host Docker when the selected backend is
-/// `microvm` or selection is unknown.
-pub fn reclaim_production_if_hard_pressure_for(
-    backend: Option<velnor_model::ExecutionBackendKind>,
-    usage_percent: u8,
-) -> Result<LeftoverReclaimReport> {
-    let work_roots = discover_daemon_work_roots();
-    reclaim_production_if_hard_pressure_for_roots(backend, usage_percent, &work_roots)
-}
-
-pub(crate) fn reclaim_production_if_hard_pressure_for_roots(
-    backend: Option<velnor_model::ExecutionBackendKind>,
-    usage_percent: u8,
-    work_roots: &[PathBuf],
-) -> Result<LeftoverReclaimReport> {
-    if usage_percent < HARD_PRESSURE_PERCENT
-        || !velnor_model::ExecutionBackendKind::permits_host_docker_maintenance(backend)
-    {
-        return Ok(LeftoverReclaimReport::default());
-    }
-    let live = match live_job_ids_for_reclaim(backend) {
-        Ok(ids) => ids,
-        Err(error) => {
-            eprintln!("leftover workspace reclaim skipped (cannot list live jobs): {error:#}");
-            return Ok(LeftoverReclaimReport {
-                skipped_docker: true,
-                ..LeftoverReclaimReport::default()
-            });
-        }
-    };
-    reclaim_leftover_after_velnor_authorized(
-        work_roots,
-        &live,
-        host_docker_if_safe,
-        |workspace| remove_authorized_workspace(workspace, None),
-        true,
-    )
 }
 
 /// Injectable hard-pressure reclaim. Host Docker listing and prune run only
@@ -3807,6 +5739,137 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
+    fn empty_directory_removal_uses_pinned_parent_and_quarantine() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-empty-directory-quarantine-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let anchor = root.join("cache");
+        let parent_path = anchor.join("admission-leases");
+        let candidate_path = parent_path.join("namespace");
+        fs::create_dir_all(&candidate_path).unwrap();
+        let anchor_identity = filesystem_directory_identity(&anchor).unwrap();
+        let (pinned_parent, parent_identity) =
+            filesystem_pin_directory_under(&anchor, &parent_path, &anchor_identity).unwrap();
+        let (pinned_candidate, candidate_identity) =
+            filesystem_pin_directory_under(&anchor, &candidate_path, &anchor_identity).unwrap();
+
+        assert!(remove_empty_directory_under_pinned_parent(
+            &anchor,
+            &candidate_path,
+            &anchor_identity,
+            &parent_identity,
+            &pinned_parent,
+            &candidate_identity,
+            &pinned_candidate,
+        )
+        .unwrap());
+        assert!(!candidate_path.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn empty_directory_quarantine_preserves_inode_replacement() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-empty-directory-quarantine-race-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let anchor = root.join("cache");
+        let parent_path = anchor.join("admission-leases");
+        let candidate_path = parent_path.join("namespace");
+        fs::create_dir_all(&candidate_path).unwrap();
+        let anchor_identity = filesystem_directory_identity(&anchor).unwrap();
+        let (pinned_parent, parent_identity) =
+            filesystem_pin_directory_under(&anchor, &parent_path, &anchor_identity).unwrap();
+        let (pinned_candidate, candidate_identity) =
+            filesystem_pin_directory_under(&anchor, &candidate_path, &anchor_identity).unwrap();
+        let mut pinned_quarantine = None;
+
+        let result = remove_empty_directory_under_pinned_parent_with_hook(
+            &anchor,
+            &candidate_path,
+            &anchor_identity,
+            &parent_identity,
+            &pinned_parent,
+            &candidate_identity,
+            &pinned_candidate,
+            |quarantine, entry| {
+                pinned_quarantine = Some(quarantine.try_clone()?);
+                let retained = std::ffi::OsStr::new("retained-original");
+                rustix::fs::renameat_with(
+                    quarantine,
+                    entry,
+                    quarantine,
+                    retained,
+                    rustix::fs::RenameFlags::NOREPLACE,
+                )
+                .map_err(std::io::Error::from)?;
+                rustix::fs::mkdirat(quarantine, entry, rustix::fs::Mode::from_raw_mode(0o700))
+                    .map_err(std::io::Error::from)?;
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err(), "replacement inode must fail closed");
+        let quarantine = pinned_quarantine.expect("quarantine descriptor captured");
+        let retained =
+            open_directory_child(&quarantine, std::ffi::OsStr::new("retained-original")).unwrap();
+        assert_eq!(directory_identity(&retained).unwrap(), candidate_identity);
+        let replacement = open_directory_child(&quarantine, std::ffi::OsStr::new("entry")).unwrap();
+        assert_ne!(
+            directory_identity(&replacement).unwrap(),
+            candidate_identity
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inventory_rejects_regular_file_on_distinct_mount_id_even_with_same_device() {
+        let anchor_identity = FilesystemDirectoryIdentity {
+            device: 7,
+            inode: 11,
+            mount: FilesystemMountIdentity::LinuxMountId(101),
+        };
+        let mounted_regular_file = FilesystemEntry {
+            name: std::ffi::OsString::from("mounted-file"),
+            kind: FilesystemEntryKind::RegularFile,
+            identity: FilesystemEntryIdentity {
+                device: anchor_identity.device,
+                inode: 12,
+                mount: FilesystemMountIdentity::LinuxMountId(102),
+            },
+            is_mountpoint: false,
+        };
+
+        assert!(!filesystem_entry_matches_mount(
+            &mounted_regular_file,
+            &anchor_identity
+        ));
+
+        let same_mount_regular_file = FilesystemEntry {
+            identity: FilesystemEntryIdentity {
+                mount: anchor_identity.mount.clone(),
+                ..mounted_regular_file.identity.clone()
+            },
+            ..mounted_regular_file.clone()
+        };
+        assert!(filesystem_entry_matches_mount(
+            &same_mount_regular_file,
+            &anchor_identity
+        ));
+        assert!(!filesystem_entry_matches_mount(
+            &FilesystemEntry {
+                is_mountpoint: true,
+                ..same_mount_regular_file
+            },
+            &anchor_identity
+        ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
     fn pinned_pressure_cleanup_skips_off_device_and_removes_matching_workspace() {
         let root = std::env::temp_dir().join(format!(
             "velnor-pressure-leftover-device-{}",
@@ -3844,6 +5907,163 @@ mod tests {
         remove_authorized_workspace_for_pressure(&workspace, pressure_device, &validate_pressure)
             .unwrap();
         assert!(!candidate.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn workspace_pressure_recovery_after_secure_preflight_preserves_candidate() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-pressure-workspace-boundary-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let pressure_root = root.join("pressure");
+        let trusted_anchor = root.join("work");
+        let candidate = trusted_anchor.join("slot-1/job-12345678");
+        fs::create_dir_all(&pressure_root).unwrap();
+        write_tree(&candidate);
+
+        let pressure = crate::host_capacity::HostCapacityPin::open(&pressure_root).unwrap();
+        let anchor_identity = filesystem_directory_identity(&trusted_anchor).unwrap();
+        let candidate_identity =
+            filesystem_directory_identity_under(&trusted_anchor, &candidate, &anchor_identity)
+                .unwrap();
+        let workspace = AuthorizedWorkspace {
+            path: candidate.clone(),
+            trusted_anchor,
+            anchor_identity,
+            candidate_identity,
+        };
+        let samples = std::cell::Cell::new(0_usize);
+        let pressure_recovered = || {
+            pressure.probe()?;
+            samples.set(samples.get() + 1);
+            bail!("injected pressure recovery at unlink boundary")
+        };
+
+        let error = remove_authorized_workspace_for_pressure(
+            &workspace,
+            pressure.device_id(),
+            &pressure_recovered,
+        )
+        .expect_err("pressure recovery at deletion boundary must stop removal");
+
+        assert!(format!("{error:#}").contains("injected pressure recovery"));
+        assert_eq!(
+            samples.get(),
+            1,
+            "pressure must be resampled at unlink boundary"
+        );
+        assert!(
+            candidate.join("marker").exists(),
+            "recovered candidate was deleted"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn pressure_workspace_reclaim_stops_at_fresh_free_space_floor() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-pressure-leftover-floor-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("work");
+        let first = work
+            .join("slot-1")
+            .join("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        let second = work
+            .join("slot-1")
+            .join("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+        cold_tree(&first);
+        cold_tree(&second);
+
+        let mut probe_calls = 0;
+        let report = reclaim_with_liveness_authorized_until_free_space(
+            std::slice::from_ref(&work),
+            &container_liveness(&BTreeSet::new()),
+            100,
+            || {
+                probe_calls += 1;
+                Ok(if probe_calls <= 2 { 99 } else { 100 })
+            },
+            |workspace| remove_authorized_workspace(workspace, None),
+        )
+        .unwrap();
+
+        assert_eq!(
+            probe_calls, 3,
+            "probe after inventory, immediately before deletion, and after first candidate"
+        );
+        assert_eq!(report.deleted_workspaces.len(), 1);
+        assert_eq!(first.exists() as u8 + second.exists() as u8, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn hard_utilization_reclaims_workspaces_with_more_than_two_gib_free() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-hard-utilization-workspace-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("work");
+        let first = work
+            .join("slot-1")
+            .join("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        let second = work
+            .join("slot-1")
+            .join("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+        cold_tree(&first);
+        cold_tree(&second);
+        let free_bytes = 3_u64 * 1024 * 1024 * 1024;
+
+        let report = reclaim_with_liveness_authorized_while_pressured(
+            std::slice::from_ref(&work),
+            &container_liveness(&BTreeSet::new()),
+            || {
+                assert!(free_bytes > 2_u64 * 1024 * 1024 * 1024);
+                Ok(first.exists() || second.exists())
+            },
+            |workspace| remove_authorized_workspace(workspace, None),
+        )
+        .unwrap();
+
+        assert_eq!(report.deleted_workspaces.len(), 2);
+        assert!(!first.exists());
+        assert!(!second.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn pressure_reclaim_skips_workspace_when_pressure_recovers_after_inventory() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-pressure-workspace-recovered-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("work");
+        let candidate = work
+            .join("slot-1")
+            .join("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        cold_tree(&candidate);
+        let samples = std::cell::Cell::new(0);
+
+        let report = reclaim_with_liveness_authorized_while_pressured(
+            std::slice::from_ref(&work),
+            &container_liveness(&BTreeSet::new()),
+            || {
+                let sample = samples.get();
+                samples.set(sample + 1);
+                Ok(sample == 0)
+            },
+            |workspace| remove_authorized_workspace(workspace, None),
+        )
+        .unwrap();
+
+        assert!(report.deleted_workspaces.is_empty());
+        assert!(candidate.exists());
+        assert_eq!(samples.get(), 2);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4173,7 +6393,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_partial_cleanup_error_never_restores_a_changed_tree() {
+    fn macos_partial_cleanup_error_restores_remaining_tree() {
         let restore_called = std::cell::Cell::new(false);
         let error = finish_macos_delete_error(
             anyhow::anyhow!("injected failure after child removal"),
@@ -4183,9 +6403,9 @@ mod tests {
                 Ok(())
             },
         )
-        .expect_err("partial cleanup must remain quarantined");
-        assert!(format!("{error:#}").contains("partial macOS cleanup remains in quarantine"));
-        assert!(!restore_called.get());
+        .expect_err("partial cleanup must report its abort after restoring");
+        assert!(format!("{error:#}").contains("remaining tree restored"));
+        assert!(restore_called.get());
     }
 
     #[cfg(target_os = "macos")]
@@ -4242,69 +6462,531 @@ mod tests {
         assert_ne!(system, data_mount);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn linux_partial_cleanup_remains_quarantined_after_first_unlink() {
+    fn pressure_abort_after_partial_unlink_restores_workspace_and_clears_quarantine() {
         let root = std::env::temp_dir().join(format!(
-            "velnor-linux-partial-cleanup-{}",
+            "velnor-pressure-partial-cleanup-{}",
             uuid::Uuid::new_v4()
         ));
-        let anchor_path = root.join("configured");
-        let candidate = anchor_path.join("work/slot-1/job-12345678");
+        let work = root.join("work");
+        let candidate = work.join("slot-1/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
         fs::create_dir_all(&candidate).unwrap();
         fs::write(candidate.join("first"), b"first").unwrap();
         fs::write(candidate.join("later"), b"later").unwrap();
 
-        let anchor = open_configured_directory(&anchor_path).unwrap();
+        let anchor_identity = filesystem_directory_identity(&work).unwrap();
+        let candidate_identity =
+            filesystem_directory_identity_under(&work, &candidate, &anchor_identity).unwrap();
+        let unlink_boundaries = std::cell::Cell::new(0_usize);
+        let pressure_cleared_before_next_unlink = |_: &Path| -> Result<()> {
+            let boundary = unlink_boundaries.get();
+            unlink_boundaries.set(boundary + 1);
+            if boundary == 1 {
+                bail!("injected pressure recovery at second unlink boundary");
+            }
+            Ok(())
+        };
+
+        let error = remove_dir_all_on_device_under_identities_with_pre_unlink(
+            &work,
+            &candidate,
+            anchor_identity.device,
+            &anchor_identity,
+            &candidate_identity,
+            &pressure_cleared_before_next_unlink,
+        )
+        .expect_err("pressure recovery must abort partial deletion");
+
+        assert!(format!("{error:#}").contains("injected pressure recovery"));
+        assert!(
+            candidate.exists(),
+            "partially deleted workspace was stranded"
+        );
+        assert_eq!(
+            fs::read_dir(&candidate).unwrap().count(),
+            1,
+            "one child is already deleted; the remaining tree must be restored"
+        );
+        assert!(
+            fs::read_dir(&work).unwrap().all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(RECLAIM_QUARANTINE_PREFIX)),
+            "completed rollback must remove its empty quarantine"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn pre_unlink_replacement_is_rechecked_and_preserved() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-pre-unlink-replacement-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("work");
+        let candidate = work.join("slot-1/eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee");
+        fs::create_dir_all(&candidate).unwrap();
+        fs::write(candidate.join("victim"), b"original").unwrap();
+
+        let anchor_identity = filesystem_directory_identity(&work).unwrap();
+        let candidate_identity =
+            filesystem_directory_identity_under(&work, &candidate, &anchor_identity).unwrap();
+        let swapped = std::cell::Cell::new(false);
+        let before_unlink = |_: &Path| -> Result<()> {
+            if swapped.replace(true) {
+                return Ok(());
+            }
+            let quarantine = fs::read_dir(&work)?
+                .filter_map(|entry| entry.ok())
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with(RECLAIM_QUARANTINE_PREFIX))
+                })
+                .context("cleanup callback cannot find its quarantine")?
+                .path()
+                .join(RECLAIM_QUARANTINE_ENTRY);
+            let victim = quarantine.join("victim");
+            fs::rename(&victim, root.join("preserved-original"))?;
+            fs::write(victim, b"replacement")?;
+            Ok(())
+        };
+
+        let error = remove_dir_all_on_device_under_identities_with_pre_unlink(
+            &work,
+            &candidate,
+            anchor_identity.device,
+            &anchor_identity,
+            &candidate_identity,
+            &before_unlink,
+        )
+        .expect_err("identity replacement in the callback must stop unlink");
+
+        assert!(format!("{error:#}").contains("changed before removal"));
+        assert_eq!(fs::read(candidate.join("victim")).unwrap(), b"replacement");
+        assert_eq!(
+            fs::read(root.join("preserved-original")).unwrap(),
+            b"original"
+        );
+        assert!(fs::read_dir(&work).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(RECLAIM_QUARANTINE_PREFIX)));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn orphan_scan_recovers_durable_partial_quarantine_by_journaled_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-quarantine-recovery-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("work");
+        let job_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        let candidate = work.join("slot-1").join(job_id);
+        write_tree(&candidate);
+        fs::write(candidate.join("already-removed"), b"partial").unwrap();
+
+        let anchor = open_configured_directory(&work).unwrap();
         let anchor_identity = directory_identity(&anchor).unwrap();
-        let (parent, name, root_path, opened_anchor_identity) =
-            open_parent_beneath_anchor(&anchor_path, &candidate, Some(&anchor_identity)).unwrap();
+        let (parent, name, _, opened_anchor_identity) =
+            open_parent_beneath_anchor(&work, &candidate, Some(&anchor_identity)).unwrap();
         assert_eq!(opened_anchor_identity, anchor_identity);
         let pinned_candidate = open_directory_child(&parent, &name).unwrap();
         let candidate_identity = directory_identity(&pinned_candidate).unwrap();
-        let mount_id = match &anchor_identity.mount {
-            FilesystemMountIdentity::LinuxMountId(mount_id) => *mount_id,
-        };
-        let identity_of = |_: &Path, device, mount_id| (device, mount_id);
-        let fail_after_first_unlink =
-            |_: &Path| -> Result<()> { bail!("injected failure after first successful unlink") };
-
-        let error = remove_dir_all_with_identity_at(
+        let (quarantine, quarantine_name) =
+            create_private_quarantine(&anchor, &anchor_identity).unwrap();
+        write_quarantine_journal(
+            &quarantine,
+            &anchor_identity,
+            &directory_identity(&parent).unwrap(),
+            Path::new("slot-1").join(job_id).as_path(),
+            &candidate_identity,
+        )
+        .unwrap();
+        let moved = move_candidate_to_quarantine(
             &parent,
             &name,
-            &anchor,
-            &anchor_identity,
-            &root_path,
-            anchor_identity.device,
-            Some(mount_id),
-            Some(&candidate_identity),
-            Some(&pinned_candidate),
-            &identity_of,
-            &fail_after_first_unlink,
+            &quarantine,
+            std::ffi::OsStr::new(RECLAIM_QUARANTINE_ENTRY),
+            &candidate_identity,
+            &pinned_candidate,
+            || Ok(()),
         )
-        .expect_err("partial deletion must fail closed in quarantine");
-        assert!(format!("{error:#}").contains("partial workspace cleanup remains in quarantine"));
-        assert!(!candidate.exists(), "partially deleted tree was restored");
-
-        let quarantine = fs::read_dir(&anchor_path)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .find(|path| {
-                path.file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with(".velnor-reclaim-"))
-            })
-            .expect("partial tree must remain under quarantine");
-        let quarantined_candidate = quarantine.join("entry");
-        let remaining_entries = fs::read_dir(&quarantined_candidate)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .collect::<Vec<_>>();
-        assert_eq!(remaining_entries.len(), 1);
-        assert!(remaining_entries[0].is_file());
-
+        .unwrap();
+        persist_quarantine_move(&parent, &quarantine).unwrap();
+        fs::remove_file(
+            work.join(&quarantine_name)
+                .join(RECLAIM_QUARANTINE_ENTRY)
+                .join("already-removed"),
+        )
+        .unwrap();
+        sync_directory(&moved).unwrap();
+        drop(moved);
         drop(pinned_candidate);
         drop(parent);
+        drop(quarantine);
         drop(anchor);
+
+        recover_private_quarantines_if_pending(
+            &root.join("run"),
+            std::slice::from_ref(&work),
+            || Ok(BTreeSet::new()),
+        )
+        .unwrap();
+
+        assert!(candidate.join("marker").exists());
+        assert!(!candidate.join("already-removed").exists());
+        assert!(!work.join(quarantine_name).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn recovery_freezes_quarantine_when_source_parent_identity_changes() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-quarantine-parent-identity-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("work");
+        let job_id = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+        let candidate = work.join("slot-1").join(job_id);
+        write_tree(&candidate);
+
+        let anchor = open_configured_directory(&work).unwrap();
+        let anchor_identity = directory_identity(&anchor).unwrap();
+        let (parent, name, _, _) =
+            open_parent_beneath_anchor(&work, &candidate, Some(&anchor_identity)).unwrap();
+        let source_parent_identity = directory_identity(&parent).unwrap();
+        let pinned_candidate = open_directory_child(&parent, &name).unwrap();
+        let candidate_identity = directory_identity(&pinned_candidate).unwrap();
+        let (quarantine, quarantine_name) =
+            create_private_quarantine(&anchor, &anchor_identity).unwrap();
+        write_quarantine_journal(
+            &quarantine,
+            &anchor_identity,
+            &source_parent_identity,
+            Path::new("slot-1").join(job_id).as_path(),
+            &candidate_identity,
+        )
+        .unwrap();
+        move_candidate_to_quarantine(
+            &parent,
+            &name,
+            &quarantine,
+            std::ffi::OsStr::new(RECLAIM_QUARANTINE_ENTRY),
+            &candidate_identity,
+            &pinned_candidate,
+            || Ok(()),
+        )
+        .unwrap();
+        persist_quarantine_move(&parent, &quarantine).unwrap();
+        let q_entry = work.join(&quarantine_name).join(RECLAIM_QUARANTINE_ENTRY);
+        drop(pinned_candidate);
+        drop(parent);
+        drop(quarantine);
+        drop(anchor);
+
+        fs::rename(work.join("slot-1"), root.join("displaced-slot-1")).unwrap();
+        fs::create_dir(work.join("slot-1")).unwrap();
+        recover_private_quarantines_if_pending(
+            &root.join("run"),
+            std::slice::from_ref(&work),
+            || Ok(BTreeSet::new()),
+        )
+        .unwrap();
+
+        assert!(
+            !candidate.exists(),
+            "replacement parent must not receive stale data"
+        );
+        assert!(
+            q_entry.join("marker").exists(),
+            "uncertain q must stay frozen"
+        );
+        assert!(root.join("displaced-slot-1").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn microvm_no_pressure_recovery_scans_cache_anchors_without_docker() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-cache-quarantine-recovery-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let config_base = root.join("config");
+        let layout = crate::storage::StorageLayout::explicit_local(&config_base);
+        let keyed_anchor = crate::trust_scope::filesystem_key_namespace(&layout.cache_root);
+        let keyed_candidate = keyed_anchor.join("scope-key").join("store-entry");
+        let direct_candidate = layout.cache_root.join("gha-cache").join("store-entry");
+        let work_roots = crate::runner::daemon_pressure_work_roots(&config_base, None, 2);
+        let work_root = config_base.join("slots/slot-2/_work");
+        assert!(work_roots.contains(&work_root));
+        let work_catalog =
+            crate::store_catalog::StoreCatalog::for_work_root_with_layout(&work_root, &layout);
+        let work_cache_candidate = work_catalog.artifacts().join("store-entry");
+        let workspace_candidate = work_root.join("ffffffff-ffff-ffff-ffff-ffffffffffff");
+        let prepare_quarantine = |anchor_path: &Path, candidate: &Path| -> Result<PathBuf> {
+            write_tree(candidate);
+            let anchor = open_configured_directory(anchor_path)?;
+            let anchor_identity = directory_identity(&anchor)?;
+            let (parent, name, _, _) =
+                open_parent_beneath_anchor(anchor_path, candidate, Some(&anchor_identity))?;
+            let source_parent_identity = directory_identity(&parent)?;
+            let pinned_candidate = open_directory_child(&parent, &name)?;
+            let candidate_identity = directory_identity(&pinned_candidate)?;
+            let (quarantine, quarantine_name) =
+                create_private_quarantine(&anchor, &anchor_identity)?;
+            write_quarantine_journal(
+                &quarantine,
+                &anchor_identity,
+                &source_parent_identity,
+                candidate.strip_prefix(anchor_path)?,
+                &candidate_identity,
+            )?;
+            move_candidate_to_quarantine(
+                &parent,
+                &name,
+                &quarantine,
+                std::ffi::OsStr::new(RECLAIM_QUARANTINE_ENTRY),
+                &candidate_identity,
+                &pinned_candidate,
+                || Ok(()),
+            )?;
+            persist_quarantine_move(&parent, &quarantine)?;
+            drop(pinned_candidate);
+            drop(parent);
+            drop(quarantine);
+            drop(anchor);
+            Ok(anchor_path.join(quarantine_name))
+        };
+        let keyed_quarantine = prepare_quarantine(&keyed_anchor, &keyed_candidate).unwrap();
+        let direct_quarantine = prepare_quarantine(&layout.cache_root, &direct_candidate).unwrap();
+        let work_cache_quarantine = prepare_quarantine(&work_root, &work_cache_candidate).unwrap();
+        let workspace_quarantine = prepare_quarantine(&work_root, &workspace_candidate).unwrap();
+
+        let docker_was_queried = std::cell::Cell::new(false);
+        recover_quarantines_for_backend(
+            Some(velnor_model::ExecutionBackendKind::MicroVm),
+            &layout.run_root,
+            &work_roots,
+            &layout,
+            || {
+                docker_was_queried.set(true);
+                bail!("MicroVM cache recovery must not query host Docker")
+            },
+        )
+        .unwrap();
+
+        assert!(!docker_was_queried.get());
+        assert!(keyed_candidate.join("marker").exists());
+        assert!(direct_candidate.join("marker").exists());
+        assert!(work_cache_candidate.join("marker").exists());
+        assert!(!keyed_quarantine.exists());
+        assert!(!direct_quarantine.exists());
+        assert!(!work_cache_quarantine.exists());
+        assert!(workspace_quarantine
+            .join(RECLAIM_QUARANTINE_ENTRY)
+            .join("marker")
+            .exists());
+        assert!(!workspace_candidate.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn no_pressure_recovery_skips_liveness_collection_without_quarantines() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-quarantine-noop-recovery-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let run_root = root.join("run");
+        let work = root.join("work");
+        fs::create_dir_all(&work).unwrap();
+        let listed_live_jobs = std::cell::Cell::new(false);
+
+        recover_private_quarantines_if_pending(&run_root, std::slice::from_ref(&work), || {
+            listed_live_jobs.set(true);
+            Ok(BTreeSet::new())
+        })
+        .unwrap();
+
+        assert!(!listed_live_jobs.get());
+        assert!(
+            !run_root.exists(),
+            "no-op scan must not acquire coordinator"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn quarantine_rename_sync_orders_are_fault_injected_and_recoverable() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-quarantine-sync-order-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(root.join("source")).unwrap();
+        fs::create_dir_all(root.join("quarantine")).unwrap();
+        let source = fs::File::open(root.join("source")).unwrap();
+        let quarantine = fs::File::open(root.join("quarantine")).unwrap();
+        let source_inode = directory_identity(&source).unwrap().inode;
+        let quarantine_inode = directory_identity(&quarantine).unwrap().inode;
+
+        let mut move_calls = Vec::new();
+        let move_error = sync_two_directories_in_order(&quarantine, &source, |directory| {
+            move_calls.push(directory_identity(directory)?.inode);
+            if move_calls.len() == 2 {
+                bail!("injected source-parent sync failure after durable destination");
+            }
+            Ok(())
+        })
+        .expect_err("second move sync failure must stop the transaction");
+        assert!(format!("{move_error:#}").contains("injected source-parent sync failure"));
+        assert_eq!(move_calls, vec![quarantine_inode, source_inode]);
+
+        let mut restore_calls = Vec::new();
+        let restore_error = sync_two_directories_in_order(&source, &quarantine, |directory| {
+            restore_calls.push(directory_identity(directory)?.inode);
+            if restore_calls.len() == 2 {
+                bail!("injected quarantine sync failure after durable source");
+            }
+            Ok(())
+        })
+        .expect_err("second restore sync failure must stop the transaction");
+        assert!(format!("{restore_error:#}").contains("injected quarantine sync failure"));
+        assert_eq!(restore_calls, vec![source_inode, quarantine_inode]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn quarantine_setup_failure_after_mkdir_removes_empty_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-quarantine-setup-failure-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let anchor = open_configured_directory(&root).unwrap();
+        let anchor_identity = directory_identity(&anchor).unwrap();
+
+        let error = create_private_quarantine_with_hook(&anchor, &anchor_identity, || {
+            bail!("injected setup failure after mkdirat")
+        })
+        .expect_err("post-mkdir setup failure must clean up");
+
+        assert!(format!("{error:#}").contains("injected setup failure after mkdirat"));
+        assert!(secure_directory_entries(&anchor).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn no_pressure_recovery_cleans_empty_quarantine_left_by_crash_after_mkdir() {
+        use std::os::unix::fs::DirBuilderExt as _;
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-quarantine-empty-recovery-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let name = format!(
+            "{RECLAIM_QUARANTINE_PREFIX}{}-{}",
+            std::process::id(),
+            QUARANTINE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let quarantine_path = root.join(&name);
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&quarantine_path)
+            .unwrap();
+
+        recover_private_quarantines_if_pending(
+            &root.join("run"),
+            std::slice::from_ref(&root),
+            || Ok(BTreeSet::new()),
+        )
+        .unwrap();
+
+        assert!(!quarantine_path.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn orphan_scan_freezes_quarantine_when_journaled_identity_changes() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-quarantine-identity-freeze-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("work");
+        let job_id = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+        let candidate = work.join("slot-1").join(job_id);
+        write_tree(&candidate);
+
+        let anchor = open_configured_directory(&work).unwrap();
+        let anchor_identity = directory_identity(&anchor).unwrap();
+        let (parent, name, _, _) =
+            open_parent_beneath_anchor(&work, &candidate, Some(&anchor_identity)).unwrap();
+        let pinned_candidate = open_directory_child(&parent, &name).unwrap();
+        let candidate_identity = directory_identity(&pinned_candidate).unwrap();
+        let (quarantine, quarantine_name) =
+            create_private_quarantine(&anchor, &anchor_identity).unwrap();
+        write_quarantine_journal(
+            &quarantine,
+            &anchor_identity,
+            &directory_identity(&parent).unwrap(),
+            Path::new("slot-1").join(job_id).as_path(),
+            &candidate_identity,
+        )
+        .unwrap();
+        move_candidate_to_quarantine(
+            &parent,
+            &name,
+            &quarantine,
+            std::ffi::OsStr::new(RECLAIM_QUARANTINE_ENTRY),
+            &candidate_identity,
+            &pinned_candidate,
+            || Ok(()),
+        )
+        .unwrap();
+        let quarantine = work.join(&quarantine_name);
+        let q_entry = quarantine.join(RECLAIM_QUARANTINE_ENTRY);
+        fs::rename(&q_entry, root.join("displaced-entry")).unwrap();
+        write_tree(&q_entry);
+        drop(pinned_candidate);
+        drop(parent);
+        drop(quarantine);
+        drop(anchor);
+
+        let report = reclaim_with_liveness_authorized_while_pressured(
+            std::slice::from_ref(&work),
+            &WorkspaceLiveness {
+                min_idle: Duration::ZERO,
+                ..WorkspaceLiveness::default()
+            },
+            || Ok(false),
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        assert!(
+            !candidate.exists(),
+            "uncertain identity must not be restored"
+        );
+        assert!(
+            q_entry.join("marker").exists(),
+            "uncertain quarantine was altered"
+        );
+        assert!(report.deleted_workspaces.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4840,18 +7522,23 @@ Filesystem     1024-blocks      Used Available Capacity Mounted on
         }
 
         // Mid artifact upload and mid target publish: store leases are held.
-        let _leases = [
-            crate::capacity::ScopeLease::acquire(
+        let leases = [
+            crate::capacity::ScopeLease::acquire_for_job(
                 &run_root,
                 "actions-cache",
-                &format!("repo/{uploading}"),
+                &format!("repo/{}", crate::trust_scope::filesystem_key(uploading)),
+                crate::capacity::JobOwnerId::parse(uploading).unwrap(),
                 Duration::from_secs(3600),
             )
             .unwrap(),
-            crate::capacity::ScopeLease::acquire(
+            crate::capacity::ScopeLease::acquire_for_job(
                 &run_root,
                 "targets",
-                &format!("workspace-v2/repo/ci.yml/{publishing}"),
+                &format!(
+                    "workspace-v2/repo/ci.yml/{}",
+                    crate::trust_scope::filesystem_key(publishing)
+                ),
+                crate::capacity::JobOwnerId::parse(publishing).unwrap(),
                 Duration::from_secs(3600),
             )
             .unwrap(),
@@ -4861,8 +7548,15 @@ Filesystem     1024-blocks      Used Available Capacity Mounted on
             .unwrap()
             .unwrap();
 
+        let coordinator =
+            crate::capacity::FilesystemCoordinator::lock_exclusive(&run_root).unwrap();
         let liveness = WorkspaceLiveness::collect(&run_root, BTreeSet::new());
         assert!(!liveness.evidence_incomplete);
+        assert_eq!(
+            liveness.leased,
+            BTreeSet::from([uploading.to_string(), publishing.to_string()]),
+            "active persisted leases must expose their explicit owner ids"
+        );
         let orphans = orphan_job_workspace_paths_with_liveness(
             std::slice::from_ref(&root.join("velnor-fixture/work")),
             &liveness,
@@ -4875,6 +7569,95 @@ Filesystem     1024-blocks      Used Available Capacity Mounted on
              recent writes may be reclaimed"
         );
         drop(claim);
+        drop(coordinator);
+        drop(leases);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn generic_lease_with_uuid_scope_suffix_does_not_prove_job_liveness() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-leftover-generic-lease-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("velnor-fixture/work/slot-1");
+        let run_root = root.join("run");
+        let job_id = "55555555-5555-4555-8555-555555555555";
+        let workspace = work.join(job_id);
+        write_tree(&workspace);
+        crate::cache::test_clock::backdate(&workspace, WORKSPACE_MIN_IDLE * 2);
+        let lease = crate::capacity::ScopeLease::acquire(
+            &run_root,
+            "cargo",
+            &format!("registry/{job_id}"),
+            Duration::from_secs(3600),
+        )
+        .unwrap();
+
+        let coordinator =
+            crate::capacity::FilesystemCoordinator::lock_exclusive(&run_root).unwrap();
+        let liveness = WorkspaceLiveness::collect(&run_root, BTreeSet::new());
+        assert!(!liveness.evidence_incomplete);
+        assert!(
+            liveness.leased.is_empty(),
+            "generic leases have no owner id"
+        );
+        assert_eq!(
+            orphan_job_workspace_paths_with_liveness(
+                std::slice::from_ref(&root.join("velnor-fixture/work")),
+                &liveness,
+            ),
+            vec![workspace.clone()],
+            "a UUID-looking scope suffix cannot substitute for persisted ownership"
+        );
+        drop(coordinator);
+        drop(lease);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn malformed_lease_owner_evidence_blocks_workspace_reclamation() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-leftover-malformed-lease-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("velnor-fixture/work/slot-1");
+        let run_root = root.join("run");
+        let job_id = "66666666-6666-4666-8666-666666666666";
+        let workspace = work.join(job_id);
+        write_tree(&workspace);
+        crate::cache::test_clock::backdate(&workspace, WORKSPACE_MIN_IDLE * 2);
+        let scope = format!("registry/{}", crate::trust_scope::filesystem_key(job_id));
+        let lease_path = run_root.join("leases__trust_scope_v2/cargo").join(format!(
+            "{}.json",
+            crate::trust_scope::filesystem_key(&scope)
+        ));
+        fs::create_dir_all(lease_path.parent().unwrap()).unwrap();
+        fs::write(
+            &lease_path,
+            serde_json::json!({
+                "scope": scope,
+                "pid": std::process::id(),
+                "created_unix": 1_800_000_000_u64,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let coordinator =
+            crate::capacity::FilesystemCoordinator::lock_exclusive(&run_root).unwrap();
+        let liveness = WorkspaceLiveness::collect(&run_root, BTreeSet::new());
+        assert!(liveness.evidence_incomplete);
+        assert!(
+            orphan_job_workspace_paths_with_liveness(
+                std::slice::from_ref(&root.join("velnor-fixture/work")),
+                &liveness,
+            )
+            .is_empty(),
+            "malformed lease metadata must make the reaper delete nothing"
+        );
+        assert!(workspace.exists());
+        drop(coordinator);
         fs::remove_dir_all(root).ok();
     }
 
@@ -4915,19 +7698,6 @@ Filesystem     1024-blocks      Used Available Capacity Mounted on
         assert!(orphans.is_empty());
         assert!(orphan.exists());
         fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn lease_scopes_name_the_job_that_holds_them() {
-        let scopes = BTreeSet::from([
-            "targets/workspace-v2/repo/ci.yml/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string(),
-            "cargo/registry/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string(),
-            "mise/cache".to_string(),
-        ]);
-        assert_eq!(
-            job_ids_from_lease_scopes(&scopes),
-            BTreeSet::from(["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string()])
-        );
     }
 
     fn assert_leftover_docker_commands_are_safe(commands: &[Vec<String>]) {

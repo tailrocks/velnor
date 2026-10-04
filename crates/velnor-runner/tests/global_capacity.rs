@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use velnor_control::permit_ledger::{unix_now, PermitLane, PermitLedger};
-use velnor_runner::permit_guard::{native_permit_holder, NativePermitGuard};
+use velnor_runner::permit_guard::{native_permit_holder, NativePermitGuard, PermitReleaseOutcome};
 use velnor_runner::scaleset::capacity::{
     AcquireOutcome, CapacityLedger, LedgerLane, LedgerPermitState,
 };
@@ -35,7 +35,8 @@ fn configure(path: &Path, max_jobs: u32) -> u64 {
     let mut ledger = PermitLedger::open(path).unwrap();
     ledger.set_max_jobs(max_jobs).unwrap();
     let generation = ledger.begin_epoch().unwrap();
-    ledger.reconcile(&[]).unwrap();
+    assert_eq!(ledger.occupied().unwrap(), 0);
+    ledger.reconcile_attempts(&[]).unwrap();
     generation
 }
 
@@ -90,17 +91,18 @@ fn native_and_scaleset_start_in_shared_observation_order() {
     let native = NativePermitGuard::acquire(&path, native_holder.clone(), SCOPE_NATIVE)
         .unwrap()
         .expect("oldest native demand should acquire");
-    assert_eq!(
-        scaleset
-            .acquire(
-                scaleset_holder,
-                LedgerLane::ScaleSet,
-                LedgerPermitState::Reserved,
-                generation,
-            )
-            .unwrap(),
-        AcquireOutcome::Acquired
-    );
+    let scaleset_attempt_token = match scaleset
+        .acquire(
+            scaleset_holder,
+            LedgerLane::ScaleSet,
+            LedgerPermitState::Reserved,
+            generation,
+        )
+        .unwrap()
+    {
+        AcquireOutcome::Acquired { attempt_token } => attempt_token,
+        outcome => panic!("expected Scale Set permit, got {outcome:?}"),
+    };
     assert_eq!(PermitLedger::open(&path).unwrap().occupied().unwrap(), 2);
 
     // Native redelivery must retain its original global queue identity.
@@ -115,8 +117,14 @@ fn native_and_scaleset_start_in_shared_observation_order() {
         velnor_control::permit_ledger::DemandState::Granted
     );
 
-    native.release();
-    scaleset.release(scaleset_holder).unwrap();
+    assert_eq!(native.release().unwrap(), PermitReleaseOutcome::Released);
+    scaleset
+        .release_staged(
+            scaleset_holder,
+            &scaleset_attempt_token,
+            velnor_control::permit_ledger::DemandState::Terminal,
+        )
+        .unwrap();
     assert_eq!(PermitLedger::open(&path).unwrap().occupied().unwrap(), 0);
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
@@ -177,19 +185,26 @@ fn older_native_demand_blocks_younger_scaleset_with_one_slot() {
     );
     assert_eq!(PermitLedger::open(&path).unwrap().occupied().unwrap(), 1);
 
-    native.release();
-    assert_eq!(
-        scaleset
-            .acquire(
-                scaleset_holder,
-                LedgerLane::ScaleSet,
-                LedgerPermitState::Reserved,
-                generation,
-            )
-            .unwrap(),
-        AcquireOutcome::Acquired
-    );
-    scaleset.release(scaleset_holder).unwrap();
+    assert_eq!(native.release().unwrap(), PermitReleaseOutcome::Released);
+    let scaleset_attempt_token = match scaleset
+        .acquire(
+            scaleset_holder,
+            LedgerLane::ScaleSet,
+            LedgerPermitState::Reserved,
+            generation,
+        )
+        .unwrap()
+    {
+        AcquireOutcome::Acquired { attempt_token } => attempt_token,
+        outcome => panic!("expected Scale Set permit, got {outcome:?}"),
+    };
+    scaleset
+        .release_staged(
+            scaleset_holder,
+            &scaleset_attempt_token,
+            velnor_control::permit_ledger::DemandState::Terminal,
+        )
+        .unwrap();
     assert_eq!(PermitLedger::open(&path).unwrap().occupied().unwrap(), 0);
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }

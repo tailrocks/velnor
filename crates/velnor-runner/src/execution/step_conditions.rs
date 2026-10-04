@@ -14,7 +14,7 @@ use crate::{
     executor::{JobExecutionState, JobExpressionContext},
     expression,
 };
-use serde_json::Value;
+use velnor_model::ContextValue;
 
 impl JobExecutionState {
     /// Whether this job has been cancelled.
@@ -156,7 +156,7 @@ impl JobExecutionState {
 pub(crate) fn condition_is_statically_false(
     condition: Option<&str>,
     base_env: &[(String, String)],
-    context_data: &[(String, Value)],
+    context_data: &[(String, ContextValue)],
 ) -> bool {
     let Some(condition) = condition else {
         return false;
@@ -332,10 +332,11 @@ mod tests {
     fn immutable_github_condition_can_prove_local_action_is_skipped() {
         let context = vec![(
             "github".to_string(),
-            serde_json::json!({
+            ContextValue::from_json(serde_json::json!({
                 "ref": "refs/heads/perf/subminute-ci",
                 "event_name": "workflow_dispatch"
-            }),
+            }))
+            .unwrap(),
         )];
         let condition = "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')";
 

@@ -397,35 +397,28 @@ pub fn intend_acquisition(
     Ok(generation)
 }
 
-/// Retarget a provisional row onto the identity the acquire reply named.
-///
-/// The broker message that opens an acquisition names no plan, and `renewjob`
-/// needs one, so a row created before the call cannot be probed. This is the
-/// moment that changes: the 200 carries the run-service plan and job id, and
-/// recording them makes the row recoverable for the first time.
-///
-/// It is deliberately one event. Dropping the message-keyed row and creating
-/// the job-keyed one would free the slot in between and destroy the very
-/// evidence this mechanism exists to keep — the same lost-acquisition window,
-/// a few microseconds wide instead of a network round trip.
-///
-/// The row stays provisional; `confirm_acquisition` promotes it.
+/// Resolve an acquisition and retain the SystemVssConnection URL supplied by
+/// the acquired job. The broker URL belongs to the acquisition intent; once
+/// the reply names the job, every lease probe and completion uses this URL.
 ///
 /// # Errors
 /// Journal write failure, or a rejection: the row is gone, already owned, at a
-/// different generation, or the acquired identity is already taken.
-pub fn resolve_acquisition(
+/// different generation, the acquired identity is already taken, or endpoint
+/// data is empty.
+pub fn resolve_acquisition_at_endpoint(
     journal: &mut Journal,
     provisional_job_id: &JobId,
     acquired_job_id: &JobId,
     plan_id: &str,
     generation: Generation,
+    run_service_url: &str,
 ) -> anyhow::Result<()> {
-    let outcome = journal.apply(Event::JobAcquisitionResolved {
+    let outcome = journal.apply(Event::JobAcquisitionResolvedAtEndpoint {
         provisional_job_id: provisional_job_id.clone(),
         acquired_job_id: acquired_job_id.clone(),
-        plan_id: plan_id.to_string(),
+        plan_id: plan_id.to_owned(),
         generation,
+        run_service_url: run_service_url.to_owned(),
     })?;
     if outcome.rejected {
         anyhow::bail!(
@@ -438,8 +431,8 @@ pub fn resolve_acquisition(
     Ok(())
 }
 
-/// Rebuild an acquisition row that `resolve_acquisition` cannot find, from the
-/// identity the acquire reply named.
+/// Rebuild an acquisition row that is missing, from the identity and endpoint
+/// the acquire reply named.
 ///
 /// The provisional row is crash *bookkeeping*, not a precondition of the job:
 /// it exists so that a crash inside the acquire window leaves evidence. When
@@ -447,20 +440,19 @@ pub fn resolve_acquisition(
 /// that went missing anyway — the slot journal was created or repopulated by
 /// another process between the intent and the resolve — must be rebuilt, never
 /// treated as a reason to give the job up. Writing it ends at the same state
-/// `intend_acquisition` + `resolve_acquisition` normally produce: one
+/// `intend_acquisition` + endpoint resolution normally produce: one
 /// provisional row keyed by the acquired identity, carrying the plan that makes
 /// it probeable, occupying the slot.
 ///
-/// The rebuild is deliberately two events, not one new event type: the interim
-/// state (provisional, no plan) is one that already exists in the log, so
-/// recovery and every reader keep seeing shapes they already understand.
+/// The acquired identity, plan, and selected endpoint are committed as one
+/// resolution event, so neither a crash nor a reader can observe a retargeted
+/// row that still points at the broker URL.
 ///
-/// Already-recorded rows are adopted, never forked or rewritten, for the same
-/// reason `intend_acquisition` reuses a retried message's generation: a row for
-/// the acquired identity that already carries a plan, or that `JobOwned` has
-/// already promoted, *is* the evidence this function exists to write. Only a
-/// provisional row still missing its plan — the state a crash between the two
-/// writes below leaves — is finished off rather than restarted.
+/// An owned row is adopted, never forked or rewritten. A provisional row with
+/// the same plan is also adopted when it already has the selected URL; if it
+/// still carries the broker URL, the endpoint resolution event corrects it.
+/// A provisional row still missing its plan is finished off rather than
+/// restarted.
 ///
 /// Returns `true` when a row was written and `false` when the journal already
 /// held the acquired identity, so callers can tell a genuine rebuild from an
@@ -482,18 +474,28 @@ pub fn reintend_resolved_acquisition(
     let state = journal.materialized_state()?;
     match state.jobs.iter().find(|job| job.job_id == *acquired_job_id) {
         // Ownership supersedes recovery: promote nothing, fork nothing.
-        Some(job) if !job.provisional || !job.plan_id.is_empty() => return Ok(false),
+        Some(job) if !job.provisional => return Ok(false),
+        Some(job) if !job.plan_id.is_empty() && job.plan_id != plan_id => {
+            anyhow::bail!(
+                "acquired job {} already carries a different plan",
+                acquired_job_id.0
+            );
+        }
+        Some(job) if job.plan_id == plan_id && job.run_service_url == run_service_url => {
+            return Ok(false);
+        }
         // A crash between the intent and the resolve below leaves exactly this
         // row: keyed by the acquired identity but planless, so no `renewjob`
         // call can be built for it and startup recovery would abandon it. Give
         // it the plan instead of starting the rebuild over.
         Some(job) => {
-            resolve_acquisition(
+            resolve_acquisition_at_endpoint(
                 journal,
                 acquired_job_id,
                 acquired_job_id,
                 plan_id,
                 job.generation,
+                run_service_url,
             )?;
             return Ok(true);
         }
@@ -510,12 +512,13 @@ pub fn reintend_resolved_acquisition(
     // Provisional and acquired identities are the same job here, so this is a
     // plan write, not a retarget of somebody else's row: the reducer's
     // `target_taken` guard is defined to be false when the two names match.
-    resolve_acquisition(
+    resolve_acquisition_at_endpoint(
         journal,
         acquired_job_id,
         acquired_job_id,
         plan_id,
         generation,
+        run_service_url,
     )?;
     Ok(true)
 }
@@ -975,7 +978,15 @@ mod tests {
             INTENDED_UNIX,
         )
         .unwrap();
-        resolve_acquisition(journal, job_id, job_id, "plan-1", generation).unwrap();
+        resolve_acquisition_at_endpoint(
+            journal,
+            job_id,
+            job_id,
+            "plan-1",
+            generation,
+            RUN_SERVICE_URL,
+        )
+        .unwrap();
         confirm_acquisition(journal, job_id, slot_id, generation).unwrap();
         generation
     }
@@ -1037,16 +1048,18 @@ mod tests {
             INTENDED_UNIX,
         )
         .unwrap();
-        resolve_acquisition(
+        resolve_acquisition_at_endpoint(
             journal,
             &JobId(message.to_owned()),
             job,
             "plan-1",
             journal.materialized_state().unwrap().slots[0].generation,
+            RUN_SERVICE_URL,
         )
         .unwrap();
     }
 
+    const BROKER_RUN_SERVICE_URL: &str = "https://broker.example/jobs/123";
     const RUN_SERVICE_URL: &str = "https://run.example/run";
     const INTENDED_UNIX: u64 = 1_000;
 
@@ -1309,10 +1322,10 @@ mod tests {
         Journal::open(dir.join("journal.db")).unwrap()
     }
 
-    /// A rebuild is two writes, so it can itself be interrupted: the crash
-    /// leaves a provisional row keyed by the acquired identity with no plan, and
-    /// a planless row is exactly the one startup recovery abandons. Retrying the
-    /// rebuild must finish that row, not fork a second one beside it.
+    /// A rebuild interrupted before resolution leaves a provisional row keyed
+    /// by the acquired identity with no plan, and a planless row is exactly the
+    /// one startup recovery abandons. Retrying the rebuild must finish that
+    /// row, not fork a second one beside it.
     #[test]
     fn a_rebuild_picks_up_where_an_interrupted_one_stopped() {
         let dir = tmp("rebuild-interrupted");
@@ -1320,13 +1333,13 @@ mod tests {
         {
             let mut journal = Journal::open(dir.join("journal.db")).unwrap();
             let (slot, _) = prime_ready_slot(&mut journal);
-            // The intent half of the rebuild, without the resolve.
+            // The intent half of the rebuild, before endpoint resolution.
             intend_acquisition(
                 &mut journal,
                 &job,
                 &slot,
                 "request-1",
-                RUN_SERVICE_URL,
+                BROKER_RUN_SERVICE_URL,
                 INTENDED_UNIX,
             )
             .unwrap();
@@ -1344,6 +1357,8 @@ mod tests {
         )
         .unwrap();
 
+        drop(journal);
+        let journal = restart(&dir);
         let state = journal.materialized_state().unwrap();
         assert_eq!(state.jobs.len(), 1, "the interrupted row is finished");
         assert_eq!(state.jobs[0].plan_id, "plan-1");

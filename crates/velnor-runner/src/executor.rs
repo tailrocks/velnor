@@ -57,6 +57,7 @@ use tokio::sync::{
     mpsc::{error::TrySendError, Sender},
     Notify,
 };
+use velnor_model::{ordinal_ignore_case_eq, ContextValue};
 
 const DOCKER_MOUNT_CHECK_FILE: &str = ".velnor-mount-check";
 const CACHE_GLOB_MANIFEST_FILE: &str = ".velnor-cache-glob-v1.json";
@@ -98,6 +99,28 @@ const PAGES_ARCHIVE_MAX_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const PAGES_ARCHIVE_MAX_ARCHIVE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 static CACHE_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 static DOCKER_TIMEOUT_CONTAINER_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Keep volume creation behind successful durable BuildKit create recovery.
+/// This seam lets setup tests exercise the exact production ordering without
+/// needing a live Docker Engine.
+pub(crate) fn ensure_persistent_buildkit_volume_after_recovery<T>(
+    recovery: Result<Option<String>>,
+    ensure_volume: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    recovery?;
+    ensure_volume()
+}
+
+/// Keep Docker volume mutation behind its domain-aware setup lock. A legacy
+/// runtime marker is durably quarantined by lock acquisition before this
+/// operation can reach Docker.
+pub(crate) fn run_persistent_buildkit_volume_operation<T, Lock>(
+    volume_lock: Result<Lock>,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let _volume_lock = volume_lock?;
+    operation()
+}
 
 /// Return a stable test-runner label only when a shell segment starts with a
 /// recognized test command. Matching the command position avoids treating
@@ -186,10 +209,18 @@ fn link_command_kind(script: &str) -> Option<&'static str> {
 }
 
 fn docker_lifecycle_guard(stage: &'static str) -> Result<crate::capacity::DockerLifecycleGuard> {
-    let run_root = crate::storage::StorageLayout::resolve()
-        .map(|layout| layout.run_root)
-        .unwrap_or_else(|| std::env::temp_dir().join("velnor"));
+    let layout = crate::storage::selected_layout().or_else(crate::storage::StorageLayout::resolve);
+    let run_root = docker_lifecycle_run_root(layout, &std::env::temp_dir());
     crate::capacity::DockerLifecycleGuard::lock_for_stage(&run_root, stage)
+}
+
+fn docker_lifecycle_run_root(
+    layout: Option<crate::storage::StorageLayout>,
+    temporary_root: &Path,
+) -> PathBuf {
+    layout
+        .map(|layout| layout.run_root)
+        .unwrap_or_else(|| temporary_root.join("velnor"))
 }
 
 // ANSI color helpers for Velnor-authored adapter output.
@@ -366,6 +397,7 @@ pub enum CommandStream {
 /// and location for lifecycle reporting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExpressionInterpolationError {
+    InvalidContext,
     BudgetExceeded,
     Unterminated { offset: usize },
     MismatchedDelimiter { offset: usize },
@@ -376,6 +408,7 @@ pub(crate) enum ExpressionInterpolationError {
 impl std::fmt::Display for ExpressionInterpolationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidContext => f.write_str("expression context data is malformed"),
             Self::BudgetExceeded => f.write_str("expression interpolation budget exceeded"),
             Self::Unterminated { offset } => {
                 write!(f, "unterminated expression interpolation at byte {offset}")
@@ -557,7 +590,7 @@ pub(crate) fn validate_deferred_expression_template(
 /// before returning, including spans after the first runtime reference.
 pub(crate) fn template_reads_runtime_context(
     value: &str,
-    context_data: &[(String, Value)],
+    context_data: &[(String, ContextValue)],
 ) -> Result<bool, ExpressionInterpolationError> {
     let spans = expression_template_spans(value)?;
     let state = JobExecutionState::try_new_with_context(&[], context_data)?;
@@ -578,7 +611,7 @@ pub(crate) fn template_reads_runtime_context(
 
 pub(crate) fn render_context_expressions_checked(
     value: &str,
-    context_data: &[(String, Value)],
+    context_data: &[(String, ContextValue)],
 ) -> Result<String, ExpressionInterpolationError> {
     JobExecutionState::try_new_with_context(&[], context_data)?
         .resolve_job_context_expressions(value)
@@ -586,13 +619,13 @@ pub(crate) fn render_context_expressions_checked(
 
 /// Compatibility boundary for callers that cannot yet surface typed errors.
 /// Errors become an empty value, never the original template source.
-pub fn render_context_expressions(value: &str, context_data: &[(String, Value)]) -> String {
+pub fn render_context_expressions(value: &str, context_data: &[(String, ContextValue)]) -> String {
     render_context_expressions_checked(value, context_data).unwrap_or_default()
 }
 
 pub(crate) fn render_context_expressions_bounded(
     value: &str,
-    context_data: &[(String, Value)],
+    context_data: &[(String, ContextValue)],
 ) -> Result<String, ExpressionInterpolationError> {
     // Scanning first makes budget exhaustion and malformed templates explicit;
     // the resolver then parses/evaluates every non-deferred span.
@@ -603,7 +636,7 @@ pub(crate) fn render_context_expressions_bounded(
 pub(crate) fn render_expressions_with_context_checked(
     value: &str,
     base_env: &[(String, String)],
-    context_data: &[(String, Value)],
+    context_data: &[(String, ContextValue)],
 ) -> Result<String, ExpressionInterpolationError> {
     JobExecutionState::try_new_with_context(base_env, context_data)?.resolve_expressions(value)
 }
@@ -613,7 +646,7 @@ pub(crate) fn render_expressions_with_context_checked(
 pub fn render_expressions_with_context(
     value: &str,
     base_env: &[(String, String)],
-    context_data: &[(String, Value)],
+    context_data: &[(String, ContextValue)],
 ) -> String {
     render_expressions_with_context_checked(value, base_env, context_data).unwrap_or_default()
 }
@@ -1322,6 +1355,15 @@ fn mark_job_container_done(container: &JobContainerSpec) -> bool {
     true
 }
 
+fn remove_job_done_mount_after_cleanup(container: &JobContainerSpec) {
+    if let Err(error) = container.remove_job_done_mount() {
+        eprintln!(
+            "Warning: could not remove completion control directory {}: {error}",
+            container.job_done_host_dir().display()
+        );
+    }
+}
+
 /// A retried teardown may find the sentinel from the first attempt. Accept
 /// only a regular, owner-only file we already wrote; a symlink or foreign
 /// inode stays a refusal.
@@ -1362,6 +1404,115 @@ fn verify_existing_job_done_marker(
         ));
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn open_job_done_control_dir(path: &Path) -> io::Result<(File, std::ffi::CString)> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "job.done path has no parent")
+    })?;
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "job.done path is not a normalized absolute path",
+        ));
+    }
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(parent)?;
+    let metadata = directory.metadata()?;
+    if !metadata.is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o022 != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "job.done parent is not a private runner-owned directory",
+        ));
+    }
+    let marker_name = std::ffi::CString::new(JOB_DONE_SENTINEL)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "job.done name contains NUL"))?;
+    Ok((directory, marker_name))
+}
+
+#[cfg(unix)]
+fn job_done_marker_exists(path: &Path) -> io::Result<bool> {
+    let (directory, marker_name) = match open_job_done_control_dir(path) {
+        Ok(opened) => opened,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let result = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            marker_name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result != 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::NotFound {
+            return Ok(false);
+        }
+        return Err(error);
+    }
+    verify_existing_job_done_marker(&directory, &marker_name)?;
+    Ok(true)
+}
+
+#[cfg(not(unix))]
+fn job_done_marker_exists(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "job.done sentinel is not a regular file",
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn clear_job_done_marker(path: &Path) -> io::Result<()> {
+    let (directory, marker_name) = match open_job_done_control_dir(path) {
+        Ok(opened) => opened,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    match verify_existing_job_done_marker(&directory, &marker_name) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    let result = unsafe { libc::unlinkat(directory.as_raw_fd(), marker_name.as_ptr(), 0) };
+    if result != 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::NotFound {
+            return Err(error);
+        }
+    }
+    directory.sync_all()
+}
+
+#[cfg(not(unix))]
+fn clear_job_done_marker(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => fs::remove_file(path),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "job.done sentinel is not a regular file",
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn write_job_done_marker(path: &Path) -> io::Result<()> {
@@ -1422,6 +1573,72 @@ fn write_job_done_marker(path: &Path) -> io::Result<()> {
         marker.write_all(b"done\n")?;
         marker.sync_all()
     }
+}
+
+/// A per-slot MBX bind source pinned across Docker's path-based mount request.
+/// The guest never sees its parent directories; identity checks before and
+/// after container creation detect host-side replacement during the remaining
+/// pathname handoff window.
+#[derive(Debug)]
+struct MbxStoreMountPin {
+    path: PathBuf,
+    directory: crate::fs_copy::NoFollowDestinationDir,
+    identity: (u64, u64),
+}
+
+fn pin_mbx_store_mount(path: &Path) -> Result<MbxStoreMountPin> {
+    let directory = crate::fs_copy::NoFollowDestinationDir::open_or_create_absolute_no_follow(path)
+        .with_context(|| format!("open per-slot MBX mount source {}", path.display()))?;
+    directory
+        .verify_runner_owned_private_ancestors()
+        .with_context(|| format!("validate per-slot MBX mount source path {}", path.display()))?;
+    let identity = directory
+        .physical_identity()
+        .with_context(|| format!("identify per-slot MBX mount source {}", path.display()))?;
+    Ok(MbxStoreMountPin {
+        path: path.to_path_buf(),
+        directory,
+        identity,
+    })
+}
+
+fn verify_mbx_store_mount_pins(pins: &[MbxStoreMountPin]) -> Result<()> {
+    for pin in pins {
+        let retained_identity = pin
+            .directory
+            .physical_identity()
+            .with_context(|| format!("recheck pinned MBX mount source {}", pin.path.display()))?;
+        if retained_identity != pin.identity {
+            bail!(
+                "pinned MBX mount descriptor changed identity: {}",
+                pin.path.display()
+            );
+        }
+
+        let current = crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(&pin.path)
+            .with_context(|| format!("reopen per-slot MBX mount source {}", pin.path.display()))?;
+        current
+            .verify_runner_owned_private_ancestors()
+            .with_context(|| {
+                format!(
+                    "revalidate per-slot MBX mount source {}",
+                    pin.path.display()
+                )
+            })?;
+        let current_identity = current.physical_identity().with_context(|| {
+            format!(
+                "reidentify per-slot MBX mount source {}",
+                pin.path.display()
+            )
+        })?;
+        if current_identity != pin.identity {
+            bail!(
+                "per-slot MBX mount source changed between pinning and Docker bind mount: {}",
+                pin.path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2240,6 +2457,10 @@ pub(crate) struct DockerJobEngine<R> {
     /// Job-secret mask values supplied by the runner. Combined with runtime
     /// ::add-mask:: values before building each docker exec argv.
     secret_masks: Vec<String>,
+    /// `Action.DisplayName` is already materialized by the CLR DTO and the
+    /// upstream runner returns it unchanged. Keep those top-level names raw;
+    /// generated names go through the shared masker before publication.
+    explicit_raw_display_names: BTreeSet<(String, String)>,
     /// The trust scope in effect for this job: the pool ceiling narrowed by
     /// the job's trust class at admission, installed via `with_trust_scope`.
     /// Credential-bearing native adapters enforce this independently of
@@ -2267,6 +2488,10 @@ pub(crate) struct DockerJobEngine<R> {
     /// with "has active endpoints" on every job and guarded nothing.
     arm_job_network_guard: bool,
     lifecycle_telemetry: Option<LifecycleTelemetry>,
+    /// Real admitted jobs require the host lease to attest persistent
+    /// BuildKit daemon and state-volume labels. Inert teardown/test engines
+    /// can exercise the adapter without contacting a Docker Engine.
+    persistent_buildkit_lease_required: bool,
     /// The running job's cancellation. Required, not optional: a job that could
     /// not be cancelled is the defect this field exists to remove, so there is
     /// no constructor that leaves it unset. Cleanup and teardown engines, which
@@ -2303,6 +2528,7 @@ where
             workflow_env: Vec::new(),
             job_timeout_minutes: None,
             secret_masks: Vec::new(),
+            explicit_raw_display_names: BTreeSet::new(),
             trust_scope: "untrusted".to_string(),
             live_step: None,
             job_environment_started: false,
@@ -2311,6 +2537,7 @@ where
             job_network_guard: None,
             arm_job_network_guard: true,
             lifecycle_telemetry: None,
+            persistent_buildkit_lease_required: true,
             cancellation,
             deprecated_command_scope: DeprecatedCommandScope::default(),
         }
@@ -2320,7 +2547,9 @@ where
     /// teardown, workspace cleanup, and tests. Its token can never be
     /// cancelled, which is the truth about that work rather than a default.
     pub fn inert(runner: R) -> Self {
-        Self::new(runner, crate::execution::cancel::JobCancellation::inert())
+        let mut engine = Self::new(runner, crate::execution::cancel::JobCancellation::inert());
+        engine.persistent_buildkit_lease_required = false;
+        engine
     }
 
     pub fn with_job_timeout_minutes(mut self, timeout_minutes: Option<u64>) -> Self {
@@ -2330,6 +2559,19 @@ where
 
     pub fn with_secret_masks(mut self, masks: Vec<String>) -> Self {
         self.secret_masks = masks;
+        self
+    }
+
+    pub(crate) fn with_explicit_raw_display_names(
+        mut self,
+        names: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        self.explicit_raw_display_names.extend(names);
+        self
+    }
+
+    pub(crate) fn with_persistent_buildkit_lease_enforcement(mut self) -> Self {
+        self.persistent_buildkit_lease_required = true;
         self
     }
 
@@ -2464,6 +2706,35 @@ where
         }
     }
 
+    fn resolve_display_name(
+        &self,
+        step_id: &str,
+        display_name: &str,
+        state: &JobExecutionState,
+        allow_explicit_raw_name: bool,
+    ) -> String {
+        if allow_explicit_raw_name
+            && self
+                .explicit_raw_display_names
+                .contains(&(step_id.to_owned(), display_name.to_owned()))
+        {
+            return display_name.to_owned();
+        }
+        match state.resolve_display_name_template(display_name) {
+            Ok((resolved, true)) => {
+                velnor_model::redaction::SecretMasker::new(state.secret_masks(&self.secret_masks))
+                    .mask(&resolved)
+            }
+            Ok((_, false)) => display_name.to_owned(),
+            Err(error) => {
+                eprintln!(
+                    "Step '{step_id}' display name could not be evaluated ({error}); using the raw name"
+                );
+                display_name.to_owned()
+            }
+        }
+    }
+
     pub fn execute_step(
         &mut self,
         container: &JobContainerSpec,
@@ -2525,7 +2796,7 @@ where
         container: &JobContainerSpec,
         steps: &[ExecutableStep],
         base_env: &[(String, String)],
-        context_data: &[(String, Value)],
+        context_data: &[(String, ContextValue)],
         temp_host: &Path,
     ) -> Result<Vec<StepExecutionResult>> {
         Ok(self
@@ -2545,7 +2816,7 @@ where
         container: &JobContainerSpec,
         steps: &[ExecutableStep],
         base_env: &[(String, String)],
-        context_data: &[(String, Value)],
+        context_data: &[(String, ContextValue)],
         job_outputs: Option<&Value>,
         temp_host: &Path,
     ) -> Result<JobExecutionSummary> {
@@ -2566,7 +2837,7 @@ where
         container: &JobContainerSpec,
         steps: &[ExecutableStep],
         base_env: &[(String, String)],
-        context_data: &[(String, Value)],
+        context_data: &[(String, ContextValue)],
         job_outputs: Option<&Value>,
         environment_url: Option<&Value>,
         temp_host: &Path,
@@ -2593,7 +2864,7 @@ where
         container: &JobContainerSpec,
         steps: &[ExecutableStep],
         base_env: &[(String, String)],
-        context_data: &[(String, Value)],
+        context_data: &[(String, ContextValue)],
         job_outputs: Option<&Value>,
         environment_url: Option<&Value>,
         temp_host: &Path,
@@ -2619,7 +2890,7 @@ where
         )
     }
 
-    fn service_context(&mut self, container: &JobContainerSpec) -> Result<Option<Value>> {
+    fn service_context(&mut self, container: &JobContainerSpec) -> Result<Option<ContextValue>> {
         if container.services.is_empty() {
             return Ok(None);
         }
@@ -2659,7 +2930,7 @@ where
                 }),
             );
         }
-        Ok(Some(Value::Object(services)))
+        Ok(Some(ContextValue::from_json(Value::Object(services))?))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2668,7 +2939,7 @@ where
         container: &JobContainerSpec,
         steps: &[ExecutableStep],
         base_env: &[(String, String)],
-        context_data: &[(String, Value)],
+        context_data: &[(String, ContextValue)],
         job_outputs: Option<&Value>,
         environment_url: Option<&Value>,
         temp_host: &Path,
@@ -2773,16 +3044,8 @@ where
                     // best-effort (`ActionRunner.cs`: the catch only
                     // traces), so the raw name carries on into condition
                     // evaluation and the run.
-                    let display = frame_state.resolve_expressions(display_name);
-                    let resolved_display = match &display {
-                        Ok(resolved_display) => resolved_display.clone(),
-                        Err(error) => {
-                            eprintln!(
-                                "Step '{step_id}' display name could not be evaluated ({error}); using the raw name"
-                            );
-                            display_name.clone()
-                        }
-                    };
+                    let resolved_display =
+                        self.resolve_display_name(step_id, display_name, &frame_state, !nested);
                     let verdict = match frame_state.evaluate_condition(condition.as_deref()) {
                         Ok(true) => UmbrellaVerdict::Run(resolved_display),
                         Ok(false) => UmbrellaVerdict::Skip(resolved_display),
@@ -3017,15 +3280,12 @@ where
             // `TryUpdateDisplayName` is best-effort
             // (`src/Runner.Worker/ActionRunner.cs`: the catch only
             // traces), so the raw name carries on and the step runs.
-            let display_name = match step_state.resolve_expressions(step.display_name()) {
-                Ok(display_name) => display_name,
-                Err(error) => {
-                    eprintln!(
-                        "Step '{step_context_id}' display name could not be evaluated ({error}); using the raw name"
-                    );
-                    step.display_name().to_string()
-                }
-            };
+            let display_name = self.resolve_display_name(
+                &step_context_id,
+                step.display_name(),
+                &step_state,
+                composite_frames.is_empty(),
+            );
             let condition_met = match step_state.evaluate_condition(step.condition()) {
                 Ok(condition_met) => condition_met,
                 Err(error) => {
@@ -4369,6 +4629,16 @@ where
         rewrite_command_file_env_for_action_container(&mut env);
         let node_image = node_action_image(&action.node, &container.node_action_image);
         let secret_masks = action_state.secret_masks(&self.secret_masks);
+        let mbx_mount_pins: Vec<MbxStoreMountPin> = container
+            .mbx_store_mount_paths()
+            .map(|paths| {
+                paths
+                    .into_iter()
+                    .map(|path| pin_mbx_store_mount(&path))
+                    .collect()
+            })
+            .transpose()?
+            .unwrap_or_default();
         let exec_args = container.prepare_run_node_action_args(
             "/__w",
             &env,
@@ -4377,12 +4647,16 @@ where
             &node_image,
             entrypoint_container_path,
         )?;
+        verify_mbx_store_mount_pins(&mbx_mount_pins)
+            .context("revalidate per-slot MBX mounts before Node action container start")?;
         let step_result = self.runner.run_timeout_with_env(
             "docker",
             exec_args.args(),
             exec_args.process_env(),
             timeout,
         )?;
+        verify_mbx_store_mount_pins(&mbx_mount_pins)
+            .context("revalidate per-slot MBX mounts after Node action container start")?;
         let mut state = command_files.collect_state()?;
         state.merge(parse_workflow_commands_from_output(
             &step_result.stdout,
@@ -4408,8 +4682,11 @@ where
     ) -> Result<StepExecutionResult> {
         let plan = resolve_checkout_plan_expressions(plan, state)?;
         let mut trace = Vec::new();
-        let mirror_store =
-            crate::container::git_mirror_store_host(&container.temp_host, &self.trust_scope);
+        let mirror_store = crate::container::git_mirror_store_host(
+            &container.temp_host,
+            &self.trust_scope,
+            container.repository_store_key.as_deref(),
+        )?;
         let checkout_result = {
             let _span = tracing::info_span!("job-checkout").entered();
             execute_checkout_with_mirror(
@@ -4671,11 +4948,65 @@ where
                 let action_state = state.with_env(state.resolve_env(&action.env)?);
                 let requested_name =
                     native_input_or(&action_state, action, "name", "velnor-builder")?;
-                let name = crate::buildkit::persistent_builder_name(
+                let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
+                let repository = if driver.eq_ignore_ascii_case("docker-container") {
+                    match persistent_buildkit_repository_key(container) {
+                        Ok(repository) => Some(repository),
+                        Err(error) => {
+                            let mut stderr = String::new();
+                            use std::fmt::Write as _;
+                            let _ = writeln!(stderr, "buildx post: {error:#}");
+                            return Ok(native_command_result(
+                                CommandResult {
+                                    code: 0,
+                                    stdout: "BuildKit repository identity unavailable; no persistent builder teardown\n".to_owned(),
+                                    stderr,
+                                },
+                                StepCommandState::default(),
+                            ));
+                        }
+                    }
+                } else {
+                    container.repository.as_deref()
+                };
+                let domain = match resolve_buildkit_domain(&container.temp_host) {
+                    Ok(domain) => domain,
+                    Err(error) => {
+                        use std::fmt::Write as _;
+                        let mut stdout =
+                            "BuildKit domain identity unavailable; builder left running\n"
+                                .to_string();
+                        let mut stderr = String::new();
+                        let _ = writeln!(stderr, "buildx post: {error:#}");
+                        if let Some(lease) = self.docker_lease.as_ref()
+                            && let Err(revoke_error) = lease.revoke_all_persistent_builders()
+                        {
+                            let _ = writeln!(
+                                stderr,
+                                "buildx post: lease capability revocation failed ({revoke_error:#})"
+                            );
+                            stdout.push_str(
+                                "Lease capability remains uncertain; builder left running\n",
+                            );
+                        } else if self.docker_lease.is_some() {
+                            stdout.push_str("Lease capability revoked; builder left running\n");
+                        }
+                        return Ok(native_command_result(
+                            CommandResult {
+                                code: 0,
+                                stdout,
+                                stderr,
+                            },
+                            StepCommandState::default(),
+                        ));
+                    }
+                };
+                let name = crate::buildkit::persistent_builder_name_for_domain(
+                    &domain.token,
                     &requested_name,
                     &state.trust_scope,
                     buildkit_trust_tier(state),
-                    container.repository.as_deref(),
+                    repository,
                 );
                 // `keep-state` is accepted and always honored: persistent
                 // builders keep their daemon and cache by construction. It is
@@ -4703,20 +5034,37 @@ where
                 // no-op stop decides under the claim lock without acting.
                 let stop = || {
                     if cleanup {
-                        crate::buildkit::stop_builder_daemon(&name)
+                        crate::buildkit::stop_builder_in_domain(&domain, &name)
                     } else {
                         Ok(false)
                     }
                 };
-                let run_root = crate::buildkit::claims_run_root();
-                let outcome = match (state.temp_host.as_deref(), run_root.as_ref()) {
-                    (Some(_temp), Some(run_root)) => {
-                        match crate::buildkit::release_and_stop_if_last(
-                            run_root,
+                let capability_revoked = match self.docker_lease.as_ref() {
+                    Some(lease) => match lease.revoke_persistent_builder(&name) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            use std::fmt::Write as _;
+                            let _ = writeln!(
+                                stderr,
+                                "buildx post: capability revocation of {name} failed ({error:#})"
+                            );
+                            stdout.push_str(
+                                "Lease revocation failed: hold retained, builder left running\n",
+                            );
+                            false
+                        }
+                    },
+                    None => true,
+                };
+                let outcome = match (capability_revoked, state.temp_host.as_deref()) {
+                    (false, _) => None,
+                    (true, Some(_temp)) => {
+                        match crate::buildkit::release_domain_builder_if_last(
+                            &domain,
                             &name,
                             &container.name,
                             stop,
-                            || crate::buildkit::start_builder_daemon(&name),
+                            || crate::buildkit::start_builder_in_domain(&domain, &name),
                         ) {
                             Ok(outcome) => Some(outcome),
                             Err(error) => {
@@ -4732,10 +5080,8 @@ where
                             }
                         }
                     }
-                    _ => {
-                        stdout.push_str(
-                            "No temp dir or run root: hold skipped, builder left running\n",
-                        );
+                    (true, None) => {
+                        stdout.push_str("No temp dir: hold skipped, builder left running\n");
                         None
                     }
                 };
@@ -5224,7 +5570,7 @@ where
             .chain(std::iter::once(container_default_path))
             .collect();
         let path = path_entries.join(":");
-        let wrapped = format!("export PATH={path}; {script}");
+        let wrapped = native_shell_script_with_path(&path, script);
         let secret_masks = state.secret_masks(&self.secret_masks);
         let args = container.prepare_exec_process_args(
             "/__w",
@@ -5272,6 +5618,39 @@ where
             args.process_env(),
             timeout,
             &mut on_output,
+        )
+    }
+
+    fn native_shell_with_stdin(
+        &mut self,
+        container: &JobContainerSpec,
+        state: &JobExecutionState,
+        script: &str,
+        stdin: &str,
+        timeout: Duration,
+    ) -> Result<CommandResult> {
+        let env = state.step_env(&[]);
+        let path = state
+            .path
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(container.default_exec_path()))
+            .collect::<Vec<_>>()
+            .join(":");
+        let wrapped = native_shell_script_with_path(&path, script);
+        let secret_masks = state.secret_masks(&self.secret_masks);
+        let args = container.prepare_exec_process_stdin_args(
+            "/__w",
+            &env,
+            &secret_masks,
+            &["sh".to_string(), "-c".to_string(), wrapped],
+        )?;
+        self.runner.run_with_stdin_timeout_with_env(
+            "docker",
+            args.args(),
+            args.process_env(),
+            stdin,
+            timeout,
         )
     }
 
@@ -5329,38 +5708,49 @@ where
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env)?);
         let requested_name = native_input_or(&action_state, action, "name", "velnor-builder")?;
+        let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
+        if self.persistent_buildkit_lease_required
+            && driver.eq_ignore_ascii_case("docker-container")
+            && self.docker_lease.is_none()
+        {
+            bail!(
+                "persistent docker-container BuildKit requires the Velnor host Docker lease to attest daemon and state-volume ownership; direct Docker socket access is unsupported"
+            );
+        }
+        let repository = if driver.eq_ignore_ascii_case("docker-container") {
+            Some(persistent_buildkit_repository_key(container)?)
+        } else {
+            container.repository.as_deref()
+        };
         let tier = buildkit_trust_tier(state);
-        let name = crate::buildkit::persistent_builder_name(
+        let temp_host = state
+            .temp_host
+            .as_deref()
+            .context("setup-buildx requires a runner temp directory")?;
+        let domain = resolve_buildkit_domain(temp_host)?;
+        let name = crate::buildkit::persistent_builder_name_for_domain(
+            &domain.token,
             &requested_name,
             &state.trust_scope,
             tier,
-            container.repository.as_deref(),
+            repository,
         );
-        let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
-        // Builder claims live in the storage-backed claim store: without a
-        // runner temp dir or without configured Velnor storage (unit tests
-        // run hermetically, without VELNOR_STORAGE_ROOT) there is nothing to
-        // claim in, so setup proceeds unclaimed and the builder stays
-        // unmanaged — the same degraded path every other storage-gated
-        // caller takes. The inspect/create below always runs.
-        let lifecycle: Option<(&Path, PathBuf)> = if driver.eq_ignore_ascii_case("docker-container")
-        {
-            match (
-                state.temp_host.as_deref(),
-                crate::buildkit::claims_run_root(),
-            ) {
-                (Some(temp), Some(run_root)) => {
-                    crate::buildkit::record_job_builder(temp, &name)?;
-                    Some((temp, run_root))
-                }
-                _ => None,
-            }
-        } else {
-            None
-        };
+        if !crate::buildkit::is_current_domain_builder_name(&name, &domain.token) {
+            bail!("BuildKit builder name escaped its selected domain");
+        }
+        let lifecycle: Option<(&Path, crate::buildkit::PersistentBuildKitDomain)> =
+            if driver.eq_ignore_ascii_case("docker-container") {
+                crate::buildkit::record_job_builder(temp_host, &name)?;
+                Some((temp_host, domain.clone()))
+            } else {
+                None
+            };
         let buildkitd_config_inline =
             native_input(action, &action_state, "buildkitd-config-inline")?;
-        let buildkitd_config_container = if buildkitd_config_inline.is_empty() {
+        let buildkitd_config_fingerprint = crate::buildkit::persistent_buildkit_config_fingerprint(
+            (!buildkitd_config_inline.is_empty()).then_some(buildkitd_config_inline.as_str()),
+        )?;
+        let buildkitd_config_contents = if buildkitd_config_inline.is_empty() {
             None
         } else {
             if !crate::docker_lease::is_approved_persistent_buildkit_config(
@@ -5368,34 +5758,27 @@ where
             ) {
                 bail!("setup-buildx permits only the reviewed mirror-only BuildKit configuration");
             }
-            let config_name = format!("buildkitd-config-{}.toml", sanitize_artifact_name(&name));
-            let config_host = state
-                .temp_host
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("setup-buildx requires a runner temp directory"))?
-                .join(&config_name);
-            fs::write(&config_host, &buildkitd_config_inline)
-                .with_context(|| format!("write BuildKit config {}", config_host.display()))?;
-            Some(format!("/__t/{config_name}"))
+            Some(buildkitd_config_inline.clone())
         };
         let result = (|| -> Result<CommandResult> {
             // Setup claims and creates/reuses under the same filesystem-wide
             // lifecycle gate the reaper takes exclusively. A job may be
             // admitted while cleanup runs, but cannot claim or use a builder
-            // until its current-generation name is registered again. Without
-            // a claim store there is no gate to take and nothing to claim,
-            // so setup proceeds straight to inspect/create.
+            // until its current-generation name is registered again.
             let _coordinator = match lifecycle.as_ref() {
-                Some((temp, run_root)) => {
-                    let coordinator = crate::capacity::FilesystemCoordinator::lock_shared(run_root)
-                        .context("lock BuildKit lifecycle for setup")?;
-                    crate::buildkit::claim_builder(
-                        run_root,
+                Some((temp, domain)) => {
+                    let coordinator =
+                        crate::capacity::FilesystemCoordinator::lock_shared(&domain.root)
+                            .context("lock BuildKit lifecycle for setup")?;
+                    let _builder_lifecycle =
+                        crate::buildkit::lock_builder_lifecycle(&domain.root, &name)?;
+                    crate::buildkit::claim_domain_builder(
+                        domain,
                         &name,
                         &job_scope_from_temp(Some(*temp)),
                         &container.name,
                     )?;
-                    Some(coordinator)
+                    Some((coordinator, _builder_lifecycle))
                 }
                 None => None,
             };
@@ -5405,13 +5788,26 @@ where
                     // state volume as one setup transaction. A failed setup
                     // must not leave a builder capability behind when a
                     // workflow continues after this step's error.
-                    self.docker_lease
+                    let setup_generation = self
+                        .docker_lease
                         .as_ref()
                         .context("Docker lease disappeared before BuildKit setup")?
-                        .begin_persistent_builder_setup(&name)?;
+                        .begin_persistent_builder_setup(&name, &buildkitd_config_fingerprint)?;
                     let setup = (|| -> Result<()> {
                         self.ensure_persistent_buildkit_image(&name)?;
-                        self.ensure_persistent_buildkit_volume(container, &name)
+                        let recovery = self
+                            .docker_lease
+                            .as_ref()
+                            .context("Docker lease disappeared during BuildKit setup recovery")?
+                            .recover_pending_buildkit_create_before_volume_setup(
+                                &domain,
+                                &name,
+                                setup_generation,
+                                &buildkitd_config_fingerprint,
+                            );
+                        ensure_persistent_buildkit_volume_after_recovery(recovery, || {
+                            self.ensure_persistent_buildkit_volume(container, &name, &domain)
+                        })
                     })();
                     if let Err(error) = setup {
                         self.docker_lease
@@ -5423,10 +5819,7 @@ where
                     self.docker_lease
                         .as_ref()
                         .context("Docker lease disappeared after BuildKit setup")?
-                        .complete_persistent_builder_setup(&name)?;
-                }
-                if self.docker_lease.is_none() {
-                    self.ensure_persistent_buildkit_volume(container, &name)?;
+                        .complete_persistent_builder_setup(&domain, &name)?;
                 }
             }
             let inspect_args = vec!["buildx".to_string(), "inspect".to_string(), name.clone()];
@@ -5453,13 +5846,22 @@ where
                     "--driver-opt".to_string(),
                     "provenance-add-gha=false".to_string(),
                 ]);
-                if let Some(config) = buildkitd_config_container {
-                    args.extend(["--config".to_string(), config]);
-                }
                 if input_truthy(&native_input_or(&action_state, action, "install", "false")?) {
                     args.push("--bootstrap".to_string());
                 }
-                Ok(self.container_docker(container, &action_state, &args, None, timeout)?)
+                let create_result = if let Some(config_contents) = &buildkitd_config_contents {
+                    let script = buildkitd_config_create_script(&args);
+                    self.native_shell_with_stdin(
+                        container,
+                        &action_state,
+                        &script,
+                        config_contents,
+                        timeout,
+                    )?
+                } else {
+                    self.container_docker(container, &action_state, &args, None, timeout)?
+                };
+                Ok(create_result)
             } else {
                 bail!(
                     "buildx inspect {name} failed with code {}: {}",
@@ -5492,9 +5894,10 @@ where
             // active after a failed `buildx use` or `buildx create`.
             lease.revoke_persistent_builder(&name)?;
         }
-        if let Some(run_root) = lifecycle.as_ref().map(|(_, run_root)| run_root)
+        #[cfg(not(test))]
+        if let Some((_, domain)) = lifecycle.as_ref()
             && let Some(report) =
-                crate::buildkit::maybe_reap_idle_builders(run_root, std::time::SystemTime::now())
+                crate::buildkit::maybe_reap_idle_builders(domain, std::time::SystemTime::now())
         {
             for failure in &report.failures {
                 eprintln!("buildx setup: horizon reap: {failure}");
@@ -5528,50 +5931,50 @@ where
         &mut self,
         container: &JobContainerSpec,
         builder: &str,
+        domain: &crate::buildkit::PersistentBuildKitDomain,
     ) -> Result<()> {
-        if self.docker_lease.is_none() {
-            return Ok(());
-        }
         let volume = crate::buildkit::daemon_state_volume(builder);
-        let _volume_lock = self
+        let volume_lock = self
             .docker_lease
             .as_ref()
             .context("Docker lease disappeared before BuildKit volume setup")?
-            .lock_volume_name(&volume)?;
-        self.run_docker(&[
-            "volume".into(),
-            "create".into(),
-            "--driver".into(),
-            "local".into(),
-            "--label".into(),
-            format!("{}={}", crate::docker_lease::JOB_ID_LABEL, container.name),
-            "--label".into(),
-            format!(
-                "{}={}",
-                crate::docker_lease::DAEMON_ID_LABEL,
-                container.daemon_id
-            ),
-            volume.clone(),
-        ])?;
-        let inspected = self.runner.run(
-            "docker",
-            &crate::docker_lease::inspect_volume_identity_args(&volume),
-        )?;
-        if inspected.code != 0 {
-            bail!(
-                "inspect persistent BuildKit state volume {volume} failed with code {}: {}",
-                inspected.code,
-                inspected.stderr.trim()
-            );
-        }
-        self.docker_lease
-            .as_ref()
-            .context("Docker lease disappeared during BuildKit volume setup")?
-            .register_persistent_volume_inspect(
-                &volume,
-                inspected.stdout.as_bytes(),
-                &container.daemon_id,
-            )
+            .lock_volume_name_for_domain(domain, &volume);
+        run_persistent_buildkit_volume_operation(volume_lock, || {
+            self.run_docker(&[
+                "volume".into(),
+                "create".into(),
+                "--driver".into(),
+                "local".into(),
+                "--label".into(),
+                format!("{}={}", crate::docker_lease::JOB_ID_LABEL, container.name),
+                "--label".into(),
+                format!(
+                    "{}={}",
+                    crate::docker_lease::BUILDKIT_DOMAIN_LABEL,
+                    domain.token
+                ),
+                volume.clone(),
+            ])?;
+            let inspected = self.runner.run(
+                "docker",
+                &crate::docker_lease::inspect_volume_identity_args(&volume),
+            )?;
+            if inspected.code != 0 {
+                bail!(
+                    "inspect persistent BuildKit state volume {volume} failed with code {}: {}",
+                    inspected.code,
+                    inspected.stderr.trim()
+                );
+            }
+            self.docker_lease
+                .as_ref()
+                .context("Docker lease disappeared during BuildKit volume setup")?
+                .register_persistent_volume_inspect(
+                    &volume,
+                    inspected.stdout.as_bytes(),
+                    &domain.token,
+                )
+        })
     }
 
     fn ensure_persistent_buildkit_image(&mut self, builder: &str) -> Result<()> {
@@ -5705,6 +6108,10 @@ where
         let action_state = state.with_env(state.resolve_env(&action.env)?);
         let context = native_input_or(&action_state, action, "context", ".")?;
         let mut args = vec!["buildx".to_string(), "build".to_string()];
+        let builder = native_input(action, &action_state, "builder")?;
+        if !builder.trim().is_empty() {
+            push_arg(&mut args, "--builder", &builder);
+        }
         // build-push-action resolves an explicit `file` from the workspace,
         // independently from `context`. Passing context/file twice here turned
         // `context: docker`, `file: docker/Dockerfile` into
@@ -5763,11 +6170,112 @@ where
         for cache in input_values(&native_input(action, &action_state, "cache-to")?) {
             push_arg(&mut args, "--cache-to", &cache);
         }
+        let provenance = native_input(action, &action_state, "provenance")?;
+        let sbom = native_input(action, &action_state, "sbom")?;
+        let attests =
+            buildx_attestation_input_values(&native_input(action, &action_state, "attests")?)?;
+        let outputs = input_values(&native_input(action, &action_state, "outputs")?);
+        let load = input_truthy(&native_input(action, &action_state, "load")?);
+        let may_default_provenance =
+            provenance.trim().is_empty() && !buildx_has_exporter_type("docker", &outputs) && !load;
+        let has_explicit_attestations =
+            !provenance.trim().is_empty() || !sbom.trim().is_empty() || !attests.is_empty();
+        let buildx_supports_attestations = if has_explicit_attestations || may_default_provenance {
+            self.native_buildx_supports_attestations(container, &action_state, timeout)?
+        } else {
+            false
+        };
+        if buildx_supports_attestations {
+            let attests_with_types = attests
+                .iter()
+                .map(|attest| {
+                    Ok((
+                        attest,
+                        buildx_has_attestation_type("provenance", attest)?,
+                        buildx_has_attestation_type("sbom", attest)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let has_explicit_provenance = !provenance.trim().is_empty()
+                || attests_with_types
+                    .iter()
+                    .any(|(_, has_provenance, _)| *has_provenance);
+            let default_provenance_candidate = !has_explicit_provenance
+                && !buildx_no_default_attestations(&action_state)?
+                && !buildx_has_exporter_type("docker", &outputs)
+                && !load;
+            if !provenance.trim().is_empty() {
+                let attest = match buildx_provenance_boolean_input(provenance.trim()) {
+                    Some(true) => format!(
+                        "type=provenance,builder-id={}",
+                        docker_buildx_workflow_run_url(&action_state)?
+                    ),
+                    Some(false) => "type=provenance,disabled=true".to_string(),
+                    None => {
+                        let resolved =
+                            buildx_resolve_provenance_attributes(provenance.trim(), || {
+                                docker_buildx_workflow_run_url(&action_state)
+                            })?;
+                        buildx_resolve_attestation_attributes(&format!(
+                            "type=provenance,{resolved}"
+                        ))?
+                    }
+                };
+                push_arg(&mut args, "--attest", &attest);
+            } else if default_provenance_candidate
+                && self.native_buildkit_supports_attestations(
+                    container,
+                    &action_state,
+                    &builder,
+                    timeout,
+                )?
+            {
+                let builder_id = docker_buildx_workflow_run_url(&action_state)?;
+                let private_repository = action_state
+                    .context_string("github.event.repository.private")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+                let attributes = if private_repository {
+                    "mode=min,inline-only=true"
+                } else {
+                    "mode=max"
+                };
+                push_arg(
+                    &mut args,
+                    "--attest",
+                    &format!("type=provenance,{attributes},builder-id={builder_id}"),
+                );
+            }
+            if !sbom.trim().is_empty() {
+                let attest =
+                    buildx_resolve_attestation_attributes(&format!("type=sbom,{}", sbom.trim()))?;
+                push_arg(&mut args, "--attest", &attest);
+            }
+            for (attest, has_provenance, has_sbom) in &attests_with_types {
+                if *has_provenance {
+                    if provenance.trim().is_empty() {
+                        let resolved = buildx_resolve_provenance_attributes(attest, || {
+                            docker_buildx_workflow_run_url(&action_state)
+                        })?;
+                        push_arg(&mut args, "--attest", &resolved);
+                    }
+                } else if *has_sbom {
+                    if sbom.trim().is_empty() {
+                        push_arg(&mut args, "--attest", attest);
+                    }
+                } else {
+                    push_arg(
+                        &mut args,
+                        "--attest",
+                        &buildx_resolve_attestation_attributes(attest)?,
+                    );
+                }
+            }
+        }
         // The `outputs` input maps to buildx --output (e.g. the publish
         // workflows' push-by-digest exporter: type=image,push-by-digest=true,
         // name=...,push=true).
         let mut has_output = false;
-        for output in input_values(&native_input(action, &action_state, "outputs")?) {
+        for output in outputs {
             push_arg(&mut args, "--output", &output);
             has_output = true;
         }
@@ -5821,6 +6329,104 @@ where
             let _ = fs::remove_file(&metadata_path);
         }
         Ok(native_command_result(result, command_state))
+    }
+
+    /// Match build-push-action v7.4.0's Buildx version gate for all attestation
+    /// inputs. Below 0.10.0, explicit and automatic attestations are ignored.
+    fn native_buildx_supports_attestations(
+        &mut self,
+        container: &JobContainerSpec,
+        state: &JobExecutionState,
+        timeout: Duration,
+    ) -> Result<bool> {
+        let buildx_version = self.container_docker(
+            container,
+            state,
+            &["buildx".into(), "version".into()],
+            None,
+            timeout,
+        )?;
+        Ok(buildx_version.code == 0 && buildx_version_at_least(&buildx_version.stdout, 0, 10, 0))
+    }
+
+    /// Automatic provenance additionally requires every selected builder node
+    /// to report BuildKit >= 0.11.0. Probe failures suppress only the optional
+    /// default; the build command remains responsible for its own diagnostics.
+    fn native_buildkit_supports_attestations(
+        &mut self,
+        container: &JobContainerSpec,
+        state: &JobExecutionState,
+        builder: &str,
+        timeout: Duration,
+    ) -> Result<bool> {
+        let mut inspect_args = vec!["buildx".into(), "inspect".into()];
+        if !builder.trim().is_empty() {
+            inspect_args.push(builder.to_string());
+        }
+        let inspect = self.container_docker(container, state, &inspect_args, None, timeout)?;
+        if inspect.code != 0 {
+            return Ok(false);
+        }
+        let Some(builder_info) = parse_buildx_builder_info(&inspect.stdout) else {
+            return Ok(false);
+        };
+        if builder_info.nodes.is_empty() {
+            return Ok(false);
+        }
+        let driver = builder_info.driver;
+        for node in builder_info.nodes {
+            let version = match node.buildkit_version {
+                Some(version) => version,
+                None => {
+                    let node_name = node.name.trim();
+                    if node_name.is_empty() {
+                        return Ok(false);
+                    }
+                    let image_result = self.container_docker(
+                        container,
+                        state,
+                        &[
+                            "inspect".into(),
+                            "--format".into(),
+                            "{{.Config.Image}}".into(),
+                            format!("buildx_buildkit_{node_name}"),
+                        ],
+                        None,
+                        timeout,
+                    )?;
+                    if image_result.code != 0 || image_result.stdout.trim().is_empty() {
+                        return Ok(false);
+                    }
+                    let version_result = self.container_docker(
+                        container,
+                        state,
+                        &[
+                            "run".into(),
+                            "--rm".into(),
+                            image_result.stdout.trim().to_string(),
+                            "--version".into(),
+                        ],
+                        None,
+                        timeout,
+                    )?;
+                    if version_result.code != 0 {
+                        return Ok(false);
+                    }
+                    version_result.stdout
+                }
+            };
+            if driver.eq_ignore_ascii_case("docker") && !version.trim().ends_with("-moby") {
+                return Ok(false);
+            }
+            let comparable = version
+                .trim()
+                .strip_suffix("-moby")
+                .unwrap_or(version.trim());
+            if !buildkit_version_at_least(comparable, 0, 11, 0) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn native_docker_bake(
@@ -6035,6 +6641,7 @@ where
             service_result
         })();
         if result.is_ok() {
+            remove_job_done_mount_after_cleanup(container);
             self.defuse_job_network_guard();
         }
         result
@@ -6078,6 +6685,7 @@ where
             service_result
         })();
         if result.is_ok() {
+            remove_job_done_mount_after_cleanup(container);
             self.defuse_job_network_guard();
         }
         result
@@ -6134,6 +6742,7 @@ where
             buildkit_result
         })();
         if result.is_ok() {
+            remove_job_done_mount_after_cleanup(container);
             self.defuse_job_network_guard();
         }
         result
@@ -6168,6 +6777,7 @@ where
             owned_result
         })();
         if result.is_ok() {
+            remove_job_done_mount_after_cleanup(container);
             self.defuse_job_network_guard();
         }
         result
@@ -6262,11 +6872,15 @@ where
             if crate::docker::client::daemon_reports_missing(&inspected.stderr) {
                 return Ok(None);
             }
-            bail!(
-                "inspect runner-owned container {name} ({target}) failed with code {}: {}",
-                inspected.code,
-                inspected.stderr.trim()
-            );
+            return Err(DockerCommandError::classified(
+                format!(
+                    "inspect runner-owned container {name} ({target}) failed with code {}: {}",
+                    inspected.code,
+                    inspected.stderr.trim()
+                ),
+                &inspected.stderr,
+            )
+            .into());
         }
         let id = crate::docker_lease::attest_container_identity(
             &inspected.stdout,
@@ -6298,11 +6912,15 @@ where
             if crate::docker::client::daemon_reports_missing(&inspected.stderr) {
                 return Ok(None);
             }
-            bail!(
-                "inspect service container {name} ({target}) failed with code {}: {}",
-                inspected.code,
-                inspected.stderr.trim()
-            );
+            return Err(DockerCommandError::classified(
+                format!(
+                    "inspect service container {name} ({target}) failed with code {}: {}",
+                    inspected.code,
+                    inspected.stderr.trim()
+                ),
+                &inspected.stderr,
+            )
+            .into());
         }
         let id = crate::docker_lease::attest_service_container_identity(
             &inspected.stdout,
@@ -6330,11 +6948,15 @@ where
             if crate::docker::client::daemon_reports_missing(&inspected.stderr) {
                 return Ok(None);
             }
-            bail!(
-                "inspect runner-owned network {name} ({target}) failed with code {}: {}",
-                inspected.code,
-                inspected.stderr.trim()
-            );
+            return Err(DockerCommandError::classified(
+                format!(
+                    "inspect runner-owned network {name} ({target}) failed with code {}: {}",
+                    inspected.code,
+                    inspected.stderr.trim()
+                ),
+                &inspected.stderr,
+            )
+            .into());
         }
         let id = crate::docker_lease::attest_network_identity(
             &inspected.stdout,
@@ -6492,7 +7114,7 @@ where
             for volume in snapshot
                 .volumes
                 .iter()
-                .filter(|volume| !crate::buildkit::is_persistent_builder_object(volume))
+                .filter(|volume| !crate::docker_lease::is_persistent_buildkit_volume_object(volume))
             {
                 #[cfg(unix)]
                 let _volume_lock = self.lock_host_volume(volume)?;
@@ -6528,81 +7150,13 @@ where
     /// Remove every BuildKit daemon whose buildx builder belongs to this job.
     ///
     /// A cancelled job can skip setup-buildx's post action. The buildx client
-    /// configuration lives inside the disposable job container, so host-side
-    /// teardown cannot use `docker buildx rm`. Buildx names its daemon and
-    /// state volume from the builder name; every native builder is suffixed
-    /// with the job's unique scope. Match that exact suffix, then remove the
-    /// daemon together with its anonymous/named state volume.
+    /// configuration lives inside the disposable job container, so teardown
+    /// releases only the exact persistent builders recorded by this job.
+    /// Pre-domain resources lack Engine/storage identity and remain quarantined
+    /// for explicit operator cleanup.
     pub(crate) fn cleanup_job_buildkit(&mut self, container: &JobContainerSpec) -> Result<()> {
         let _lifecycle = docker_lifecycle_guard("cleanup-job-buildkit")?;
         self.cleanup_job_buildkit_unlocked(container)
-    }
-
-    /// Legacy setup-buildx recorded names as
-    /// `velnor-builder-<requested>-<slot>`. The requested part may contain
-    /// hyphens, so match the complete slot suffix instead of splitting on the
-    /// final hyphen. Persistent builders use a different prefix and are
-    /// released through the claim store, never destroyed here.
-    fn legacy_buildkit_builder_for_scope(builder: &str, scope: &str) -> bool {
-        let Some(requested) = builder
-            .strip_prefix("velnor-builder-")
-            .and_then(|name| name.strip_suffix(&format!("-{scope}")))
-        else {
-            return false;
-        };
-        !requested.is_empty() && !crate::buildkit::is_persistent_builder_name(builder)
-    }
-
-    fn job_buildkit_builder_names(builders: &[String], scope: &str) -> BTreeSet<String> {
-        let mut names = BTreeSet::new();
-        let default = format!("velnor-builder-{scope}");
-        if !crate::buildkit::is_persistent_builder_name(&default) {
-            names.insert(default);
-        }
-        for builder in builders {
-            if Self::legacy_buildkit_builder_for_scope(builder, scope) {
-                names.insert(builder.clone());
-            }
-        }
-        names
-    }
-
-    fn job_buildkit_ids_for_names(
-        formatted: &str,
-        job_id: &str,
-        daemon_id: &str,
-        builder_names: &BTreeSet<String>,
-    ) -> Vec<String> {
-        let daemon_names = builder_names
-            .iter()
-            .map(|builder| crate::buildkit::daemon_container_name(builder))
-            .collect::<BTreeSet<_>>();
-        let mut ids = Vec::new();
-        for line in formatted.lines() {
-            let fields = line.split('\t').map(str::trim).collect::<Vec<_>>();
-            if fields.len() != 5 {
-                continue;
-            }
-            let id = fields[0];
-            let names = fields[1];
-            if id.is_empty()
-                || fields[2] != job_id
-                || fields[3] != daemon_id
-                || crate::docker::client::ContainerState::parse(fields[4]).is_none()
-            {
-                continue;
-            }
-            let owned = names
-                .split(',')
-                .map(|name| name.trim().trim_start_matches('/'))
-                .any(|name| daemon_names.contains(name));
-            if owned {
-                ids.push(id.to_owned());
-            }
-        }
-        ids.sort();
-        ids.dedup();
-        ids
     }
 
     fn cleanup_job_buildkit_unlocked(&mut self, container: &JobContainerSpec) -> Result<()> {
@@ -6612,87 +7166,26 @@ where
         // happens when the release removed the final hold. Errors propagate
         // like the removal errors below: a broken run root must be loud.
         let recorded_builders = crate::buildkit::read_job_builders(&container.temp_host)?;
-        for builder in &recorded_builders {
-            if !crate::buildkit::is_persistent_builder_name(builder) {
-                continue;
-            }
-            if let Some(run_root) = crate::buildkit::claims_run_root() {
-                crate::buildkit::release_and_stop_if_last(
-                    &run_root,
+        let has_domained_builders = recorded_builders
+            .iter()
+            .any(|builder| crate::buildkit::is_current_domained_persistent_builder(builder));
+        if has_domained_builders {
+            let domain = resolve_buildkit_domain(&container.temp_host)?;
+            for builder in &recorded_builders {
+                if !crate::buildkit::is_current_domain_builder_name(builder, &domain.token) {
+                    continue;
+                }
+                crate::buildkit::release_domain_builder_if_last(
+                    &domain,
                     builder,
                     &container.name,
-                    || crate::buildkit::stop_builder_daemon(builder),
-                    || crate::buildkit::start_builder_daemon(builder),
+                    || crate::buildkit::stop_builder_in_domain(&domain, builder),
+                    || crate::buildkit::start_builder_in_domain(&domain, builder),
                 )?;
             }
         }
-        let scope = job_scope_from_temp(Some(&container.temp_host));
-        let builder_names = Self::job_buildkit_builder_names(&recorded_builders, &scope);
-        let listed = self.run_docker(&crate::docker_lease::list_job_buildkit_format_args())?;
-        let ids = Self::job_buildkit_ids_for_names(
-            &listed.stdout,
-            &container.name,
-            &container.daemon_id,
-            &builder_names,
-        );
-        if !ids.is_empty() {
-            crate::docker_lease::force_remove_containers_serially(&ids, |args| {
-                self.run_docker_remove_container(args).map(|_| ())
-            })?;
-        }
-
-        // Buildx creates a named `<container>_state` volume. Docker's
-        // `rm --volumes` deliberately removes only anonymous volumes, so the
-        // state volume requires a separate prefix query and removal.
-        let volume_filter = format!(
-            "name={}",
-            crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX
-        );
-        let listed_volumes = self.run_docker(&[
-            "volume".into(),
-            "ls".into(),
-            "--quiet".into(),
-            "--filter".into(),
-            volume_filter,
-        ])?;
-        let expected_volumes = builder_names
-            .iter()
-            .map(|builder| crate::buildkit::daemon_state_volume(builder))
-            .collect::<BTreeSet<_>>();
-        let volumes = listed_volumes
-            .stdout
-            .lines()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .filter(|name| expected_volumes.contains(*name))
-            // The engine `name=` filter is a substring match: a slot scope
-            // that prefixes a persistent builder name would destroy shared
-            // cache. Persistent state volumes belong to the reclaim paths.
-            .filter(|name| !crate::buildkit::is_persistent_builder_object(name))
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
-        let mut attested_volumes = Vec::with_capacity(volumes.len());
-        for volume in volumes {
-            #[cfg(unix)]
-            let _volume_lock = self.lock_host_volume(&volume)?;
-            if !self.attest_volume_target(&volume, &container.name, &container.daemon_id)? {
-                continue;
-            }
-            attested_volumes.push(volume);
-        }
-        if !attested_volumes.is_empty() {
-            for volume in attested_volumes {
-                #[cfg(unix)]
-                let _volume_lock = self.lock_host_volume(&volume)?;
-                // Re-attest immediately before removal. Volume deletion has
-                // no compare-and-delete API; this is the narrowest safe
-                // window and leaves a replacement untouched on mismatch.
-                if self.attest_volume_target(&volume, &container.name, &container.daemon_id)? {
-                    self.ensure_job_not_live_before_buildkit_volume_delete(container)?;
-                    self.run_docker(&crate::docker_lease::force_remove_volume_args(&[volume]))?;
-                }
-            }
-        }
+        // Pre-domain per-slot Buildx names cannot prove Engine/storage
+        // ownership. They stay quarantined for explicit operator cleanup.
         Ok(())
     }
 
@@ -6700,6 +7193,7 @@ where
         let _span = tracing::info_span!("job-container-boot").entered();
         let deadline = Instant::now() + DOCKER_START_RETRY_DEADLINE;
         let _docker_deadline = DockerStartupDeadlineGuard::enter(deadline);
+        self.prepare_job_done_marker_for_new_generation(container, deadline)?;
         // The retry decision derives from the typed category attached at the
         // docker boundary, never from error text (GOAL 31). Every failure
         // still tidies partial state first; only the retry decision below is
@@ -6800,6 +7294,40 @@ where
             waited += delay;
         }
     }
+
+    /// This generation's marker can remain if teardown crashed after writing
+    /// it. Clear it only after stale cleanup proves the exact job's Engine
+    /// objects are gone; another generation has a different mounted source.
+    fn prepare_job_done_marker_for_new_generation(
+        &mut self,
+        container: &JobContainerSpec,
+        deadline: Instant,
+    ) -> Result<()> {
+        let marker = container.job_done_host_path();
+        if !job_done_marker_exists(&marker)
+            .with_context(|| format!("inspect prior job completion marker {}", marker.display()))?
+        {
+            return Ok(());
+        }
+        match self.cleanup_stale_with_retries(container, deadline).0 {
+            StaleCleanupDisposition::ReadyToRetry => {}
+            StaleCleanupDisposition::ProtectedLive => {
+                bail!(
+                    "cannot reuse job key {} while its prior container is live",
+                    container.name
+                )
+            }
+            StaleCleanupDisposition::RetryCleanup | StaleCleanupDisposition::Blocked => {
+                bail!(
+                    "cannot prove prior generation cleanup for job key {}",
+                    container.name
+                )
+            }
+        }
+        clear_job_done_marker(&marker)
+            .with_context(|| format!("clear prior job completion marker {}", marker.display()))
+    }
+
     fn start_job_environment_once(&mut self, container: &JobContainerSpec) -> Result<()> {
         // A retry has already completed stale cleanup. Start each attempt with
         // no handles from the prior object generation; any IDs learned below
@@ -6811,35 +7339,20 @@ where
                 container.temp_host.display()
             )
         })?;
-        if let Some(cache_host) = &container.mbx_store_host {
-            fs::create_dir_all(cache_host).with_context(|| {
-                format!(
-                    "create Mr Boxington store for {}",
-                    container.temp_host.display()
-                )
-            })?;
-            // The store root is shared across slots, but MBX_CACHE_DIR points
-            // at a per-slot subdir so mbx's registrar/lease flocks never cross
-            // containers. Pre-create it daemon-side like the root: mbx runs as
-            // root in the container and would otherwise create it root-owned
-            // on first use, locking the daemon user out of host-side repair.
-            if let Some(slot_cache) = container.mbx_cache_store_host() {
-                fs::create_dir_all(&slot_cache).with_context(|| {
-                    format!(
-                        "create per-slot Mr Boxington cache for {}",
-                        container.temp_host.display()
-                    )
-                })?;
-            }
-            if let Some(slot_target) = container.mbx_target_store_host() {
-                fs::create_dir_all(&slot_target).with_context(|| {
-                    format!(
-                        "create per-slot Mr Boxington target root for {}",
-                        container.temp_host.display()
-                    )
-                })?;
-            }
-        }
+        // Keep both per-slot source directories descriptor-pinned until after
+        // Docker has resolved its pathname-based bind mounts. The shared store
+        // root is never mounted, and ephemeral fallback stores below temp stay
+        // container-local instead of crossing this boundary.
+        let mbx_mount_pins: Vec<MbxStoreMountPin> = container
+            .mbx_store_mount_paths()
+            .map(|paths| {
+                paths
+                    .into_iter()
+                    .map(|path| pin_mbx_store_mount(&path))
+                    .collect()
+            })
+            .transpose()?
+            .unwrap_or_default();
         if let Some(cache_host) = &container.sccache_store_host {
             fs::create_dir_all(cache_host).with_context(|| {
                 format!("create sccache store for {}", container.temp_host.display())
@@ -6959,7 +7472,11 @@ where
             )?;
             self.wait_for_service(service, &service_target)?;
         }
+        verify_mbx_store_mount_pins(&mbx_mount_pins)?;
         let prepared = container.start_args()?;
+        // `start_args` performs path mapping and prepares all mounts. Recheck
+        // at the closest host boundary before Docker resolves the source path.
+        verify_mbx_store_mount_pins(&mbx_mount_pins)?;
         let job_started = self.with_docker_lifecycle("start-job", |executor| {
             executor.run_docker_with_env(prepared.args(), prepared.process_env())
         })?;
@@ -6981,6 +7498,10 @@ where
                 container.name
             );
         }
+        // The job container starts only Velnor's PID 1 supervisor before this
+        // point. If any host path changed while Docker created the bind mounts,
+        // fail before the first workflow exec and let stale cleanup remove it.
+        verify_mbx_store_mount_pins(&mbx_mount_pins)?;
         // Docker accepts repeated network-shaped create options with behavior
         // that depends on option placement. Reconcile the runner-owned
         // topology explicitly after every container exists, before any step
@@ -7094,7 +7615,7 @@ where
         let store = crate::container::mise_store_host(
             &container.temp_host,
             container.store_trust_scope.as_str(),
-        );
+        )?;
         let image_id = match crate::docker::Docker::job(&mut self.runner).image_id(&container.image)
         {
             Ok(id) => id,
@@ -7110,7 +7631,7 @@ where
         // every later repository, leaving baked shims (notably `gh`) dangling.
         // Keep the image marker beside the exact executable store it governs.
         let marker = container
-            .mise_executable_store_host()
+            .mise_executable_store_host()?
             .join(".velnor-seeded-image");
         if fs::read_to_string(&marker)
             .map(|seeded| seeded.trim() == image_id)
@@ -8326,6 +8847,10 @@ fn setup_just_script() -> String {
 
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn native_shell_script_with_path(path: &str, script: &str) -> String {
+    format!("export PATH={}; {script}", shell_single_quote(path))
 }
 
 /// Dispatch an `actions/cache` main step by lifecycle. Root and `/restore`
@@ -10339,9 +10864,13 @@ fn create_pages_archive_from_canonical_source(
     let file_name = archive_relative
         .file_name()
         .with_context(|| format!("Pages archive has no file name: {}", archive.display()))?;
-    let destination = crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination(
+    let staging_parent = trusted_temp_root
+        .parent()
+        .context("RUNNER_TEMP has no private Pages archive staging parent")?;
+    let destination = crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination_with_staging_parent(
         trusted_temp_root,
         parent_relative,
+        staging_parent,
     )
     .with_context(|| {
         format!(
@@ -10349,10 +10878,9 @@ fn create_pages_archive_from_canonical_source(
             trusted_temp_root.join(parent_relative).display()
         )
     })?;
-    let parent = trusted_temp_root.join(parent_relative);
-    let (file, staging_path) = create_pages_archive_staging_file(&parent, &destination)?;
+    let staged_file = create_pages_archive_staging_file(&archive, &destination)?;
     let mut builder = tar::Builder::new(BoundedPagesWriter::new(
-        file,
+        staged_file,
         PAGES_ARCHIVE_MAX_ARCHIVE_BYTES,
     ));
     if !canonical_source.is_dir() {
@@ -10392,11 +10920,13 @@ fn create_pages_archive_from_canonical_source(
     writer
         .flush()
         .with_context(|| format!("flush Pages archive {}", archive.display()))?;
-    let (file, archive_size) = writer.into_parts();
-    file.set_len(archive_size)
+    let (staged_file, archive_size) = writer.into_parts();
+    staged_file
+        .file()?
+        .set_len(archive_size)
         .with_context(|| format!("truncate Pages archive {}", archive.display()))?;
-    destination
-        .publish_temporary_file(&staging_path.name, file_name)
+    staged_file
+        .publish(file_name)
         .with_context(|| format!("publish Pages archive {}", archive.display()))?;
     Ok(())
 }
@@ -10510,18 +11040,6 @@ fn record_pages_archive_entry(
 }
 
 #[derive(Debug)]
-struct PagesArchiveStagingPath {
-    parent: crate::fs_copy::NoFollowDestinationDir,
-    name: OsString,
-}
-
-impl Drop for PagesArchiveStagingPath {
-    fn drop(&mut self) {
-        let _ = self.parent.remove_tree_entry(&self.name);
-    }
-}
-
-#[derive(Debug)]
 struct RepositoryArtifactStagingDirectory {
     parent: crate::fs_copy::NoFollowDestinationDir,
     name: OsString,
@@ -10611,32 +11129,17 @@ fn create_repository_artifact_staging_directory(
 }
 
 fn create_pages_archive_staging_file(
-    staging_directory: &Path,
-    staging_parent: &crate::fs_copy::NoFollowDestinationDir,
-) -> Result<(fs::File, PagesArchiveStagingPath)> {
-    let cleanup_parent = staging_parent
-        .open_relative_directory(Path::new(""))
+    staging_file_path: &Path,
+    destination: &crate::fs_copy::NoFollowDestinationDir,
+) -> Result<crate::fs_copy::StagedFile> {
+    destination
+        .create_staged_temporary_file(".velnor-pages-archive")
         .with_context(|| {
             format!(
-                "duplicate Pages archive staging parent {}",
-                staging_directory.display()
+                "create Pages archive staging file for {}",
+                staging_file_path.display()
             )
-        })?;
-    let (file, name) = staging_parent
-        .create_temporary_file(".velnor-pages-archive")
-        .with_context(|| {
-            format!(
-                "create Pages archive staging file in {}",
-                staging_directory.display()
-            )
-        })?;
-    Ok((
-        file,
-        PagesArchiveStagingPath {
-            parent: cleanup_parent,
-            name,
-        },
-    ))
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -11871,9 +12374,10 @@ fn restore_repository_artifact(
                 destination_relative.parent().unwrap_or(Path::new(""));
             let destination_parent_path = destination_scope.root.join(destination_parent_relative);
             let destination_parent =
-                crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination(
+                crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination_with_staging_parent(
                     &destination_scope.root,
                     destination_parent_relative,
+                    &destination_scope.staging_parent,
                 )
                 .with_context(|| {
                     format!(
@@ -12285,7 +12789,8 @@ fn artifact_store_dir(state: &JobExecutionState) -> Result<PathBuf> {
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("artifact actions require a temp directory"))?;
     let run_key = artifact_run_key(state);
-    Ok(crate::store_catalog::StoreCatalog::for_job_temp(temp).artifacts_run(&run_key))
+    let layout = crate::storage::resolve_required_layout()?;
+    Ok(crate::store_catalog::StoreCatalog::for_job_temp(temp, &layout).artifacts_run(&run_key))
 }
 
 /// Resolve the store directory for a cache entry. Trust and repository remain
@@ -12300,12 +12805,15 @@ fn cache_store_dir(state: &JobExecutionState, version: &str) -> Result<PathBuf> 
         .ok_or_else(|| anyhow::anyhow!("cache actions require a temp directory"))?;
     // Daemon-shared (across slots), not per-slot: cold slots must hit the
     // caches their siblings saved (see container::daemon_shared_root).
-    let repository = state
-        .context_string("github.repository")
-        .filter(|value| !value.is_empty());
-    let Some(repository) = repository else {
+    let repository_key = state
+        .context_string("github.server_url")
+        .zip(state.context_string("github.repository_id"))
+        .and_then(|(server_url, repository_id)| {
+            crate::store_catalog::repository_store_key(&server_url, &repository_id)
+        });
+    let Some(repository_key) = repository_key else {
         eprintln!(
-            "forensics.lifecycle: persistent actions cache refused: missing github.repository"
+            "forensics.lifecycle: persistent actions cache refused: missing or invalid github.server_url or github.repository_id"
         );
         return Ok(temp.join("_velnor/ephemeral/caches").join(version));
     };
@@ -12313,26 +12821,9 @@ fn cache_store_dir(state: &JobExecutionState, version: &str) -> Result<PathBuf> 
     // lands in the untrusted namespace even on a trusted pool. Never the
     // process pool — that is the ceiling, not this job's trust.
     let scope = crate::trust_scope::normalize_scope(&state.trust_scope);
-    let root = crate::storage::cache_class_path(
-        &crate::container::daemon_shared_root(shared_work_root(temp)),
-        scope,
-        "caches",
-        "_velnor_caches",
-    );
-    Ok(crate::storage::append_legacy_trust(root, scope)
-        .join(crate::container::sanitize_store_key(&repository))
+    Ok(crate::storage::cache_class_path(scope, "caches")?
+        .join(repository_key)
         .join(version))
-}
-
-fn shared_work_root(temp: &Path) -> PathBuf {
-    if temp.file_name().is_some_and(|name| name == "temp") {
-        temp.parent()
-            .and_then(Path::parent)
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| temp.to_path_buf())
-    } else {
-        temp.to_path_buf()
-    }
 }
 
 fn artifact_run_key(state: &JobExecutionState) -> String {
@@ -12641,6 +13132,7 @@ fn state_home_host(state: &JobExecutionState) -> Option<PathBuf> {
 struct TrustedJobDestination {
     root: PathBuf,
     relative: PathBuf,
+    staging_parent: PathBuf,
 }
 
 impl TrustedJobDestination {
@@ -12658,9 +13150,10 @@ impl TrustedJobDestination {
     ) -> Result<crate::fs_copy::NoFollowDestinationDir> {
         let rooted_relative = self.joined_relative(relative)?;
         let destination = self.root.join(&rooted_relative);
-        crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination(
+        crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination_with_staging_parent(
             &self.root,
             &rooted_relative,
+            &self.staging_parent,
         )
         .with_context(|| {
             format!(
@@ -12676,6 +13169,12 @@ fn trusted_job_destination(
     destination: &Path,
 ) -> Result<TrustedJobDestination> {
     let home = state_home_host(state);
+    let staging_parent = state
+        .temp_host
+        .as_deref()
+        .and_then(Path::parent)
+        .context("job has no private per-job artifact staging parent")?
+        .to_path_buf();
     for root in [
         state.workspace_host.as_deref(),
         home.as_deref(),
@@ -12700,6 +13199,7 @@ fn trusted_job_destination(
             relative: normalized_destination_relative(
                 &configured_relative.join(destination_relative),
             )?,
+            staging_parent,
         });
     }
     bail!(
@@ -13547,6 +14047,17 @@ fn sanitize_artifact_name(name: &str) -> String {
     }
 }
 
+fn buildkitd_config_create_script(args: &[String]) -> String {
+    let docker_args = args
+        .iter()
+        .map(|arg| shell_single_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "set -eu; umask 077; config_dir=$(mktemp -d /dev/shm/velnor-buildkitd-config.XXXXXXXX); trap 'rm -rf -- \"$config_dir\"' EXIT; config_path=\"$config_dir/buildkitd.toml\"; cat > \"$config_path\"; docker {docker_args} --config \"$config_path\""
+    )
+}
+
 fn job_scope_from_temp(temp: Option<&Path>) -> String {
     let scope_path = temp
         .filter(|path| path.file_name().is_some_and(|name| name == "temp"))
@@ -13577,6 +14088,47 @@ fn buildkit_trust_tier(state: &JobExecutionState) -> &'static str {
         get("GITHUB_EVENT_NAME"),
         get("GITHUB_REF_PROTECTED"),
     )
+}
+
+fn persistent_buildkit_repository_key(container: &JobContainerSpec) -> Result<&str> {
+    let key = container
+        .repository_store_key
+        .as_deref()
+        .context(
+            "persistent BuildKit requires validated github.server_url and github.repository_id metadata",
+        )?;
+    let Some(digest) = key.strip_prefix("repo-key-v1-") else {
+        bail!("persistent BuildKit repository key has an unsupported version");
+    };
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("persistent BuildKit repository key is malformed");
+    }
+    Ok(key)
+}
+
+fn resolve_buildkit_domain(
+    slot_temp_root: &Path,
+) -> Result<crate::buildkit::PersistentBuildKitDomain> {
+    #[cfg(test)]
+    {
+        // Unit tests use one isolated storage root per job fixture. Production
+        // always resolves the selected daemon layout and Docker /info identity.
+        return Ok(crate::buildkit::PersistentBuildKitDomain {
+            token: crate::buildkit::TEST_BUILDKIT_DOMAIN_TOKEN.to_string(),
+            engine_id: "test-docker-engine".to_string(),
+            identity_root: slot_temp_root.join("_velnor-test-buildkit-storage"),
+            root: slot_temp_root.join("_velnor-test-buildkit-domain"),
+        });
+    }
+    #[cfg(not(test))]
+    {
+        let _ = slot_temp_root;
+        crate::buildkit::PersistentBuildKitDomain::resolve()
+    }
 }
 
 fn pages_url_for_repository(repository: &str) -> String {
@@ -13789,6 +14341,388 @@ fn docker_sanitize_tag(name: &str) -> String {
     trimmed.chars().take(128).collect()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct BuildxBuilderNode {
+    name: String,
+    buildkit_version: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct BuildxBuilderInfo {
+    driver: String,
+    nodes: Vec<BuildxBuilderNode>,
+}
+
+fn parse_buildx_builder_info(output: &str) -> Option<BuildxBuilderInfo> {
+    let mut driver = None;
+    let mut saw_builder_name = false;
+    let mut nodes = Vec::new();
+    let mut current_node: Option<BuildxBuilderNode> = None;
+
+    for line in output.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        match key.to_ascii_lowercase().as_str() {
+            "name" => {
+                if !saw_builder_name {
+                    saw_builder_name = true;
+                } else if !value.is_empty() {
+                    if let Some(node) = current_node.take() {
+                        nodes.push(node);
+                    }
+                    current_node = Some(BuildxBuilderNode {
+                        name: value.to_string(),
+                        buildkit_version: None,
+                    });
+                }
+            }
+            "driver" => driver = Some(value.to_string()),
+            "buildkit version" | "buildkit" => {
+                if let Some(node) = current_node.as_mut() {
+                    node.buildkit_version = (!value.is_empty()).then(|| value.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(node) = current_node {
+        nodes.push(node);
+    }
+    Some(BuildxBuilderInfo {
+        driver: driver?,
+        nodes,
+    })
+}
+
+fn buildx_version_at_least(output: &str, major: u64, minor: u64, patch: u64) -> bool {
+    output
+        .split_whitespace()
+        .find_map(parse_leading_semver)
+        .is_some_and(|version| version.at_least(major, minor, patch))
+}
+
+fn buildkit_version_at_least(output: &str, major: u64, minor: u64, patch: u64) -> bool {
+    output
+        .split_whitespace()
+        .find_map(parse_leading_semver)
+        .is_some_and(|version| version.at_least(major, minor, patch))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ParsedSemver {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    prerelease: bool,
+}
+
+impl ParsedSemver {
+    fn at_least(self, major: u64, minor: u64, patch: u64) -> bool {
+        !self.prerelease && (self.major, self.minor, self.patch) >= (major, minor, patch)
+    }
+}
+
+fn parse_leading_semver(value: &str) -> Option<ParsedSemver> {
+    let start = value.find(|character: char| character.is_ascii_digit())?;
+    let value = value[start..].trim_start_matches('v');
+    let candidate = value.trim_end_matches([',', ';', ')', ']']);
+    let before_build_metadata = candidate.split('+').next()?;
+    let prerelease = before_build_metadata.contains('-');
+    let numeric = before_build_metadata.split('-').next()?;
+    let mut components = numeric.split('.');
+    let major = components.next()?.parse().ok()?;
+    let minor = components.next()?.parse().ok()?;
+    let patch = components.next()?.parse().ok()?;
+    if components.next().is_some() {
+        return None;
+    }
+    Some(ParsedSemver {
+        major,
+        minor,
+        patch,
+        prerelease,
+    })
+}
+
+fn buildx_has_attestation_type(name: &str, attributes: &str) -> Result<bool> {
+    let records = buildx_attestation_csv_records(attributes, true, false, false)?;
+    Ok(records.first().into_iter().flatten().any(|attribute| {
+        attribute
+            .split_once('=')
+            .is_some_and(|(key, value)| key.trim() == "type" && value.trim() == name)
+    }))
+}
+
+fn buildx_has_exporter_type(name: &str, outputs: &[String]) -> bool {
+    outputs.iter().any(|output| {
+        let fields = output
+            .split(',')
+            .map(str::trim)
+            .filter(|field| !field.is_empty())
+            .collect::<Vec<_>>();
+        if fields.len() == 1 && !fields[0].starts_with("type=") {
+            return name == "local";
+        }
+        fields.iter().any(|field| {
+            field
+                .split_once('=')
+                .is_some_and(|(key, value)| key.trim() == "type" && value.trim() == name)
+        })
+    })
+}
+
+fn buildx_resolve_provenance_attributes(
+    attributes: &str,
+    builder_id: impl FnOnce() -> Result<String>,
+) -> Result<String> {
+    let records = buildx_attestation_csv_records(attributes, true, false, false)?;
+    if records.first().into_iter().flatten().any(|attribute| {
+        attribute
+            .split_once('=')
+            .is_some_and(|(key, _)| key.trim() == "builder-id")
+    }) {
+        Ok(attributes.to_string())
+    } else {
+        Ok(format!("{attributes},builder-id={}", builder_id()?))
+    }
+}
+
+fn buildx_resolve_attestation_attributes(attributes: &str) -> Result<String> {
+    Ok(
+        buildx_attestation_csv_records(attributes, false, true, false)?
+            .into_iter()
+            .flatten()
+            .map(|attribute| match buildx_parse_bool(&attribute) {
+                Some(enabled) => format!("disabled={}", !enabled),
+                None => attribute,
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
+/// Match actions-toolkit v0.100.0's Go `strconv.ParseBool` spellings.
+fn buildx_parse_bool(value: &str) -> Option<bool> {
+    match value {
+        "1" | "t" | "T" | "true" | "TRUE" | "True" => Some(true),
+        "0" | "f" | "F" | "false" | "FALSE" | "False" => Some(false),
+        _ => None,
+    }
+}
+
+/// Match `@actions/core.getBooleanInput`'s accepted provenance shorthands.
+fn buildx_provenance_boolean_input(value: &str) -> Option<bool> {
+    match value {
+        "true" | "True" | "TRUE" => Some(true),
+        "false" | "False" | "FALSE" => Some(false),
+        _ => None,
+    }
+}
+
+fn buildx_no_default_attestations(state: &JobExecutionState) -> Result<bool> {
+    let Some(value) = state
+        .env
+        .get("BUILDX_NO_DEFAULT_ATTESTATIONS")
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(false);
+    };
+    buildx_parse_bool(value)
+        .ok_or_else(|| anyhow::anyhow!("BUILDX_NO_DEFAULT_ATTESTATIONS must be a valid Go boolean"))
+}
+
+fn buildx_attestation_input_values(input: &str) -> Result<Vec<String>> {
+    if input.is_empty() {
+        return Ok(Vec::new());
+    }
+    let records = buildx_attestation_csv_records(input, true, false, true)?;
+    Ok(records
+        .into_iter()
+        .map(|record| {
+            if record.len() == 1 {
+                record.into_iter().next().unwrap_or_default()
+            } else {
+                record.join(",")
+            }
+        })
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect())
+}
+
+/// Parse the CSV fields used by the pinned actions-toolkit. `trim_fields`
+/// selects its `resolveAttestationAttrs` setting; `relax_quotes` selects the
+/// more permissive `Util.getInputList` setting.
+fn buildx_attestation_csv_records(
+    input: &str,
+    skip_empty_lines: bool,
+    trim_fields: bool,
+    relax_quotes: bool,
+) -> Result<Vec<Vec<String>>> {
+    let mut records = Vec::new();
+    let mut record = Vec::new();
+    let mut field = String::new();
+    let mut field_present = false;
+    let mut quoted = false;
+    let mut after_quote = false;
+    let mut chars = input.chars().peekable();
+
+    while let Some(character) = chars.next() {
+        if quoted {
+            if character == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    quoted = false;
+                    after_quote = true;
+                }
+            } else {
+                field.push(character);
+            }
+            continue;
+        }
+
+        if after_quote {
+            match character {
+                ',' => {
+                    record.push(std::mem::take(&mut field));
+                    field_present = false;
+                    after_quote = false;
+                }
+                '\n' | '\r' => {
+                    if !skip_empty_lines || field_present || !record.is_empty() {
+                        record.push(std::mem::take(&mut field));
+                        records.push(std::mem::take(&mut record));
+                    }
+                    field.clear();
+                    field_present = false;
+                    after_quote = false;
+                    if character == '\r' && chars.peek() == Some(&'\n') {
+                        chars.next();
+                    }
+                }
+                whitespace if whitespace.is_whitespace() => {}
+                _ => anyhow::bail!("invalid Buildx attestation CSV after closing quote"),
+            }
+            continue;
+        }
+
+        match character {
+            '"' if field.trim().is_empty() => {
+                field.clear();
+                field_present = true;
+                quoted = true;
+            }
+            '"' if relax_quotes => {
+                field.push('"');
+                field_present = true;
+            }
+            '"' => anyhow::bail!("invalid quote in Buildx attestation CSV field"),
+            ',' => {
+                record.push(if trim_fields {
+                    field.trim().to_string()
+                } else {
+                    std::mem::take(&mut field)
+                });
+                field.clear();
+                field_present = false;
+            }
+            '\n' | '\r' => {
+                if !skip_empty_lines || field_present || !record.is_empty() {
+                    record.push(if trim_fields {
+                        field.trim().to_string()
+                    } else {
+                        std::mem::take(&mut field)
+                    });
+                    records.push(std::mem::take(&mut record));
+                }
+                field.clear();
+                field_present = false;
+                if character == '\r' && chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+            }
+            _ => {
+                field.push(character);
+                field_present = true;
+            }
+        }
+    }
+
+    if quoted {
+        anyhow::bail!("unterminated quote in Buildx attestation CSV");
+    }
+    if field_present || !record.is_empty() {
+        record.push(if after_quote {
+            std::mem::take(&mut field)
+        } else if trim_fields {
+            field.trim().to_string()
+        } else {
+            std::mem::take(&mut field)
+        });
+        records.push(std::mem::take(&mut record));
+    }
+    Ok(records)
+}
+
+/// Match docker/build-push-action v7's `GitHub.workflowRunURL(true)` builder ID.
+/// Use runner-owned identity, so action-local env cannot forge provenance metadata.
+fn docker_buildx_workflow_run_url(state: &JobExecutionState) -> Result<String> {
+    let repository = state
+        .immutable_env
+        .get("GITHUB_REPOSITORY")
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .or_else(|| state.context_string("github.repository"))
+        .context("docker/build-push-action provenance requires a GitHub repository")?;
+    let (owner, repository_name) = repository
+        .split_once('/')
+        .filter(|(owner, name)| {
+            [*owner, *name].into_iter().all(|part| {
+                !part.is_empty()
+                    && part != "."
+                    && part != ".."
+                    && part.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                    })
+            })
+        })
+        .filter(|(_, name)| !name.contains('/'))
+        .context("immutable GitHub repository must be an owner/name pair")?;
+    let run_id = state
+        .immutable_env
+        .get("GITHUB_RUN_ID")
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .or_else(|| state.context_string("github.run_id"))
+        .context("docker/build-push-action provenance requires a GitHub run ID")?;
+    let run_id = run_id
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .context("immutable GitHub run ID must be a positive integer")?;
+    let run_attempt = state
+        .immutable_env
+        .get("GITHUB_RUN_ATTEMPT")
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .or_else(|| state.context_string("github.run_attempt"))
+        .unwrap_or_else(|| "1".to_string());
+    let run_attempt = run_attempt
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .context("immutable GitHub run attempt must be a positive integer")?;
+    let server_url = trusted_github_server_base(state)?;
+    Ok(format!(
+        "{server_url}/{owner}/{repository_name}/actions/runs/{run_id}/attempts/{run_attempt}"
+    ))
+}
+
 fn docker_metadata_labels(state: &JobExecutionState) -> Vec<String> {
     let repository = state
         .env
@@ -13893,7 +14827,7 @@ pub(crate) struct JobExecutionState {
     /// Env accumulated at runtime via GITHUB_ENV / ::set-env, in set order —
     /// GitHub appends these after the workflow env in the `env:` block.
     pub(crate) dynamic_env: Vec<(String, String)>,
-    context_data: BTreeMap<String, Value>,
+    context_data: Vec<(String, ContextValue)>,
     workspace_host: Option<PathBuf>,
     temp_host: Option<PathBuf>,
     pub(crate) outputs: BTreeMap<String, BTreeMap<String, String>>,
@@ -13920,14 +14854,14 @@ impl JobExecutionState {
 
     pub(crate) fn new_with_context(
         base_env: &[(String, String)],
-        context_data: &[(String, Value)],
+        context_data: &[(String, ContextValue)],
     ) -> Self {
         Self::try_new_with_context(base_env, context_data).unwrap_or_default()
     }
 
     fn new_with_workspace(
         base_env: &[(String, String)],
-        context_data: &[(String, Value)],
+        context_data: &[(String, ContextValue)],
         workspace_host: &Path,
         temp_host: &Path,
     ) -> Self {
@@ -13941,14 +14875,14 @@ impl JobExecutionState {
 
     pub(crate) fn try_new_with_context(
         base_env: &[(String, String)],
-        context_data: &[(String, Value)],
+        context_data: &[(String, ContextValue)],
     ) -> Result<Self, ExpressionInterpolationError> {
         Self::try_new_internal(base_env, context_data, None, None)
     }
 
     pub(crate) fn try_new_with_workspace(
         base_env: &[(String, String)],
-        context_data: &[(String, Value)],
+        context_data: &[(String, ContextValue)],
         workspace_host: &Path,
         temp_host: &Path,
     ) -> Result<Self, ExpressionInterpolationError> {
@@ -13962,7 +14896,7 @@ impl JobExecutionState {
 
     fn new_internal(
         base_env: &[(String, String)],
-        context_data: &[(String, Value)],
+        context_data: &[(String, ContextValue)],
         workspace_host: Option<PathBuf>,
         temp_host: Option<PathBuf>,
     ) -> Self {
@@ -13972,10 +14906,12 @@ impl JobExecutionState {
 
     fn try_new_internal(
         base_env: &[(String, String)],
-        context_data: &[(String, Value)],
+        context_data: &[(String, ContextValue)],
         workspace_host: Option<PathBuf>,
         temp_host: Option<PathBuf>,
     ) -> Result<Self, ExpressionInterpolationError> {
+        ContextValue::object(context_data.to_vec())
+            .map_err(|_| ExpressionInterpolationError::InvalidContext)?;
         let initial_env: BTreeMap<_, _> = base_env.iter().cloned().collect();
         let mut state = Self {
             trust_scope: String::new(),
@@ -13983,7 +14919,7 @@ impl JobExecutionState {
             immutable_env: initial_env,
             workflow_env: Vec::new(),
             dynamic_env: Vec::new(),
-            context_data: context_data.iter().cloned().collect(),
+            context_data: context_data.to_vec(),
             workspace_host,
             temp_host,
             outputs: BTreeMap::new(),
@@ -14093,15 +15029,30 @@ impl JobExecutionState {
     /// in GitHub's `inputs` root while retaining the regular job roots.
     fn with_context_root(&self, name: &str, values: BTreeMap<String, String>) -> Self {
         let mut state = self.with_env(Vec::new());
-        state.context_data.insert(
-            name.to_owned(),
-            Value::Object(
-                values
-                    .into_iter()
-                    .map(|(key, value)| (key, Value::String(value)))
-                    .collect(),
-            ),
-        );
+        let mut entries = Vec::<(String, ContextValue)>::new();
+        for (key, value) in values {
+            if let Some((_, existing)) = entries
+                .iter_mut()
+                .find(|(existing, _)| ordinal_ignore_case_eq(existing, &key))
+            {
+                *existing = ContextValue::String(value);
+            } else {
+                entries.push((key, ContextValue::String(value)));
+            }
+        }
+        let value = ContextValue::Object {
+            case_sensitive: false,
+            entries,
+        };
+        if let Some((_, existing)) = state
+            .context_data
+            .iter_mut()
+            .find(|(existing, _)| ordinal_ignore_case_eq(existing, name))
+        {
+            *existing = value;
+        } else {
+            state.context_data.push((name.to_owned(), value));
+        }
         state
     }
 
@@ -14241,6 +15192,37 @@ impl JobExecutionState {
         self.render_template(value, false)
     }
 
+    /// Match ActionRunner's `CheckHasRequiredContext` gate before resolving a
+    /// generated display name. A successful interpolation alone is not proof
+    /// that every referenced root context existed: the runtime evaluator
+    /// represents absent roots as empty objects, while upstream preserves the
+    /// original token and skips masking when a required root is missing.
+    pub(crate) fn resolve_display_name_template(
+        &self,
+        value: &str,
+    ) -> Result<(String, bool), ExpressionInterpolationError> {
+        let spans = expression_template_spans(value)?;
+        let context = self.expression_context();
+        let mut has_required_context = true;
+        for span in &spans {
+            let node =
+                expression::parse(span.expression(value).trim(), &context).map_err(|_| {
+                    ExpressionInterpolationError::Parse {
+                        offset: span.start(),
+                    }
+                })?;
+            if let Some(node) = node {
+                has_required_context &= node_has_required_display_name_context(&node, self);
+            }
+        }
+        if !has_required_context {
+            return Ok((value.to_owned(), false));
+        }
+
+        self.resolve_expressions(value)
+            .map(|resolved| (resolved, true))
+    }
+
     /// Render only the spans the job message alone can answer, leaving every
     /// span that reads runtime state as its literal source text.
     ///
@@ -14322,6 +15304,31 @@ impl JobExecutionState {
 
     pub(crate) fn expression_context(&self) -> JobExpressionContext<'_> {
         JobExpressionContext { state: self }
+    }
+}
+
+/// Whether every root referenced by a display-name expression exists in the
+/// step's `ExpressionValues`. Job initialization always installs these roots;
+/// other roots must arrive through the acquired ContextData, as in Runner's
+/// `InitializeJob` before `TemplateTokenExtensions.CheckHasRequiredContext`.
+fn node_has_required_display_name_context(
+    node: &expression::Node,
+    state: &JobExecutionState,
+) -> bool {
+    match node {
+        expression::Node::NamedValue(name) => {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "github" | "env" | "job" | "runner" | "steps" | "secrets"
+            ) || state
+                .context_data
+                .iter()
+                .any(|(root, _)| ordinal_ignore_case_eq(root, name))
+        }
+        node => node
+            .children()
+            .into_iter()
+            .all(|child| node_has_required_display_name_context(child, state)),
     }
 }
 
@@ -14432,10 +15439,16 @@ fn upsert_entry(
 
 impl JobExpressionContext<'_> {
     fn context_data_entries(&self, root: &str) -> Vec<(String, expression::Value)> {
-        match self.state.context_data.get(root) {
-            Some(Value::Object(map)) => map
+        match self
+            .state
+            .context_data
+            .iter()
+            .find(|(name, _)| ordinal_ignore_case_eq(name, root))
+            .map(|(_, value)| value)
+        {
+            Some(ContextValue::Object { entries, .. }) => entries
                 .iter()
-                .map(|(name, value)| (name.clone(), expression::eval::from_serde_json(value)))
+                .map(|(name, value)| (name.clone(), expression::eval::from_context_value(value)))
                 .collect(),
             _ => Vec::new(),
         }
@@ -14537,8 +15550,8 @@ impl expression::ParseEnvironment for JobExpressionContext<'_> {
             || self
                 .state
                 .context_data
-                .keys()
-                .any(|root| root.eq_ignore_ascii_case(name))
+                .iter()
+                .any(|(root, _)| ordinal_ignore_case_eq(root, name))
     }
 
     fn function_arity(&self, name: &str) -> Option<(usize, usize)> {
@@ -14561,15 +15574,14 @@ impl expression::EvaluationContext for JobExpressionContext<'_> {
             "job" => self.job_context(),
             other => {
                 let entries = self.context_data_entries(other);
-                if entries.is_empty()
-                    && let Some(value) = self
-                        .state
-                        .context_data
-                        .iter()
-                        .find(|(root, _)| root.eq_ignore_ascii_case(other))
-                        .map(|(_, value)| value)
+                if let Some(value) = self
+                    .state
+                    .context_data
+                    .iter()
+                    .find(|(root, _)| ordinal_ignore_case_eq(root, other))
+                    .map(|(_, value)| value)
                 {
-                    return expression::eval::from_serde_json(value);
+                    return expression::eval::from_context_value(value);
                 }
                 expression::Value::Object(expression::ObjectValue::new(entries))
             }
@@ -15011,9 +16023,9 @@ fn unix_now_rfc3339() -> String {
 
 fn prepare_github_event_path(
     temp_host: &Path,
-    context_data: &[(String, Value)],
+    context_data: &[(String, ContextValue)],
 ) -> Result<Option<String>> {
-    let Some(payload) = github_event_payload(context_data) else {
+    let Some(payload) = github_event_payload(context_data)? else {
         return Ok(None);
     };
     let event_dir = temp_host.join("_github_workflow");
@@ -15023,15 +16035,20 @@ fn prepare_github_event_path(
     Ok(Some("/github/workflow/event.json".to_string()))
 }
 
-fn github_event_payload(context_data: &[(String, Value)]) -> Option<String> {
-    let github = context_data
+fn github_event_payload(context_data: &[(String, ContextValue)]) -> Result<Option<String>> {
+    let Some(github) = context_data
         .iter()
-        .find_map(|(name, value)| (name == "github").then_some(value))?;
-    let event = github.get("event")?;
+        .find_map(|(name, value)| ordinal_ignore_case_eq(name, "github").then_some(value))
+    else {
+        return Ok(None);
+    };
+    let Some(event) = github.get("event") else {
+        return Ok(None);
+    };
     match event {
-        Value::String(value) => Some(value.clone()),
-        Value::Null => None,
-        value => serde_json::to_string(value).ok(),
+        ContextValue::String(value) => Ok(Some(value.clone())),
+        ContextValue::Null => Ok(None),
+        value => Ok(Some(value.to_github_json()?)),
     }
 }
 
@@ -15601,6 +16618,128 @@ fn docker_run_container_name(args: &[String]) -> Option<String> {
 )]
 mod tests {
     use super::*;
+
+    fn context_from_json(value: serde_json::Value) -> ContextValue {
+        ContextValue::from_json(value).expect("valid context fixture")
+    }
+
+    #[test]
+    fn derived_step_state_keeps_typed_context_values_and_comparers() {
+        let context_data = vec![
+            (
+                "insensitive".into(),
+                ContextValue::object(vec![
+                    ("Name".into(), ContextValue::String("ordinal".into())),
+                    (
+                        "nan".into(),
+                        ContextValue::non_finite(velnor_model::NonFinite::NaN),
+                    ),
+                    (
+                        "positive".into(),
+                        ContextValue::non_finite(velnor_model::NonFinite::PositiveInfinity),
+                    ),
+                    (
+                        "negative".into(),
+                        ContextValue::non_finite(velnor_model::NonFinite::NegativeInfinity),
+                    ),
+                ])
+                .unwrap(),
+            ),
+            (
+                "sensitive".into(),
+                ContextValue::case_sensitive_object(vec![
+                    ("Path".into(), ContextValue::String("upper".into())),
+                    ("path".into(), ContextValue::String("lower".into())),
+                ])
+                .unwrap(),
+            ),
+        ];
+        let state = JobExecutionState::try_new_with_context(&[], &context_data).unwrap();
+        let derived = state
+            .with_step_action("step")
+            .with_env(vec![("STEP_ENV".into(), "kept".into())]);
+
+        assert_eq!(derived.context_data, context_data);
+        assert_eq!(
+            derived
+                .resolve_expressions(
+                    "${{ insensitive.NAME }}|${{ insensitive.nan }}|${{ insensitive.positive }}|${{ insensitive.negative }}|${{ sensitive.Path }}|${{ sensitive.path }}|${{ sensitive.PATH }}",
+                )
+                .unwrap(),
+            "ordinal|NaN|Infinity|-Infinity|upper|lower|"
+        );
+    }
+
+    #[test]
+    fn github_event_json_quotes_nonfinite_numbers_as_plain_strings() {
+        let event = ContextValue::object(vec![
+            (
+                "nan".into(),
+                ContextValue::non_finite(velnor_model::NonFinite::NaN),
+            ),
+            (
+                "positive".into(),
+                ContextValue::non_finite(velnor_model::NonFinite::PositiveInfinity),
+            ),
+            (
+                "negative".into(),
+                ContextValue::non_finite(velnor_model::NonFinite::NegativeInfinity),
+            ),
+        ])
+        .unwrap();
+        let github = ContextValue::object(vec![("event".into(), event)]).unwrap();
+        assert_eq!(
+            github_event_payload(&[("github".into(), github)]).unwrap(),
+            Some(r#"{"nan":"NaN","positive":"Infinity","negative":"-Infinity"}"#.into())
+        );
+    }
+
+    thread_local! {
+        static RECORDING_RUNNER_RESPONSES: std::cell::RefCell<Vec<(String, String)>> = const {
+            std::cell::RefCell::new(Vec::new())
+        };
+    }
+
+    struct RecordingRunnerResponseGuard;
+
+    impl Drop for RecordingRunnerResponseGuard {
+        fn drop(&mut self) {
+            RECORDING_RUNNER_RESPONSES.with(|slot| slot.borrow_mut().clear());
+        }
+    }
+
+    fn set_recording_runner_responses(
+        responses: Vec<(String, String)>,
+    ) -> RecordingRunnerResponseGuard {
+        RECORDING_RUNNER_RESPONSES.with(|slot| *slot.borrow_mut() = responses);
+        RecordingRunnerResponseGuard
+    }
+
+    fn recording_runner_stdout(args: &[String]) -> String {
+        let command = args.join(" ").replace('\'', "");
+        RECORDING_RUNNER_RESPONSES.with(|slot| {
+            slot.borrow()
+                .iter()
+                .find(|(needle, _)| command.contains(needle))
+                .map(|(_, stdout)| stdout.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_shell_path_is_literal_even_with_shell_metacharacters() {
+        let path = "/path with spaces/$(printf injected); 'quoted'";
+        let script = native_shell_script_with_path(path, "printf '%s' \"$PATH\"");
+        let output = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), path);
+        assert!(output.stderr.is_empty());
+    }
 
     #[cfg(unix)]
     #[test]
@@ -16632,6 +17771,14 @@ mod tests {
         args.first().is_some_and(|a| a == "image") && args.get(1).is_some_and(|a| a == "inspect")
     }
 
+    fn is_buildx_provenance_probe(args: &[String]) -> bool {
+        let command = args.join(" ").replace('\'', "");
+        command.contains("docker buildx version")
+            || command.contains("docker buildx inspect")
+            || (command.contains("docker inspect --format") && command.contains("buildx_buildkit_"))
+            || (command.contains("docker run --rm") && command.contains("--version"))
+    }
+
     impl RecordingRunner {
         /// Record one call whose environment travels outside argv: the env
         /// file is expanded and process-environment forwards are appended, so
@@ -16655,17 +17802,19 @@ mod tests {
                     stderr: String::new(),
                 });
             }
+            let stdout = recording_runner_stdout(&args);
+            let is_probe = is_buildx_provenance_probe(&args);
             self.calls.push((program.to_string(), args));
             self.stdin.push(stdin);
             self.env.push(env.to_vec());
-            let code = if self.codes.is_empty() {
+            let code = if is_probe || self.codes.is_empty() {
                 0
             } else {
                 self.codes.remove(0)
             };
             Ok(CommandResult {
                 code,
-                stdout: String::new(),
+                stdout,
                 stderr: String::new(),
             })
         }
@@ -16681,17 +17830,18 @@ mod tests {
                     stderr: String::new(),
                 });
             }
+            let stdout = recording_runner_stdout(args);
             self.calls.push((program.to_string(), args.to_vec()));
             self.stdin.push(String::new());
             self.env.push(Vec::new());
-            let code = if self.codes.is_empty() {
+            let code = if is_buildx_provenance_probe(args) || self.codes.is_empty() {
                 0
             } else {
                 self.codes.remove(0)
             };
             Ok(CommandResult {
                 code,
-                stdout: String::new(),
+                stdout,
                 stderr: String::new(),
             })
         }
@@ -16702,17 +17852,18 @@ mod tests {
             args: &[String],
             env: &[(String, String)],
         ) -> Result<CommandResult> {
+            let stdout = recording_runner_stdout(args);
             self.calls.push((program.to_string(), args.to_vec()));
             self.stdin.push(String::new());
             self.env.push(env.to_vec());
-            let code = if self.codes.is_empty() {
+            let code = if is_buildx_provenance_probe(args) || self.codes.is_empty() {
                 0
             } else {
                 self.codes.remove(0)
             };
             Ok(CommandResult {
                 code,
-                stdout: String::new(),
+                stdout,
                 stderr: String::new(),
             })
         }
@@ -16723,17 +17874,18 @@ mod tests {
             args: &[String],
             stdin: &str,
         ) -> Result<CommandResult> {
+            let stdout = recording_runner_stdout(args);
             self.calls.push((program.to_string(), args.to_vec()));
             self.stdin.push(stdin.to_string());
             self.env.push(Vec::new());
-            let code = if self.codes.is_empty() {
+            let code = if is_buildx_provenance_probe(args) || self.codes.is_empty() {
                 0
             } else {
                 self.codes.remove(0)
             };
             Ok(CommandResult {
                 code,
-                stdout: String::new(),
+                stdout,
                 stderr: String::new(),
             })
         }
@@ -16845,36 +17997,6 @@ mod tests {
             )?;
             self.script_stderr(&mut result);
             Ok(result)
-        }
-    }
-
-    #[derive(Default)]
-    struct BuildkitCleanupRunner {
-        calls: Vec<Vec<String>>,
-    }
-
-    impl CommandRunner for BuildkitCleanupRunner {
-        fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
-            let args: &[String] = &crate::execution::expand_env_file_args(args);
-            self.calls.push(args.to_vec());
-            let stdout = match args.first().map(String::as_str) {
-                Some("ps") => {
-                    "bk1\tbuildx_buildkit_velnor-builder-job-scope0\tjob\ttest-daemon\tcreated\n\
-                     bk2\tbuildx_buildkit_velnor-builder-job-scope0\tjob\ttest-daemon\tremoving\n"
-                }
-                Some("volume") if args.get(1).is_some_and(|arg| arg == "ls") => {
-                    "buildx_buildkit_velnor-builder-job-scope0_state\n"
-                }
-                Some("volume") if args.get(1).is_some_and(|arg| arg == "inspect") => {
-                    "\"buildx_buildkit_velnor-builder-job-scope0_state\"\t\"local\"\t{\"velnor.job-id\":\"job\",\"velnor.daemon-id\":\"test-daemon\"}\n"
-                }
-                _ => "",
-            };
-            Ok(CommandResult {
-                code: 0,
-                stdout: stdout.to_string(),
-                stderr: String::new(),
-            })
         }
     }
 
@@ -17093,6 +18215,10 @@ mod tests {
             true
         }
 
+        fn supports_durable_docker_rm_tickets(&self) -> bool {
+            false
+        }
+
         fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
             let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push(args.to_vec());
@@ -17113,92 +18239,6 @@ mod tests {
             Ok(CommandResult {
                 code: 0,
                 stdout,
-                stderr: String::new(),
-            })
-        }
-    }
-
-    #[derive(Default)]
-    struct HostBuildkitCleanupRunner {
-        calls: Vec<Vec<String>>,
-        volume_identity: String,
-        live_job: bool,
-    }
-
-    impl CommandRunner for HostBuildkitCleanupRunner {
-        fn is_host_process_runner(&self) -> bool {
-            true
-        }
-
-        fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
-            let args: &[String] = &crate::execution::expand_env_file_args(args);
-            self.calls.push(args.to_vec());
-            let stdout = if args.iter().any(|arg| arg == "label=velnor.daemon-id") {
-                if self.live_job {
-                    "job\tjob\ttest-daemon\trunning\n".to_string()
-                } else {
-                    String::new()
-                }
-            } else {
-                match args.first().map(String::as_str) {
-                Some("ps") => {
-                    "bk-good\tbuildx_buildkit_velnor-builder-job-scope0\tjob\ttest-daemon\tcreated\n\
-                     bk-collision\tbuildx_buildkit_velnor-builder-job-scope0-shadow\tjob\ttest-daemon\tcreated\n"
-                }
-                Some("volume") if args.get(1).is_some_and(|arg| arg == "ls") => {
-                    "buildx_buildkit_velnor-builder-job-scope0_state\n\
-                     buildx_buildkit_velnor-builder-job-scope0_state-shadow\n"
-                }
-                Some("volume") if args.get(1).is_some_and(|arg| arg == "inspect") => {
-                    &self.volume_identity
-                }
-                _ => "",
-                }
-                .to_string()
-            };
-            Ok(CommandResult {
-                code: 0,
-                stdout,
-                stderr: String::new(),
-            })
-        }
-    }
-
-    #[derive(Default)]
-    struct CustomHostBuildkitCleanupRunner {
-        calls: Vec<Vec<String>>,
-    }
-
-    impl CommandRunner for CustomHostBuildkitCleanupRunner {
-        fn is_host_process_runner(&self) -> bool {
-            true
-        }
-
-        fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
-            let args: &[String] = &crate::execution::expand_env_file_args(args);
-            self.calls.push(args.to_vec());
-            let stdout = match args.first().map(String::as_str) {
-                Some("ps") => {
-                    "custom-bk\tbuildx_buildkit_velnor-builder-requested-name-job-scope0\tjob\ttest-daemon\tcreated\n\
-                     default-shadow\tbuildx_buildkit_velnor-builder-job-scope-shadow0\tjob\ttest-daemon\tcreated\n"
-                }
-                Some("volume") if args.get(1).is_some_and(|arg| arg == "ls") => {
-                    "buildx_buildkit_velnor-builder-requested-name-job-scope0_state\n\
-                     buildx_buildkit_velnor-builder-job-scope-shadow0_state\n"
-                }
-                Some("volume") if args.get(1).is_some_and(|arg| arg == "inspect") => {
-                    let name = args.last().map(String::as_str).unwrap_or_default();
-                    if name == "buildx_buildkit_velnor-builder-requested-name-job-scope0_state" {
-                        "\"buildx_buildkit_velnor-builder-requested-name-job-scope0_state\"\t\"local\"\t{\"velnor.job-id\":\"job\",\"velnor.daemon-id\":\"test-daemon\"}\n"
-                    } else {
-                        "\"buildx_buildkit_velnor-builder-job-scope-shadow0_state\"\t\"local\"\t{\"velnor.job-id\":\"foreign\",\"velnor.daemon-id\":\"test-daemon\"}\n"
-                    }
-                }
-                _ => "",
-            };
-            Ok(CommandResult {
-                code: 0,
-                stdout: stdout.to_string(),
                 stderr: String::new(),
             })
         }
@@ -17255,6 +18295,10 @@ mod tests {
             true
         }
 
+        fn supports_durable_docker_rm_tickets(&self) -> bool {
+            false
+        }
+
         fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
             let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push(args.to_vec());
@@ -17302,6 +18346,10 @@ mod tests {
     impl CommandRunner for CombinedHostCleanupRunner {
         fn is_host_process_runner(&self) -> bool {
             true
+        }
+
+        fn supports_durable_docker_rm_tickets(&self) -> bool {
+            false
         }
 
         fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
@@ -17366,6 +18414,10 @@ mod tests {
     impl CommandRunner for HostStartupCaptureRunner {
         fn is_host_process_runner(&self) -> bool {
             true
+        }
+
+        fn supports_durable_docker_rm_tickets(&self) -> bool {
+            false
         }
 
         fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
@@ -17449,9 +18501,19 @@ mod tests {
         let mut executor = DockerJobEngine::inert(ServiceContextRunner);
         let context = executor.service_context(&job).unwrap().unwrap();
 
-        assert_eq!(context["postgres"]["id"], "container-id");
-        assert_eq!(context["postgres"]["network"], "velnor-net");
-        assert_eq!(context["postgres"]["ports"]["5432"], "32768");
+        let postgres = context.get("postgres").unwrap();
+        assert_eq!(
+            postgres.get("id"),
+            Some(&ContextValue::String("container-id".into()))
+        );
+        assert_eq!(
+            postgres.get("network"),
+            Some(&ContextValue::String("velnor-net".into()))
+        );
+        assert_eq!(
+            postgres.get("ports").and_then(|ports| ports.get("5432")),
+            Some(&ContextValue::String("32768".into()))
+        );
         fs::remove_dir_all(temp).ok();
     }
 
@@ -18073,6 +19135,122 @@ mod tests {
         );
     }
 
+    #[test]
+    fn same_job_key_new_generation_clears_done_marker_after_absence_proof() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        assert!(mark_job_container_done(&spec));
+        let marker = spec.job_done_host_path();
+        assert!(marker.is_file());
+
+        let mut executor = DockerJobEngine::inert(HostIdentityRunner::default());
+        executor
+            .prepare_job_done_marker_for_new_generation(
+                &spec,
+                Instant::now() + DOCKER_START_RETRY_DEADLINE,
+            )
+            .unwrap();
+
+        assert!(!marker.exists());
+        assert!(executor.runner().calls.iter().any(|args| {
+            args == &crate::docker_lease::inspect_container_identity_args(&spec.name)
+        }));
+        assert!(executor.runner().calls.iter().any(|args| {
+            args == &crate::docker_lease::inspect_network_identity_args(&spec.network)
+        }));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn late_old_generation_done_write_cannot_stop_replacement_container() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let old = container(&temp);
+        let mut replacement = old.clone();
+        replacement.completion_generation = uuid::Uuid::new_v4();
+
+        let mut executor = DockerJobEngine::inert(HostIdentityRunner::default());
+        executor
+            .prepare_job_done_marker_for_new_generation(
+                &replacement,
+                Instant::now() + DOCKER_START_RETRY_DEADLINE,
+            )
+            .unwrap();
+
+        // Old teardown finishes after replacement preflight. Its publication
+        // remains in the old read-only mount source; PID 1 in the replacement
+        // watches only the new source at /__velnor/job.done.
+        assert!(mark_job_container_done(&old));
+        assert!(old.job_done_host_path().is_file());
+        assert!(!replacement.job_done_host_path().exists());
+        assert!(mark_job_container_done(&replacement));
+        assert!(replacement.job_done_host_path().is_file());
+        assert!(old.job_done_host_dir().exists());
+        assert!(replacement.job_done_host_dir().exists());
+
+        fs::remove_dir_all(temp).unwrap();
+        fs::remove_dir_all(old.job_done_host_dir()).unwrap();
+        fs::remove_dir_all(replacement.job_done_host_dir()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mbx_mount_source_swap_during_docker_create_fails_before_workflow_exec() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let mut spec = container(&temp);
+        spec.slot_store_key = Some("slot-1".into());
+        let store = temp.with_file_name(format!(
+            "{}-mbx-store",
+            temp.file_name().unwrap().to_string_lossy()
+        ));
+        spec.mbx_store_host = Some(store.clone());
+        let target = spec.mbx_target_store_host().unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let preserved = target.with_file_name("slot-1-pinned");
+        let replacement = temp.join("replacement-targets");
+        fs::create_dir(&replacement).unwrap();
+        let runner = MbxMountRaceRunner {
+            source: target.clone(),
+            preserved: preserved.clone(),
+            replacement: replacement.clone(),
+            job_name: spec.name.clone(),
+            replaced: false,
+            calls: Vec::new(),
+        };
+        let mut executor = DockerJobEngine::inert(runner);
+
+        let error = executor.start_job_environment_once(&spec).unwrap_err();
+        assert!(
+            executor.runner().replaced,
+            "test runner must replace the host path during the container-create call"
+        );
+        assert!(
+            format!("{error:#}").contains("per-slot MBX mount source"),
+            "{error:#}"
+        );
+        assert!(executor.runner().calls.iter().any(|args| {
+            args.first().is_some_and(|arg| arg == "run")
+                && args
+                    .windows(2)
+                    .any(|pair| pair == ["--name", spec.name.as_str()])
+        }));
+        assert!(
+            executor
+                .runner()
+                .calls
+                .iter()
+                .all(|args| args.first().is_none_or(|arg| arg != "exec")),
+            "workflow exec must not run after Docker resolved a replaced MBX bind source"
+        );
+
+        fs::remove_file(&target).unwrap();
+        fs::rename(preserved, target).unwrap();
+        fs::remove_dir_all(&store).unwrap();
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn mark_job_container_done_rejects_symlink_sentinel() {
@@ -18431,6 +19609,7 @@ esac
     fn container(temp: &Path) -> JobContainerSpec {
         JobContainerSpec {
             name: "job".into(),
+            completion_generation: uuid::Uuid::new_v4(),
             image: "ubuntu:24.04".into(),
             network: "net".into(),
             workspace_host: temp.join("work"),
@@ -18450,10 +19629,131 @@ esac
             docker_host_work_dir: None,
             verify_bind_mounts: false,
             daemon_id: "test-daemon".into(),
-            repository: Some("unknown-repository".into()),
+            repository: None,
+            repository_store_key: None,
             store_trust_scope: "trusted".to_owned(),
             mbx_store_host: None,
             sccache_store_host: None,
+        }
+    }
+
+    #[test]
+    fn persistent_buildkit_repository_key_uses_only_immutable_store_identity() {
+        let mut spec = container(Path::new("/tmp/velnor-buildkit-repository-test"));
+        spec.repository = Some("octo-org/octo-repo".to_owned());
+        assert!(persistent_buildkit_repository_key(&spec).is_err());
+        let key = crate::store_catalog::repository_store_key("https://github.com", "42")
+            .expect("valid immutable repository identity");
+        spec.repository_store_key = Some(key.clone());
+        assert_eq!(persistent_buildkit_repository_key(&spec).unwrap(), key);
+        for invalid in [
+            "",
+            "repo-key-v1-short",
+            "repo-key-v1-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+            "repo-key-v2-0000000000000000000000000000000000000000000000000000000000000000",
+        ] {
+            spec.repository_store_key = Some(invalid.to_owned());
+            assert!(
+                persistent_buildkit_repository_key(&spec).is_err(),
+                "{invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn persistent_buildkit_names_partition_same_display_repository_by_id() {
+        let root = temp_dir();
+        let domain = crate::buildkit::PersistentBuildKitDomain::from_identities(
+            &root,
+            "storage-a",
+            "engine-a",
+        )
+        .unwrap();
+        let mut spec = container(&root);
+        spec.repository = Some("same-owner/same-name".to_owned());
+        spec.repository_store_key =
+            Some(crate::store_catalog::repository_store_key("https://github.com", "41").unwrap());
+        let key_41 = persistent_buildkit_repository_key(&spec)
+            .unwrap()
+            .to_owned();
+        let name_41 = crate::buildkit::persistent_builder_name_for_domain(
+            &domain.token,
+            "velnor-builder",
+            "trusted",
+            crate::buildkit::TRUST_TIER_BRANCH,
+            Some(&key_41),
+        );
+
+        spec.repository_store_key =
+            Some(crate::store_catalog::repository_store_key("https://github.com", "42").unwrap());
+        let key_42 = persistent_buildkit_repository_key(&spec)
+            .unwrap()
+            .to_owned();
+        let name_42 = crate::buildkit::persistent_builder_name_for_domain(
+            &domain.token,
+            "velnor-builder",
+            "trusted",
+            crate::buildkit::TRUST_TIER_BRANCH,
+            Some(&key_42),
+        );
+        assert_ne!(key_41, key_42);
+        assert_ne!(name_41, name_42);
+
+        // Rename changes display metadata, not the immutable repository key
+        // or the persistent BuildKit namespace.
+        spec.repository = Some("renamed-owner/renamed-name".to_owned());
+        spec.repository_store_key = Some(key_41.clone());
+        let renamed_name = crate::buildkit::persistent_builder_name_for_domain(
+            &domain.token,
+            "velnor-builder",
+            "trusted",
+            crate::buildkit::TRUST_TIER_BRANCH,
+            Some(persistent_buildkit_repository_key(&spec).unwrap()),
+        );
+        assert_eq!(name_41, renamed_name);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    struct MbxMountRaceRunner {
+        source: PathBuf,
+        preserved: PathBuf,
+        replacement: PathBuf,
+        job_name: String,
+        replaced: bool,
+        calls: Vec<Vec<String>>,
+    }
+
+    #[cfg(unix)]
+    impl CommandRunner for MbxMountRaceRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            self.calls.push(args.to_vec());
+            if program == "docker"
+                && args.first().is_some_and(|arg| arg == "image")
+                && args.get(1).is_some_and(|arg| arg == "inspect")
+            {
+                return Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            if !self.replaced
+                && program == "docker"
+                && args.first().is_some_and(|arg| arg == "run")
+                && args
+                    .windows(2)
+                    .any(|pair| pair == ["--name", self.job_name.as_str()])
+            {
+                fs::rename(&self.source, &self.preserved)?;
+                std::os::unix::fs::symlink(&self.replacement, &self.source)?;
+                self.replaced = true;
+            }
+            Ok(CommandResult {
+                code: 0,
+                stdout: format!("{}\n", "a".repeat(64)),
+                stderr: String::new(),
+            })
         }
     }
 
@@ -18480,11 +19780,25 @@ esac
             crate::docker_lease::list_job_buildkit_format_args()
         );
         let scope = sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap());
-        assert_eq!(calls[rm_index + 5].1[0], "volume");
-        assert!(calls[rm_index + 5].1.contains(&format!(
-            "name={}{scope}",
-            crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX
-        )));
+        assert_eq!(
+            calls[rm_index + 5].1,
+            crate::docker_lease::list_job_buildkit_volume_args(),
+            "Docker's name filter is substring-matching; query only the stable prefix"
+        );
+        let expected_volume =
+            crate::buildkit::daemon_state_volume(&format!("velnor-builder-{scope}"));
+        for (_, args) in calls.iter().skip(rm_index + 6) {
+            if args.first().map(String::as_str) == Some("volume")
+                && args
+                    .get(1)
+                    .is_some_and(|arg| arg == "inspect" || arg == "rm")
+            {
+                assert!(
+                    args.iter().any(|arg| arg == &expected_volume),
+                    "cleanup may inspect/remove only the exact expected volume {expected_volume}: {args:?}"
+                );
+            }
+        }
     }
 
     fn expected_network_create_args() -> Vec<String> {
@@ -18501,6 +19815,24 @@ esac
         .into_iter()
         .map(String::from)
         .collect()
+    }
+
+    #[test]
+    fn docker_lifecycle_lock_uses_the_selected_storage_layout() {
+        let selected_run_root = PathBuf::from("/selected/config/run");
+        let layout = crate::storage::StorageLayout {
+            cache_root: PathBuf::from("/selected/config/cache"),
+            lib_root: PathBuf::from("/selected/config/lib"),
+            run_root: selected_run_root.clone(),
+            log_root: PathBuf::from("/selected/config/log"),
+            mode: "explicit-config",
+        };
+
+        assert_eq!(
+            docker_lifecycle_run_root(Some(layout), Path::new("/private/tmp/namespace")),
+            selected_run_root,
+            "systemd PrivateTmp must not split the selected host lifecycle lock"
+        );
     }
 
     #[test]
@@ -18608,116 +19940,25 @@ esac
     }
 
     #[test]
-    fn cleanup_removes_job_scoped_buildkit_daemons_and_state_volumes() {
+    fn teardown_leaves_unscoped_per_slot_buildkit_for_operator_cleanup() {
         let root = temp_dir();
         let temp = root.join("job-scope").join("temp");
         fs::create_dir_all(&temp).unwrap();
+        crate::buildkit::record_job_builder(&temp, "velnor-builder-requested-job-scope").unwrap();
         let spec = container(&temp);
-        let mut executor = DockerJobEngine::inert(BuildkitCleanupRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor.cleanup_job_buildkit(&spec).unwrap();
-        // Created + removing of this job's builder must both be force-removed,
-        // one docker rm per id. Batching those ids deadlocks Engine 29 DELETE.
 
-        for call in &executor.runner().calls {
-            if call.first().map(String::as_str) != Some("rm") {
-                continue;
-            }
-            let ids: Vec<_> = call
-                .iter()
-                .skip(1)
-                .filter(|arg| !arg.starts_with('-'))
-                .collect();
-            assert!(
-                ids.len() <= 1,
-                "cleanup_job_buildkit batched docker rm {call:?}"
-            );
-        }
-
+        assert!(
+            executor.runner().calls.is_empty(),
+            "pre-domain names have no Engine/storage proof and must not be auto-operated"
+        );
         assert_eq!(
-            executor.runner().calls,
-            vec![
-                crate::docker_lease::list_job_buildkit_format_args(),
-                crate::docker_lease::force_remove_one_container_args("bk1"),
-                crate::docker_lease::force_remove_one_container_args("bk2"),
-                vec![
-                    "volume",
-                    "ls",
-                    "--quiet",
-                    "--filter",
-                    "name=buildx_buildkit_velnor-builder-",
-                ]
-                .into_iter()
-                .map(String::from)
-                .collect::<Vec<_>>(),
-                crate::docker_lease::inspect_volume_identity_args(
-                    "buildx_buildkit_velnor-builder-job-scope0_state",
-                ),
-                crate::docker_lease::inspect_volume_identity_args(
-                    "buildx_buildkit_velnor-builder-job-scope0_state",
-                ),
-                crate::docker_lease::list_daemon_owned_job_format_args(),
-                vec![
-                    "volume",
-                    "rm",
-                    "--force",
-                    "buildx_buildkit_velnor-builder-job-scope0_state",
-                ]
-                .into_iter()
-                .map(String::from)
-                .collect::<Vec<_>>(),
-            ]
+            crate::buildkit::read_job_builders(&temp).unwrap(),
+            vec!["velnor-builder-requested-job-scope"]
         );
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn cleanup_recovers_recorded_custom_legacy_builder_without_job_id() {
-        let root = temp_dir();
-        let temp = root.join("job-scope").join("temp");
-        fs::create_dir_all(&temp).unwrap();
-        let custom_builder = "velnor-builder-requested-name-job-scope";
-        crate::buildkit::record_job_builder(&temp, custom_builder).unwrap();
-        let spec = container(&temp);
-        let mut executor = DockerJobEngine::inert(CustomHostBuildkitCleanupRunner::default());
-
-        // This models missing create output / a removed job container: the
-        // recorded builder name and exact ownership labels are the recovery
-        // handles, so teardown must not fall back to the default name.
-        executor.cleanup_job_buildkit(&spec).unwrap();
-
-        let calls = &executor.runner().calls;
-        let volume = "buildx_buildkit_velnor-builder-requested-name-job-scope0_state";
-        assert!(
-            calls
-                .iter()
-                .any(|args| args
-                    == &crate::docker_lease::force_remove_one_container_args("custom-bk"))
-        );
-        assert!(calls.iter().any(|args| {
-            args == &crate::docker_lease::force_remove_volume_args(&[volume.to_owned()])
-        }));
-        assert!(calls
-            .iter()
-            .any(|args| args == &crate::docker_lease::list_job_buildkit_format_args()));
-        assert!(calls.iter().all(|args| {
-            !args.iter().any(|arg| arg == "default-shadow")
-                && !args
-                    .iter()
-                    .any(|arg| arg == "buildx_buildkit_velnor-builder-job-scope-shadow0_state")
-        }));
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn cleanup_does_not_synthesize_persistent_shared_builder_from_scope() {
-        let scope = "shared-trusted-branch-repository";
-        let names = DockerJobEngine::<RecordingRunner>::job_buildkit_builder_names(&[], scope);
-
-        assert!(
-            names.is_empty(),
-            "persistent shared scopes must never become teardown targets: {names:?}"
-        );
     }
 
     #[test]
@@ -19750,7 +20991,7 @@ esac
     }
 
     #[test]
-    fn host_cleanup_preserves_persistent_buildkit_volume_for_dedicated_cleanup() {
+    fn host_cleanup_quarantines_unscoped_persistent_buildkit_volumes() {
         let root = temp_dir();
         let temp = root.join("job-scope").join("temp");
         fs::create_dir_all(&temp).unwrap();
@@ -19767,228 +21008,31 @@ esac
         let calls = &executor.runner().calls;
         let shared = "buildx_buildkit_velnor-builder-shared-repo_state";
         let dedicated = "buildx_buildkit_velnor-builder-job-scope0_state";
-        assert!(calls.iter().all(|args| {
-            !(args.first().map(String::as_str) == Some("volume")
-                && args.get(1).map(String::as_str) == Some("rm")
-                && args.iter().any(|arg| arg == shared))
-        }));
-        assert!(calls.iter().any(|args| {
-            args.first().map(String::as_str) == Some("volume")
-                && args.get(1).map(String::as_str) == Some("rm")
-                && args.iter().any(|arg| arg == dedicated)
-        }));
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn buildkit_cleanup_attests_exact_scope_and_volume_owner_on_host_runner() {
-        let root = temp_dir();
-        let temp = root.join("job-scope").join("temp");
-        fs::create_dir_all(&temp).unwrap();
-        let volume = "buildx_buildkit_velnor-builder-job-scope0_state";
-        let mut executor = DockerJobEngine::inert(HostBuildkitCleanupRunner {
-            calls: Vec::new(),
-            volume_identity: format!(
-                "{volume:?}\t\"local\"\t{{\"velnor.job-id\":\"job\",\"velnor.daemon-id\":\"test-daemon\"}}\n"
-            ),
-            live_job: false,
-        })
-        .with_docker_object_ids(crate::docker_lease::DockerObjectIds {
-            job_container: Some("job-container-id".into()),
-            ..Default::default()
-        });
-        let spec = container(&temp);
-
-        executor.cleanup_job_buildkit(&spec).unwrap();
-
-        let calls = &executor.runner().calls;
-        assert!(calls.iter().any(|args| {
-            args.first().map(String::as_str) == Some("volume")
-                && args.get(1).map(String::as_str) == Some("inspect")
-        }));
-        let expected_volume_remove = vec![
-            String::from("volume"),
-            String::from("rm"),
-            String::from("--force"),
-            volume.to_string(),
-        ];
-        assert!(calls.iter().any(|args| args == &expected_volume_remove));
-        assert!(calls.iter().all(|args| {
-            !args
-                .iter()
-                .any(|arg| arg.contains("job-scope0_state-shadow"))
-        }));
-        assert!(calls.iter().any(|args| {
-            args == &crate::docker_lease::force_remove_one_container_args("bk-good")
-        }));
-        assert!(calls
-            .iter()
-            .all(|args| { !args.iter().any(|arg| arg == "bk-collision") }));
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn buildkit_cleanup_continues_when_job_container_is_already_gone() {
-        let root = temp_dir();
-        let temp = root.join("job-scope").join("temp");
-        fs::create_dir_all(&temp).unwrap();
-        let volume = "buildx_buildkit_velnor-builder-job-scope0_state";
-        let mut executor = DockerJobEngine::inert(HostBuildkitCleanupRunner {
-            calls: Vec::new(),
-            volume_identity: format!(
-                "{volume:?}\t\"local\"\t{{\"velnor.job-id\":\"job\",\"velnor.daemon-id\":\"test-daemon\"}}\n"
-            ),
-            live_job: false,
-        });
-        let spec = container(&temp);
-
-        executor
-            .cleanup_job_buildkit(&spec)
-            .expect("exactly scoped BuildKit objects remain reclaimable after job removal");
-
-        assert!(executor
-            .runner()
-            .calls
-            .iter()
-            .any(|args| args == &crate::docker_lease::force_remove_one_container_args("bk-good")));
-        assert!(executor.runner().calls.iter().any(|args| {
-            args == &crate::docker_lease::force_remove_volume_args(&[volume.to_string()])
-        }));
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn buildkit_cleanup_refuses_replaced_volume_before_remove() {
-        let root = temp_dir();
-        let temp = root.join("job-scope").join("temp");
-        fs::create_dir_all(&temp).unwrap();
-        let volume = "buildx_buildkit_velnor-builder-job-scope0_state";
-        let mut executor = DockerJobEngine::inert(HostBuildkitCleanupRunner {
-            calls: Vec::new(),
-            volume_identity: format!(
-                "{volume:?}\t\"local\"\t{{\"velnor.job-id\":\"foreign-job\",\"velnor.daemon-id\":\"test-daemon\"}}\n"
-            ),
-            live_job: false,
-        })
-        .with_docker_object_ids(crate::docker_lease::DockerObjectIds {
-            job_container: Some("job-container-id".into()),
-            ..Default::default()
-        });
-        let spec = container(&temp);
-
-        let error = executor
-            .cleanup_job_buildkit(&spec)
-            .expect_err("foreign volume replacement must fail closed");
-        assert!(error.to_string().contains("ownership label mismatch"));
-        assert!(executor.runner().calls.iter().all(|args| {
-            !(args.first().map(String::as_str) == Some("volume")
-                && args.get(1).map(String::as_str) == Some("rm"))
-        }));
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn buildkit_cleanup_refreshes_live_job_before_state_volume_remove() {
-        let root = temp_dir();
-        let temp = root.join("job-scope").join("temp");
-        fs::create_dir_all(&temp).unwrap();
-        let volume = "buildx_buildkit_velnor-builder-job-scope0_state";
-        let mut executor = DockerJobEngine::inert(HostBuildkitCleanupRunner {
-            calls: Vec::new(),
-            volume_identity: format!(
-                "{volume:?}\t\"local\"\t{{\"velnor.job-id\":\"job\",\"velnor.daemon-id\":\"test-daemon\"}}\n"
-            ),
-            live_job: true,
-        });
-        let spec = container(&temp);
-
-        let error = executor
-            .cleanup_job_buildkit(&spec)
-            .expect_err("live-job refresh must fence state-volume deletion");
-        assert!(error.to_string().contains("live job"), "{error:#}");
-        assert!(executor.runner().calls.iter().all(|args| {
-            !(args.first().map(String::as_str) == Some("volume")
-                && args.get(1).map(String::as_str) == Some("rm"))
-        }));
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn cleanup_keeps_persistent_builders_and_their_state_volumes() {
-        struct PersistentCleanupRunner {
-            calls: Vec<Vec<String>>,
+        for unscoped in [shared, dedicated] {
+            assert!(calls.iter().all(|args| {
+                !(args.first().map(String::as_str) == Some("volume")
+                    && args.get(1).map(String::as_str) == Some("rm")
+                    && args.iter().any(|arg| arg == unscoped))
+            }));
         }
-        impl CommandRunner for PersistentCleanupRunner {
-            fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
-                let args: &[String] = &crate::execution::expand_env_file_args(args);
-                self.calls.push(args.to_vec());
-                let stdout = match args.first().map(String::as_str) {
-                    // The persistent daemon carries this job's label BY
-                    // DESIGN. Matching it here would destroy a daemon other
-                    // jobs share.
-                    Some("ps") => {
-                        "aaa111\tbuildx_buildkit_velnor-builder-shared-trusted-o_r0\tjob\ttrusted\tcreated\n"
-                    }
-                    Some("volume") if args.get(1).is_some_and(|arg| arg == "ls") => {
-                        "buildx_buildkit_velnor-builder-shared-trusted-o_r0_state\n"
-                    }
-                    _ => "",
-                };
-                Ok(CommandResult {
-                    code: 0,
-                    stdout: stdout.to_string(),
-                    stderr: String::new(),
-                })
-            }
-        }
-
-        let root = temp_dir();
-        let temp = root.join("job-scope").join("temp");
-        fs::create_dir_all(&temp).unwrap();
-        let spec = container(&temp);
-        crate::buildkit::record_job_builder(&temp, "velnor-builder-shared-trusted-o_r").unwrap();
-        let mut executor = DockerJobEngine::inert(PersistentCleanupRunner { calls: Vec::new() });
-
-        executor.cleanup_job_buildkit(&spec).unwrap();
-
-        let calls = &executor.runner().calls;
-        assert!(
-            calls
-                .iter()
-                .any(|args| args == &crate::docker_lease::list_job_buildkit_format_args()),
-            "teardown still lists builders: {calls:?}"
-        );
-        assert!(
-            !calls
-                .iter()
-                .any(|args| args.first().is_some_and(|arg| arg == "rm")
-                    && args.iter().any(|arg| arg == "aaa111")),
-            "teardown must never remove a persistent daemon: {calls:?}"
-        );
-        assert!(
-            !calls
-                .iter()
-                .any(|args| args.first().is_some_and(|arg| arg == "volume")
-                    && args.get(1).is_some_and(|arg| arg == "rm")),
-            "teardown must never remove a persistent state volume: {calls:?}"
-        );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
     #[test]
-    fn cleanup_aborts_docker_lease_before_buildkit_rm() {
+    fn cleanup_aborts_docker_lease_before_deferred_reclaim() {
         use std::path::PathBuf;
 
         struct LeaseOrderRunner {
             lease_path: PathBuf,
             job_rm_saw_lease: bool,
-            buildkit_saw_dead_lease: bool,
+            calls: Vec<Vec<String>>,
         }
 
         impl CommandRunner for LeaseOrderRunner {
             fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
                 let args: &[String] = &crate::execution::expand_env_file_args(args);
+                self.calls.push(args.to_vec());
                 let lease_live = self.lease_path.exists();
                 if args
                     == [
@@ -20004,13 +21048,6 @@ esac
                         "lease must stay mounted until the job container is removed"
                     );
                     self.job_rm_saw_lease = true;
-                }
-                if args == crate::docker_lease::list_job_buildkit_format_args() {
-                    assert!(
-                        !lease_live,
-                        "in-flight Engine Start must be aborted before BuildKit reclaim"
-                    );
-                    self.buildkit_saw_dead_lease = true;
                 }
                 Ok(CommandResult {
                     code: 0,
@@ -20032,11 +21069,12 @@ esac
         ));
         fs::create_dir_all(&lease_dir).unwrap();
         let lease_path = lease_dir.join("s.sock");
-        let lease = crate::docker_lease::DockerLeaseGuard::bind_to(
+        let lease = crate::docker_lease::DockerLeaseGuard::bind_to_with_test_volume_lock_root(
             lease_path.clone(),
             PathBuf::from("/nonexistent-host-docker.sock"),
             "job".into(),
             "daemon".into(),
+            lease_dir.join("volume-locks"),
         )
         .unwrap();
         assert!(
@@ -20047,7 +21085,7 @@ esac
         let mut executor = DockerJobEngine::inert(LeaseOrderRunner {
             lease_path: lease_path.clone(),
             job_rm_saw_lease: false,
-            buildkit_saw_dead_lease: false,
+            calls: Vec::new(),
         })
         .with_job_environment_guards(JobEnvironmentGuards {
             docker_lease: Some(lease),
@@ -20060,10 +21098,10 @@ esac
             runner.job_rm_saw_lease,
             "cleanup must remove the job container"
         );
-        assert!(
-            runner.buildkit_saw_dead_lease,
-            "cleanup must reclaim BuildKit after aborting the lease"
-        );
+        assert!(runner
+            .calls
+            .iter()
+            .all(|args| { args != &crate::docker_lease::list_job_buildkit_format_args() }));
         assert!(!lease_path.exists(), "cleanup must drop the lease socket");
         fs::remove_dir_all(temp).ok();
         fs::remove_dir_all(lease_dir).ok();
@@ -20120,11 +21158,12 @@ esac
         ));
         fs::create_dir_all(&lease_dir).unwrap();
         let lease_path = lease_dir.join("s.sock");
-        let lease = crate::docker_lease::DockerLeaseGuard::bind_to(
+        let lease = crate::docker_lease::DockerLeaseGuard::bind_to_with_test_volume_lock_root(
             lease_path.clone(),
             PathBuf::from("/nonexistent-host-docker.sock"),
             "job".into(),
             "daemon".into(),
+            lease_dir.join("volume-locks"),
         )
         .unwrap();
         let spec = container(&temp);
@@ -20731,14 +21770,14 @@ esac
                 &[("GITHUB_SHA".into(), "head-sha".into())],
                 &[(
                     "github".into(),
-                    serde_json::json!({
+                    context_from_json(serde_json::json!({
                         "event": {
                             "pull_request": {
                                 "base": { "sha": "base-sha" },
                                 "head": { "sha": "head-sha" }
                             }
                         }
-                    }),
+                    })),
                 )],
                 &temp,
             )
@@ -20787,9 +21826,9 @@ esac
             &[("GITHUB_SHA".into(), "head-sha".into())],
             &[(
                 "github".into(),
-                serde_json::json!({
+                context_from_json(serde_json::json!({
                     "event": {"repository": {"default_branch": "main"}}
-                }),
+                })),
             )],
         );
 
@@ -20895,9 +21934,12 @@ esac
     /// Versioned store directory a cache test uses to pre-seed or assert
     /// entries, mirroring `cache_store_dir` + `cache_scope_version` for the
     /// common case of an empty action ref and no runner os/arch in the env.
+    fn cache_scope_root(root: &Path, trust_scope: &str) -> PathBuf {
+        crate::storage::StorageLayout::from_prefix(root).cache_class(trust_scope, "caches")
+    }
+
     fn cache_scope_store_dir(root: &Path, repo_key: &str, path: &str) -> PathBuf {
-        root.join("_velnor_caches")
-            .join("untrusted")
+        cache_scope_root(root, crate::trust_scope::FAIL_CLOSED)
             .join(repo_key)
             .join(cache_scope_version("", "", "", path))
     }
@@ -20908,7 +21950,11 @@ esac
         let temp = root.join("job/temp");
         fs::create_dir_all(&temp).unwrap();
         let state = JobExecutionState::new_internal(
-            &[("GITHUB_REPOSITORY".into(), "Org/Repo.Name".into())],
+            &[
+                ("GITHUB_REPOSITORY".into(), "Org/Repo.Name".into()),
+                ("GITHUB_SERVER_URL".into(), "https://github.com".into()),
+                ("GITHUB_REPOSITORY_ID".into(), "42".into()),
+            ],
             &[],
             None,
             Some(temp.clone()),
@@ -20916,13 +21962,19 @@ esac
 
         let version = "cv1-abc123";
         let store = cache_store_dir(&state, version).unwrap();
+        let repository_key =
+            crate::store_catalog::repository_store_key("https://github.com", "42").unwrap();
 
-        // Trust/repo remain the outer boundary; the version segment sits below.
-        assert!(store.ends_with("_velnor_caches/untrusted/Org_Repo.Name/cv1-abc123"));
-        assert!(store.starts_with(root.join("_velnor_caches")));
+        // Production constructors define the trust boundary; repo and version
+        // remain below it.
+        let trust_root = cache_scope_root(&root, &state.trust_scope);
+        assert_eq!(
+            store.strip_prefix(trust_root).unwrap(),
+            Path::new(&repository_key).join("cv1-abc123")
+        );
         assert_eq!(
             store.parent().unwrap().file_name().unwrap(),
-            "Org_Repo.Name"
+            repository_key.as_str()
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -20933,7 +21985,11 @@ esac
         let temp = root.join("job/temp");
         fs::create_dir_all(&temp).unwrap();
         let mut state = JobExecutionState::new_internal(
-            &[("GITHUB_REPOSITORY".into(), "Org/Repo.Name".into())],
+            &[
+                ("GITHUB_REPOSITORY".into(), "Org/Repo.Name".into()),
+                ("GITHUB_SERVER_URL".into(), "https://github.com".into()),
+                ("GITHUB_REPOSITORY_ID".into(), "42".into()),
+            ],
             &[],
             None,
             Some(temp.clone()),
@@ -20941,19 +21997,23 @@ esac
 
         // A state without an installed scope fails closed to untrusted.
         let store = cache_store_dir(&state, "cv1-abc123").unwrap();
-        assert!(
-            store.ends_with("_velnor_caches/untrusted/Org_Repo.Name/cv1-abc123"),
-            "{}",
-            store.display()
+        assert_eq!(
+            store,
+            cache_scope_root(&root, crate::trust_scope::FAIL_CLOSED).join(format!(
+                "{}/cv1-abc123",
+                crate::store_catalog::repository_store_key("https://github.com", "42").unwrap()
+            ))
         );
 
         // The engine installs the job's admitted scope; the cache follows it.
         state.trust_scope = "trusted".into();
         let store = cache_store_dir(&state, "cv1-abc123").unwrap();
-        assert!(
-            store.ends_with("_velnor_caches/trusted/Org_Repo.Name/cv1-abc123"),
-            "{}",
-            store.display()
+        assert_eq!(
+            store,
+            cache_scope_root(&root, "trusted").join(format!(
+                "{}/cv1-abc123",
+                crate::store_catalog::repository_store_key("https://github.com", "42").unwrap()
+            ))
         );
 
         // A derived state is the same job: it carries the same trust.
@@ -21457,7 +22517,7 @@ esac
         assert!(results[0]
             .stderr
             .contains("outside Velnor-mapped job storage"));
-        assert!(!root.join("_velnor_caches").exists());
+        assert!(!cache_scope_store_dir(&root, "Test_Repo", "/etc/**").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -21488,7 +22548,7 @@ esac
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].exit_code, 1);
         assert!(results[0].stderr.contains("invalid cache glob syntax"));
-        assert!(!root.join("_velnor_caches").exists());
+        assert!(!cache_scope_store_dir(&root, "Test_Repo", paths).exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -21521,7 +22581,7 @@ esac
         let error = native_rust_cache_save("rust-cache", &action, &state).unwrap_err();
 
         assert!(error.to_string().contains("invalid cache glob syntax"));
-        assert!(!root.join("_velnor_caches").exists());
+        assert!(!cache_scope_store_dir(&root, "Test_Repo", "cache/[unterminated").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -22151,17 +23211,17 @@ esac
         let root = temp_dir();
         let restore_temp = root.join("restore-job/temp");
         let version = "cv1-testscope";
-        let entry = root.join(format!(
-            "_velnor_caches/trusted/Test_Repo/{version}/rustup-v2-linux-key"
-        ));
-        fs::create_dir_all(entry.join("0/toolchains/1.97.0/bin")).unwrap();
-        fs::create_dir_all(root.join("restore-job/home")).unwrap();
-        fs::write(entry.join(".velnor-key"), "rustup-v2-linux-key").unwrap();
-        fs::write(entry.join("0/toolchains/1.97.0/bin/cargo"), "partial").unwrap();
         let state = JobExecutionState::default()
             .with_env(vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())]);
         let mut state = state;
         state.temp_host = Some(restore_temp);
+        let entry = cache_store_dir(&state, version)
+            .unwrap()
+            .join("rustup-v2-linux-key");
+        fs::create_dir_all(entry.join("0/toolchains/1.97.0/bin")).unwrap();
+        fs::create_dir_all(root.join("restore-job/home")).unwrap();
+        fs::write(entry.join(".velnor-key"), "rustup-v2-linux-key").unwrap();
+        fs::write(entry.join("0/toolchains/1.97.0/bin/cargo"), "partial").unwrap();
 
         assert_eq!(
             find_cache_match(
@@ -22904,7 +23964,15 @@ type=sha,format=long,prefix=,enable=true"
                 timeout_minutes: None,
             },
         ];
-        let missing_builder = "ERROR: no builder \"velnor-builder-shared-unbounded-v1-trusted-unknown-unknown-repository\" found";
+        let missing_builder = format!(
+            "ERROR: no builder \"{}\" found",
+            crate::buildkit::persistent_builder_name(
+                "velnor-builder",
+                "trusted",
+                crate::buildkit::TRUST_TIER_UNKNOWN,
+                Some("unknown-repository"),
+            )
+        );
         let mut executor = DockerJobEngine::inert(StderrScriptRunner {
             inner: RecordingRunner {
                 calls: Vec::new(),
@@ -22912,7 +23980,7 @@ type=sha,format=long,prefix=,enable=true"
                 env: Vec::new(),
                 codes: vec![0, 0, 1],
             },
-            stderrs: vec![missing_builder.to_owned(); 3],
+            stderrs: vec![missing_builder; 3],
         })
         .with_trust_scope("trusted");
         let spec = container(&temp);
@@ -22935,11 +24003,13 @@ type=sha,format=long,prefix=,enable=true"
                 &[
                     (
                         "secrets".into(),
-                        serde_json::json!({ "DOCKER_TOKEN": "docker-token" }),
+                        context_from_json(serde_json::json!({ "DOCKER_TOKEN": "docker-token" })),
                     ),
                     (
                         "github".into(),
-                        serde_json::json!({ "event": { "pull_request": { "number": 42 } } }),
+                        context_from_json(
+                            serde_json::json!({ "event": { "pull_request": { "number": 42 } } }),
+                        ),
                     ),
                 ],
                 &temp,
@@ -22966,10 +24036,8 @@ type=sha,format=long,prefix=,enable=true"
             crate::buildkit::TRUST_TIER_UNKNOWN,
             Some("unknown-repository"),
         );
-        assert_eq!(
-            builder,
-            "velnor-builder-shared-unbounded-v1-trusted-unknown-unknown-repository"
-        );
+        assert!(builder
+            .starts_with("velnor-builder-shared-unbounded-v2-d0123456789abcdef0123456789abcdef-"));
         // Unbounded: the builder daemon has only the reviewed provenance
         // opt-out, with no cpu-*/memory= resource sizing.
         let create = calls
@@ -22978,13 +24046,24 @@ type=sha,format=long,prefix=,enable=true"
             .expect("buildx create call");
         assert!(create.contains("'--driver-opt' 'provenance-add-gha=false'"));
         assert!(!create.contains("cpu-period=") && !create.contains("memory="));
-        assert!(create.contains(&format!(
-            "'--config' '/__t/buildkitd-config-{builder}.toml'"
-        )));
+        assert!(create.contains("mktemp -d /dev/shm/velnor-buildkitd-config.XXXXXXXX"));
+        assert!(create.contains("--config \"$config_path\""));
+        let config_call = runner
+            .inner
+            .calls
+            .iter()
+            .position(|(_, args)| {
+                args.iter()
+                    .any(|arg| arg.contains("mktemp -d /dev/shm/velnor-buildkitd-config.XXXXXXXX"))
+            })
+            .expect("guest-private BuildKit config command");
         assert_eq!(
-            fs::read_to_string(temp.join(format!("buildkitd-config-{builder}.toml"))).unwrap(),
+            runner.inner.stdin[config_call],
             "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]\n"
         );
+        assert!(!temp
+            .join(format!("buildkitd-config-{builder}.toml"))
+            .exists());
         let login_call = runner.inner.calls.iter().position(|(program, args)| {
             program == "docker"
                 && args.join(" ").contains(
@@ -23348,6 +24427,679 @@ type=sha,format=long,prefix=,enable=true"
     }
 
     #[test]
+    fn native_docker_build_push_maps_enabled_provenance_and_disabled_sbom() {
+        let temp = temp_dir();
+        let action = NativeActionInvocation {
+            git_ref: String::new(),
+            adapter: NativeActionAdapter::DockerBuildPush,
+            cache_kind: None,
+            source_path: None,
+            inputs: [
+                ("provenance".into(), "true".into()),
+                ("sbom".into(), "false".into()),
+            ]
+            .into(),
+            env: Vec::new(),
+        };
+        let env = [
+            ("GITHUB_SERVER_URL".into(), "https://github.example".into()),
+            ("GITHUB_REPOSITORY".into(), "octocat/hello-world".into()),
+            ("GITHUB_RUN_ID".into(), "123456".into()),
+            ("GITHUB_RUN_ATTEMPT".into(), "2".into()),
+        ];
+        let state = JobExecutionState::new_with_workspace(&env, &[], &temp.join("work"), &temp);
+        let _responses = set_recording_runner_responses(vec![(
+            "docker buildx version".into(),
+            "github.com/docker/buildx v0.10.0".into(),
+        )]);
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+
+        executor
+            .native_docker_build_push(&container(&temp), &action, &state, DEFAULT_STEP_TIMEOUT)
+            .unwrap();
+
+        let calls = docker_call_strings(&executor.runner().calls);
+        let build = calls
+            .iter()
+            .find(|call| call.contains("'buildx' 'build'"))
+            .expect("native build-push invokes buildx");
+        assert!(
+            build.contains(
+                "'--attest' 'type=provenance,builder-id=https://github.example/octocat/hello-world/actions/runs/123456/attempts/2'"
+            ),
+            "{build}"
+        );
+        assert!(
+            build.contains("'--attest' 'type=sbom,disabled=true'"),
+            "{build}"
+        );
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_docker_build_push_maps_disabled_provenance_and_enabled_sbom() {
+        let temp = temp_dir();
+        let action = NativeActionInvocation {
+            git_ref: String::new(),
+            adapter: NativeActionAdapter::DockerBuildPush,
+            cache_kind: None,
+            source_path: None,
+            inputs: [
+                ("provenance".into(), "false".into()),
+                ("sbom".into(), "true".into()),
+            ]
+            .into(),
+            env: Vec::new(),
+        };
+        let state = JobExecutionState::new_with_workspace(&[], &[], &temp.join("work"), &temp);
+        let _responses = set_recording_runner_responses(vec![(
+            "docker buildx version".into(),
+            "github.com/docker/buildx v0.10.0".into(),
+        )]);
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+
+        executor
+            .native_docker_build_push(&container(&temp), &action, &state, DEFAULT_STEP_TIMEOUT)
+            .unwrap();
+
+        let calls = docker_call_strings(&executor.runner().calls);
+        let build = calls
+            .iter()
+            .find(|call| call.contains("'buildx' 'build'"))
+            .expect("native build-push invokes buildx");
+        assert!(
+            build.contains("'--attest' 'type=provenance,disabled=true'"),
+            "{build}"
+        );
+        assert!(
+            build.contains("'--attest' 'type=sbom,disabled=false'"),
+            "{build}"
+        );
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn build_push_ignores_all_explicit_attestations_before_buildx_010() {
+        let temp = temp_dir();
+        let action = NativeActionInvocation {
+            git_ref: String::new(),
+            adapter: NativeActionAdapter::DockerBuildPush,
+            cache_kind: None,
+            source_path: None,
+            inputs: [
+                ("provenance".into(), "true".into()),
+                (
+                    "sbom".into(),
+                    "generator=docker/scout-sbom-indexer:latest".into(),
+                ),
+                ("attests".into(), "type=custom,name=custom".into()),
+                ("outputs".into(), "type=docker".into()),
+            ]
+            .into(),
+            env: Vec::new(),
+        };
+        let state = build_push_state(&temp, Some(false));
+        let _responses = set_recording_runner_responses(vec![(
+            "docker buildx version".into(),
+            "github.com/docker/buildx v0.9.9".into(),
+        )]);
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+
+        executor
+            .native_docker_build_push(&container(&temp), &action, &state, DEFAULT_STEP_TIMEOUT)
+            .unwrap();
+
+        let calls = docker_call_strings(&executor.runner().calls);
+        let build = calls
+            .iter()
+            .find(|call| call.contains("'buildx' 'build'"))
+            .expect("native build-push invokes buildx");
+        assert!(!build.contains("'--attest'"), "{build}");
+        assert!(
+            !calls.iter().any(|call| call.contains("'buildx' 'inspect'")),
+            "Buildx below 0.10 must not inspect the builder: {calls:?}"
+        );
+        drop(_responses);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn build_push_sbom_preserves_generator_attributes() {
+        let temp = temp_dir();
+        let action = NativeActionInvocation {
+            git_ref: String::new(),
+            adapter: NativeActionAdapter::DockerBuildPush,
+            cache_kind: None,
+            source_path: None,
+            inputs: [
+                (
+                    "sbom".into(),
+                    "generator=docker/scout-sbom-indexer:latest".into(),
+                ),
+                ("outputs".into(), "type=docker".into()),
+            ]
+            .into(),
+            env: Vec::new(),
+        };
+        let state = build_push_state(&temp, Some(false));
+        let _responses = set_recording_runner_responses(vec![(
+            "docker buildx version".into(),
+            "github.com/docker/buildx v0.10.0".into(),
+        )]);
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+
+        executor
+            .native_docker_build_push(&container(&temp), &action, &state, DEFAULT_STEP_TIMEOUT)
+            .unwrap();
+
+        let build = docker_call_strings(&executor.runner().calls)
+            .into_iter()
+            .find(|call| call.contains("'buildx' 'build'"))
+            .expect("native build-push invokes buildx");
+        assert!(
+            build.contains("'--attest' 'type=sbom,generator=docker/scout-sbom-indexer:latest'"),
+            "{build}"
+        );
+        drop(_responses);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn build_push_explicit_provenance_attest_keeps_one_type_prefix() {
+        let temp = temp_dir();
+        let action = NativeActionInvocation {
+            git_ref: String::new(),
+            adapter: NativeActionAdapter::DockerBuildPush,
+            cache_kind: None,
+            source_path: None,
+            inputs: [
+                (
+                    "attests".into(),
+                    "type=provenance,mode=max,builder-id=https://provenance.example/run".into(),
+                ),
+                ("outputs".into(), "type=docker".into()),
+            ]
+            .into(),
+            env: Vec::new(),
+        };
+        let state = build_push_state(&temp, Some(false));
+        let _responses = set_recording_runner_responses(vec![(
+            "docker buildx version".into(),
+            "github.com/docker/buildx v0.10.0".into(),
+        )]);
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+
+        executor
+            .native_docker_build_push(&container(&temp), &action, &state, DEFAULT_STEP_TIMEOUT)
+            .unwrap();
+
+        let build = docker_call_strings(&executor.runner().calls)
+            .into_iter()
+            .find(|call| call.contains("'buildx' 'build'"))
+            .expect("native build-push invokes buildx");
+        assert!(
+            build.contains(
+                "'--attest' 'type=provenance,mode=max,builder-id=https://provenance.example/run'"
+            ),
+            "{build}"
+        );
+        assert_eq!(build.matches("type=provenance").count(), 1, "{build}");
+        drop(_responses);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn build_push_parses_quoted_provenance_attest_before_default_detection() {
+        let temp = temp_dir();
+        let action = NativeActionInvocation {
+            git_ref: String::new(),
+            adapter: NativeActionAdapter::DockerBuildPush,
+            cache_kind: None,
+            source_path: None,
+            inputs: [("attests".into(), "\"type=provenance,mode=max\"".into())].into(),
+            env: Vec::new(),
+        };
+        let state = build_push_state(&temp, Some(false));
+        let _responses =
+            set_recording_runner_responses(builder_supports_default_provenance_responses());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+
+        executor
+            .native_docker_build_push(&container(&temp), &action, &state, DEFAULT_STEP_TIMEOUT)
+            .unwrap();
+
+        let calls = docker_call_strings(&executor.runner().calls);
+        let build = calls
+            .iter()
+            .find(|call| call.contains("'buildx' 'build'"))
+            .expect("native build-push invokes buildx");
+        assert!(
+            build.contains(
+                "'--attest' 'type=provenance,mode=max,builder-id=https://github.example/octocat/hello-world/actions/runs/123456/attempts/2'"
+            ),
+            "{build}"
+        );
+        assert_eq!(build.matches("'--attest'").count(), 1, "{build}");
+        drop(_responses);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn build_push_provenance_mixed_case_booleans_are_attributes() {
+        for provenance in ["True", "TrUe", "FaLsE"] {
+            let temp = temp_dir();
+            let action = NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::DockerBuildPush,
+                cache_kind: None,
+                source_path: None,
+                inputs: [
+                    ("provenance".into(), provenance.into()),
+                    ("outputs".into(), "type=docker".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            };
+            let state = build_push_state(&temp, Some(false));
+            let _responses = set_recording_runner_responses(vec![(
+                "docker buildx version".into(),
+                "github.com/docker/buildx v0.10.0".into(),
+            )]);
+            let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+
+            executor
+                .native_docker_build_push(&container(&temp), &action, &state, DEFAULT_STEP_TIMEOUT)
+                .unwrap();
+
+            let build = docker_call_strings(&executor.runner().calls)
+                .into_iter()
+                .find(|call| call.contains("'buildx' 'build'"))
+                .expect("native build-push invokes buildx");
+            let expected = match provenance {
+                "True" => "type=provenance,builder-id=https://github.example/octocat/hello-world/actions/runs/123456/attempts/2".to_string(),
+                _ => format!(
+                    "type=provenance,{provenance},builder-id=https://github.example/octocat/hello-world/actions/runs/123456/attempts/2"
+                ),
+            };
+            assert!(build.contains(&expected), "{build}");
+            assert_eq!(build.matches("type=provenance").count(), 1, "{build}");
+            drop(_responses);
+            fs::remove_dir_all(temp).unwrap();
+        }
+    }
+
+    #[test]
+    fn buildx_attestation_csv_matches_go_boolean_values() {
+        for (boolean, expected) in [
+            ("1", "disabled=false"),
+            ("t", "disabled=false"),
+            ("T", "disabled=false"),
+            ("true", "disabled=false"),
+            ("TRUE", "disabled=false"),
+            ("True", "disabled=false"),
+            ("0", "disabled=true"),
+            ("f", "disabled=true"),
+            ("F", "disabled=true"),
+            ("false", "disabled=true"),
+            ("FALSE", "disabled=true"),
+            ("False", "disabled=true"),
+        ] {
+            assert_eq!(
+                buildx_resolve_attestation_attributes(boolean).unwrap(),
+                expected,
+                "boolean field {boolean:?}"
+            );
+        }
+
+        assert_eq!(
+            buildx_resolve_attestation_attributes(r#"type=sbom,"generator=one,two",t"#).unwrap(),
+            "type=sbom,generator=one,two,disabled=false"
+        );
+    }
+
+    #[test]
+    fn buildx_provenance_attrs_only_resolve_missing_builder_id() {
+        let resolved_identity = std::cell::Cell::new(false);
+        assert_eq!(
+            buildx_resolve_provenance_attributes(
+                "type=provenance,builder-id=https://provided.example/run",
+                || {
+                    resolved_identity.set(true);
+                    Ok("https://runner.example/run".into())
+                }
+            )
+            .unwrap(),
+            "type=provenance,builder-id=https://provided.example/run"
+        );
+        assert!(!resolved_identity.get());
+        assert_eq!(
+            buildx_resolve_provenance_attributes("type=provenance,mode=max", || {
+                Ok("https://runner.example/run".into())
+            })
+            .unwrap(),
+            "type=provenance,mode=max,builder-id=https://runner.example/run"
+        );
+    }
+
+    fn build_push_state(temp: &Path, private: Option<bool>) -> JobExecutionState {
+        let env = [
+            ("GITHUB_SERVER_URL".into(), "https://github.example".into()),
+            ("GITHUB_REPOSITORY".into(), "octocat/hello-world".into()),
+            ("GITHUB_RUN_ID".into(), "123456".into()),
+            ("GITHUB_RUN_ATTEMPT".into(), "2".into()),
+        ];
+        let mut repository = serde_json::Map::new();
+        if let Some(private) = private {
+            repository.insert("private".into(), serde_json::Value::Bool(private));
+        }
+        let context = [(
+            "github".into(),
+            context_from_json(serde_json::json!({"event": {"repository": repository}})),
+        )];
+        JobExecutionState::new_with_workspace(&env, &context, &temp.join("work"), temp)
+    }
+
+    fn builder_supports_default_provenance_responses() -> Vec<(String, String)> {
+        vec![
+            (
+                "docker buildx version".into(),
+                "github.com/docker/buildx v0.10.0".into(),
+            ),
+            (
+                "docker buildx inspect".into(),
+                "Name: default\nDriver: docker-container\nNodes:\nName: default0\nBuildKit version: v0.11.0\n".into(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn build_push_defaults_public_provenance_for_eligible_local_export() {
+        let temp = temp_dir();
+        let action = NativeActionInvocation {
+            git_ref: String::new(),
+            adapter: NativeActionAdapter::DockerBuildPush,
+            cache_kind: None,
+            source_path: None,
+            inputs: [("outputs".into(), "type=local,dest=out".into())].into(),
+            env: Vec::new(),
+        };
+        let state = build_push_state(&temp, Some(false));
+        let _responses =
+            set_recording_runner_responses(builder_supports_default_provenance_responses());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+
+        executor
+            .native_docker_build_push(&container(&temp), &action, &state, DEFAULT_STEP_TIMEOUT)
+            .unwrap();
+
+        let build = docker_call_strings(&executor.runner().calls)
+            .into_iter()
+            .find(|call| call.contains("'buildx' 'build'"))
+            .expect("native build-push invokes buildx");
+        assert!(
+            build.contains("'--attest' 'type=provenance,mode=max,builder-id=https://github.example/octocat/hello-world/actions/runs/123456/attempts/2'"),
+            "{build}"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn build_push_defaults_private_provenance_inline_minimum() {
+        let temp = temp_dir();
+        let action = NativeActionInvocation {
+            git_ref: String::new(),
+            adapter: NativeActionAdapter::DockerBuildPush,
+            cache_kind: None,
+            source_path: None,
+            inputs: [("outputs".into(), "type=registry".into())].into(),
+            env: Vec::new(),
+        };
+        let state = build_push_state(&temp, Some(true));
+        let _responses =
+            set_recording_runner_responses(builder_supports_default_provenance_responses());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+
+        executor
+            .native_docker_build_push(&container(&temp), &action, &state, DEFAULT_STEP_TIMEOUT)
+            .unwrap();
+
+        let build = docker_call_strings(&executor.runner().calls)
+            .into_iter()
+            .find(|call| call.contains("'buildx' 'build'"))
+            .expect("native build-push invokes buildx");
+        assert!(
+            build.contains("'--attest' 'type=provenance,mode=min,inline-only=true,builder-id=https://github.example/octocat/hello-world/actions/runs/123456/attempts/2'"),
+            "{build}"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn build_push_go_true_env_disables_default_provenance() {
+        let temp = temp_dir();
+        let action = NativeActionInvocation {
+            git_ref: String::new(),
+            adapter: NativeActionAdapter::DockerBuildPush,
+            cache_kind: None,
+            source_path: None,
+            inputs: BTreeMap::new(),
+            env: Vec::new(),
+        };
+        let env = [
+            ("GITHUB_SERVER_URL".into(), "https://github.example".into()),
+            ("GITHUB_REPOSITORY".into(), "octocat/hello-world".into()),
+            ("GITHUB_RUN_ID".into(), "123456".into()),
+            ("GITHUB_RUN_ATTEMPT".into(), "2".into()),
+            ("BUILDX_NO_DEFAULT_ATTESTATIONS".into(), "t".into()),
+        ];
+        let mut repository = serde_json::Map::new();
+        repository.insert("private".into(), serde_json::Value::Bool(false));
+        let context = [(
+            "github".into(),
+            context_from_json(serde_json::json!({"event": {"repository": repository}})),
+        )];
+        let state =
+            JobExecutionState::new_with_workspace(&env, &context, &temp.join("work"), &temp);
+        let _responses =
+            set_recording_runner_responses(builder_supports_default_provenance_responses());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+
+        executor
+            .native_docker_build_push(&container(&temp), &action, &state, DEFAULT_STEP_TIMEOUT)
+            .unwrap();
+
+        let calls = docker_call_strings(&executor.runner().calls);
+        let build = calls
+            .iter()
+            .find(|call| call.contains("'buildx' 'build'"))
+            .expect("native build-push invokes buildx");
+        assert!(!build.contains("type=provenance"), "{build}");
+        assert!(
+            calls.iter().any(|call| call.contains("'buildx' 'version'")),
+            "the action checks the Buildx gate before attestation inputs: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|call| call.contains("'buildx' 'inspect'")),
+            "the toolkit flag suppresses the default before builder inspection: {calls:?}"
+        );
+        drop(_responses);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn build_push_requires_buildkit_011_on_every_node() {
+        let cases = [
+            (
+                "v0.9.9",
+                "Name: default\nDriver: docker-container\nNodes:\nName: default0\nBuildKit version: v0.12.0\n",
+                false,
+            ),
+            (
+                "v0.10.1-rc.1",
+                "Name: default\nDriver: docker-container\nNodes:\nName: default0\nBuildKit version: v0.12.0\n",
+                false,
+            ),
+            (
+                "v0.10.0",
+                "Name: default\nDriver: docker-container\nNodes:\nName: default0\nBuildKit version: v0.10.9\n",
+                false,
+            ),
+            (
+                "v0.10.0",
+                "Name: default\nDriver: docker-container\nNodes:\nName: default0\nBuildKit version: v0.12.0-rc.1\n",
+                false,
+            ),
+            (
+                "v0.10.0",
+                "Name: default\nDriver: docker-container\nNodes:\nName: default0\nBuildKit version: v0.12.0\nName: default1\nBuildKit version: v0.10.9\n",
+                false,
+            ),
+            (
+                "v0.10.0",
+                "Name: default\nDriver: docker\nNodes:\nName: default0\nBuildKit version: v0.11.0\n",
+                false,
+            ),
+            (
+                "v0.10.0",
+                "Name: default\nDriver: docker\nNodes:\nName: default0\nBuildKit version: v0.11.0-moby\n",
+                true,
+            ),
+        ];
+        for (buildx_version, inspect, expect_default) in cases {
+            let temp = temp_dir();
+            let action = NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::DockerBuildPush,
+                cache_kind: None,
+                source_path: None,
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+            };
+            let state = build_push_state(&temp, Some(false));
+            let _responses = set_recording_runner_responses(vec![
+                (
+                    "docker buildx version".into(),
+                    format!("github.com/docker/buildx {buildx_version}"),
+                ),
+                ("docker buildx inspect".into(), inspect.into()),
+            ]);
+            let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+
+            executor
+                .native_docker_build_push(&container(&temp), &action, &state, DEFAULT_STEP_TIMEOUT)
+                .unwrap();
+
+            let calls = docker_call_strings(&executor.runner().calls);
+            let build = calls
+                .iter()
+                .find(|call| call.contains("'buildx' 'build'"))
+                .expect("native build-push invokes buildx");
+            assert_eq!(
+                build.contains("type=provenance,"),
+                expect_default,
+                "Buildx {buildx_version}; inspect={inspect:?}; build={build}"
+            );
+            if buildx_version == "v0.9.9" {
+                assert!(
+                    !calls.iter().any(|call| call.contains("'buildx' 'inspect'")),
+                    "Buildx below 0.10 must not inspect the builder: {calls:?}"
+                );
+            }
+            drop(_responses);
+            fs::remove_dir_all(temp).unwrap();
+        }
+    }
+
+    #[test]
+    fn build_push_probes_buildkit_image_when_inspect_omits_version() {
+        let temp = temp_dir();
+        let action = NativeActionInvocation {
+            git_ref: String::new(),
+            adapter: NativeActionAdapter::DockerBuildPush,
+            cache_kind: None,
+            source_path: None,
+            inputs: BTreeMap::new(),
+            env: Vec::new(),
+        };
+        let state = build_push_state(&temp, Some(false));
+        let _responses = set_recording_runner_responses(vec![
+            (
+                "docker buildx version".into(),
+                "github.com/docker/buildx v0.10.0".into(),
+            ),
+            (
+                "docker buildx inspect".into(),
+                "Name: default\nDriver: docker-container\nNodes:\nName: default0\n".into(),
+            ),
+            (
+                "docker inspect --format".into(),
+                "moby/buildkit:buildx-stable-1\n".into(),
+            ),
+            (
+                "docker run --rm moby/buildkit:buildx-stable-1 --version".into(),
+                "buildkitd github.com/moby/buildkit v0.11.0\n".into(),
+            ),
+        ]);
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+
+        executor
+            .native_docker_build_push(&container(&temp), &action, &state, DEFAULT_STEP_TIMEOUT)
+            .unwrap();
+
+        let calls = docker_call_strings(&executor.runner().calls);
+        let build = calls
+            .iter()
+            .find(|call| call.contains("'buildx' 'build'"))
+            .expect("native build-push invokes buildx");
+        assert!(build.contains("type=provenance,mode=max,"), "{build}");
+        assert!(calls.iter().any(|call| call
+            .contains("'inspect' '--format' '{{.Config.Image}}' 'buildx_buildkit_default0'")));
+        assert!(calls.iter().any(|call| {
+            call.contains("'run' '--rm' 'moby/buildkit:buildx-stable-1' '--version'")
+        }));
+        drop(_responses);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn build_push_suppresses_default_for_docker_exporter_or_load() {
+        for inputs in [
+            [("outputs".into(), "type=docker".into())].into(),
+            [("load".into(), "true".into())].into(),
+        ] {
+            let temp = temp_dir();
+            let action = NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::DockerBuildPush,
+                cache_kind: None,
+                source_path: None,
+                inputs,
+                env: Vec::new(),
+            };
+            let state = build_push_state(&temp, Some(false));
+            let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+
+            executor
+                .native_docker_build_push(&container(&temp), &action, &state, DEFAULT_STEP_TIMEOUT)
+                .unwrap();
+
+            let calls = docker_call_strings(&executor.runner().calls);
+            let build = calls
+                .iter()
+                .find(|call| call.contains("'buildx' 'build'"))
+                .expect("native build-push invokes buildx");
+            assert!(!build.contains("'type=provenance,"), "{build}");
+            assert!(
+                !calls.iter().any(|call| call.contains("'buildx' 'version'")),
+                "ineligible default must skip the Buildx/BuildKit probe: {calls:?}"
+            );
+            fs::remove_dir_all(temp).unwrap();
+        }
+    }
+
+    #[test]
     fn build_secret_file_is_private_and_ephemeral() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -23412,14 +25164,16 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 &[
                     (
                         "inputs".into(),
-                        serde_json::json!({
+                        context_from_json(serde_json::json!({
                             "image": "chainargos/rust-bitcoin-processor",
                             "publish": false
-                        }),
+                        })),
                     ),
                     (
                         "github".into(),
-                        serde_json::json!({ "event": { "pull_request": { "number": 42 } } }),
+                        context_from_json(
+                            serde_json::json!({ "event": { "pull_request": { "number": 42 } } }),
+                        ),
                     ),
                 ],
                 &temp,
@@ -23442,10 +25196,10 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             ],
             &[(
                 "inputs".into(),
-                serde_json::json!({
+                context_from_json(serde_json::json!({
                     "image": "chainargos/rust-bitcoin-processor",
                     "publish": true
-                }),
+                })),
             )],
         );
         let publish_action = NativeActionInvocation {
@@ -24222,6 +25976,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             display_name: "Checkout".into(),
             clone_url: "https://github.com/acme/repo.git".into(),
             version: Some("abc123".into()),
+            pull_request_fallback_ref: None,
             destination: PathBuf::from("/tmp/work"),
             token: Some("${{ steps.app-token.outputs.token }}".into()),
             fetch_depth: Some(1),
@@ -24261,6 +26016,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 display_name: String::new(),
                 clone_url: "https://github.com/jackin-project/jackin.git".into(),
                 version: Some("${{ steps.source.outputs.sha }}".into()),
+                pull_request_fallback_ref: None,
                 destination: temp.join("work"),
                 token: None,
                 fetch_depth: None,
@@ -24391,14 +26147,14 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             &[
                 (
                     "matrix".into(),
-                    serde_json::json!({
+                    context_from_json(serde_json::json!({
                         "target": "x86_64-apple-darwin",
                         "zigbuild": true
-                    }),
+                    })),
                 ),
                 (
                     "needs".into(),
-                    serde_json::json!({
+                    context_from_json(serde_json::json!({
                         "changes": {
                             "outputs": {
                                 "bitcoin-processor": "false",
@@ -24409,19 +26165,19 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                         "test-bitcoin-processor": {
                             "result": "failure"
                         }
-                    }),
+                    })),
                 ),
                 (
                     "inputs".into(),
-                    serde_json::json!({ "packages": "bitcoin-processor-app" }),
+                    context_from_json(serde_json::json!({ "packages": "bitcoin-processor-app" })),
                 ),
                 (
                     "secrets".into(),
-                    serde_json::json!({ "DOCKERHUB_TOKEN": "docker_secret" }),
+                    context_from_json(serde_json::json!({ "DOCKERHUB_TOKEN": "docker_secret" })),
                 ),
                 (
                     "github".into(),
-                    serde_json::json!({
+                    context_from_json(serde_json::json!({
                         "repository": "jackin-project/jackin",
                         "event": {
                             "pull_request": { "number": 42 },
@@ -24435,7 +26191,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                                 }
                             }
                         }
-                    }),
+                    })),
                 ),
             ],
         );
@@ -24577,9 +26333,9 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             &[],
             &[(
                 "matrix".into(),
-                serde_json::json!({
+                context_from_json(serde_json::json!({
                     "zigbuild": false
-                }),
+                })),
             )],
         );
         assert!(!false_state
@@ -24596,7 +26352,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             ],
             &[(
                 "github".into(),
-                serde_json::json!({
+                context_from_json(serde_json::json!({
                     "repository": "jackin-project/jackin",
                     "event": {
                         "workflow_run": {
@@ -24609,7 +26365,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                             "head_sha": "def456"
                         }
                     }
-                }),
+                })),
             )],
         );
 
@@ -24823,14 +26579,14 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             )],
             &[(
                 "needs".into(),
-                serde_json::json!({
+                context_from_json(serde_json::json!({
                     "check-version": {
                         "outputs": {
                             "version": "0.6.0"
                         },
                         "result": "success"
                     }
-                }),
+                })),
             )],
         );
 
@@ -24918,12 +26674,12 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         })];
         let context = vec![(
             "github".to_string(),
-            serde_json::json!({
+            context_from_json(serde_json::json!({
                 "event": {
                     "pull_request": { "number": 42 },
                     "workflow_run": { "head_sha": "abc123" }
                 }
-            }),
+            })),
         )];
         let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
@@ -25069,15 +26825,15 @@ fi"#
         let context = vec![
             (
                 "inputs".into(),
-                serde_json::json!({ "package": "bitcoin-processor-app" }),
+                context_from_json(serde_json::json!({ "package": "bitcoin-processor-app" })),
             ),
             (
                 "secrets".into(),
-                serde_json::json!({
+                context_from_json(serde_json::json!({
                     "DOCKERHUB_USERNAME": "docker_user",
                     "DOCKERHUB_TOKEN": "docker_secret",
                     "GITHUB_TOKEN": "ghs_token"
-                }),
+                })),
             ),
         ];
         let mut executor = DockerJobEngine::inert(OutputWritingRunner {
@@ -27573,10 +29329,10 @@ fi"#
         ];
         let context = vec![(
             "needs".into(),
-            serde_json::json!({
+            context_from_json(serde_json::json!({
                 "check": { "result": "success" },
                 "test-bitcoin-processor": { "result": "cancelled" }
-            }),
+            })),
         )];
         let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
@@ -28123,6 +29879,7 @@ fi"#
                 display_name: "Checkout".into(),
                 clone_url: "https://github.com/acme/missing.git".into(),
                 version: Some("missing".into()),
+                pull_request_fallback_ref: None,
                 destination: temp.join("work"),
                 token: None,
                 fetch_depth: Some(1),
@@ -29612,7 +31369,7 @@ fi"#
 
         let context_data = [(
             "github".into(),
-            serde_json::json!({"repository": "acme/repo"}),
+            context_from_json(serde_json::json!({"repository": "acme/repo"})),
         )];
         let results = executor
             .execute_ordered_steps_with_context(
@@ -29818,11 +31575,13 @@ fi"#
         let context = vec![
             (
                 "github".into(),
-                serde_json::json!({ "event": { "pull_request": { "number": 42 } } }),
+                context_from_json(
+                    serde_json::json!({ "event": { "pull_request": { "number": 42 } } }),
+                ),
             ),
             (
                 "secrets".into(),
-                serde_json::json!({ "DOCKER_TOKEN": "secret-token" }),
+                context_from_json(serde_json::json!({ "DOCKER_TOKEN": "secret-token" })),
             ),
         ];
         let mut executor = DockerJobEngine::inert(RecordingRunner::default());
@@ -30134,7 +31893,7 @@ fi"#
                 &runtime_env,
                 &[(
                     "matrix".into(),
-                    serde_json::json!({ "platform": "linux-amd64" }),
+                    context_from_json(serde_json::json!({ "platform": "linux-amd64" })),
                 )],
                 &temp,
             )
@@ -31282,7 +33041,8 @@ fi"#
 
     #[test]
     fn native_upload_pages_artifact_uploads_single_dereferenced_tar() {
-        let temp = temp_dir();
+        let job_dir = temp_dir();
+        let temp = job_dir.join("temp");
         let site = temp.join("work/site");
         fs::create_dir_all(site.join("assets")).unwrap();
         fs::create_dir_all(site.join(".github")).unwrap();
@@ -31345,14 +33105,15 @@ fi"#
         assert!(!archived.contains_key(Path::new(".github/workflow.yml")));
         assert!(!archived.contains_key(Path::new(".well-known/security.txt")));
 
-        fs::remove_dir_all(temp).unwrap();
+        fs::remove_dir_all(job_dir).unwrap();
     }
 
     #[test]
     fn create_pages_archive_streams_large_directory() {
         const FILE_COUNT: usize = 1_024;
 
-        let temp = temp_dir();
+        let job_dir = temp_dir();
+        let temp = job_dir.join("temp");
         let site = temp.join("site");
         let archive_path = temp.join("artifact.tar");
         fs::create_dir_all(&site).unwrap();
@@ -31371,28 +33132,41 @@ fi"#
             .filter(|entry| entry.header().entry_type().is_file())
             .count();
         assert_eq!(archived_files, FILE_COUNT);
-        fs::remove_dir_all(temp).unwrap();
+        fs::remove_dir_all(job_dir).unwrap();
     }
 
     #[test]
     fn pages_archive_staging_files_are_unique_siblings() {
-        let temp = temp_dir();
+        let job_dir = temp_dir();
+        let temp = job_dir.join("temp");
         fs::create_dir_all(&temp).unwrap();
-        let parent = crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination(
+        let parent = crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination_with_staging_parent(
             &temp,
             Path::new(""),
+            &job_dir,
         )
         .unwrap();
 
-        let (first_file, first_path) = create_pages_archive_staging_file(&temp, &parent).unwrap();
-        let (second_file, second_path) = create_pages_archive_staging_file(&temp, &parent).unwrap();
+        let first_file =
+            create_pages_archive_staging_file(&temp.join("artifact.tar"), &parent).unwrap();
+        let second_file =
+            create_pages_archive_staging_file(&temp.join("artifact.tar"), &parent).unwrap();
 
-        assert_ne!(first_path.name, second_path.name);
+        assert_eq!(
+            fs::read_dir(&job_dir)
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".velnor-pages-archive-"))
+                .count(),
+            2
+        );
         drop(first_file);
         drop(second_file);
-        drop(first_path);
-        drop(second_path);
-        fs::remove_dir_all(temp).unwrap();
+        assert_eq!(fs::read_dir(&job_dir).unwrap().count(), 1);
+        fs::remove_dir_all(job_dir).unwrap();
     }
 
     #[cfg(unix)]
@@ -31400,7 +33174,8 @@ fi"#
     fn create_pages_archive_rejects_destination_symlink() {
         use std::os::unix::fs::symlink;
 
-        let temp = temp_dir();
+        let job_dir = temp_dir();
+        let temp = job_dir.join("temp");
         let site = temp.join("site");
         let archive_path = temp.join("artifact.tar");
         let outside = temp.join("outside.tar");
@@ -31417,7 +33192,7 @@ fi"#
             .unwrap()
             .file_type()
             .is_symlink());
-        fs::remove_dir_all(temp).unwrap();
+        fs::remove_dir_all(job_dir).unwrap();
     }
 
     #[cfg(unix)]
@@ -31425,7 +33200,8 @@ fi"#
     fn create_pages_archive_failure_does_not_publish_partial_archive() {
         use std::os::unix::fs::symlink;
 
-        let temp = temp_dir();
+        let job_dir = temp_dir();
+        let temp = job_dir.join("temp");
         let site = temp.join("site");
         let archive_path = temp.join("artifact.tar");
         fs::create_dir_all(&site).unwrap();
@@ -31444,18 +33220,19 @@ fi"#
             fs::read_to_string(&archive_path).unwrap(),
             "previous archive\n"
         );
-        let staging_files = fs::read_dir(&temp)
+        let staging_files = fs::read_dir(&job_dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .filter(|name| name.to_string_lossy().starts_with(".velnor-pages-archive-"))
             .collect::<Vec<_>>();
         assert!(staging_files.is_empty(), "{staging_files:?}");
-        fs::remove_dir_all(temp).unwrap();
+        fs::remove_dir_all(job_dir).unwrap();
     }
 
     #[test]
     fn create_pages_archive_orders_sources_deterministically() {
-        let temp = temp_dir();
+        let job_dir = temp_dir();
+        let temp = job_dir.join("temp");
         let site = temp.join("site");
         let archive_path = temp.join("artifact.tar");
         fs::create_dir_all(site.join("z-dir")).unwrap();
@@ -31488,7 +33265,7 @@ fi"#
             ]
             .map(PathBuf::from)
         );
-        fs::remove_dir_all(temp).unwrap();
+        fs::remove_dir_all(job_dir).unwrap();
     }
 
     #[test]
@@ -31713,7 +33490,7 @@ fi"#
         ];
         let context_data = vec![(
             "github".into(),
-            serde_json::json!({
+            context_from_json(serde_json::json!({
                 "event": {
                     "pull_request": {
                         "number": 42,
@@ -31721,7 +33498,7 @@ fi"#
                     },
                     "repository": { "default_branch": "main" }
                 }
-            }),
+            })),
         )];
         let base_env = vec![
             ("GITHUB_EVENT_NAME".into(), "pull_request".into()),
@@ -31928,8 +33705,9 @@ fi"#
                     && !arg.starts_with("/var/run/docker.sock:")
             })
         } else {
-            args.iter()
-                .any(|arg| arg.ends_with(".sock:/var/run/docker.sock") && !arg.contains("vdl-"))
+            !args
+                .iter()
+                .any(|arg| arg.ends_with(":/var/run/docker.sock"))
         }
     }
 
@@ -32102,7 +33880,7 @@ fi"#
     }
 
     #[test]
-    fn native_setup_buildx_reuses_existing_builder() {
+    fn native_setup_buildx_requires_attested_lease_before_claiming() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ExecutableStep::Native {
@@ -32114,7 +33892,7 @@ fi"#
                 cache_kind: None,
                 source_path: None,
                 inputs: [
-                    ("name".into(), "jackin-construct".into()),
+                    ("name".into(), "Jackin-Construct".into()),
                     ("driver".into(), "docker-container".into()),
                 ]
                 .into(),
@@ -32124,41 +33902,48 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default())
+            .with_persistent_buildkit_lease_enforcement();
 
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
         let builder = crate::buildkit::persistent_builder_name(
-            "jackin-construct",
+            "Jackin-Construct",
             "untrusted",
             crate::buildkit::TRUST_TIER_UNKNOWN,
             Some("unknown-repository"),
         );
         assert_eq!(
             builder,
-            "velnor-builder-shared-unbounded-v1-untrusted-unknown-unknown-repository-jackin-construct"
+            crate::buildkit::persistent_builder_name(
+                "jackin-construct",
+                "untrusted",
+                crate::buildkit::TRUST_TIER_UNKNOWN,
+                Some("unknown-repository"),
+            ),
+            "uppercase requested names canonicalize to the same persisted builder"
         );
-        assert_eq!(results[0].exit_code, 0);
-        assert_eq!(results[0].state.outputs["name"], builder);
-        assert_eq!(results[0].state.env["BUILDX_BUILDER"], builder);
+        assert!(builder
+            .starts_with("velnor-builder-shared-unbounded-v2-d0123456789abcdef0123456789abcdef-"));
+        assert_eq!(results[0].exit_code, 1);
+        assert!(results[0]
+            .stderr
+            .contains("requires the Velnor host Docker lease to attest"));
         let calls = docker_call_strings(&executor.runner().calls);
-        let inspect_call = calls
-            .iter()
-            .position(|c| c.contains(&format!("'buildx' 'inspect' '{builder}'")))
-            .unwrap();
-        let use_call = calls
-            .iter()
-            .position(|c| c.contains(&format!("'buildx' 'use' '{builder}'")))
-            .unwrap();
-        assert!(inspect_call < use_call);
         assert!(
-            calls[inspect_call].starts_with("exec "),
-            "buildx state lives in the job container: {}",
-            calls[inspect_call]
+            !calls.iter().any(|call| call.contains("'buildx'")),
+            "unattested setup must make no Buildx requests: {calls:?}"
         );
-        assert!(!calls.iter().any(|c| c.contains("'buildx' 'create'")));
+        assert!(
+            !calls.iter().any(|call| call.contains("'volume' 'create'")),
+            "unattested setup must not create a state volume: {calls:?}"
+        );
+        assert!(
+            !temp.join("_velnor/buildkit-builders.json").exists(),
+            "unattested setup must not journal or claim a builder"
+        );
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -32253,14 +34038,89 @@ fi"#
         fs::remove_dir_all(temp).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn native_setup_buildx_ignores_host_temp_config_symlink() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        let domain = resolve_buildkit_domain(&spec.temp_host).unwrap();
+        let builder = crate::buildkit::persistent_builder_name_for_domain(
+            &domain.token,
+            "builder",
+            "untrusted",
+            crate::buildkit::TRUST_TIER_UNKNOWN,
+            spec.repository.as_deref(),
+        );
+        let config_name = format!("buildkitd-config-{}.toml", sanitize_artifact_name(&builder));
+        let target = temp.with_extension("outside-buildkit-config");
+        fs::write(&target, b"preserve this host file\n").unwrap();
+        std::os::unix::fs::symlink(&target, temp.join(&config_name)).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "buildx".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::DockerSetupBuildx,
+                cache_kind: None,
+                source_path: None,
+                inputs: [
+                    ("name".into(), "builder".into()),
+                    ("driver".into(), "docker-container".into()),
+                    (
+                        "buildkitd-config-inline".into(),
+                        "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]\n".into(),
+                    ),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+
+        let results = executor
+            .execute_ordered_steps(&spec, &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results[0].exit_code, 0, "{}", results[0].stderr);
+        assert!(
+            !executor.runner().calls.is_empty(),
+            "host temp symlinks must not block BuildKit setup"
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"preserve this host file\n");
+        assert!(fs::symlink_metadata(temp.join(&config_name))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        fs::remove_dir_all(temp).unwrap();
+        fs::remove_file(target).unwrap();
+    }
+
     #[test]
     fn native_setup_buildx_post_never_destroys_the_builder() {
         // Every cleanup/keep-state combination releases the hold host-side
         // and never runs `buildx rm`: destroying the builder here is what
         // kept every job's builds cold.
-        for (cleanup, keep_state) in [("false", "false"), ("true", "false"), ("true", "true")] {
+        for (cleanup, keep_state) in [
+            ("false", "false"),
+            ("false", "true"),
+            ("true", "false"),
+            ("true", "true"),
+        ] {
             let temp = temp_dir();
             fs::create_dir_all(&temp).unwrap();
+            let spec = container(&temp);
+            let domain = resolve_buildkit_domain(&spec.temp_host).unwrap();
+            let builder = crate::buildkit::persistent_builder_name_for_domain(
+                &domain.token,
+                "builder",
+                "untrusted",
+                crate::buildkit::TRUST_TIER_UNKNOWN,
+                spec.repository.as_deref(),
+            );
             let steps = vec![ExecutableStep::Native {
                 step_id: "buildx".into(),
                 display_name: String::new(),
@@ -32284,7 +34144,7 @@ fi"#
             let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
             let results = executor
-                .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+                .execute_ordered_steps(&spec, &steps, &[], &temp)
                 .unwrap();
 
             let calls = executor
@@ -32300,9 +34160,8 @@ fi"#
             let post = results.last().expect("post result");
             assert_eq!(post.exit_code, 0);
             assert!(
-                post.stdout.contains(
-                    "Releasing builder velnor-builder-shared-unbounded-v1-untrusted-unknown-unknown-repository-builder"
-                ),
+                post.stdout
+                    .contains(&format!("Releasing builder {builder} ")),
                 "post names the persistent builder: {:?}",
                 post.stdout
             );
@@ -32313,12 +34172,26 @@ fi"#
             );
             if cleanup == "false" {
                 assert!(
-                    post.stdout.contains("No temp dir or run root")
-                        || post.stdout.contains("cleanup disabled"),
-                    "cleanup=false leaves the daemon: {:?}",
+                    post.stdout
+                        .contains("No other holders: cleanup disabled, daemon left running"),
+                    "cleanup=false releases the hold without stopping the daemon: {:?}",
                     post.stdout
                 );
+                assert!(
+                    executor
+                        .runner()
+                        .calls
+                        .iter()
+                        .all(|(_, args)| { args.first().map(String::as_str) != Some("stop") }),
+                    "cleanup=false must not send a stop command: {calls:?}"
+                );
             }
+            assert!(
+                crate::buildkit::builder_holders(&domain.root, &builder, None)
+                    .unwrap()
+                    .is_empty(),
+                "post releases this job's claim (cleanup={cleanup}, keep-state={keep_state})"
+            );
             fs::remove_dir_all(temp).unwrap();
         }
     }
@@ -32497,27 +34370,29 @@ bitcoin-processor-app.push=${{ (github.event_name == 'push' && needs.changes.out
         let context = vec![
             (
                 "inputs".into(),
-                serde_json::json!({
+                context_from_json(serde_json::json!({
                     "app": "bitcoin-processor-app",
                     "image": "chainargos/rust-bitcoin-processor",
                     "publish": false,
                     "push": true
-                }),
+                })),
             ),
             (
                 "github".into(),
-                serde_json::json!({ "event": { "pull_request": { "number": 42 } } }),
+                context_from_json(
+                    serde_json::json!({ "event": { "pull_request": { "number": 42 } } }),
+                ),
             ),
             (
                 "needs".into(),
-                serde_json::json!({
+                context_from_json(serde_json::json!({
                     "changes": {
                         "outputs": {
                             "bake-targets": "bitcoin-processor-app",
                             "bitcoin-processor": "true"
                         }
                     }
-                }),
+                })),
             ),
         ];
         let mut executor = DockerJobEngine::inert(RecordingRunner::default());
@@ -32633,7 +34508,7 @@ bitcoin-processor-app.push=true")
         spec.docker_cli_host_path = Some("/usr/bin/docker".into());
         let context = vec![(
             "secrets".into(),
-            serde_json::json!({ "RENOVATE_TOKEN": "renovate-token" }),
+            context_from_json(serde_json::json!({ "RENOVATE_TOKEN": "renovate-token" })),
         )];
         let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
@@ -33935,11 +35810,11 @@ bitcoin-processor-app.push=true")
         fs::remove_dir_all(temp).unwrap();
     }
 
-    fn target_expression_context() -> Vec<(String, Value)> {
+    fn target_expression_context() -> Vec<(String, ContextValue)> {
         vec![
             (
                 "github".into(),
-                serde_json::json!({
+                context_from_json(serde_json::json!({
                     "repository": "jackin-project/jackin",
                     "event": {
                         "pull_request": { "number": 42 },
@@ -33953,11 +35828,11 @@ bitcoin-processor-app.push=true")
                             }
                         }
                     }
-                }),
+                })),
             ),
             (
                 "inputs".into(),
-                serde_json::json!({
+                context_from_json(serde_json::json!({
                     "app": "bitcoin-processor-app",
                     "image": "docker.io/chainargos/bitcoin-processor-app",
                     "package": "prod",
@@ -33965,11 +35840,11 @@ bitcoin-processor-app.push=true")
                     "publish": false,
                     "push": true,
                     "targets": "bitcoin-processor-app"
-                }),
+                })),
             ),
             (
                 "matrix".into(),
-                serde_json::json!({
+                context_from_json(serde_json::json!({
                     "arch": "x86_64",
                     "os": "ubuntu-latest",
                     "platform": "linux-amd64",
@@ -33977,11 +35852,11 @@ bitcoin-processor-app.push=true")
                     "target": "x86_64-unknown-linux-gnu",
                     "zigbuild": true,
                     "zigbuild_target": "x86_64-unknown-linux-gnu"
-                }),
+                })),
             ),
             (
                 "needs".into(),
-                serde_json::json!({
+                context_from_json(serde_json::json!({
                     "changes": {
                         "outputs": {
                             "bake-targets": "bitcoin-processor-app",
@@ -34032,18 +35907,18 @@ bitcoin-processor-app.push=true")
                     "test-legacy-grpc-server": { "result": "success" },
                     "test-tron-grpc-server": { "result": "success" },
                     "test-tron-processor": { "result": "success" }
-                }),
+                })),
             ),
             (
                 "secrets".into(),
-                serde_json::json!({
+                context_from_json(serde_json::json!({
                     "DOCKERHUB_TOKEN": "secret",
                     "DOCKERHUB_USERNAME": "user",
                     "GH_READONLY_TOKEN": "secret",
                     "GITHUB_TOKEN": "secret",
                     "HOMEBREW_TAP_TOKEN": "secret",
                     "RENOVATE_TOKEN": "secret"
-                }),
+                })),
             ),
         ]
     }
@@ -34774,6 +36649,127 @@ bitcoin-processor-app.push=true")
         );
         assert_eq!(log.order, 3);
         assert_eq!(log.display_name, "Run tests");
+    }
+
+    #[test]
+    fn generated_display_names_are_masked_before_start_and_completion_publication() {
+        let dynamic_value = "endpoint-only-value prior-dynamic-mask";
+        let mut state = JobExecutionState::new_with_context(
+            &[],
+            &[(
+                "secrets".to_owned(),
+                ContextValue::Object {
+                    case_sensitive: false,
+                    entries: vec![(
+                        "name".to_owned(),
+                        ContextValue::String(dynamic_value.to_owned()),
+                    )],
+                },
+            )],
+        );
+        state.masks.push("prior-dynamic-mask".to_owned());
+        let template = "${{ secrets.name }}";
+        let engine = DockerJobEngine::inert(RecordingRunner::default())
+            .with_secret_masks(vec!["endpoint-only-value".to_owned()])
+            .with_explicit_raw_display_names(vec![("raw-step".into(), template.into())]);
+
+        let generated = engine.resolve_display_name("generated-step", template, &state, true);
+        assert_eq!(generated, "*** ***");
+        let composite = engine.resolve_display_name("composite-step", template, &state, false);
+        assert_eq!(composite, "*** ***");
+        let literal = engine.resolve_display_name(
+            "literal-step",
+            "Run endpoint-only-value prior-dynamic-mask",
+            &state,
+            true,
+        );
+        assert_eq!(literal, "Run *** ***", "literal token is fully evaluable");
+        let missing_required_context = engine.resolve_display_name(
+            "missing-context-step",
+            "${{ secrets.name }} ${{ matrix.missing }}",
+            &state,
+            true,
+        );
+        assert_eq!(
+            missing_required_context, "${{ secrets.name }} ${{ matrix.missing }}",
+            "missing required root keeps raw fallback and does not mask it"
+        );
+        let explicit = engine.resolve_display_name("raw-step", template, &state, true);
+        assert_eq!(explicit, template, "explicit Action.DisplayName stays raw");
+
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        let engine = engine.with_step_start_sender(BoundedStepSender::new(sender));
+        let mut order = 0;
+        let started_at = engine.emit_step_started("opaque-step-id", generated.clone(), &mut order);
+        let event = receiver.try_recv().unwrap();
+        assert_eq!(event.step_id, "opaque-step-id");
+        assert_eq!(event.display_name, "*** ***");
+
+        let result = StepExecutionResult {
+            exit_code: 0,
+            state: StepCommandState::default(),
+            skipped: false,
+            failure_ignored: false,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        let log = step_log_with_name(
+            "opaque-step-id",
+            &generated,
+            order,
+            &started_at,
+            "2026-10-04T00:00:00Z",
+            &result,
+            &[],
+            false,
+        );
+        assert_eq!(log.step_id, "opaque-step-id");
+        assert_eq!(log.display_name, "*** ***");
+        assert_eq!(post_step_display_name(&generated), "Post *** ***");
+    }
+
+    #[test]
+    fn recovered_workflow_name_keeps_generated_provenance_and_is_masked() {
+        let mut job = crate::job_message::AgentJobRequestMessage::from_value(serde_json::json!({
+            "Steps": [{ "Type": 4, "Id": "44444444-4444-4444-4444-444444444444" }]
+        }))
+        .unwrap();
+        let recovered = "${{ secrets.name }}";
+        {
+            let step = job.steps[0].as_mut().unwrap();
+            assert!(step.display_name.is_none());
+            assert!(step.display_name_token.is_none());
+            assert!(!step.display_name_is_explicit);
+            crate::runner::set_recovered_workflow_step_display_name(step, recovered);
+            assert!(!step.display_name_is_explicit);
+        }
+
+        let explicit_names = crate::runner::explicit_raw_display_name_pairs(&job);
+        assert!(
+            explicit_names.is_empty(),
+            "a locally recovered YAML name is not raw Action.DisplayName"
+        );
+        let state = JobExecutionState::new_with_context(
+            &[],
+            &[(
+                "secrets".to_owned(),
+                ContextValue::Object {
+                    case_sensitive: false,
+                    entries: vec![(
+                        "name".to_owned(),
+                        ContextValue::String("endpoint-only-value".to_owned()),
+                    )],
+                },
+            )],
+        );
+        let engine = DockerJobEngine::inert(RecordingRunner::default())
+            .with_secret_masks(vec!["endpoint-only-value".to_owned()])
+            .with_explicit_raw_display_names(explicit_names);
+        assert_eq!(
+            engine.resolve_display_name("run", recovered, &state, true),
+            "***",
+            "the recovered expression resolves, then endpoint secret is masked"
+        );
     }
 
     // ── host_docker_env ───────────────────────────────────────────────────

@@ -19,14 +19,24 @@ pub struct JobRunnerIdentity {
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
+pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Result<Vec<(String, String)>> {
     job_runtime_env_with_identity(job, None)
 }
 
 pub(crate) fn job_runtime_env_with_identity(
     job: &AgentJobRequestMessage,
     identity: Option<&JobRunnerIdentity>,
-) -> Vec<(String, String)> {
+) -> Result<Vec<(String, String)>> {
+    let local_cache_url = std::env::var("VELNOR_ACTIONS_CACHE_URL").ok();
+    job_runtime_env_with_identity_and_cache_url(job, identity, local_cache_url.as_deref())
+}
+
+fn job_runtime_env_with_identity_and_cache_url(
+    job: &AgentJobRequestMessage,
+    identity: Option<&JobRunnerIdentity>,
+    local_cache_url: Option<&str>,
+) -> Result<Vec<(String, String)>> {
+    let system_connection = job.system_connection_single_or_default()?;
     let resolved = resolved_identity(identity);
     let mut env = vec![
         ("CI".to_string(), "true".to_string()),
@@ -176,56 +186,34 @@ pub(crate) fn job_runtime_env_with_identity(
         job.variable("github.graphql_url"),
         "https://api.github.com/graphql",
     );
-    push_var(
-        &mut env,
-        "GITHUB_TOKEN",
-        job.variable("system.github.token"),
-    );
 
-    if let Some(endpoint) = job.system_connection() {
+    if let Some(endpoint) = system_connection {
         if let Some(url) = endpoint.url.as_deref() {
             set_env(&mut env, "ACTIONS_RUNTIME_URL", url);
         }
-        if let Some(token) = job_runtime_token(job) {
+        if let Some(token) = endpoint_access_token(endpoint) {
             set_env(&mut env, "ACTIONS_RUNTIME_TOKEN", token);
         }
+        push_endpoint_data(&mut env, endpoint, "CacheServerUrl", "ACTIONS_CACHE_URL");
         push_endpoint_data(
             &mut env,
             endpoint,
-            &["CacheServerUrl", "cacheServerUrl", "ACTIONS_CACHE_URL"],
-            "ACTIONS_CACHE_URL",
-        );
-        push_endpoint_data(
-            &mut env,
-            endpoint,
-            &[
-                "PipelinesServiceUrl",
-                "pipelinesServiceUrl",
-                "ACTIONS_RUNTIME_URL",
-            ],
+            "PipelinesServiceUrl",
             "ACTIONS_RUNTIME_URL",
         );
         if push_endpoint_data(
             &mut env,
             endpoint,
-            &[
-                "GenerateIdTokenUrl",
-                "generateIdTokenUrl",
-                "ACTIONS_ID_TOKEN_REQUEST_URL",
-            ],
+            "GenerateIdTokenUrl",
             "ACTIONS_ID_TOKEN_REQUEST_URL",
-        ) && let Some(token) = job_runtime_token(job)
+        ) && let Some(token) = endpoint_access_token(endpoint)
         {
             set_env(&mut env, "ACTIONS_ID_TOKEN_REQUEST_TOKEN", token);
         }
         push_endpoint_data(
             &mut env,
             endpoint,
-            &[
-                "ResultsServiceUrl",
-                "resultsServiceUrl",
-                "ACTIONS_RESULTS_URL",
-            ],
+            "ResultsServiceUrl",
             "ACTIONS_RESULTS_URL",
         );
     }
@@ -236,13 +224,11 @@ pub(crate) fn job_runtime_env_with_identity(
     // token remains the cache bearer and is also retained for Results Service;
     // never replace it with an operator-wide credential.
     if !env.iter().any(|(name, _)| name == "ACTIONS_CACHE_URL") {
-        let configured_url = std::env::var("VELNOR_ACTIONS_CACHE_URL").ok();
         let has_job_token = env
             .iter()
             .any(|(name, value)| name == "ACTIONS_RUNTIME_TOKEN" && !value.is_empty());
-        if let Some(url) = configured_cache_url(configured_url.as_deref(), has_job_token) {
+        if let Some(url) = configured_cache_url(local_cache_url, has_job_token) {
             set_env(&mut env, "ACTIONS_CACHE_URL", &url);
-            env.push(("ACTIONS_CACHE_SERVICE_V2".to_string(), "True".to_string()));
         }
     }
     if job.variable_bool("actions_uses_cache_service_v2") == Some(true) {
@@ -266,7 +252,7 @@ pub(crate) fn job_runtime_env_with_identity(
         env.push((name, value));
     }
 
-    env
+    Ok(env)
 }
 
 /// Generated workflows use runner-owned cache state and declare no workflow
@@ -289,66 +275,89 @@ pub(crate) fn job_environment_variables(job: &AgentJobRequestMessage) -> Vec<(St
 pub(crate) fn environment_token_pairs(value: &Value) -> Vec<(String, String)> {
     match value {
         Value::Object(object) => environment_object_pairs(object),
-        Value::Array(values) => values.iter().flat_map(environment_token_pairs).collect(),
         _ => Vec::new(),
     }
 }
 
 fn environment_object_pairs(object: &Map<String, Value>) -> Vec<(String, String)> {
-    if let (Some(name), Some(value)) = (object.get("name"), object.get("value"))
-        && let Some(name) = environment_name(name)
-    {
-        return vec![(name.to_string(), environment_value(value))];
+    match environment_token_type(object) {
+        // JobExtension evaluates each EnvironmentVariables entry as a
+        // step-environment TemplateToken, whose converter requires a mapping.
+        // Missing `type` means StringToken; malformed, scalar, sequence, and
+        // null tokens cannot define environment variable names.
+        Some(2) => object_member(object, &["map"])
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .flat_map(environment_pair_value)
+            .collect(),
+        Some(_) | None => Vec::new(),
     }
-
-    for pair_key in ["pairs", "mapping", "map"] {
-        if let Some(Value::Array(pairs)) = object.get(pair_key) {
-            return pairs.iter().flat_map(environment_pair_value).collect();
-        }
-    }
-
-    object
-        .iter()
-        .filter(|(name, _)| !name.eq_ignore_ascii_case("type"))
-        .map(|(name, value)| (name.clone(), environment_value(value)))
-        .collect()
 }
 
 fn environment_pair_value(value: &Value) -> Vec<(String, String)> {
     match value {
         Value::Object(object) => {
             if let (Some(key), Some(value)) = (
-                object
-                    .get("key")
-                    .or_else(|| object.get("name"))
-                    .or_else(|| object.get("Key")),
-                object.get("value").or_else(|| object.get("Value")),
+                object_member(object, &["key"]),
+                object_member(object, &["value"]),
             ) && let Some(key) = environment_name(key)
             {
-                return vec![(key.to_string(), environment_value(value))];
+                return vec![(key, environment_value(value))];
             }
-            environment_object_pairs(object)
+            Vec::new()
         }
-        Value::Array(pair) if pair.len() == 2 => pair[0]
-            .as_str()
-            .or_else(|| environment_name(&pair[0]))
-            .map(|key| vec![(key.to_string(), environment_value(&pair[1]))])
-            .unwrap_or_default(),
         _ => Vec::new(),
     }
 }
 
-fn environment_name(value: &Value) -> Option<&str> {
-    value.as_str().or_else(|| {
-        value.as_object().and_then(|object| {
-            object
-                .get("value")
-                .or_else(|| object.get("Value"))
-                .or_else(|| object.get("lit"))
-                .or_else(|| object.get("Lit"))
-                .and_then(environment_name)
-        })
-    })
+/// TemplateToken object members follow CLR's case-insensitive property
+/// lookup. This helper is used only for schema members; mapping keys
+/// themselves are returned untouched and retain their original spelling.
+fn object_member<'a>(object: &'a Map<String, Value>, names: &[&str]) -> Option<&'a Value> {
+    object
+        .iter()
+        .find(|(member, _)| names.iter().any(|name| member.eq_ignore_ascii_case(name)))
+        .map(|(_, value)| value)
+}
+
+fn environment_token_type(object: &Map<String, Value>) -> Option<i64> {
+    token_discriminator(object, "type", 0)
+}
+
+fn token_discriminator(object: &Map<String, Value>, member: &str, default: i64) -> Option<i64> {
+    match object_member(object, &[member]) {
+        None => Some(default),
+        Some(Value::Number(value)) if !value.is_f64() => value.as_i64(),
+        Some(_) => None, // The pinned converter returns null for non-integers.
+    }
+}
+
+fn environment_name(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Object(object) => {
+            match token_discriminator(object, "type", 0) {
+                Some(0) => object_member(object, &["lit"]).and_then(token_scalar_string),
+                Some(5) => Some(
+                    object_member(object, &["bool"])
+                        .and_then(token_bool_value)
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+                Some(6) => Some(
+                    object_member(object, &["num"])
+                        .and_then(token_number_string)
+                        .unwrap_or_else(|| crate::expression::value::format_number(0.0)),
+                ),
+                // Expressions need the job expression context to determine
+                // their key; structured, file-table, null, and invalid tokens
+                // cannot name an environment variable here.
+                Some(_) | None => None,
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Array(_) => None,
+    }
 }
 
 fn environment_value(value: &Value) -> String {
@@ -356,30 +365,66 @@ fn environment_value(value: &Value) -> String {
         Value::Null => String::new(),
         Value::String(value) => value.clone(),
         Value::Bool(value) => value.to_string(),
-        Value::Number(value) => value.to_string(),
+        Value::Number(_) => token_number_string(value).unwrap_or_default(),
         Value::Object(object) => {
-            // Expression template tokens ({"expr": "...", "type": 3}) arrive
-            // UNevaluated from the broker — `env: X: ${{ secrets.Y }}` is an
-            // expr token. Render back to `${{ ... }}` so the executor's
-            // expression resolver (which holds the secrets context) evaluates
-            // it; returning "" here silently blanked every such variable and
-            // skipped `if: env.X != ''` steps the GitHub lane runs.
-            if let Some(expr) = object
-                .get("expr")
-                .or_else(|| object.get("Expr"))
-                .and_then(Value::as_str)
-            {
-                return format!("${{{{ {expr} }}}}");
+            match token_discriminator(object, "type", 0) {
+                Some(3) => object_member(object, &["expr"])
+                    .and_then(token_scalar_string)
+                    .filter(|expr| !expr.is_empty())
+                    .map(|expr| format!("${{{{ {expr} }}}}"))
+                    .unwrap_or_default(),
+                Some(5) => object_member(object, &["bool"])
+                    .and_then(token_bool_value)
+                    .unwrap_or_default()
+                    .to_string(),
+                Some(6) => object_member(object, &["num"])
+                    .and_then(token_number_string)
+                    .unwrap_or_else(|| crate::expression::value::format_number(0.0)),
+                Some(7) => String::new(),
+                Some(0) => object_member(object, &["lit"])
+                    .and_then(token_scalar_string)
+                    .unwrap_or_default(),
+                // Environment values are strings in the runner contract.
+                // Structured, file-table, and invalid tokens have no scalar
+                // representation here, so retain the fail-closed empty value.
+                Some(_) | None => String::new(),
             }
-            object
-                .get("value")
-                .or_else(|| object.get("Value"))
-                .or_else(|| object.get("lit"))
-                .or_else(|| object.get("Lit"))
-                .map(environment_value)
-                .unwrap_or_default()
         }
         _ => String::new(),
+    }
+}
+
+fn token_scalar_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Bool(value) => Some(if *value { "True" } else { "False" }.to_owned()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Null => None,
+        Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
+fn token_number_string(value: &Value) -> Option<String> {
+    let number = match value {
+        Value::Number(value) => value.as_f64()?,
+        Value::Bool(value) => f64::from(u8::from(*value)),
+        Value::String(value) => value.trim().replace(',', "").parse::<f64>().ok()?,
+        Value::Null | Value::Array(_) | Value::Object(_) => return None,
+    };
+    Some(crate::expression::value::format_number(number))
+}
+
+fn token_bool_value(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(value) => Some(*value),
+        Value::String(value) if value.trim().eq_ignore_ascii_case("true") => Some(true),
+        Value::String(value) if value.trim().eq_ignore_ascii_case("false") => Some(false),
+        Value::Number(value) => value
+            .as_i64()
+            .map(|value| value != 0)
+            .or_else(|| value.as_u64().map(|value| value != 0))
+            .or_else(|| value.as_f64().map(|value| value != 0.0)),
+        Value::Null | Value::String(_) | Value::Array(_) | Value::Object(_) => None,
     }
 }
 
@@ -414,7 +459,9 @@ pub(crate) fn protocol_job_queue_time(job: &AgentJobRequestMessage) -> Option<&s
         .filter(|value| !value.trim().is_empty())
         .or_else(|| {
             job.variables
-                .get("system.queueTime")
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("system.queueTime"))
+                .map(|(_, value)| value)
                 .and_then(|value| value.value.as_deref())
                 .filter(|value| !value.trim().is_empty())
         })
@@ -461,20 +508,37 @@ fn configured_cache_url(url: Option<&str>, has_job_token: bool) -> Option<String
 /// line per token at request time).
 pub(crate) fn job_cache_session(
     job: &AgentJobRequestMessage,
-) -> Option<(String, crate::gha_cache::CacheIdentity)> {
-    let token = job
-        .system_connection()
+) -> Result<Option<(String, crate::gha_cache::CacheIdentity)>> {
+    let system_connection = job.system_connection_single_or_default()?;
+    let Some(token) = system_connection
         .and_then(endpoint_access_token)
-        .filter(|token| !token.is_empty())?;
-    let repository = job.variable("github.repository")?;
-    let git_ref = job.variable("github.ref")?;
+        .filter(|token| !token.is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(server_url) = job.variable("github.server_url") else {
+        return Ok(None);
+    };
+    let Some(repository_id) = job.variable("github.repository_id") else {
+        return Ok(None);
+    };
+    let Some(git_ref) = job.variable("github.ref") else {
+        return Ok(None);
+    };
     let base_ref = job
         .variable("github.base_ref")
         .filter(|base| !base.is_empty());
     let trust = crate::trust_class::TrustClass::derive(job);
-    let identity =
-        crate::gha_cache::CacheIdentity::new(repository, git_ref, base_ref, trust).ok()?;
-    Some((token.to_owned(), identity))
+    let Ok(identity) = crate::gha_cache::CacheIdentity::for_repository(
+        server_url,
+        repository_id,
+        git_ref,
+        base_ref,
+        trust,
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some((token.to_owned(), identity)))
 }
 
 fn push_var(env: &mut Vec<(String, String)>, name: &str, value: Option<&str>) {
@@ -535,10 +599,10 @@ fn repository_owner(repository: &str) -> Option<String> {
 fn push_endpoint_data(
     env: &mut Vec<(String, String)>,
     endpoint: &crate::job_message::ServiceEndpoint,
-    keys: &[&str],
+    key: &str,
     env_name: &str,
 ) -> bool {
-    if let Some(value) = map_get_any_case(&endpoint.data, keys).filter(|value| !value.is_empty()) {
+    if let Some(value) = endpoint.data_string(key).filter(|value| !value.is_empty()) {
         set_env(env, env_name, value);
         return true;
     }
@@ -549,32 +613,18 @@ fn push_endpoint_data(
 /// exact value injected as `ACTIONS_RUNTIME_TOKEN`. The GHA cache service
 /// binds this credential to the job's cache identity at admission, so both
 /// sides must read it through this one accessor.
-pub(crate) fn job_runtime_token(job: &AgentJobRequestMessage) -> Option<&str> {
-    job.system_connection().and_then(endpoint_access_token)
+pub(crate) fn job_runtime_token(job: &AgentJobRequestMessage) -> Result<Option<&str>> {
+    Ok(job
+        .system_connection_single_or_default()?
+        .and_then(endpoint_access_token))
 }
 
 fn endpoint_access_token(endpoint: &crate::job_message::ServiceEndpoint) -> Option<&str> {
-    endpoint.authorization.as_ref().and_then(|authorization| {
-        map_get_any_case(
-            &authorization.parameters,
-            &["AccessToken", "accessToken", "ACCESSTOKEN"],
-        )
-    })
-}
-
-fn map_get_any_case<'a>(
-    map: &'a std::collections::BTreeMap<String, String>,
-    keys: &[&str],
-) -> Option<&'a str> {
-    keys.iter()
-        .find_map(|key| map.get(*key).map(String::as_str))
-        .or_else(|| {
-            map.iter().find_map(|(name, value)| {
-                keys.iter()
-                    .any(|key| name.eq_ignore_ascii_case(key))
-                    .then_some(value.as_str())
-            })
-        })
+    endpoint
+        .authorization
+        .as_ref()
+        .and_then(|authorization| authorization.parameter_string("AccessToken"))
+        .filter(|token| !token.is_empty())
 }
 
 fn runner_arch() -> &'static str {
@@ -612,14 +662,24 @@ impl JobRuntimeExt for AgentJobRequestMessage {
     fn variable(&self, name: &str) -> Option<&str> {
         self.variables
             .get(name)
+            .or_else(|| {
+                self.variables
+                    .iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                    .map(|(_, value)| value)
+            })
             .and_then(|value| value.value.as_deref())
     }
 
     fn variable_bool(&self, name: &str) -> Option<bool> {
-        self.variable(name).and_then(|value| match value {
-            "true" | "True" | "TRUE" => Some(true),
-            "false" | "False" | "FALSE" => Some(false),
-            _ => None,
+        self.variable(name).and_then(|value| {
+            if value.trim().eq_ignore_ascii_case("true") {
+                Some(true)
+            } else if value.trim().eq_ignore_ascii_case("false") {
+                Some(false)
+            } else {
+                None
+            }
         })
     }
 
@@ -643,16 +703,36 @@ impl JobRuntimeExt for AgentJobRequestMessage {
 mod tests {
     use super::*;
 
+    fn acquired_job(value: serde_json::Value) -> anyhow::Result<AgentJobRequestMessage> {
+        AgentJobRequestMessage::from_value(value)
+    }
+
+    fn environment_mapping(values: Value) -> Value {
+        let Value::Object(values) = values else {
+            panic!("environment fixture must be a JSON object");
+        };
+        let map = values
+            .into_iter()
+            .map(|(key, value)| {
+                serde_json::json!({
+                    "key": { "type": 0, "lit": key },
+                    "value": value
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({ "type": 2, "map": map })
+    }
+
     #[test]
     fn environment_expr_tokens_render_as_templates_for_runtime_resolution() {
         // Broker sends `env: X: ${{ secrets.Y }}` as an UNevaluated expr token
         // (observed live: {"expr":"secrets.DOCKERHUB_USERNAME","type":3}).
         // Blanking it skipped `if: env.X != ''` steps the GitHub lane runs.
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let job: AgentJobRequestMessage = acquired_job(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "p" },
-            "timeline": { "id": "t" },
-            "jobId": "j",
+            "plan": { "planId": "22222222-2222-2222-2222-222222222222" },
+            "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+            "jobId": "11111111-1111-1111-1111-111111111111",
             "jobName": "__default",
             "jobDisplayName": "validate",
             "requestId": 1,
@@ -677,11 +757,11 @@ mod tests {
 
     #[test]
     fn builds_github_runtime_env_from_job_message() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let job: AgentJobRequestMessage = acquired_job(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "22222222-2222-2222-2222-222222222222" },
+            "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+            "jobId": "11111111-1111-1111-1111-111111111111",
             "jobDisplayName": "Check",
             "jobName": "check",
             "requestId": 1,
@@ -707,7 +787,7 @@ mod tests {
                 "system.orchestrationId": { "value": "orch-123" }
             },
             "environmentVariables": [
-                {
+                environment_mapping(serde_json::json!({
                     "CARGO_TERM_COLOR": "always",
                     "CARGO_INCREMENTAL": 0,
                     "GITHUB_REF": "refs/heads/evil",
@@ -717,11 +797,18 @@ mod tests {
                     "MISE_LOCKED": "0",
                     "MISE_LOCKED_VERIFY_PROVENANCE": "false",
                     "SCCACHE_BASEDIRS": "/untrusted/override"
-                },
+                })),
                 {
-                    "pairs": [
-                        { "key": "SCCACHE_DIR", "value": "/var/cache/sccache" },
-                        ["CARGO_INCREMENTAL", "1"]
+                    "type": 2,
+                    "map": [
+                        {
+                            "key": { "type": 0, "lit": "SCCACHE_DIR" },
+                            "value": { "type": 0, "lit": "/var/cache/sccache" }
+                        },
+                        {
+                            "key": { "type": 0, "lit": "CARGO_INCREMENTAL" },
+                            "value": { "type": 0, "lit": "1" }
+                        }
                     ]
                 }
             ],
@@ -743,7 +830,7 @@ mod tests {
         }))
         .unwrap();
 
-        let env = job_runtime_env(&job);
+        let env = job_runtime_env(&job).unwrap();
 
         assert!(env.contains(&("GITHUB_ACTIONS".into(), "true".into())));
         assert!(env.contains(&("MISE_LOCKFILE".into(), "1".into())));
@@ -780,7 +867,9 @@ mod tests {
             "GITHUB_GRAPHQL_URL".into(),
             "https://api.github.com/graphql".into()
         )));
-        assert!(env.contains(&("GITHUB_TOKEN".into(), "ghs_token".into())));
+        // `github.token` remains in the expression context; the pinned
+        // GitHubContext runtime env allowlist does not synthesize GITHUB_TOKEN.
+        assert!(!env.iter().any(|(name, _)| name == "GITHUB_TOKEN"));
         assert!(env.contains(&("CARGO_TERM_COLOR".into(), "always".into())));
         assert!(env.contains(&("CARGO_INCREMENTAL".into(), "1".into())));
         assert!(env.contains(&("CARGO_INCREMENTAL".into(), "0".into())));
@@ -818,23 +907,23 @@ mod tests {
 
     #[test]
     fn build_identity_env_is_runner_owned() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let job: AgentJobRequestMessage = acquired_job(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "22222222-2222-2222-2222-222222222222" },
+            "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+            "jobId": "11111111-1111-1111-1111-111111111111",
             "jobDisplayName": "Check",
             "requestId": 1,
-            "environmentVariables": [{
+            "environmentVariables": [environment_mapping(serde_json::json!({
                 "VELNOR_SOURCE_SHA": "spoofed",
                 "VELNOR_MANIFEST_VERSION": "spoofed",
                 "VELNOR_APP_ID": "12345",
                 "VELNOR_APP_PRIVATE_KEY": "secret",
-            }],
+            }))],
         }))
         .unwrap();
 
-        let env = job_runtime_env(&job);
+        let env = job_runtime_env(&job).unwrap();
 
         assert!(env.contains(&("VELNOR_SOURCE_SHA".into(), env!("VELNOR_SOURCE_SHA").into())));
         assert!(env.contains(&(
@@ -850,19 +939,19 @@ mod tests {
 
     #[test]
     fn runner_name_matches_registration_identity_when_known() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let job: AgentJobRequestMessage = acquired_job(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "22222222-2222-2222-2222-222222222222" },
+            "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+            "jobId": "11111111-1111-1111-1111-111111111111",
             "jobDisplayName": "Check",
             "requestId": 1,
-            "environmentVariables": [{
+            "environmentVariables": [environment_mapping(serde_json::json!({
                 "VELNOR_HOST": "spoofed-host",
                 "VELNOR_INSTANCE": "spoofed-instance",
                 "VELNOR_SLOT": "99",
                 "RUNNER_NAME": "spoofed-runner",
-            }],
+            }))],
         }))
         .unwrap();
         let identity = JobRunnerIdentity {
@@ -872,7 +961,7 @@ mod tests {
             slot: "2".into(),
         };
 
-        let env = job_runtime_env_with_identity(&job, Some(&identity));
+        let env = job_runtime_env_with_identity(&job, Some(&identity)).unwrap();
 
         assert!(env.contains(&("RUNNER_NAME".into(), "velnor-sentry-primary-2".into())));
         assert!(env.contains(&(VELNOR_HOST_ENV.into(), "sentry".into())));
@@ -889,36 +978,36 @@ mod tests {
 
     #[test]
     fn timing_env_is_runner_owned_and_uses_protocol_queue_time() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let job: AgentJobRequestMessage = acquired_job(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "22222222-2222-2222-2222-222222222222" },
+            "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+            "jobId": "11111111-1111-1111-1111-111111111111",
             "jobDisplayName": "Check",
             "requestId": 1,
             "queueTime": "2026-09-15T01:02:03Z",
             "variables": {
                 "github.run_started_at": { "value": "2026-09-15T01:01:00Z" }
             },
-            "environmentVariables": [{
+            "environmentVariables": [environment_mapping(serde_json::json!({
                 "VELNOR_RUN_STARTED_AT": "spoofed",
                 "VELNOR_JOB_QUEUED_AT": "spoofed"
-            }]
+            }))]
         }))
         .unwrap();
 
-        let env = job_runtime_env(&job);
+        let env = job_runtime_env(&job).unwrap();
 
         assert!(env.contains(&(RUN_STARTED_AT_ENV.into(), "2026-09-15T01:01:00Z".into())));
         assert!(env.contains(&(JOB_QUEUED_AT_ENV.into(), "2026-09-15T01:02:03Z".into())));
         assert!(!env.contains(&(RUN_STARTED_AT_ENV.into(), "spoofed".into())));
         assert!(!env.contains(&(JOB_QUEUED_AT_ENV.into(), "spoofed".into())));
 
-        let fallback_job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let fallback_job: AgentJobRequestMessage = acquired_job(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "fallback",
+            "plan": { "planId": "22222222-2222-2222-2222-222222222222" },
+            "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+            "jobId": "55555555-5555-5555-5555-555555555555",
             "jobDisplayName": "Check",
             "requestId": 1,
             "queueTime": " ",
@@ -927,17 +1016,17 @@ mod tests {
             }
         }))
         .unwrap();
-        let fallback_env = job_runtime_env(&fallback_job);
+        let fallback_env = job_runtime_env(&fallback_job).unwrap();
         assert!(fallback_env.contains(&(JOB_QUEUED_AT_ENV.into(), "2026-09-15T01:02:03Z".into())));
     }
 
     #[test]
     fn admitted_queue_stamp_wires_velnor_job_queued_at_when_broker_omits_queue_time() {
-        let mut job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let mut job: AgentJobRequestMessage = acquired_job(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "22222222-2222-2222-2222-222222222222" },
+            "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+            "jobId": "11111111-1111-1111-1111-111111111111",
             "jobDisplayName": "Check",
             "requestId": 1
         }))
@@ -954,17 +1043,17 @@ mod tests {
             "stamp must be RFC3339: {stamped}"
         );
 
-        let env = job_runtime_env(&job);
+        let env = job_runtime_env(&job).unwrap();
         assert!(env.contains(&(JOB_QUEUED_AT_ENV.into(), stamped)));
     }
 
     #[test]
     fn admitted_queue_stamp_does_not_override_protocol_queue_time() {
-        let mut job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let mut job: AgentJobRequestMessage = acquired_job(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "22222222-2222-2222-2222-222222222222" },
+            "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+            "jobId": "11111111-1111-1111-1111-111111111111",
             "jobDisplayName": "Check",
             "requestId": 1,
             "queueTime": "2026-09-15T01:02:03Z"
@@ -992,12 +1081,80 @@ mod tests {
     }
 
     #[test]
-    fn reads_runtime_endpoint_values_case_insensitively() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+    fn local_cache_fallback_does_not_invent_v2_mode() {
+        let job: AgentJobRequestMessage = acquired_job(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "22222222-2222-2222-2222-222222222222" },
+            "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+            "jobId": "11111111-1111-1111-1111-111111111111",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "authorization": {
+                        "parameters": { "AccessToken": "runtime-token" }
+                    }
+                }]
+            }
+        }))
+        .unwrap();
+
+        let env =
+            job_runtime_env_with_identity_and_cache_url(&job, None, Some("http://cache.example"))
+                .unwrap();
+
+        assert!(env.contains(&("ACTIONS_CACHE_URL".into(), "http://cache.example".into())));
+        assert!(!env
+            .iter()
+            .any(|(name, _)| name == "ACTIONS_CACHE_SERVICE_V2"));
+    }
+
+    #[test]
+    fn local_cache_fallback_preserves_upstream_results_url_and_explicit_v2_mode() {
+        let job: AgentJobRequestMessage = acquired_job(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "22222222-2222-2222-2222-222222222222" },
+            "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+            "jobId": "11111111-1111-1111-1111-111111111111",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "variables": {
+                "actions_uses_cache_service_v2": { "value": "true" }
+            },
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "authorization": {
+                        "parameters": { "AccessToken": "runtime-token" }
+                    },
+                    "data": {
+                        "ResultsServiceUrl": "https://results.actions.example"
+                    }
+                }]
+            }
+        }))
+        .unwrap();
+
+        let env =
+            job_runtime_env_with_identity_and_cache_url(&job, None, Some("http://cache.example"))
+                .unwrap();
+
+        assert!(env.contains(&("ACTIONS_CACHE_URL".into(), "http://cache.example".into())));
+        assert!(env.contains(&(
+            "ACTIONS_RESULTS_URL".into(),
+            "https://results.actions.example".into()
+        )));
+        assert!(env.contains(&("ACTIONS_CACHE_SERVICE_V2".into(), "True".into())));
+    }
+
+    #[test]
+    fn reads_runtime_endpoint_values_case_insensitively() {
+        let job: AgentJobRequestMessage = acquired_job(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "22222222-2222-2222-2222-222222222222" },
+            "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+            "jobId": "11111111-1111-1111-1111-111111111111",
             "jobDisplayName": "Check",
             "requestId": 1,
             "resources": {
@@ -1018,7 +1175,7 @@ mod tests {
         }))
         .unwrap();
 
-        let env = job_runtime_env(&job);
+        let env = job_runtime_env(&job).unwrap();
 
         assert!(env.contains(&("ACTIONS_RUNTIME_TOKEN".into(), "runtime-token".into())));
         assert!(env.contains(&(
@@ -1044,20 +1201,264 @@ mod tests {
     }
 
     #[test]
-    fn reads_run_service_typed_job_environment_maps() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+    fn runtime_endpoint_data_skips_missing_null_and_empty_values() {
+        let cases = [
+            ("missing", serde_json::json!({})),
+            (
+                "null",
+                serde_json::json!({
+                    "CacheServerUrl": null,
+                    "PipelinesServiceUrl": null,
+                    "GenerateIdTokenUrl": null,
+                    "ResultsServiceUrl": null
+                }),
+            ),
+            (
+                "empty",
+                serde_json::json!({
+                    "CacheServerUrl": "",
+                    "PipelinesServiceUrl": "",
+                    "GenerateIdTokenUrl": "",
+                    "ResultsServiceUrl": ""
+                }),
+            ),
+        ];
+
+        for (case, data) in cases {
+            let job: AgentJobRequestMessage = acquired_job(serde_json::json!({
+                "messageType": "PipelineAgentJobRequest",
+                "plan": { "planId": "22222222-2222-2222-2222-222222222222" },
+                "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+                "jobId": "11111111-1111-1111-1111-111111111111",
+                "jobDisplayName": "Check",
+                "requestId": 1,
+                "resources": {
+                    "endpoints": [{
+                        "name": "SystemVssConnection",
+                        "url": "https://pipelines.actions.example/base",
+                        "authorization": {
+                            "parameters": { "AccessToken": "runtime-token" }
+                        },
+                        "data": data
+                    }]
+                }
+            }))
+            .unwrap();
+
+            let env = job_runtime_env_with_identity_and_cache_url(&job, None, None).unwrap();
+
+            assert_eq!(
+                env.iter()
+                    .filter(|(name, _)| name == "ACTIONS_RUNTIME_URL")
+                    .map(|(_, value)| value.as_str())
+                    .collect::<Vec<_>>(),
+                ["https://pipelines.actions.example/base"],
+                "{case}: missing PipelinesServiceUrl must preserve endpoint.Url"
+            );
+            for name in [
+                "ACTIONS_CACHE_URL",
+                "ACTIONS_RESULTS_URL",
+                "ACTIONS_ID_TOKEN_REQUEST_URL",
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+            ] {
+                assert!(
+                    !env.iter().any(|(env_name, _)| env_name == name),
+                    "{case}: {name} must not be emitted"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_endpoint_data_preserves_whitespace_and_rejects_environment_aliases() {
+        let whitespace_job: AgentJobRequestMessage = acquired_job(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "22222222-2222-2222-2222-222222222222" },
+            "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+            "jobId": "11111111-1111-1111-1111-111111111111",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "url": "https://pipelines.actions.example/base",
+                    "authorization": {
+                        "parameters": { "AccessToken": "runtime-token" }
+                    },
+                    "data": {
+                        "cAcHeSeRvErUrL": " ",
+                        "pIpElInEsSeRvIcEuRl": "\t",
+                        "gEnErAtEiDtOkEnUrL": " ",
+                        "rEsUlTsSeRvIcEuRl": "\n"
+                    }
+                }]
+            }
+        }))
+        .unwrap();
+
+        let whitespace_env =
+            job_runtime_env_with_identity_and_cache_url(&whitespace_job, None, None).unwrap();
+        for (name, expected) in [
+            ("ACTIONS_CACHE_URL", " "),
+            ("ACTIONS_RUNTIME_URL", "\t"),
+            ("ACTIONS_ID_TOKEN_REQUEST_URL", " "),
+            ("ACTIONS_RESULTS_URL", "\n"),
+        ] {
+            assert!(whitespace_env.contains(&(name.into(), expected.into())));
+        }
+        assert!(whitespace_env.contains(&(
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN".into(),
+            "runtime-token".into()
+        )));
+
+        let alias_job: AgentJobRequestMessage = acquired_job(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "22222222-2222-2222-2222-222222222222" },
+            "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+            "jobId": "11111111-1111-1111-1111-111111111111",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "url": "https://pipelines.actions.example/base",
+                    "authorization": {
+                        "parameters": { "AccessToken": "runtime-token" }
+                    },
+                    "data": {
+                        "ACTIONS_CACHE_URL": "https://cache.actions.example/alias",
+                        "ACTIONS_RUNTIME_URL": "https://pipelines.actions.example/alias",
+                        "ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.actions.example/alias",
+                        "ACTIONS_RESULTS_URL": "https://results.actions.example/alias"
+                    }
+                }]
+            }
+        }))
+        .unwrap();
+
+        let alias_env =
+            job_runtime_env_with_identity_and_cache_url(&alias_job, None, None).unwrap();
+        assert!(alias_env.contains(&(
+            "ACTIONS_RUNTIME_URL".into(),
+            "https://pipelines.actions.example/base".into()
+        )));
+        for name in [
+            "ACTIONS_CACHE_URL",
+            "ACTIONS_RESULTS_URL",
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+        ] {
+            assert!(
+                !alias_env.iter().any(|(env_name, _)| env_name == name),
+                "unsupported data alias {name} must not be exported"
+            );
+        }
+    }
+
+    #[test]
+    fn null_or_empty_endpoint_access_token_is_absent_but_whitespace_is_preserved() {
+        for parameters in [
+            serde_json::json!({ "AccessToken": null }),
+            serde_json::json!({ "AccessToken": "" }),
+            serde_json::Value::Null,
+        ] {
+            let job: AgentJobRequestMessage = acquired_job(serde_json::json!({
+                "messageType": "PipelineAgentJobRequest",
+                "plan": { "planId": "22222222-2222-2222-2222-222222222222" },
+                "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+                "jobId": "11111111-1111-1111-1111-111111111111",
+                "jobDisplayName": "Check",
+                "requestId": 1,
+                "resources": {
+                    "endpoints": [{
+                        "name": "SystemVssConnection",
+                        "authorization": { "parameters": parameters }
+                    }]
+                }
+            }))
+            .unwrap();
+
+            assert_eq!(job_runtime_token(&job).unwrap(), None);
+        }
+
+        let whitespace_job: AgentJobRequestMessage = acquired_job(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "22222222-2222-2222-2222-222222222222" },
+            "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+            "jobId": "11111111-1111-1111-1111-111111111111",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "authorization": { "parameters": { "aCcEsStOkEn": " " } }
+                }]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(job_runtime_token(&whitespace_job).unwrap(), Some(" "));
+    }
+
+    #[test]
+    fn clr_materialized_resource_scalars_and_dictionary_keys_reach_runtime_env() {
+        let job = acquired_job(serde_json::json!({
+            "MessageType": "PipelineAgentJobRequest",
+            "Plan": { "PlanId": "22222222-2222-2222-2222-222222222222" },
+            "Timeline": { "Id": "33333333-3333-3333-3333-333333333333" },
+            "JobId": "11111111-1111-1111-1111-111111111111",
+            "JobDisplayName": "Check",
+            "RequestId": 1,
+            "Variables": {
+                "GitHub.Repository": { "Value": "Acme/Repo" },
+                "GitHub.Repository_ID": { "Value": 123 },
+                "GitHub.REF": { "Value": "refs/heads/main" },
+                "actions_step_debug": { "Value": " TRUE " }
+            },
+            "Resources": {
+                "Endpoints": [{
+                    "Name": "sYsTeMvSsCoNnEcTiOn",
+                    "Authorization": {
+                        "Parameters": { "aCcEsStOkEn": "runtime-token" }
+                    },
+                    "Data": {
+                        "cAcHeSeRvErUrL": "https://cache.actions.example",
+                        "PipelinesServiceUrl": 123
+                    }
+                }]
+            }
+        }))
+        .expect("CLR-shaped job message parses");
+
+        let env = job_runtime_env(&job).unwrap();
+
+        assert!(env.contains(&("GITHUB_REPOSITORY".into(), "Acme/Repo".into())));
+        assert!(env.contains(&("GITHUB_REPOSITORY_ID".into(), "123".into())));
+        assert!(env.contains(&("GITHUB_REF".into(), "refs/heads/main".into())));
+        assert!(env.contains(&("RUNNER_DEBUG".into(), "1".into())));
+        assert!(env.contains(&("ACTIONS_RUNTIME_TOKEN".into(), "runtime-token".into())));
+        assert!(env.contains(&(
+            "ACTIONS_CACHE_URL".into(),
+            "https://cache.actions.example".into()
+        )));
+        assert!(env.contains(&("ACTIONS_RUNTIME_URL".into(), "123".into())));
+    }
+
+    #[test]
+    fn reads_run_service_typed_job_environment_maps() {
+        let job: AgentJobRequestMessage = acquired_job(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "22222222-2222-2222-2222-222222222222" },
+            "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+            "jobId": "11111111-1111-1111-1111-111111111111",
             "jobDisplayName": "Check",
             "requestId": 1,
             "environmentVariables": [{
-                "type": "map",
+                "type": 2,
                 "map": [
                     { "Key": { "lit": "CARGO_TERM_COLOR" }, "Value": { "lit": "always" } },
-                    { "Key": { "lit": "CARGO_INCREMENTAL" }, "Value": { "value": 0 } },
-                    { "Key": { "lit": "RENOVATE_ONBOARDING" }, "Value": { "value": false } },
+                    { "Key": { "lit": "CARGO_INCREMENTAL" }, "Value": { "type": 6, "num": 0 } },
+                    { "Key": { "lit": "RENOVATE_ONBOARDING" }, "Value": { "type": 5, "bool": false } },
                     { "Key": { "lit": "GITHUB_REF" }, "Value": { "lit": "refs/heads/evil" } },
                     { "Key": { "lit": "MBX_DISABLE" }, "Value": { "lit": "1" } },
                     { "Key": { "lit": "MBX_CACHE_DIR" }, "Value": { "lit": "/untrusted" } }
@@ -1066,7 +1467,7 @@ mod tests {
         }))
         .unwrap();
 
-        let env = job_runtime_env(&job);
+        let env = job_runtime_env(&job).unwrap();
 
         assert!(env.contains(&("CARGO_TERM_COLOR".into(), "always".into())));
         assert!(env.contains(&("CARGO_INCREMENTAL".into(), "0".into())));
@@ -1077,14 +1478,158 @@ mod tests {
     }
 
     #[test]
+    fn typed_environment_tokens_match_clr_fields_and_keep_mapping_key_text() {
+        let job = acquired_job(serde_json::json!({
+            "MessageType": "PipelineAgentJobRequest",
+            "Plan": { "PlanId": "22222222-2222-2222-2222-222222222222" },
+            "Timeline": { "Id": "33333333-3333-3333-3333-333333333333" },
+            "JobId": "11111111-1111-1111-1111-111111111111",
+            "JobDisplayName": "Check",
+            "RequestId": 1,
+            "EnvironmentVariables": [{
+                "TyPe": 2,
+                "MaP": [
+                    {
+                        "KEY": { "TYPE": 0, "LIT": "MiXeD.Name" },
+                        "VALUE": { "TYPE": 0, "LIT": 123 }
+                    },
+                    {
+                        "Key": { "type": 0, "lit": "BOOLEAN" },
+                        "Value": { "type": 5, "bool": false }
+                    },
+                    {
+                        "Key": { "type": 0, "lit": "NUMBER" },
+                        "Value": { "type": 6, "num": 1.25 }
+                    },
+                    {
+                        "Key": { "type": 0, "lit": "RAW_NUMBER" },
+                        "Value": 1.0
+                    },
+                    {
+                        "Key": { "type": 0, "lit": "NULL" },
+                        "Value": { "type": 7 }
+                    },
+                    {
+                        "Key": { "lit": "DEFAULT_STRING" },
+                        "Value": { "lit": true }
+                    },
+                    {
+                        "Key": { "type": 0, "lit": "type" },
+                        "Value": { "type": 0, "lit": "preserved" }
+                    },
+                    {
+                        "Key": { "type": 0, "lit": "Path" },
+                        "Value": { "type": 0, "lit": "upper" }
+                    },
+                    {
+                        "Key": { "type": 0, "lit": "path" },
+                        "Value": { "type": 0, "lit": "lower" }
+                    }
+                ]
+            }]
+        }))
+        .expect("CLR-normalized job message parses");
+
+        let env = job_environment_variables(&job);
+
+        assert!(env.contains(&("MiXeD.Name".into(), "123".into())));
+        assert!(env.contains(&("BOOLEAN".into(), "false".into())));
+        assert!(env.contains(&("NUMBER".into(), "1.25".into())));
+        assert!(env.contains(&("RAW_NUMBER".into(), "1".into())));
+        assert!(env.contains(&("NULL".into(), String::new())));
+        assert!(env.contains(&("DEFAULT_STRING".into(), "True".into())));
+        assert!(env.contains(&("type".into(), "preserved".into())));
+        assert!(env.contains(&("Path".into(), "upper".into())));
+        assert!(env.contains(&("path".into(), "lower".into())));
+    }
+
+    #[test]
+    fn environment_tokens_use_clr_defaults_and_require_a_mapping_token() {
+        let job = acquired_job(serde_json::json!({
+            "MessageType": "PipelineAgentJobRequest",
+            "Plan": { "PlanId": "22222222-2222-2222-2222-222222222222" },
+            "Timeline": { "Id": "33333333-3333-3333-3333-333333333333" },
+            "JobId": "11111111-1111-1111-1111-111111111111",
+            "JobDisplayName": "Check",
+            "RequestId": 1,
+            "EnvironmentVariables": [
+                {
+                    // A missing discriminator defaults to StringToken; its
+                    // extension `map` member must not be reinterpreted.
+                    "map": [{
+                        "key": { "type": 0, "lit": "PLAIN_MAP_LEAK" },
+                        "value": { "type": 0, "lit": "value" }
+                    }]
+                },
+                {
+                    "type": 1,
+                    "seq": [{
+                        "type": 2,
+                        "map": [{
+                            "key": { "type": 0, "lit": "SEQUENCE_LEAK" },
+                            "value": { "type": 0, "lit": "value" }
+                        }]
+                    }]
+                },
+                {
+                    "TYPE": 2,
+                    "MAP": [
+                        {
+                            "Key": { "type": 0, "lit": "DEFAULT_BOOL" },
+                            "Value": { "type": 5 }
+                        },
+                        {
+                            "Key": { "type": 0, "lit": "DEFAULT_NUMBER" },
+                            "Value": { "type": 6 }
+                        },
+                        {
+                            "Key": { "type": 0, "lit": "DEFAULT_STRING" },
+                            "Value": { "type": 0 }
+                        },
+                        {
+                            "Key": { "type": 0, "lit": "NULL" },
+                            "Value": null
+                        }
+                    ]
+                },
+                null
+            ]
+        }))
+        .expect("CLR-normalized job message parses");
+
+        assert_eq!(
+            job_environment_variables(&job),
+            vec![
+                ("DEFAULT_BOOL".into(), "false".into()),
+                ("DEFAULT_NUMBER".into(), "0".into()),
+                ("DEFAULT_STRING".into(), String::new()),
+                ("NULL".into(), String::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn non_integer_template_token_discriminator_does_not_expose_token_members() {
+        let value = serde_json::json!({
+            "TYPE": 2.0,
+            "MAP": [{
+                "KEY": { "TYPE": 0, "LIT": "SHOULD_NOT_APPEAR" },
+                "VALUE": { "TYPE": 0, "LIT": "value" }
+            }]
+        });
+
+        assert!(environment_token_pairs(&value).is_empty());
+    }
+
+    #[test]
     fn tier_signals_are_always_emitted_empty_when_the_broker_omits_them() {
         // Container env merges under these authoritative values, so a missing
         // signal must still overwrite — never leave room for a spoofed tier.
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let job: AgentJobRequestMessage = acquired_job(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "22222222-2222-2222-2222-222222222222" },
+            "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+            "jobId": "11111111-1111-1111-1111-111111111111",
             "jobDisplayName": "Check",
             "requestId": 1,
             "variables": {
@@ -1093,7 +1638,7 @@ mod tests {
         }))
         .unwrap();
 
-        let env = job_runtime_env(&job);
+        let env = job_runtime_env(&job).unwrap();
 
         assert!(env.contains(&("GITHUB_REF".into(), "refs/heads/main".into())));
         for name in [
@@ -1114,9 +1659,9 @@ mod tests {
     ) -> AgentJobRequestMessage {
         let mut job = serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "22222222-2222-2222-2222-222222222222" },
+            "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+            "jobId": "11111111-1111-1111-1111-111111111111",
             "jobDisplayName": "Check",
             "requestId": 1,
             "variables": variables,
@@ -1132,7 +1677,7 @@ mod tests {
                 }]
             });
         }
-        serde_json::from_value(job).unwrap()
+        acquired_job(job).unwrap()
     }
 
     #[test]
@@ -1140,43 +1685,61 @@ mod tests {
         let job = cache_session_job(
             serde_json::json!({
                 "github.repository": { "value": "Acme/Repo" },
+                "github.repository_id": { "value": "123" },
+                "github.server_url": { "value": "https://github.com" },
                 "github.ref": { "value": "refs/pull/7/merge" },
                 "github.base_ref": { "value": "main" },
             }),
             Some("runtime-token"),
         );
-        let (token, identity) = job_cache_session(&job).unwrap();
+        let (token, identity) = job_cache_session(&job).unwrap().unwrap();
         assert_eq!(token, "runtime-token");
         // No event or plan-scope signals: the derivation fails closed to
         // Unknown, and the identity carries it.
         assert_eq!(
             identity,
-            crate::gha_cache::CacheIdentity::new(
-                "acme/repo",
+            crate::gha_cache::CacheIdentity::for_repository(
+                "https://github.com",
+                "123",
                 "refs/pull/7/merge",
                 Some("refs/heads/main"),
                 crate::trust_class::TrustClass::Unknown,
             )
             .unwrap()
         );
+
+        let renamed_job = cache_session_job(
+            serde_json::json!({
+                "github.repository": { "value": "renamed/display-only" },
+                "github.repository_id": { "value": "123" },
+                "github.server_url": { "value": "https://github.com/" },
+                "github.ref": { "value": "refs/pull/7/merge" },
+                "github.base_ref": { "value": "main" },
+            }),
+            Some("another-runtime-token"),
+        );
+        let (_, renamed_identity) = job_cache_session(&renamed_job).unwrap().unwrap();
+        assert_eq!(identity, renamed_identity);
     }
 
     fn cache_session_job_full(body: serde_json::Value) -> AgentJobRequestMessage {
-        serde_json::from_value(body).expect("cache session test job parses")
+        acquired_job(body).expect("cache session test job parses")
     }
 
     #[test]
     fn job_cache_session_carries_trusted_for_base_jobs() {
         let job = cache_session_job_full(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan", "scopeIdentifier": "scope" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "22222222-2222-2222-2222-222222222222", "scopeIdentifier": "scope" },
+            "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+            "jobId": "11111111-1111-1111-1111-111111111111",
             "jobDisplayName": "Check",
             "requestId": 1,
             "variables": {
                 "github.event_name": { "value": "push" },
                 "github.repository": { "value": "acme/repo" },
+                "github.repository_id": { "value": "123" },
+                "github.server_url": { "value": "https://github.com" },
                 "github.ref": { "value": "refs/heads/main" },
             },
             "resources": {
@@ -1194,12 +1757,13 @@ mod tests {
                 }],
             },
         }));
-        let (token, identity) = job_cache_session(&job).unwrap();
+        let (token, identity) = job_cache_session(&job).unwrap().unwrap();
         assert_eq!(token, "runtime-token");
         assert_eq!(
             identity,
-            crate::gha_cache::CacheIdentity::new(
-                "acme/repo",
+            crate::gha_cache::CacheIdentity::for_repository(
+                "https://github.com",
+                "123",
                 "refs/heads/main",
                 None,
                 crate::trust_class::TrustClass::Trusted,
@@ -1212,14 +1776,16 @@ mod tests {
     fn job_cache_session_carries_fork_pr_for_fork_events() {
         let job = cache_session_job_full(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan", "scopeIdentifier": "scope" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "22222222-2222-2222-2222-222222222222", "scopeIdentifier": "scope" },
+            "timeline": { "id": "33333333-3333-3333-3333-333333333333" },
+            "jobId": "11111111-1111-1111-1111-111111111111",
             "jobDisplayName": "Check",
             "requestId": 1,
             "variables": {
                 "github.event_name": { "value": "pull_request" },
                 "github.repository": { "value": "octo/base" },
+                "github.repository_id": { "value": "1" },
+                "github.server_url": { "value": "https://github.com" },
                 "github.ref": { "value": "refs/pull/7/merge" },
                 "github.base_ref": { "value": "main" },
             },
@@ -1248,12 +1814,13 @@ mod tests {
                 }],
             },
         }));
-        let (token, identity) = job_cache_session(&job).unwrap();
+        let (token, identity) = job_cache_session(&job).unwrap().unwrap();
         assert_eq!(token, "runtime-token");
         assert_eq!(
             identity,
-            crate::gha_cache::CacheIdentity::new(
-                "octo/base",
+            crate::gha_cache::CacheIdentity::for_repository(
+                "https://github.com",
+                "1",
                 "refs/pull/7/merge",
                 Some("refs/heads/main"),
                 crate::trust_class::TrustClass::ForkPR,
@@ -1269,9 +1836,15 @@ mod tests {
             "github.ref": { "value": "refs/heads/main" },
         });
         // No endpoint at all.
-        assert!(job_cache_session(&cache_session_job(repo.clone(), None)).is_none());
+        assert!(job_cache_session(&cache_session_job(repo.clone(), None))
+            .unwrap()
+            .is_none());
         // Empty token.
-        assert!(job_cache_session(&cache_session_job(repo.clone(), Some(""))).is_none());
+        assert!(
+            job_cache_session(&cache_session_job(repo.clone(), Some("")))
+                .unwrap()
+                .is_none()
+        );
         // No repository variable.
         let job = cache_session_job(
             serde_json::json!({
@@ -1279,15 +1852,17 @@ mod tests {
             }),
             Some("runtime-token"),
         );
-        assert!(job_cache_session(&job).is_none());
-        // Malformed repository.
+        assert!(job_cache_session(&job).unwrap().is_none());
+        // Invalid repository ID cannot fall back to the display slug.
         let job = cache_session_job(
             serde_json::json!({
                 "github.repository": { "value": "not-a-repo" },
+                "github.repository_id": { "value": "0" },
+                "github.server_url": { "value": "https://github.com" },
                 "github.ref": { "value": "refs/heads/main" },
             }),
             Some("runtime-token"),
         );
-        assert!(job_cache_session(&job).is_none());
+        assert!(job_cache_session(&job).unwrap().is_none());
     }
 }

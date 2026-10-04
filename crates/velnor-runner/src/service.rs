@@ -4,8 +4,8 @@
 //! command center; what remains here is exactly the machine-invoked plumbing
 //! packaged consumers execute: the node-local guardian/controller/slot/job
 //! processes (`ExecStart=/usr/bin/velnor-runner daemon` still launches the
-//! controller that spawns one OS process per slot), the pre-start coherence hook
-//! (`release verify-installed`), Debian maintainer-script identity exports
+//! controller that spawns one OS process per slot), installed-tuple coherence
+//! checks, Debian maintainer-script identity exports
 //! (`release export`, `capabilities export`), and the release workflow's
 //! metadata job. The [`packaged invoker guard`](#) in `crates/velnorctl/tests`
 //! proves the packaged files never reference a verb dropped from either
@@ -44,10 +44,31 @@ pub enum ServiceCommand {
     Slot(Box<crate::node::SlotArgs>),
     /// Transient per-job worker process.
     Job(crate::node::JobArgs),
-    /// Release-coherence hooks for ExecStartPre, postinst, and release CI.
+    /// Release-coherence hooks for service startup, postinst, and release CI.
     Release(ReleaseArgs),
     /// Compiled-manifest export for postinst identity validation.
     Capabilities(CapabilitiesArgs),
+    /// One-time package migration of stale pre-key trust-scope roots.
+    #[cfg(unix)]
+    #[command(hide = true)]
+    Storage(StoragePurgeArgs),
+}
+
+#[cfg(unix)]
+#[derive(Debug, Args)]
+pub struct StoragePurgeArgs {
+    #[command(subcommand)]
+    pub command: StoragePurgeCommand,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Subcommand)]
+pub enum StoragePurgeCommand {
+    /// Verify configured roots and effective systemd units without mutation.
+    #[command(hide = true)]
+    VerifyLegacy,
+    /// Remove only the allowlisted pre-key trust-scope roots.
+    PurgeLegacy,
 }
 
 /// The complete runtime dispatch surface shared with the velnorctl facade.
@@ -78,6 +99,10 @@ impl TryFrom<ServiceCommand> for Command {
             ServiceCommand::Daemon(args) => Ok(Self::Daemon(args)),
             ServiceCommand::Release(args) => Ok(Self::Release(args)),
             ServiceCommand::Capabilities(args) => Ok(Self::Capabilities(args.into())),
+            #[cfg(unix)]
+            ServiceCommand::Storage(_) => Err(anyhow::anyhow!(
+                "package storage migration dispatches before Command conversion"
+            )),
             ServiceCommand::Guardian(_)
             | ServiceCommand::Controller(_)
             | ServiceCommand::Slot(_)
@@ -187,7 +212,8 @@ pub struct DaemonArgs {
     #[arg(long, default_value = "velnor/job-ubuntu:26.04")]
     pub docker_image: String,
 
-    /// Host execution topology. Defaults to native-only.
+    /// Host execution topology. Defaults to native-only; Scale Set lane
+    /// activation is explicit and never inferred from a config path.
     #[arg(
         long = "host-mode",
         env = "VELNOR_HOST_MODE",
@@ -208,9 +234,9 @@ pub struct DaemonArgs {
     #[arg(long, env = "VELNOR_PERMIT_LEDGER")]
     pub permit_ledger: Option<PathBuf>,
 
-    /// Scale-set lane config file (TOML). This must be paired with an explicit
-    /// `--host-mode both` or `--host-mode scale-set-only`; a config path alone
-    /// never changes the safe native-only default.
+    /// Scale Set config file (TOML). Native-only can use it to attest Scale Set
+    /// permit holders from sibling daemons during shared-ledger startup
+    /// reconciliation; it does not enable the Scale Set lane by itself.
     #[arg(long, env = "VELNOR_SCALE_SET_CONFIG")]
     pub scale_set_config: Option<PathBuf>,
 
@@ -308,7 +334,7 @@ pub enum ReleaseCommand {
     /// Verify a record against its independent checksum and internal coherence.
     VerifyRecord(ReleaseVerifyRecordArgs),
     /// Validate the installed binary/package/manifest against the active record.
-    /// Run by both `.service` units before ExecStart.
+    /// Run by package service roles while their in-process shared lock is held.
     VerifyInstalled(ReleaseVerifyInstalledArgs),
     /// Atomically activate a record, demoting the current active to rollback.
     Activate(ReleaseActivateArgs),
@@ -620,12 +646,33 @@ pub fn node_service_executable() -> std::io::Result<std::path::PathBuf> {
     Ok(current)
 }
 
+fn runner_role_requires_package_guard(command: &ServiceCommand) -> bool {
+    matches!(
+        command,
+        ServiceCommand::Daemon(_)
+            | ServiceCommand::Guardian(_)
+            | ServiceCommand::Controller(_)
+            | ServiceCommand::Slot(_)
+            | ServiceCommand::Job(_)
+    )
+}
+
 /// Service entry point: unconditional strict-capability admission, manifest
 /// integrity check, service-surface CLI parsing, telemetry initialization,
 /// and dispatch. Behavior matches the historical daemon bootstrap.
 pub async fn execute() -> anyhow::Result<()> {
     crate::scaffold::enforce_admission()?;
     let cli = ServiceCli::parse();
+    // Each runner role owns one shared package lock for its full lifetime. This
+    // covers direct invocations too, without relying on systemd's outer flock.
+    // Slot/job dispatch transfers guard ownership into the common node wrapper;
+    // velnorctl entrypoints acquire it there instead. Development binaries
+    // receive a no-op guard because they have no installed package tuple.
+    let package_guard = if runner_role_requires_package_guard(&cli.command) {
+        Some(crate::release::package_runner_execution_guard()?)
+    } else {
+        None
+    };
     match cli.command {
         ServiceCommand::Guardian(args) => {
             crate::scaffold::init_telemetry(None);
@@ -637,11 +684,35 @@ pub async fn execute() -> anyhow::Result<()> {
         }
         ServiceCommand::Slot(args) => {
             crate::scaffold::init_telemetry(None);
-            crate::node::run_slot(*args).await
+            crate::node::run_slot_with_package_guard(
+                *args,
+                package_guard
+                    .ok_or_else(|| anyhow::anyhow!("slot role has no package execution guard"))?,
+            )
+            .await
         }
         ServiceCommand::Job(args) => {
             crate::scaffold::init_telemetry(None);
-            crate::node::run_job(args).await
+            crate::node::run_job_with_package_guard(
+                args,
+                package_guard
+                    .ok_or_else(|| anyhow::anyhow!("job role has no package execution guard"))?,
+            )
+            .await
+        }
+        #[cfg(unix)]
+        ServiceCommand::Storage(StoragePurgeArgs {
+            command: StoragePurgeCommand::PurgeLegacy,
+        }) => {
+            crate::scaffold::init_telemetry(None);
+            crate::stale_trust_scope::purge_configured_legacy_roots()
+        }
+        #[cfg(unix)]
+        ServiceCommand::Storage(StoragePurgeArgs {
+            command: StoragePurgeCommand::VerifyLegacy,
+        }) => {
+            crate::scaffold::init_telemetry(None);
+            crate::stale_trust_scope::verify_configured_legacy_roots()
         }
         other => {
             let command = Command::try_from(other)?;
@@ -751,6 +822,8 @@ mod tests {
                 "/tmp/velnor-state",
                 "--job-id",
                 "job",
+                "--pressure-launch-nonce",
+                "nonce",
             ],
         ] {
             let parsed =
@@ -764,6 +837,53 @@ mod tests {
     }
 
     #[test]
+    fn every_runner_process_role_requires_a_package_execution_guard() {
+        let commands = [
+            vec!["velnor-runner", "daemon"],
+            vec!["velnor-runner", "guardian", "--state-dir", "/tmp/state"],
+            vec!["velnor-runner", "controller", "--state-dir", "/tmp/state"],
+            vec![
+                "velnor-runner",
+                "slot",
+                "--state-dir",
+                "/tmp/state",
+                "--scope",
+                "default",
+                "--slot-index",
+                "1",
+                "--generation",
+                "1",
+            ],
+            vec![
+                "velnor-runner",
+                "job",
+                "--state-dir",
+                "/tmp/state",
+                "--job-id",
+                "job-1",
+                "--pressure-launch-nonce",
+                "nonce-1",
+            ],
+        ];
+
+        for argv in commands {
+            let parsed =
+                ServiceCli::try_parse_from(argv.clone()).expect("runner role should parse");
+            assert!(
+                runner_role_requires_package_guard(&parsed.command),
+                "{argv:?} skipped package execution admission"
+            );
+        }
+
+        let parsed = ServiceCli::try_parse_from(["velnor-runner", "release", "export"])
+            .expect("release export should parse");
+        assert!(
+            !runner_role_requires_package_guard(&parsed.command),
+            "release hooks must not be treated as runner roles"
+        );
+    }
+
+    #[test]
     fn service_daemon_host_mode_defaults_and_parses_explicitly() {
         let default = ServiceCli::try_parse_from(["velnor-runner", "daemon"])
             .expect("default daemon arguments should parse");
@@ -771,6 +891,28 @@ mod tests {
             panic!("expected daemon command");
         };
         assert_eq!(default_args.mode, crate::args::HostMode::NativeOnly);
+
+        let attestation = ServiceCli::try_parse_from([
+            "velnor-runner",
+            "daemon",
+            "--scale-set-config",
+            "scale-set.toml",
+        ])
+        .expect("native-only Scale Set attestation config should parse");
+        let ServiceCommand::Daemon(attestation_args) = attestation.command else {
+            panic!("expected daemon command");
+        };
+        assert_eq!(attestation_args.mode, crate::args::HostMode::NativeOnly);
+        assert_eq!(
+            attestation_args.scale_set_config,
+            Some(PathBuf::from("scale-set.toml"))
+        );
+        let converted: crate::args::DaemonArgs = (*attestation_args).clone().into();
+        assert_eq!(converted.mode, crate::args::HostMode::NativeOnly);
+        assert_eq!(
+            converted.scale_set_config,
+            Some(PathBuf::from("scale-set.toml"))
+        );
 
         let explicit = ServiceCli::try_parse_from([
             "velnor-runner",
@@ -806,6 +948,39 @@ mod tests {
             !url.is_required_set(),
             "ScaleSetOnly must be able to omit native registration URL"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn package_storage_purge_command_parses() {
+        let parsed = ServiceCli::try_parse_from(["velnor-runner", "storage", "purge-legacy"])
+            .expect("package storage purge command should parse");
+        assert!(matches!(
+            parsed.command,
+            ServiceCommand::Storage(StoragePurgeArgs {
+                command: StoragePurgeCommand::PurgeLegacy
+            })
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn package_storage_verify_command_parses() {
+        let parsed = ServiceCli::try_parse_from(["velnor-runner", "storage", "verify-legacy"])
+            .expect("package storage root verification command should parse");
+        assert!(matches!(
+            parsed.command,
+            ServiceCommand::Storage(StoragePurgeArgs {
+                command: StoragePurgeCommand::VerifyLegacy
+            })
+        ));
+    }
+
+    #[test]
+    #[cfg(not(unix))]
+    fn package_storage_migration_commands_are_linux_only() {
+        assert!(ServiceCli::try_parse_from(["velnor-runner", "storage", "purge-legacy"]).is_err());
+        assert!(ServiceCli::try_parse_from(["velnor-runner", "storage", "verify-legacy"]).is_err());
     }
 
     #[test]
