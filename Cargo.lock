@@ -4059,6 +4059,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "velnor-storage-snapshot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "velnor-client",
+]
+
+[[package]]
 name = "velnor-tools"
 version = "0.1.27"
 dependencies = [
