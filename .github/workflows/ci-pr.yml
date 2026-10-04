@@ -63,9 +63,9 @@ jobs:
         id: runtime
         uses: ./.github/actions/setup-velnor-workflow
         with:
-          rev: 317395329bfba277c976e6b578ed18561193e685
+          rev: e988d793937c044275e4086b00856444c60f6ab8
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=317395329bfba277c976e6b578ed18561193e685" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=e988d793937c044275e4086b00856444c60f6ab8" >> "$GITHUB_ENV"
       - name: Select affected units
         id: plan
         env:
@@ -92,7 +92,7 @@ jobs:
       - name: Prepare Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 317395329bfba277c976e6b578ed18561193e685
+          EXPECTED_REVISION: e988d793937c044275e4086b00856444c60f6ab8
         run: |
           set -euo pipefail
           stage="$RUNNER_TEMP/velnor-workflow-runtime"
@@ -111,7 +111,7 @@ jobs:
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: velnor-workflow-runtime-317395329bfba277c976e6b578ed18561193e685-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-e988d793937c044275e4086b00856444c60f6ab8-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/velnor-workflow-runtime
           if-no-files-found: error
           retention-days: 7
@@ -841,7 +841,6 @@ jobs:
         crates/velnor-workflow/templates/**
         crates/velnor-workflow/templates/release-package-signer.yml
         crates/velnor-workflow/tests/**
-        crates/velnor-workflow/tests/fixtures/github-action-consumer/workflow.yml
         crates/velnor-workflow/tests/generic_surface_literals.rs
         docker/build-mise.*
         docker/job-mise.lock
@@ -866,7 +865,7 @@ jobs:
       candidate_publish: true
       unit_platform: linux-x64
       unit_trust: untrusted-ok
-      unit_dependencies: "rust-velnor-model,rust-velnor-runner"
+      unit_dependencies: rust-velnor-runner
       unit_admission: github-hosted
   github-hosted-rust-velnor-workflow-contract:
     name: "Rust · velnor-workflow-contract · github-hosted — rust-velnor-workflow-contract"
@@ -1074,12 +1073,12 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime-317395329bfba277c976e6b578ed18561193e685-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-e988d793937c044275e4086b00856444c60f6ab8-${{ runner.os }}-${{ runner.arch }}
           path: .velnor-workflow-runtime
       - name: Verify Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 317395329bfba277c976e6b578ed18561193e685
+          EXPECTED_REVISION: e988d793937c044275e4086b00856444c60f6ab8
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
@@ -1093,7 +1092,7 @@ jobs:
       - name: Add Velnor workflow runtime to PATH
         shell: bash
         env:
-          EXPECTED_REVISION: 317395329bfba277c976e6b578ed18561193e685
+          EXPECTED_REVISION: e988d793937c044275e4086b00856444c60f6ab8
         run: |
           set -euo pipefail
           home="$RUNNER_TEMP/velnor-workflow-runtime-artifact"
