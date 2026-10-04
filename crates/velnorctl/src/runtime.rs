@@ -75,7 +75,18 @@ pub struct DaemonArgs {
     /// Host-wide permit ledger database. Must match `velnor_runner::service`.
     #[arg(long, env = "VELNOR_PERMIT_LEDGER")]
     pub permit_ledger: Option<PathBuf>,
-    /// Scale-set lane config file (TOML). Must match `velnor_runner::service`.
+    /// Host execution topology: native-only (default), scale-set-only, or both.
+    /// Lane activation is mode-driven; native-only may still use Scale Set
+    /// config to attest permits during shared-ledger startup reconciliation.
+    #[arg(
+        long = "host-mode",
+        env = "VELNOR_HOST_MODE",
+        value_name = "MODE",
+        default_value_t = rt::HostMode::NativeOnly
+    )]
+    pub mode: rt::HostMode,
+    /// Optional Scale Set TOML. Also used in native-only mode to attest Scale
+    /// Set permit holders during shared-ledger startup reconciliation.
     #[arg(long, env = "VELNOR_SCALE_SET_CONFIG")]
     pub scale_set_config: Option<PathBuf>,
     /// Pool trust boundary. Flattened from the single declaration in
@@ -115,6 +126,7 @@ pub struct DaemonArgs {
 /// are selected together, and each listener owns its exact socket path for
 /// cleanup on normal exit, cancellation, and partial startup failure.
 pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
+    validate_daemon_host_mode(&args)?;
     enforce_admission()?;
     crate::ensure_native_github_http_transport();
     velnor_client::ensure_socket_root()?;
@@ -198,6 +210,18 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     })
     .await;
     result
+}
+
+/// Require Scale Set config for modes that start the lane before the daemon
+/// creates sockets, opens state, or starts runtime services.
+pub fn validate_daemon_host_mode(args: &DaemonArgs) -> anyhow::Result<()> {
+    if args.mode.scale_set_enabled() && args.scale_set_config.is_none() {
+        anyhow::bail!(
+            "host mode {} requires --scale-set-config or VELNOR_SCALE_SET_CONFIG",
+            args.mode
+        );
+    }
+    Ok(())
 }
 
 fn resolve_state_db_path(explicit: Option<&Path>, config_dir: Option<&Path>) -> PathBuf {
@@ -372,7 +396,7 @@ impl From<DaemonArgs> for velnor_runner::args::DaemonArgs {
             dry_run_jobs: args.dry_run_jobs,
             dump_job_message: args.dump_job_message,
             docker_image: args.docker_image,
-            mode: rt::HostMode::NativeOnly,
+            mode: args.mode,
             max_jobs: args.max_jobs,
             permit_ledger: args.permit_ledger,
             scale_set_config: args.scale_set_config,
@@ -848,24 +872,70 @@ mod tests {
     }
 
     #[test]
-    fn daemon_conversion_keeps_scale_set_config_from_enabling_lane() {
+    fn daemon_conversion_keeps_scale_set_config_without_enabling_lane() {
         use clap::Parser;
 
-        #[derive(Parser)]
-        struct Cli {
-            #[command(flatten)]
-            daemon: DaemonArgs,
-        }
-
-        let parsed =
-            Cli::try_parse_from(["velnorctl", "--scale-set-config", "scale-set.toml"]).unwrap();
-        let converted: rt::DaemonArgs = parsed.daemon.into();
+        let parsed = crate::Cli::try_parse_from([
+            "velnorctl",
+            "daemon",
+            "--scale-set-config",
+            "scale-set.toml",
+        ])
+        .unwrap();
+        let crate::Command::Daemon(daemon) = parsed.command else {
+            unreachable!();
+        };
+        assert!(validate_daemon_host_mode(&daemon).is_ok());
+        let converted: rt::DaemonArgs = (*daemon).into();
 
         assert_eq!(converted.mode, rt::HostMode::NativeOnly);
+        assert!(!converted.mode.scale_set_enabled());
         assert_eq!(
             converted.scale_set_config,
             Some(PathBuf::from("scale-set.toml"))
         );
+    }
+
+    #[test]
+    fn daemon_conversion_maps_explicit_scale_set_host_mode() {
+        use clap::Parser;
+
+        let parsed = crate::Cli::try_parse_from([
+            "velnorctl",
+            "daemon",
+            "--host-mode",
+            "both",
+            "--scale-set-config",
+            "scale-set.toml",
+        ])
+        .unwrap();
+        let crate::Command::Daemon(daemon) = parsed.command else {
+            unreachable!();
+        };
+        assert!(validate_daemon_host_mode(&daemon).is_ok());
+        let converted: rt::DaemonArgs = (*daemon).into();
+
+        assert_eq!(converted.mode, rt::HostMode::Both);
+        assert_eq!(
+            converted.scale_set_config,
+            Some(PathBuf::from("scale-set.toml"))
+        );
+    }
+
+    #[test]
+    fn scale_set_host_modes_require_config_before_startup() {
+        use clap::Parser;
+
+        for mode in ["scale-set-only", "both"] {
+            let parsed =
+                crate::Cli::try_parse_from(["velnorctl", "daemon", "--host-mode", mode]).unwrap();
+            let crate::Command::Daemon(daemon) = parsed.command else {
+                unreachable!();
+            };
+
+            let error = validate_daemon_host_mode(&daemon).unwrap_err();
+            assert!(error.to_string().contains("requires --scale-set-config"));
+        }
     }
 
     #[test]
