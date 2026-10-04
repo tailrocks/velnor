@@ -4729,8 +4729,9 @@ fn journal_write_fence_is_exact(tx: &Connection) -> StoreResult<bool> {
 fn journal_identity_table_is_exact(conn: &Connection) -> StoreResult<bool> {
     let schema: Option<String> = conn
         .query_row(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'journal_identity'",
-            [],
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'table' AND lower(name) = lower(?1)",
+            ["journal_identity"],
             |row| row.get(0),
         )
         .optional()?;
@@ -4776,7 +4777,7 @@ fn journal_pressure_table_exists(conn: &Connection) -> StoreResult<bool> {
     conn.query_row(
         "SELECT EXISTS (
              SELECT 1 FROM sqlite_master
-             WHERE type = 'table' AND name IN (
+             WHERE type IN ('table', 'view') AND lower(name) IN (
                  'disk_pressure_episodes',
                  'disk_pressure_launches',
                  'disk_pressure_observations'
@@ -4834,7 +4835,8 @@ fn journal_pressure_tables_are_exact(conn: &Connection) -> StoreResult<bool> {
     ] {
         let schema: Option<String> = conn
             .query_row(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'table' AND lower(name) = lower(?1)",
                 [name],
                 |row| row.get(0),
             )
@@ -4853,7 +4855,7 @@ fn journal_identity_table_exists(conn: &Connection) -> StoreResult<bool> {
     conn.query_row(
         "SELECT EXISTS (
              SELECT 1 FROM sqlite_master
-             WHERE type = 'table' AND name = 'journal_identity'
+             WHERE type IN ('table', 'view') AND lower(name) = 'journal_identity'
          )",
         [],
         |row| row.get(0),
@@ -9997,6 +9999,129 @@ mod tests {
         let before = std::fs::read(&path).unwrap();
 
         let error = Journal::open_for_service_instance(&path, "service-one").unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema10_reopen_rejects_missing_or_malformed_pressure_tables_before_ddl() {
+        for (label, mutate_sql, missing_table) in [
+            (
+                "missing-pressure",
+                "DROP TABLE disk_pressure_episodes;",
+                Some("disk_pressure_episodes"),
+            ),
+            (
+                "malformed-pressure",
+                "ALTER TABLE disk_pressure_observations ADD COLUMN unexpected TEXT;",
+                None,
+            ),
+        ] {
+            let (dir, journal) = open_tmp(label);
+            let path = dir.join("journal.db");
+            drop(journal);
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("DROP TABLE journal_identity;").unwrap();
+            conn.execute_batch(mutate_sql).unwrap();
+            conn.pragma_update(None, "user_version", 10u32).unwrap();
+            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+                .unwrap();
+            drop(conn);
+
+            let before = std::fs::read(&path).unwrap();
+            let error = Journal::open_for_service_instance(&path, "service-one").unwrap_err();
+            assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+
+            if let Some(table) = missing_table {
+                let conn = Connection::open(&path).unwrap();
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT EXISTS (
+                             SELECT 1 FROM sqlite_master
+                             WHERE type = 'table' AND lower(name) = lower(?1)
+                         )",
+                        [table],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                    0,
+                    "failed v10 open must not recreate {table}"
+                );
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn lowered_schema_stamp_rejects_case_insensitive_newer_pressure_and_identity_objects() {
+        let (dir, journal) = open_tmp("lowered-stamp-uppercase-pressure");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE disk_pressure_episodes
+                 RENAME TO disk_pressure_episodes_renamed;
+             ALTER TABLE disk_pressure_episodes_renamed
+                 RENAME TO DISK_PRESSURE_EPISODES;
+             DROP TABLE journal_identity;",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 9u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let before = std::fs::read(&path).unwrap();
+        let probe = Connection::open(&path).unwrap();
+        let preflight_error = preflight_schema(&probe).unwrap_err();
+        assert_eq!(preflight_error.envelope.reason, "journal.schema.mismatch");
+        drop(probe);
+        let error = Journal::open_for_service_instance(&path, "service-one").unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+
+        let (dir, journal) = open_tmp("lowered-stamp-uppercase-identity");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE journal_identity RENAME TO journal_identity_renamed;
+             ALTER TABLE journal_identity_renamed RENAME TO JOURNAL_IDENTITY;",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 10u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let before = std::fs::read(&path).unwrap();
+        let probe = Connection::open(&path).unwrap();
+        let preflight_error = preflight_schema(&probe).unwrap_err();
+        assert_eq!(preflight_error.envelope.reason, "journal.schema.mismatch");
+        drop(probe);
+        let error = Journal::open_for_service_instance(&path, "service-one").unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema11_reopen_rejects_malformed_identity_shape_without_mutation() {
+        let (dir, journal) = open_tmp("schema11-malformed-identity");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("ALTER TABLE journal_identity ADD COLUMN unexpected TEXT;")
+            .unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
         assert_eq!(error.envelope.reason, "journal.schema.mismatch");
         assert_eq!(std::fs::read(&path).unwrap(), before);
         std::fs::remove_dir_all(dir).unwrap();
