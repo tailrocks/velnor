@@ -31,3 +31,4 @@ target-job-payloads/
 __unconfig*
 todos.json
 .amp/portals/*
+.firecrawl/
