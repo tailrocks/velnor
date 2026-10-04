@@ -418,7 +418,7 @@ const BUILD_PUSH_INPUTS: &[InputRule] = &[
     InputRule::Literal("push", &["true", "false"]),
     InputRule::Literal("load", &["true", "false"]),
     InputRule::Literal("provenance", &["true", "false"]),
-    InputRule::Literal("sbom", &["true", "false"]),
+    InputRule::Any("sbom"),
 ];
 const TAILROCKS_VELNOR_INPUTS: &[InputRule] = &[
     // .github/actions/report-velnor-ci-outcomes inputs
@@ -2037,6 +2037,28 @@ mod tests {
         assert_eq!(MANIFEST_VERSION, 15);
         assert_eq!(MANIFEST.version, 15);
         assert_manifest_integrity().expect("compiled manifest must pass integrity");
+    }
+
+    #[test]
+    fn build_push_sbom_accepts_generator_attributes() {
+        let mut violations = Vec::new();
+        let inputs = [(
+            "sbom".to_string(),
+            "generator=docker/scout-sbom-indexer:latest".to_string(),
+        )]
+        .into_iter()
+        .collect();
+
+        validate_inputs(
+            &mut violations,
+            "build",
+            "docker/build-push-action",
+            "v7.4.0",
+            BUILD_PUSH_INPUTS,
+            &inputs,
+        );
+
+        assert!(violations.is_empty(), "{violations:?}");
     }
 
     #[test]
