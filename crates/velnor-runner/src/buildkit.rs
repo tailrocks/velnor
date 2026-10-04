@@ -2020,7 +2020,7 @@ pub(crate) fn persist_builder_readiness_after_start(
         },
         attest_buildkit_removal_volume,
         attest_buildkit_removal_container,
-        |_, daemon, volume, volume_present, container_id| {
+        |_, daemon, _volume, volume_present, container_id| {
             if !volume_present {
                 anyhow::bail!("BuildKit state volume for {daemon} disappeared after start");
             }
