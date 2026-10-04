@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+#[cfg(unix)]
 use velnor_client::{ResourceQuery, UnixControlClient, UnixEndpoint};
 
 const EVIDENCE_SCHEMA_VERSION: u32 = 1;
@@ -20,13 +21,18 @@ const GITHUB_API_VERSION: &str = "2026-03-10";
 const GITHUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const GITHUB_USER_AGENT: &str = "velnor-tools-workflow-monitor";
 const MAX_EVIDENCE_BYTES: usize = 8 * 1024 * 1024;
+#[cfg(unix)]
 const MAX_LOCAL_ERRORS: usize = 16;
+#[cfg(unix)]
 const MAX_LOCAL_ERROR_BYTES: usize = 512;
+#[cfg(unix)]
 const MAX_LOCAL_SNAPSHOT_BYTES: usize = 256 * 1024;
 const MAX_MONITOR_OBSERVATIONS: usize = 2048;
 const MAX_MONITOR_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+#[cfg(unix)]
 const LOCAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(unix)]
 const LOCAL_PAGE_LIMIT: u32 = 100;
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -243,6 +249,10 @@ pub fn monitor_workflow_run<'a>(
     config: &'a WorkflowMonitorConfig,
 ) -> Result<WorkflowMonitorResult<'a>> {
     config.validate()?;
+    #[cfg(not(unix))]
+    if config.instance.is_some() {
+        bail!("local Velnor observation requires Unix sockets and is unsupported on this platform");
+    }
     let started_at = utc_timestamp()?;
     let deadline = Instant::now()
         .checked_add(config.timeout)
@@ -271,13 +281,17 @@ pub fn monitor_workflow_run<'a>(
                 config.run_id
             );
         }
+        #[cfg(unix)]
+        let velnor = config
+            .instance
+            .as_deref()
+            .map(|instance| collect_velnor_observation(instance, deadline));
+        #[cfg(not(unix))]
+        let velnor = None;
         let observation = WorkflowRunObservation {
             observed_at: utc_timestamp()?,
             run,
-            velnor: config
-                .instance
-                .as_deref()
-                .map(|instance| collect_velnor_observation(instance, deadline)),
+            velnor,
         };
         let current = observation.run.clone();
         if observations.len() == MAX_MONITOR_OBSERVATIONS {
@@ -363,6 +377,7 @@ fn github_token() -> Result<String> {
     bail!("workflow monitor requires a GitHub token in GITHUB_TOKEN (or GH_TOKEN); none found")
 }
 
+#[cfg(unix)]
 fn collect_velnor_observation(instance: &str, deadline: Instant) -> VelnorObservation {
     let instance = instance.to_owned();
     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -391,6 +406,7 @@ fn collect_velnor_observation(instance: &str, deadline: Instant) -> VelnorObserv
     }
 }
 
+#[cfg(unix)]
 async fn collect_velnor_snapshot(instance: &str, deadline: Instant) -> Result<VelnorObservation> {
     let endpoint = UnixEndpoint::from_instance(instance).context("validate Velnor instance")?;
     let timeout = LOCAL_REQUEST_TIMEOUT.min(deadline.saturating_duration_since(Instant::now()));
@@ -482,6 +498,7 @@ async fn collect_velnor_snapshot(instance: &str, deadline: Instant) -> Result<Ve
     })
 }
 
+#[cfg(unix)]
 fn insert_local_snapshot(
     snapshots: &mut std::collections::BTreeMap<String, Value>,
     errors: &mut Vec<String>,
@@ -508,6 +525,7 @@ fn insert_local_snapshot(
     snapshots.insert(key, value);
 }
 
+#[cfg(unix)]
 fn record_local_error(errors: &mut Vec<String>, key: &str, error: impl std::fmt::Display) {
     if errors.len() >= MAX_LOCAL_ERRORS {
         return;
@@ -516,6 +534,7 @@ fn record_local_error(errors: &mut Vec<String>, key: &str, error: impl std::fmt:
     errors.push(truncate_utf8(message, MAX_LOCAL_ERROR_BYTES));
 }
 
+#[cfg(unix)]
 fn truncate_utf8(mut value: String, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value;
@@ -529,6 +548,7 @@ fn truncate_utf8(mut value: String, max_bytes: usize) -> String {
     value
 }
 
+#[cfg(unix)]
 fn unavailable_velnor_observation(instance: String, error: impl Into<String>) -> VelnorObservation {
     VelnorObservation {
         instance,
@@ -703,6 +723,7 @@ mod tests {
             .is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn local_snapshots_and_errors_stay_bounded() {
         let mut snapshots = std::collections::BTreeMap::new();
@@ -730,6 +751,7 @@ mod tests {
             .all(|error| error.len() <= MAX_LOCAL_ERROR_BYTES));
     }
 
+    #[cfg(unix)]
     #[test]
     fn expired_deadline_does_not_start_local_observation() {
         let started = Instant::now();
@@ -737,6 +759,16 @@ mod tests {
         assert!(!observation.available);
         assert_eq!(observation.snapshots.len(), 0);
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn local_observation_is_rejected_before_github_polling() {
+        let config = WorkflowMonitorConfig::new("owner/repo", 1).with_instance("velnor");
+        let error = monitor_workflow_run(&config).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("local Velnor observation requires Unix sockets"));
     }
 
     #[test]
