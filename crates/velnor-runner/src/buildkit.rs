@@ -5599,7 +5599,11 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("create temp root");
-        root
+        // macOS exposes temp paths under /var, which is commonly a symlink
+        // to /private/var. Secure storage helpers reject symlink ancestors,
+        // so hand them the resolved fixture root; tests still create any
+        // symlinks they intend to exercise inside that root.
+        std::fs::canonicalize(&root).expect("canonicalize temp root")
     }
 
     fn legacy_readiness_fixture(
