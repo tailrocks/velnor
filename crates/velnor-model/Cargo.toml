@@ -14,7 +14,6 @@ sha2.workspace = true
 time = { workspace = true, features = ["macros"] }
 toml.workspace = true
 url = { workspace = true }
-rustix.workspace = true
 
 [dev-dependencies]
 serde_json = { workspace = true }
