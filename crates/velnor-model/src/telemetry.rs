@@ -1308,6 +1308,15 @@ fn lock_telemetry_file(path: &Path, exclusive: bool) -> io::Result<File> {
 fn lock_telemetry_file_with_retry(
     path: &Path,
     exclusive: bool,
+    on_would_block: impl FnMut(),
+) -> io::Result<File> {
+    lock_telemetry_file_with_retry_and_clock(path, exclusive, Instant::now, on_would_block)
+}
+
+fn lock_telemetry_file_with_retry_and_clock(
+    path: &Path,
+    exclusive: bool,
+    mut now: impl FnMut() -> Instant,
     mut on_would_block: impl FnMut(),
 ) -> io::Result<File> {
     let lock_path = path.with_extension("lock");
@@ -1317,7 +1326,7 @@ fn lock_telemetry_file_with_retry(
         .write(true)
         .truncate(false)
         .open(lock_path)?;
-    let deadline = Instant::now() + Duration::from_millis(100);
+    let deadline = now() + Duration::from_millis(100);
     loop {
         let result = if exclusive {
             lock.try_lock()
@@ -1326,7 +1335,7 @@ fn lock_telemetry_file_with_retry(
         };
         match result {
             Ok(()) => break,
-            Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+            Err(std::fs::TryLockError::WouldBlock) if now() < deadline => {
                 on_would_block();
                 std::thread::yield_now();
             }
@@ -2341,12 +2350,18 @@ mod tests {
         let contender = std::thread::spawn(move || {
             let mut blocker = Some(blocker);
             let mut observed_contention = false;
-            let acquired = lock_telemetry_file_with_retry(&contender_path, true, || {
-                if !observed_contention {
+            // Freeze retry time so scheduler delays cannot expire the production
+            // 100ms window before this contender reaches its first try_lock.
+            let retry_started = Instant::now();
+            let acquired = lock_telemetry_file_with_retry_and_clock(
+                &contender_path,
+                true,
+                || retry_started,
+                || {
                     observed_contention = true;
                     drop(blocker.take());
-                }
-            });
+                },
+            );
             (acquired, observed_contention)
         });
 
@@ -2361,6 +2376,38 @@ mod tests {
             "contender should first observe WouldBlock"
         );
         acquired.expect("contender should acquire after release");
+    }
+
+    #[test]
+    fn telemetry_file_lock_retry_stops_at_100ms_deadline() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-telemetry-lock-deadline-{}.jsonl",
+            std::process::id()
+        ));
+        let lock_path = path.with_extension("lock");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&lock_path);
+
+        let blocker = lock_telemetry_file(&path, true).expect("initial exclusive lock");
+        let retry_started = Instant::now();
+        let simulated_elapsed = std::cell::Cell::new(Duration::ZERO);
+        let mut observed_contention = false;
+        let blocked = lock_telemetry_file_with_retry_and_clock(
+            &path,
+            true,
+            || retry_started + simulated_elapsed.get(),
+            || {
+                observed_contention = true;
+                simulated_elapsed.set(Duration::from_millis(100));
+            },
+        )
+        .expect_err("lock retry should stop when the 100ms deadline expires");
+
+        drop(blocker);
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(lock_path);
+        assert_eq!(blocked.kind(), io::ErrorKind::WouldBlock);
+        assert!(observed_contention, "retry should observe contention once");
     }
 
     #[test]
