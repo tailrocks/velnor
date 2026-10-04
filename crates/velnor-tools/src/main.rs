@@ -545,7 +545,7 @@ async fn main() -> Result<()> {
         CommandKind::TargetVerify(args) => target_verify(&root, args).await,
         CommandKind::Commit(args) => commit(&root, args),
         CommandKind::WorkflowDispatch(args) => workflow_dispatch(args),
-        CommandKind::WorkflowMonitor(args) => run_workflow_monitor(args),
+        CommandKind::WorkflowMonitor(args) => run_workflow_monitor(args).await,
         CommandKind::WriteLiveEvidence(args) => write_live_evidence_cmd(&root, args),
         CommandKind::FixtureSmoke(args) => fixture_smoke(&root, args),
         CommandKind::TargetSmoke(args) => target_smoke(&root, args),
@@ -3392,7 +3392,13 @@ fn parse_monitor_duration(raw: &str) -> Result<Duration, String> {
     Ok(Duration::from_millis(milliseconds))
 }
 
-fn run_workflow_monitor(args: WorkflowMonitorArgs) -> Result<()> {
+async fn run_workflow_monitor(args: WorkflowMonitorArgs) -> Result<()> {
+    tokio::task::spawn_blocking(move || run_workflow_monitor_blocking(args))
+        .await
+        .context("join workflow monitor blocking task")?
+}
+
+fn run_workflow_monitor_blocking(args: WorkflowMonitorArgs) -> Result<()> {
     let mut config = workflow_monitor::WorkflowMonitorConfig::new(args.repo, args.run_id)
         .with_timeout(args.timeout)
         .with_poll_interval(args.poll);
