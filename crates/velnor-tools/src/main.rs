@@ -22,6 +22,7 @@ use std::{
     process::Command,
     time::Duration,
 };
+use velnor_tools::homebrew_preview;
 
 const DEFAULT_FIXTURE_REPO: &str = "tailrocks/velnor-actions-fixture";
 const DEFAULT_FIXTURE_REF: &str = "main";
@@ -88,6 +89,23 @@ enum CommandKind {
     LaneCompare(lane_compare::LaneCompareArgs),
     /// Maintainer-only org-JIT fleet policy operations (Plan 039).
     FleetPolicy(fleet_policy::FleetPolicyArgs),
+    /// Produce and verify the source-bound Homebrew preview package.
+    #[command(name = "homebrew-preview")]
+    HomebrewPreview(HomebrewPreviewArgs),
+}
+
+#[derive(Debug, Args)]
+struct HomebrewPreviewArgs {
+    #[command(subcommand)]
+    command: HomebrewPreviewCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum HomebrewPreviewCommand {
+    /// Build the deterministic package in the declared verified handoff.
+    Package,
+    /// Verify the source archive, manifest, identity, and checksum in the handoff.
+    Verify,
 }
 
 #[derive(Debug, Args)]
@@ -556,6 +574,13 @@ async fn main() -> Result<()> {
         CommandKind::G0LiveSample(args) => github_acquisition::live_cli::run_sample(args).await,
         CommandKind::LaneCompare(args) => lane_compare::lane_compare(&root, args),
         CommandKind::FleetPolicy(args) => fleet_policy::fleet_policy(args.command).await,
+        CommandKind::HomebrewPreview(args) => {
+            let config = homebrew_preview::ProducerConfig::from_env()?;
+            match args.command {
+                HomebrewPreviewCommand::Package => homebrew_preview::produce(&config),
+                HomebrewPreviewCommand::Verify => homebrew_preview::verify(&config),
+            }
+        }
     }
 }
 

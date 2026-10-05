@@ -4057,6 +4057,7 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "clap",
+ "flate2",
  "libc",
  "noyalib",
  "regex",
@@ -4064,6 +4065,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tar",
  "time",
  "tokio",
  "toml",
@@ -4096,6 +4098,7 @@ dependencies = [
  "toml",
  "uuid",
  "velnor-runner",
+ "velnor-tools",
 ]
 
 [[package]]
