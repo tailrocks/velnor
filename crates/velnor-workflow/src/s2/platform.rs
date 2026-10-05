@@ -286,10 +286,12 @@ fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), Generator
 /// the product rebuilds before the unit's own checks on every provider and in
 /// local runs, which read the same serialized vectors.
 fn prepend_prepare_commands(unit: &mut Unit, commands: &[String]) {
-    let mut pr_commands = commands.to_vec();
+    let mut pr_commands: Vec<crate::validation::CheckCommand> =
+        commands.iter().cloned().map(Into::into).collect();
     pr_commands.extend(unit.pr_commands.iter().cloned());
     unit.pr_commands = pr_commands;
-    let mut full_commands = commands.to_vec();
+    let mut full_commands: Vec<crate::validation::CheckCommand> =
+        commands.iter().cloned().map(Into::into).collect();
     full_commands.extend(unit.full_commands.iter().cloned());
     unit.full_commands = full_commands;
     unit.watch.sort();
@@ -359,6 +361,7 @@ mod tests {
 
     fn unit(id: &str, kind: UnitKind) -> Unit {
         Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: id.to_owned(),
             label: id.to_owned(),
             kind,

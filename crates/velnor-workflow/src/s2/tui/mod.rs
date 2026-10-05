@@ -949,13 +949,14 @@ mod tests {
 
     fn unit(id: &str, dependencies: &[&str]) -> crate::s2::Unit {
         crate::s2::Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: id.to_owned(),
             label: id.to_owned(),
             kind: crate::s2::UnitKind::Rust,
             root: ".".to_owned(),
             watch: Vec::new(),
-            pr_commands: vec!["cargo test".to_owned()],
-            full_commands: vec!["cargo test --all-targets".to_owned()],
+            pr_commands: vec!["cargo test".into()],
+            full_commands: vec!["cargo test --all-targets".into()],
             depends_on: dependencies
                 .iter()
                 .map(|dependency| (*dependency).to_owned())

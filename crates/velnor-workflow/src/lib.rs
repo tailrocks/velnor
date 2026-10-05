@@ -5,6 +5,8 @@
 //! `.github/ci/project.toml`; the checked-in configuration is the runtime
 //! source of truth after generation.
 
+use crate::validation::{CheckCommand, CheckKind};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
@@ -38,6 +40,7 @@ mod scan;
 mod template_memory;
 #[cfg(feature = "tui")]
 mod tui;
+mod validation;
 
 use crate::primitives::prepared_tools::PreparedToolNeed;
 use crate::primitives::{WorkflowIr, WorkflowKind};
@@ -622,6 +625,7 @@ impl UnitKind {
 /// A scanner-derived verification unit serialized to TOML.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Unit {
+    pub(crate) check_contract: crate::validation::CheckContract,
     pub(crate) id: String,
     pub(crate) label: String,
     pub(crate) kind: UnitKind,
@@ -631,12 +635,12 @@ pub struct Unit {
     /// unit without one must resolve its own inputs.
     pub(crate) pinned_lockfile: bool,
     pub(crate) watch: Vec<String>,
-    pub(crate) pr_commands: Vec<String>,
-    pub(crate) full_commands: Vec<String>,
-    pub(crate) github_pr_commands: Option<Vec<String>>,
-    pub(crate) github_full_commands: Option<Vec<String>>,
-    pub(crate) velnor_pr_commands: Option<Vec<String>>,
-    pub(crate) velnor_full_commands: Option<Vec<String>>,
+    pub(crate) pr_commands: Vec<CheckCommand>,
+    pub(crate) full_commands: Vec<CheckCommand>,
+    pub(crate) github_pr_commands: Option<Vec<CheckCommand>>,
+    pub(crate) github_full_commands: Option<Vec<CheckCommand>>,
+    pub(crate) velnor_pr_commands: Option<Vec<CheckCommand>>,
+    pub(crate) velnor_full_commands: Option<Vec<CheckCommand>>,
     pub(crate) depends_on: Vec<String>,
     pub(crate) cache: Option<CacheSpec>,
     pub(crate) tool_version: Option<String>,
@@ -1184,7 +1188,7 @@ impl ProjectConfig {
     )]
     fn toml(&self) -> String {
         let mut output = String::from(GENERATED_HEADER);
-        output.push_str("schema = 2\n");
+        output.push_str("schema = 4\n");
         if !self.repository.is_empty() {
             write_toml_string(&mut output, "repository", &self.repository);
         }
@@ -1265,30 +1269,39 @@ impl ProjectConfig {
             write_toml_string(&mut output, "id", &unit.id);
             write_toml_string(&mut output, "label", &unit.label);
             write_toml_string(&mut output, "kind", unit.kind.id_prefix());
+            let contract = serde_json::to_value(unit.check_contract).unwrap_or_default();
+            write_toml_string(
+                &mut output,
+                "check_contract",
+                contract.as_str().unwrap_or_default(),
+            );
             write_toml_string(&mut output, "root", &unit.root);
             write_toml_array(&mut output, "watch", &unit.watch);
-            write_toml_array(
+            if unit.workspace_check {
+                output.push_str("workspace_check = true\n");
+            }
+            crate::validation::write_commands(
                 &mut output,
                 "github_pr_commands",
                 unit.github_pr_commands
                     .as_deref()
                     .unwrap_or(&unit.pr_commands),
             );
-            write_toml_array(
+            crate::validation::write_commands(
                 &mut output,
                 "github_full_commands",
                 unit.github_full_commands
                     .as_deref()
                     .unwrap_or(&unit.full_commands),
             );
-            write_toml_array(
+            crate::validation::write_commands(
                 &mut output,
                 "velnor_pr_commands",
                 unit.velnor_pr_commands
                     .as_deref()
                     .unwrap_or(&unit.pr_commands),
             );
-            write_toml_array(
+            crate::validation::write_commands(
                 &mut output,
                 "velnor_full_commands",
                 unit.velnor_full_commands
@@ -1444,6 +1457,12 @@ fn scan_target(
     // Every surface that renders a self-hosted lane must name its labels,
     // whether the rest of the contract is scanned or declared.
     validate_runner_labels(&config)?;
+    for unit in &config.units {
+        for commands in [&unit.pr_commands, &unit.full_commands] {
+            crate::validation::validate(unit.check_contract, commands)
+                .map_err(|error| GeneratorError::usage(format!("unit {}: {error}", unit.id)))?;
+        }
+    }
     validate_trusted_units_have_label(&config)?;
     runners::validate_trusted_runner_availability(&config)?;
     let inputs = GenerationInputs::current(generation.as_ref(), &shape)?;
@@ -1461,12 +1480,12 @@ pub(crate) fn enable_mr_boxington_commands(config: &mut ProjectConfig) {
             unit.pr_commands = unit
                 .pr_commands
                 .iter()
-                .map(|command| mbxify_cargo_command(command))
+                .map(|command| command.with_mbx(mbxify_cargo_command))
                 .collect();
             unit.full_commands = unit
                 .full_commands
                 .iter()
-                .map(|command| mbxify_cargo_command(command))
+                .map(|command| command.with_mbx(mbxify_cargo_command))
                 .collect();
         }
         unit.watch.sort();
@@ -2667,38 +2686,65 @@ fn apply_unit_row(
         let docker_contexts = row.named_docker_contexts(id, root)?;
         let env = row.validated_env(id)?.unwrap_or_default();
         config.units.push(Unit {
+            check_contract: if row.workspace_check() {
+                crate::validation::CheckContract::RustCompile
+            } else {
+                crate::validation::CheckContract::Auxiliary
+            },
             id: id.to_owned(),
             label: row.label().unwrap_or_default().to_owned(),
             kind,
             root: row.root().unwrap_or_default().to_owned(),
             pinned_lockfile: row.pinned_lockfile().unwrap_or(false),
             watch: row.watch().unwrap_or_default().to_vec(),
-            pr_commands: {
+            pr_commands: ({
                 let mut commands = if row.workspace_check() {
-                    vec!["cargo check --workspace --all-targets --locked".to_owned()]
+                    crate::validation::workspace_checks()
                 } else {
-                    row.pr_commands().unwrap_or_default().to_vec()
+                    row.pr_commands()
+                        .unwrap_or_default()
+                        .iter()
+                        .cloned()
+                        .map(Into::into)
+                        .collect()
                 };
                 for task in row.ci_tasks() {
-                    commands.push(format!("mise run {task}"));
+                    commands.push(CheckCommand::new(
+                        CheckKind::Auxiliary,
+                        format!("Task: {task}"),
+                        format!("mise run {task}"),
+                    ));
                 }
                 commands
-            },
-            full_commands: {
+            }),
+            full_commands: ({
                 let mut commands = if row.workspace_check() {
-                    vec!["cargo check --workspace --all-targets --locked".to_owned()]
+                    crate::validation::workspace_checks()
                 } else {
-                    row.full_commands().unwrap_or_default().to_vec()
+                    row.full_commands()
+                        .unwrap_or_default()
+                        .iter()
+                        .cloned()
+                        .map(Into::into)
+                        .collect()
                 };
                 for task in row.ci_tasks() {
-                    commands.push(format!("mise run {task}"));
+                    commands.push(CheckCommand::new(
+                        CheckKind::Auxiliary,
+                        format!("Task: {task}"),
+                        format!("mise run {task}"),
+                    ));
                 }
                 commands
-            },
-            github_pr_commands: row.github_pr_commands().map(Vec::from),
-            github_full_commands: row.github_full_commands().map(Vec::from),
-            velnor_pr_commands: row.velnor_pr_commands().map(Vec::from),
-            velnor_full_commands: row.velnor_full_commands().map(Vec::from),
+            }),
+            github_pr_commands: (row.github_pr_commands().map(Vec::from))
+                .map(|commands| commands.into_iter().map(Into::into).collect()),
+            github_full_commands: (row.github_full_commands().map(Vec::from))
+                .map(|commands| commands.into_iter().map(Into::into).collect()),
+            velnor_pr_commands: (row.velnor_pr_commands().map(Vec::from))
+                .map(|commands| commands.into_iter().map(Into::into).collect()),
+            velnor_full_commands: (row.velnor_full_commands().map(Vec::from))
+                .map(|commands| commands.into_iter().map(Into::into).collect()),
             depends_on: row.depends_on().unwrap_or_default().to_vec(),
             cache: row.cache().map(|cache| CacheSpec {
                 key_files: cache.key_files().unwrap_or_default().to_vec(),
@@ -2737,12 +2783,21 @@ fn apply_unit_row(
     }
     if row.workspace_check() {
         unit.workspace_check = true;
-        unit.pr_commands = vec!["cargo check --workspace --all-targets --locked".to_owned()];
+        unit.check_contract = crate::validation::CheckContract::RustCompile;
+        unit.pr_commands = crate::validation::workspace_checks();
         unit.full_commands.clone_from(&unit.pr_commands);
     }
     for task in row.ci_tasks() {
-        let command = format!("mise run {task}");
-        if !unit.pr_commands.contains(&command) {
+        let command = CheckCommand::new(
+            CheckKind::Auxiliary,
+            format!("Task: {task}"),
+            format!("mise run {task}"),
+        );
+        if !unit
+            .pr_commands
+            .iter()
+            .any(|existing| existing.run == command.run)
+        {
             unit.pr_commands.push(command.clone());
             unit.full_commands.push(command);
         }
@@ -2985,14 +3040,14 @@ fn has_named_docker_context(command: &str, name: &str) -> bool {
 }
 
 fn append_docker_contexts_to_commands(
-    commands: &mut [String],
+    commands: &mut [CheckCommand],
     contexts: &[DockerContext],
 ) -> Result<bool, String> {
     let mut rendered = false;
     for command in commands {
         let updated = append_docker_contexts(command, contexts)?;
         rendered |= updated != *command;
-        *command = updated;
+        command.run = updated;
     }
     Ok(rendered)
 }
@@ -3016,26 +3071,30 @@ fn materialize_capability_commands(
                 .is_some_and(|cache| cache.mutable_mount_seed)
         {
             for command in &mut unit.pr_commands {
-                *command = docker_pull_request_target(command);
+                command.run = docker_pull_request_target(command);
             }
-            let hosted_pr = unit.github_pr_commands.as_ref().map_or_else(
+            let hosted_pr: Vec<CheckCommand> = unit.github_pr_commands.as_ref().map_or_else(
                 || {
                     unit.pr_commands
                         .iter()
-                        .map(|command| docker_hosted_pull_request_command(command, &unit.id))
+                        .map(|command| {
+                            command.map_run(|run| docker_hosted_pull_request_command(run, &unit.id))
+                        })
                         .collect()
                 },
                 |commands| {
                     commands
                         .iter()
-                        .map(|command| docker_hosted_pull_request_command(command, &unit.id))
+                        .map(|command| {
+                            command.map_run(|run| docker_hosted_pull_request_command(run, &unit.id))
+                        })
                         .collect()
                 },
             );
             unit.github_pr_commands = Some(hosted_pr);
             if let Some(commands) = &mut unit.velnor_pr_commands {
                 for command in commands {
-                    *command = docker_pull_request_target(command);
+                    command.run = docker_pull_request_target(command);
                 }
             }
             let dockerfile = if unit.root == "." {
@@ -3065,7 +3124,8 @@ fn materialize_capability_commands(
                 let mut github_full = if unit.full_commands.is_empty() {
                     vec![format!(
                         "docker buildx build --load --file {file} --tag local-ci:dockerfile {ctx}"
-                    )]
+                    )
+                    .into()]
                 } else {
                     unit.full_commands.clone()
                 };
@@ -3079,7 +3139,7 @@ fn materialize_capability_commands(
                     "docker buildx build --target {} --output type=local,dest={}/export {seed} --file {file} {ctx}",
                     primitives::MUTABLE_MOUNT_EXPORT_TARGET,
                     primitives::MUTABLE_MOUNT_HOST_DIR
-                ));
+                ).into());
                 for command in &mut github_full {
                     if command.contains("docker")
                         && !command.contains(DOCKER_BUILD_GITHUB_TOKEN_SECRET)
@@ -9486,13 +9546,14 @@ mod tests {
     #[test]
     fn swift_units_on_the_default_executor_are_named_in_contract_notes() {
         let unit = |id: &str, platform: crate::platform::PlatformRequirement| Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: id.to_owned(),
             label: id.to_owned(),
             kind: UnitKind::Swift,
             root: ".".to_owned(),
             watch: vec!["**".to_owned()],
-            pr_commands: vec!["swift test".to_owned()],
-            full_commands: vec!["swift test".to_owned()],
+            pr_commands: vec!["swift test".into()],
+            full_commands: vec!["swift test".into()],
             github_pr_commands: None,
             github_full_commands: None,
             velnor_pr_commands: None,
@@ -10209,11 +10270,12 @@ mod tests {
         );
         let emitted = scanned.config.toml();
         assert!(
-            !emitted.contains("workspace_check"),
-            "pinned Planning runtimes reject unknown fields: {emitted}"
+            emitted.contains("workspace_check = true"),
+            "workspace applicability must be explicit: {emitted}"
         );
         assert!(
-            emitted.contains("mbx check --workspace --all-targets --locked"),
+            emitted.contains("operation = \"check\"")
+                && emitted.contains("check_contract = \"rust-compile\""),
             "workspace gate contract must live in emitted commands: {emitted}"
         );
         let path = root.join(".github/ci/project.toml");
@@ -11374,6 +11436,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             "scanned Rust toolchain",
         );
         config.units.push(Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: "rust-declared-lane-only".to_owned(),
             label: "Rust declared lane only".to_owned(),
             kind: UnitKind::Rust,
@@ -11382,9 +11445,9 @@ const INCLUDED: &str = include_str!("fixture.txt");
             watch: vec!["Cargo.toml".to_owned()],
             pr_commands: Vec::new(),
             full_commands: Vec::new(),
-            github_pr_commands: Some(vec!["mise run test-release-boundary".to_owned()]),
+            github_pr_commands: Some(vec!["mise run test-release-boundary".into()]),
             github_full_commands: None,
-            velnor_pr_commands: Some(vec!["mise run test-release-boundary".to_owned()]),
+            velnor_pr_commands: Some(vec!["mise run test-release-boundary".into()]),
             velnor_full_commands: None,
             depends_on: Vec::new(),
             cache: None,
@@ -11403,14 +11466,15 @@ const INCLUDED: &str = include_str!("fixture.txt");
             prepared_tools: Vec::new(),
         });
         config.units.push(Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: "rust-declared-base".to_owned(),
             label: "Rust declared base".to_owned(),
             kind: UnitKind::Rust,
             root: ".".to_owned(),
             pinned_lockfile: true,
             watch: vec!["Cargo.toml".to_owned()],
-            pr_commands: vec!["mise run check-boundaries".to_owned()],
-            full_commands: vec!["mise run check-boundaries".to_owned()],
+            pr_commands: vec!["mise run check-boundaries".into()],
+            full_commands: vec!["mise run check-boundaries".into()],
             github_pr_commands: None,
             github_full_commands: None,
             velnor_pr_commands: None,
@@ -11432,14 +11496,15 @@ const INCLUDED: &str = include_str!("fixture.txt");
             prepared_tools: Vec::new(),
         });
         config.units.push(Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: "rust-declared-mise-free".to_owned(),
             label: "Rust declared mise free".to_owned(),
             kind: UnitKind::Rust,
             root: ".".to_owned(),
             pinned_lockfile: true,
             watch: vec!["Cargo.toml".to_owned()],
-            pr_commands: vec!["cargo test --package 'fixture'".to_owned()],
-            full_commands: vec!["cargo test --package 'fixture'".to_owned()],
+            pr_commands: vec!["cargo test --package 'fixture'".into()],
+            full_commands: vec!["cargo test --package 'fixture'".into()],
             github_pr_commands: None,
             github_full_commands: None,
             velnor_pr_commands: None,
@@ -11547,16 +11612,15 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(!workflow.contains("cargo-binstall"));
         assert!(!workflow.contains("cargo-zigbuild"));
 
-        // Every unit lane switches off every mise auto-install path, on both
-        // lanes, so verification cannot silently materialise tools the
-        // provision steps did not declare.
-        let auto_install_off = workflow.matches("MISE_AUTO_INSTALL: \"false\"").count();
+        // The runtime enforces no implicit mise installation at the child
+        // process boundary for every independently visible command.
         assert!(
-            auto_install_off >= 2,
-            "both lanes must disable mise auto-install: {workflow}"
+            workflow
+                .matches("velnor-workflow validate-unit --config")
+                .count()
+                >= 2
         );
-        assert!(workflow.contains("MISE_EXEC_AUTO_INSTALL: \"false\""));
-        assert!(workflow.contains("MISE_NOT_FOUND_AUTO_INSTALL: \"false\""));
+        assert!(workflow.contains("--check-index 0"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -12348,8 +12412,8 @@ channel = "stable"
             "set -o pipefail",
             "velnor-ci-timing-${GITHUB_RUN_ID:-unknown}",
             "(set -C; printf '%s\\n' \"$(date +%s)\"",
-            "| tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?",
-            "\n          exit $rc",
+            "| tee -a \"$RUNNER_TEMP/velnor-unit-log.txt\"",
+            "- name: Finish unit checks\n        if: always()",
             "- name: Report phase timings and cache outcomes",
             "\n        if: always()\n",
             "job_label: ",
@@ -13909,22 +13973,14 @@ channel = "stable"
                 .position(|unit| unit.kind == UnitKind::Docker),
             "scanned Docker unit",
         );
-        config.units[index].pr_commands = vec![
-            "docker buildx build --load --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'"
-                .to_owned(),
-        ];
-        config.units[index].full_commands = vec![
-            "docker buildx build --load --cache-from type=gha,scope=example-docker --file 'Dockerfile' --tag local-ci:dockerfile --build-context velnor-cache-seed='.velnor-docker-cache/seed' '.'".to_owned(),
-            "docker buildx build --target velnor-cache-export --output type=local,dest=.velnor-docker-cache/export --file 'Dockerfile' '.'".to_owned(),
-        ];
+        config.units[index].pr_commands = vec!["docker buildx build --load --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'"
+                .into()];
+        config.units[index].full_commands = vec!["docker buildx build --load --cache-from type=gha,scope=example-docker --file 'Dockerfile' --tag local-ci:dockerfile --build-context velnor-cache-seed='.velnor-docker-cache/seed' '.'".into(),"docker buildx build --target velnor-cache-export --output type=local,dest=.velnor-docker-cache/export --file 'Dockerfile' '.'".into()];
         // The persistent self-hosted lane runs its own retained builder: no
         // seed transport, no seed reference.
-        config.units[index].velnor_pr_commands = Some(vec![
-            "docker buildx build --load --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'".to_owned(),
-        ]);
+        config.units[index].velnor_pr_commands = Some(vec!["docker buildx build --load --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'".into()]);
         config.units[index].velnor_full_commands = Some(vec![
-            "docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.'"
-                .to_owned(),
+            "docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.'".into(),
         ]);
         config.units[index].cache = Some(CacheSpec {
             key_files: vec!["Cargo.lock".to_owned(), "Dockerfile".to_owned()],
@@ -13939,8 +13995,8 @@ channel = "stable"
     #[test]
     fn docker_named_context_materializes_every_legacy_lane() {
         let (mut config, index) = both_runner_docker_config();
-        config.units[index].github_pr_commands = Some(vec!["docker build .".to_owned()]);
-        config.units[index].github_full_commands = Some(vec!["docker build .".to_owned()]);
+        config.units[index].github_pr_commands = Some(vec!["docker build .".into()]);
+        config.units[index].github_full_commands = Some(vec!["docker build .".into()]);
         config.units[index].docker_contexts = vec![DockerContext {
             name: "checkout".to_owned(),
             path: ".".to_owned(),
@@ -14035,7 +14091,7 @@ channel = "stable"
             rendered.find("Prepare Docker build seed context"),
             "seed context preparation rendered",
         );
-        let run = must_some(rendered.find("Run "), "checks step rendered");
+        let run = must_some(rendered.find("Start unit checks"), "checks step rendered");
         let collect = must_some(
             rendered.find("Collect Docker mutable-cache export"),
             "export collection rendered",
@@ -14154,10 +14210,7 @@ channel = "stable"
             mutate(&mut config.units[index]);
             config.units[index].clone()
         };
-        let full_commands = vec![
-            "docker buildx build --load --file 'Dockerfile' --build-context velnor-cache-seed='.velnor-docker-cache/seed' '.'".to_owned(),
-            "docker buildx build --target velnor-cache-export --output type=local,dest=.velnor-docker-cache/export --file 'Dockerfile' '.'".to_owned(),
-        ];
+        let full_commands: Vec<CheckCommand> = vec!["docker buildx build --load --file 'Dockerfile' --build-context velnor-cache-seed='.velnor-docker-cache/seed' '.'".into(),"docker buildx build --target velnor-cache-export --output type=local,dest=.velnor-docker-cache/export --file 'Dockerfile' '.'".into()];
 
         // A hosted full build that never injects the seed.
         let unit = docker_unit(&|unit: &mut Unit| {
@@ -15314,13 +15367,14 @@ channel = "stable"
         let marker = root.join("execution-order");
         let marker = shell_quote(&marker.to_string_lossy());
         let unit = |id: &str, command: String, depends_on: Vec<String>| Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: id.to_owned(),
             label: id.to_owned(),
             kind: UnitKind::Rust,
             root: ".".to_owned(),
             watch: vec!["**".to_owned()],
-            pr_commands: vec![command.clone()],
-            full_commands: vec![command],
+            pr_commands: vec![command.clone().into()],
+            full_commands: vec![command.into()],
             github_pr_commands: None,
             github_full_commands: None,
             velnor_pr_commands: None,
@@ -17016,7 +17070,7 @@ channel = "stable"
             github_lane.find("name: Restore \"Rust crate (fixture)\" cache"),
             "cargo restore",
         );
-        let checks = must_some(github_lane.find("name: Run "), "checks step");
+        let checks = must_some(github_lane.find("name: Start unit checks"), "checks step");
         assert!(
             restore < checks,
             "restore must precede checks on GitHub lane"
@@ -17070,6 +17124,7 @@ channel = "stable"
             "scanned Rust unit",
         );
         config.units.push(Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: "rust-mise-tools".to_owned(),
             label: "Rust mise tools".to_owned(),
             kind: UnitKind::Rust,
@@ -17343,14 +17398,15 @@ channel = "stable"
             .find(|unit| unit.kind == UnitKind::Rust)
             .and_then(|unit| unit.toolchain.clone());
         config.units.push(Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: "rust-dependency-policy".to_owned(),
             label: "Rust dependency policy".to_owned(),
             kind: UnitKind::Rust,
             root: ".".to_owned(),
             pinned_lockfile: true,
             watch: vec!["Cargo.toml".to_owned()],
-            pr_commands: vec!["cargo +nightly deny check".to_owned()],
-            full_commands: vec!["RUSTFLAGS='-D warnings' mbx deny check".to_owned()],
+            pr_commands: vec!["cargo +nightly deny check".into()],
+            full_commands: vec!["RUSTFLAGS='-D warnings' mbx deny check".into()],
             github_pr_commands: None,
             github_full_commands: None,
             velnor_pr_commands: None,
@@ -17455,14 +17511,15 @@ channel = "stable"
         config.units[rust_index].pinned_lockfile = true;
         let toolchain = config.units[rust_index].toolchain.clone();
         config.units.push(Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: "rust-dependency-policy".to_owned(),
             label: "Rust dependency policy".to_owned(),
             kind: UnitKind::Rust,
             root: ".".to_owned(),
             pinned_lockfile: true,
             watch: vec!["Cargo.toml".to_owned()],
-            pr_commands: vec!["cargo +nightly deny check".to_owned()],
-            full_commands: vec!["RUSTFLAGS='-D warnings' mbx deny check".to_owned()],
+            pr_commands: vec!["cargo +nightly deny check".into()],
+            full_commands: vec!["RUSTFLAGS='-D warnings' mbx deny check".into()],
             github_pr_commands: None,
             github_full_commands: None,
             velnor_pr_commands: None,
@@ -17545,14 +17602,15 @@ channel = "stable"
     #[test]
     fn cargo_fetch_roots_deduplicate_workspace_members_and_keep_independent_lockfiles() {
         let workspace_member = |id: &str, root: &str| Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: id.to_owned(),
             label: format!("Rust crate ({id})"),
             kind: UnitKind::Rust,
             root: root.to_owned(),
             pinned_lockfile: true,
             watch: vec!["Cargo.lock".to_owned()],
-            pr_commands: vec!["cargo test --locked".to_owned()],
-            full_commands: vec!["cargo test --locked".to_owned()],
+            pr_commands: vec!["cargo test --locked".into()],
+            full_commands: vec!["cargo test --locked".into()],
             github_pr_commands: None,
             github_full_commands: None,
             velnor_pr_commands: None,
@@ -17580,6 +17638,7 @@ channel = "stable"
             prepared_tools: Vec::new(),
         };
         let independent = Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             root: "crates/contract".to_owned(),
             watch: vec!["crates/contract/Cargo.lock".to_owned()],
             cache: Some(CacheSpec {
@@ -17639,14 +17698,15 @@ channel = "stable"
     #[test]
     fn velnor_dependency_closure_adds_direct_depends_on_needs_edges() {
         let rust_unit = |id: &str, depends_on: Vec<&str>| Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: id.to_owned(),
             label: format!("Rust crate ({id})"),
             kind: UnitKind::Rust,
             root: format!("crates/{id}"),
             pinned_lockfile: true,
             watch: vec!["Cargo.lock".to_owned()],
-            pr_commands: vec!["cargo test --locked".to_owned()],
-            full_commands: vec!["cargo test --locked".to_owned()],
+            pr_commands: vec!["cargo test --locked".into()],
+            full_commands: vec!["cargo test --locked".into()],
             github_pr_commands: None,
             github_full_commands: None,
             velnor_pr_commands: None,
@@ -17729,6 +17789,7 @@ channel = "stable"
                          workspace_check: bool,
                          commands: Vec<&str>,
                          depends_on: Vec<&str>| Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: id.to_owned(),
             label: format!("Rust crate ({id})"),
             kind: UnitKind::Rust,
@@ -17741,11 +17802,11 @@ channel = "stable"
             },
             pr_commands: commands
                 .iter()
-                .map(|command| (*command).to_owned())
+                .map(|command| CheckCommand::from(*command))
                 .collect(),
             full_commands: commands
                 .iter()
-                .map(|command| (*command).to_owned())
+                .map(|command| CheckCommand::from(*command))
                 .collect(),
             github_pr_commands: None,
             github_full_commands: None,
@@ -17891,6 +17952,7 @@ channel = "stable"
             velnor_serial_stack_groups: true,
             units: vec![
                 Unit {
+                    check_contract: crate::validation::CheckContract::Auxiliary,
                     id: "bun-root".to_owned(),
                     label: "Bun".to_owned(),
                     kind: UnitKind::Bun,
@@ -17920,6 +17982,7 @@ channel = "stable"
                     prepared_tools: Vec::new(),
                 },
                 Unit {
+                    check_contract: crate::validation::CheckContract::Auxiliary,
                     id: "docs".to_owned(),
                     label: "Documentation".to_owned(),
                     kind: UnitKind::Docs,

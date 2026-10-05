@@ -153,6 +153,7 @@ pub(crate) fn unit(
         format!("-{}", identifier_suffix(root))
     };
     Unit {
+        check_contract: crate::validation::CheckContract::Auxiliary,
         id: format!("{}{}", kind.id_prefix(), suffix),
         label: if root == "." {
             kind.label().to_owned()
@@ -162,8 +163,8 @@ pub(crate) fn unit(
         kind,
         root: root.to_owned(),
         watch,
-        pr_commands: commands.clone(),
-        full_commands: commands,
+        pr_commands: (commands.clone()).into_iter().map(Into::into).collect(),
+        full_commands: (commands).into_iter().map(Into::into).collect(),
         github_pr_commands: None,
         github_full_commands: None,
         velnor_pr_commands: None,
