@@ -166,10 +166,9 @@ mod tests {
 
     use super::{
         automatic_event_selects_lane, dispatch_choice_selects_lane, dispatch_lane_expression,
-        lane_input, snapshot_compatibility, unit_owns_workflow_crate, AutomaticEvent,
-        CacheReportFacts, DispatchChoice::*, GraphNode, LaneAdmission, Pins, ReportedCacheLayer,
-        RunnerMode, ToolRequirement, Unit, UnitKind, VelnorPullRequest, VelnorRustNeeds,
-        WorkflowIr, WorkflowKind,
+        lane_input, snapshot_compatibility, AutomaticEvent, CacheReportFacts, DispatchChoice::*,
+        GraphNode, LaneAdmission, Pins, ReportedCacheLayer, RunnerMode, ToolRequirement, Unit,
+        UnitKind, VelnorPullRequest, VelnorRustNeeds, WorkflowIr, WorkflowKind,
     };
     use crate::{
         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
@@ -811,22 +810,6 @@ mod tests {
         let apple_workflow = mixed_ir.render_nested_unit(&mixed_ir.units[1], WorkflowKind::Main);
         assert!(!apple_workflow.contains("Set up mold"), "{apple_workflow}");
         assert!(!apple_workflow.contains("fuse-ld=mold"), "{apple_workflow}");
-    }
-
-    fn candidate_flagged_callers(ir: &WorkflowIr) -> Vec<String> {
-        let mut flagged = Vec::new();
-        for unit in &ir.units {
-            for caller in ir.unit_lane_callers(unit, "ci-unit-rust.yml", None) {
-                if caller
-                    .inputs
-                    .iter()
-                    .any(|(name, value)| *name == lane_input::CANDIDATE_PUBLISH && value == "true")
-                {
-                    flagged.push(caller.job_id.clone());
-                }
-            }
-        }
-        flagged
     }
 
     #[expect(
