@@ -6108,7 +6108,9 @@ mod tests {
         assert!(read_owner_record(&registry_root, &builder)
             .unwrap()
             .is_none());
-        assert!(read_claims(&path, &builder).is_err());
+        assert!(!path.exists());
+        assert!(read_registered_claims(&path, &builder).unwrap().is_none());
+        assert!(read_claims(&path, &builder).unwrap().holders.is_empty());
         assert!(!readiness_path.exists());
         assert!(!lifecycle_lock_path.exists());
         std::fs::remove_dir_all(root).unwrap();
@@ -6189,7 +6191,14 @@ mod tests {
         assert!(read_owner_record(&registry_root, &builder)
             .unwrap()
             .is_none());
-        assert!(read_claims(&claims_path, &builder).is_err());
+        assert!(!claims_path.exists());
+        assert!(read_registered_claims(&claims_path, &builder)
+            .unwrap()
+            .is_none());
+        assert!(read_claims(&claims_path, &builder)
+            .unwrap()
+            .holders
+            .is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -6244,7 +6253,14 @@ mod tests {
         assert!(read_owner_record(&registry_root, &builder)
             .unwrap()
             .is_none());
-        assert!(read_claims(&claims_path, &builder).is_err());
+        assert!(!claims_path.exists());
+        assert!(read_registered_claims(&claims_path, &builder)
+            .unwrap()
+            .is_none());
+        assert!(read_claims(&claims_path, &builder)
+            .unwrap()
+            .holders
+            .is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -7054,6 +7070,7 @@ mod tests {
         let volume_inspections = Cell::new(0);
         let container_removed = Cell::new(false);
         let volume_removed = Cell::new(false);
+        let container_inspections = Cell::new(0);
         let result = remove_builder_with(
             &domain,
             &builder,
@@ -7067,7 +7084,11 @@ mod tests {
                     Err(anyhow::anyhow!("volume identity changed before deletion"))
                 }
             },
-            |_, _, _, _| Ok(Some("immutable-container-id".to_string())),
+            |_, _, _, _| {
+                let inspection = container_inspections.get() + 1;
+                container_inspections.set(inspection);
+                Ok((inspection == 1).then(|| "immutable-container-id".to_string()))
+            },
             |container_id, _| {
                 assert_eq!(container_id, "immutable-container-id");
                 container_removed.set(true);
@@ -7081,6 +7102,7 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(volume_inspections.get(), 2);
+        assert_eq!(container_inspections.get(), 2);
         assert!(container_removed.get());
         assert!(!volume_removed.get());
         std::fs::remove_dir_all(root).unwrap();
@@ -10080,13 +10102,13 @@ mod tests {
 
         assert!(report.deleted.is_empty());
         assert_eq!(
-            report.unreadable_claims,
-            vec![
+            report.unreadable_claims.into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([
                 owner_registry_file(&registry_root, &owner_corrupt)
                     .display()
                     .to_string(),
                 torn_claim_path.display().to_string(),
-            ]
+            ])
         );
 
         std::fs::remove_dir_all(&root).unwrap();

@@ -19717,7 +19717,7 @@ mod tests {
         let listing = format!(
             "job-id\t{job_id}\t{job_id}\trunning\n\
              guest-id\tguest-container\t{job_id}\texited\n\
-             bk-id\t{BUILDKIT_CONTAINER_NAME_PREFIX}deadbeef\t{job_id}\trunning\n"
+             bk-id\t{BUILDKIT_CONTAINER_NAME_PREFIX}deadbeef0\t{job_id}\trunning\n"
         );
         let mut calls = Vec::new();
         let mut outputs = vec![listing, String::new(), String::new()];
