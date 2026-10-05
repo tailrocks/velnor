@@ -109,10 +109,6 @@ struct Cache {
     paths: Vec<String>,
 }
 
-#[expect(
-    dead_code,
-    reason = "runtime preserves the complete generated unit contract while execution consumes selected fields"
-)]
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CiUnit {
@@ -413,6 +409,82 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             )?;
             Ok(true)
         }
+        _ => try_run_reuse(command, arguments),
+    }
+}
+
+/// Dispatch the slice-C subcommands (`aggregate`, `select`, `fingerprint`,
+/// `reuse-decision`). `false` means the arguments belong to the workflow
+/// generator CLI proper.
+fn try_run_reuse(command: &str, arguments: &[OsString]) -> Result<bool, GeneratorError> {
+    match command {
+        "aggregate" => {
+            let options = parse_options(&arguments[1..], &["expected", "results"])?;
+            let expected = options.get("expected").ok_or_else(|| {
+                GeneratorError::usage("aggregate requires --expected PATH".to_owned())
+            })?;
+            let results = options.get("results").ok_or_else(|| {
+                GeneratorError::usage("aggregate requires --results PATH".to_owned())
+            })?;
+            aggregate_command(Path::new(expected), Path::new(results))?;
+            Ok(true)
+        }
+        "select" => {
+            let options = parse_options(&arguments[1..], &["config", "base", "head", "scope"])?;
+            let root = env::current_dir()
+                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+            let config = resolve_config_path(options.get("config"));
+            let scope = options
+                .get("scope")
+                .map_or(Ok(Scope::Affected), |value| Scope::parse(value))?;
+            let base = options.get("base").cloned().unwrap_or_default();
+            let head = options
+                .get("head")
+                .cloned()
+                .unwrap_or_else(|| "HEAD".to_owned());
+            select_command(&root, &config, scope, &base, &head)?;
+            Ok(true)
+        }
+        "fingerprint" => {
+            let options = parse_options(&arguments[1..], &["config", "unit", "rev", "live"])?;
+            let root = env::current_dir()
+                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+            let config = resolve_config_path(options.get("config"));
+            let rev = options
+                .get("rev")
+                .cloned()
+                .unwrap_or_else(|| "HEAD".to_owned());
+            fingerprint_command(
+                &root,
+                &config,
+                options.get("unit").map(String::as_str),
+                options.get("live").map(String::as_str),
+                &rev,
+            )?;
+            Ok(true)
+        }
+        "reuse-decision" => {
+            let options = parse_options(&arguments[1..], &["evidence", "request", "now"])?;
+            let evidence = options.get("evidence").ok_or_else(|| {
+                GeneratorError::usage("reuse-decision requires --evidence PATH".to_owned())
+            })?;
+            let request = options.get("request").ok_or_else(|| {
+                GeneratorError::usage("reuse-decision requires --request PATH".to_owned())
+            })?;
+            let now = options
+                .get("now")
+                .map(String::as_str)
+                .map(|pinned| {
+                    pinned.parse::<u64>().map_err(|_| {
+                        GeneratorError::usage(format!(
+                            "unsupported --now value {pinned}: name seconds since the epoch"
+                        ))
+                    })
+                })
+                .transpose()?;
+            reuse_decision_command(Path::new(evidence), Path::new(request), now)?;
+            Ok(true)
+        }
         _ => Ok(false),
     }
 }
@@ -563,6 +635,303 @@ fn cache_plan(entries_path: Option<&str>, now: Option<&str>) -> Result<(), Gener
     writeln!(handle)
         .map_err(|error| GeneratorError::usage(format!("write eviction plan: {error}")))?;
     Ok(())
+}
+
+/// Score reported results against the planner's expected work: the same
+/// [`crate::reuse::aggregate`] the generator's tests exercise, run against
+/// the expected-work file the plan wrote and the results file the unit jobs
+/// collected. Prints the audit report and fails when the aggregate rejects.
+fn aggregate_command(expected: &Path, results: &Path) -> Result<(), GeneratorError> {
+    let expected_text = fs::read_to_string(expected)
+        .map_err(|error| GeneratorError::io("read expected work", expected, &error))?;
+    let results_text = fs::read_to_string(results)
+        .map_err(|error| GeneratorError::io("read reported results", results, &error))?;
+    let verdict = crate::reuse::aggregate_files(&expected_text, &results_text)
+        .map_err(GeneratorError::usage)?;
+    print!("{}", crate::reuse::render_report(&verdict));
+    if verdict.passed {
+        Ok(())
+    } else {
+        Err(GeneratorError::usage(
+            "aggregate: expected work did not complete",
+        ))
+    }
+}
+
+/// Print the affected selection for a diff as JSON: the auditable
+/// [`crate::reuse::select_affected`] core over the runtime's own unit table.
+/// Unlike `plan`, this command answers one question only — which units a
+/// change list affects — without lane filtering, workspace gates, or outputs.
+fn select_command(
+    root: &Path,
+    config_path: &Path,
+    scope: Scope,
+    base: &str,
+    head: &str,
+) -> Result<(), GeneratorError> {
+    let config = read_config(config_path)?;
+    let watched: Vec<crate::reuse::WatchedUnit> = config
+        .unit
+        .iter()
+        .map(|unit| crate::reuse::WatchedUnit {
+            id: unit.id.clone(),
+            watch: unit.watch.clone(),
+            depends_on: unit.depends_on.clone(),
+        })
+        .collect();
+    if scope == Scope::Full {
+        return print_selection(&crate::reuse::AffectedSelection {
+            required: watched.iter().map(|unit| unit.id.clone()).collect(),
+            full_units: watched.iter().map(|unit| unit.id.clone()).collect(),
+            fallback_full: false,
+            explanations: watched
+                .iter()
+                .map(|unit| (unit.id.clone(), "full scope requested".to_owned()))
+                .collect(),
+        });
+    }
+    if base.is_empty() || base.chars().all(|character| character == '0') {
+        return print_selection(&crate::reuse::fallback_selection(
+            &watched,
+            "no affected base; fell back to full",
+        ));
+    }
+    let Some(lines) = git_name_status(root, base, head)? else {
+        return print_selection(&crate::reuse::fallback_selection(
+            &watched,
+            "git diff unavailable; fell back to full",
+        ));
+    };
+    let mut changes = Vec::with_capacity(lines.len());
+    for line in &lines {
+        let Some(change) = crate::reuse::parse_name_status_line(line) else {
+            return print_selection(&crate::reuse::fallback_selection(
+                &watched,
+                "unparseable change entry; fell back to full",
+            ));
+        };
+        changes.push(change);
+    }
+    print_selection(&crate::reuse::select_affected(
+        &watched,
+        &changes,
+        crate::reuse::FULL_SELECTION_PREFIXES,
+    )?)
+}
+
+fn print_selection(selection: &crate::reuse::AffectedSelection) -> Result<(), GeneratorError> {
+    let mut json = serde_json::to_string(selection)
+        .map_err(|error| GeneratorError::usage(format!("serialize affected selection: {error}")))?;
+    json.push('\n');
+    print!("{json}");
+    Ok(())
+}
+
+fn git_name_status(
+    root: &Path,
+    base: &str,
+    head: &str,
+) -> Result<Option<Vec<String>>, GeneratorError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--name-status", "-M"])
+        .arg(format!("{base}...{head}"))
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("run git diff: {error}")))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+    ))
+}
+
+/// One `fingerprint` report: the revision fingerprinted and the per-unit
+/// identities in dependency order.
+#[derive(serde::Serialize)]
+struct FingerprintOutput {
+    rev: String,
+    units: Vec<crate::reuse::FingerprintReport>,
+}
+
+/// Print per-unit fingerprints as JSON: the canonical [`crate::reuse`]
+/// artifact identity over the runtime's own unit table at one revision.
+/// `--unit` reports one unit; `--live` names the live-state units explicitly,
+/// since the runtime table cannot observe that property.
+fn fingerprint_command(
+    root: &Path,
+    config_path: &Path,
+    only_unit: Option<&str>,
+    live: Option<&str>,
+    rev: &str,
+) -> Result<(), GeneratorError> {
+    let config = read_config(config_path)?;
+    let known: BTreeSet<&str> = config.unit.iter().map(|unit| unit.id.as_str()).collect();
+    if let Some(id) = only_unit
+        && !known.contains(id)
+    {
+        return Err(GeneratorError::usage(format!("unknown unit: {id}")));
+    }
+    let live_ids = resolve_live_ids(live, &known)?;
+    let tree = git_ls_tree(root, rev)?;
+    let ordered = ordered_units(&config.unit, None)?;
+    let check_impl = crate::reuse::current_check_impl();
+    let mut fingerprints: BTreeMap<String, String> = BTreeMap::new();
+    let mut reports = Vec::new();
+    for unit in ordered {
+        let commands = BTreeMap::from([
+            (
+                "github/affected".to_owned(),
+                unit.github_pr_commands.clone(),
+            ),
+            ("github/full".to_owned(), unit.github_full_commands.clone()),
+            (
+                "velnor/affected".to_owned(),
+                unit.velnor_pr_commands.clone(),
+            ),
+            ("velnor/full".to_owned(), unit.velnor_full_commands.clone()),
+        ]);
+        let recipe = crate::reuse::recipe_digest(&commands, crate::GENERATOR_REVISION, &check_impl);
+        let pinned: BTreeSet<String> = unit.cache.as_ref().map_or_else(BTreeSet::new, |cache| {
+            cache.key_files.iter().cloned().collect()
+        });
+        let source = crate::reuse::source_digests(&tree, &unit.watch, &pinned)?;
+        let view = crate::reuse::UnitConfigView {
+            id: unit.id.clone(),
+            kind: unit.kind.clone(),
+            root: unit.root.clone(),
+            watch: unit.watch.clone(),
+            commands,
+            depends_on: unit.depends_on.clone(),
+            tool_version: unit.tool_version.clone(),
+            cache_key_files: unit
+                .cache
+                .as_ref()
+                .map_or_else(Vec::new, |cache| cache.key_files.clone()),
+            cache_paths: unit
+                .cache
+                .as_ref()
+                .map_or_else(Vec::new, |cache| cache.paths.clone()),
+        };
+        let config_digest = crate::reuse::config_digest(&view);
+        let mut tool_pins = BTreeMap::new();
+        if let Some(version) = &unit.tool_version {
+            tool_pins.insert("tool_version".to_owned(), version.clone());
+        }
+        let pins = crate::reuse::unit_pin_set(&tool_pins);
+        let mut transitive = BTreeMap::new();
+        for dependency in &unit.depends_on {
+            let Some(digest) = fingerprints.get(dependency) else {
+                return Err(GeneratorError::usage(format!(
+                    "unit `{}` depends on unknown unit `{dependency}`",
+                    unit.id
+                )));
+            };
+            transitive.insert(dependency.clone(), digest.clone());
+        }
+        let input = crate::reuse::FingerprintInput {
+            unit_id: unit.id.clone(),
+            kind: unit.kind.clone(),
+            root: unit.root.clone(),
+            source,
+            config_digest,
+            recipe_digest: recipe.clone(),
+            pins,
+            transitive,
+            live_state: live_ids.contains(unit.id.as_str()),
+        };
+        let fingerprint = crate::reuse::canonical_fingerprint(&input);
+        fingerprints.insert(unit.id.clone(), fingerprint.clone());
+        if only_unit.is_none_or(|id| id == unit.id) {
+            reports.push(crate::reuse::FingerprintReport {
+                unit: unit.id.clone(),
+                locator: crate::reuse::artifact_locator(&unit.id, &fingerprint),
+                fingerprint,
+                recipe,
+                live: input.live_state,
+            });
+        }
+    }
+    let output = FingerprintOutput {
+        rev: rev.to_owned(),
+        units: reports,
+    };
+    let mut json = serde_json::to_string(&output)
+        .map_err(|error| GeneratorError::usage(format!("serialize fingerprints: {error}")))?;
+    json.push('\n');
+    print!("{json}");
+    Ok(())
+}
+
+/// Resolve the `--live` unit list against the known unit ids. Every named id
+/// must exist: a live-state marker for an unknown unit would silently leave
+/// the real unit content-addressed.
+fn resolve_live_ids<'a>(
+    live: Option<&'a str>,
+    known: &BTreeSet<&str>,
+) -> Result<BTreeSet<&'a str>, GeneratorError> {
+    let ids: BTreeSet<&'a str> = live.map_or_else(BTreeSet::new, |list| {
+        list.split(',').filter(|id| !id.is_empty()).collect()
+    });
+    for id in &ids {
+        if !known.contains(id) {
+            return Err(GeneratorError::usage(format!(
+                "unknown live-state unit: {id}"
+            )));
+        }
+    }
+    Ok(ids)
+}
+
+fn git_ls_tree(root: &Path, rev: &str) -> Result<String, GeneratorError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-tree", "-r", rev])
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("run git ls-tree: {error}")))?;
+    if !output.status.success() {
+        return Err(GeneratorError::usage(format!(
+            "revision {rev} is not available for fingerprinting"
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Decide whether a prior successful result may back the current verdict and
+/// print the decision: `reuse <run>` or `execute`, then one audit reason per
+/// line. A refused reuse is a normal decision, so the command always exits
+/// success once the files parse. `--now` pins the freshness clock; a live run
+/// without it uses the system clock.
+fn reuse_decision_command(
+    evidence: &Path,
+    request: &Path,
+    now: Option<u64>,
+) -> Result<(), GeneratorError> {
+    let evidence_text = fs::read_to_string(evidence)
+        .map_err(|error| GeneratorError::io("read producing evidence", evidence, &error))?;
+    let request_text = fs::read_to_string(request)
+        .map_err(|error| GeneratorError::io("read reuse request", request, &error))?;
+    let now = match now {
+        Some(pinned) => Some(pinned),
+        None => Some(system_now_secs()?),
+    };
+    let decision = crate::reuse::reuse_decision_files(&evidence_text, &request_text, now)
+        .map_err(GeneratorError::usage)?;
+    print!("{}", crate::reuse::render_decision(&decision));
+    Ok(())
+}
+
+fn system_now_secs() -> Result<u64, GeneratorError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| GeneratorError::usage(format!("resolve current time: {error}")))
+        .map(|duration| duration.as_secs())
 }
 
 /// Parse the pinned `--now` clock as seconds since the epoch, so a test run
@@ -3616,6 +3985,69 @@ workspace_check = true
             selection.full_units,
             ["app", "consumer"].into_iter().map(str::to_owned).collect()
         );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn slice_c_selection_agrees_with_runtime_selection() -> Result<(), Box<dyn Error>> {
+        // The auditable core and the runtime planner share one selection
+        // model: the same change list selects the same required and full sets
+        // on both paths. The fixture carries no workspace gates or version
+        // bumps, so the planner's refinements stay out of the comparison.
+        let config = selection_config();
+        let watched: Vec<crate::reuse::WatchedUnit> = config
+            .unit
+            .iter()
+            .map(|unit| crate::reuse::WatchedUnit {
+                id: unit.id.clone(),
+                watch: unit.watch.clone(),
+                depends_on: unit.depends_on.clone(),
+            })
+            .collect();
+        for changed in [
+            "crates/base/src/lib.rs",
+            "crates/app/src/lib.rs",
+            "crates/consumer/src/lib.rs",
+            "docs/index.md",
+            "README.md",
+            ".github/workflows/ci.yml",
+        ] {
+            let (root, base, head) = selection_git_fixture("slice-c", changed)?;
+            let runtime_selection =
+                selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+            let changed_files =
+                git_changed_files(&root, &base, &head)?.ok_or("the diff must resolve")?;
+            let changes: Vec<crate::reuse::ChangedPath> = changed_files
+                .into_iter()
+                .map(|path| crate::reuse::ChangedPath {
+                    path,
+                    previous: None,
+                    status: crate::reuse::ChangeKind::Modified,
+                })
+                .collect();
+            let model = crate::reuse::select_affected(
+                &watched,
+                &changes,
+                crate::reuse::FULL_SELECTION_PREFIXES,
+            )?;
+            assert_eq!(
+                selected_id_set(&runtime_selection),
+                model.required,
+                "required set for {changed}"
+            );
+            assert_eq!(
+                runtime_selection.full_units, model.full_units,
+                "full set for {changed}"
+            );
+            std::fs::remove_dir_all(root)?;
+        }
+        let (root, base, _) = selection_git_fixture("slice-c-empty", "crates/base/src/lib.rs")?;
+        let runtime_selection = selection_for_diff(&root, &config, Scope::Affected, &base, &base)?;
+        let model =
+            crate::reuse::select_affected(&watched, &[], crate::reuse::FULL_SELECTION_PREFIXES)?;
+        assert!(selected_id_set(&runtime_selection).is_empty());
+        assert!(model.required.is_empty() && !model.fallback_full);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

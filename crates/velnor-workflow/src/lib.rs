@@ -24,6 +24,7 @@ mod config;
 mod estate;
 mod policy;
 mod primitives;
+mod reuse;
 mod runners;
 mod runtime;
 mod scan;
@@ -4262,7 +4263,7 @@ fn ruleset_required_status_check_contexts(config: &ProjectConfig) -> Vec<String>
         return config.ruleset_required_status_checks.clone();
     }
     if config.ci_required {
-        return vec!["ci-required".to_owned()];
+        return vec![crate::reuse::REQUIRED_CHECK.to_owned()];
     }
     Vec::new()
 }
