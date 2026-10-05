@@ -789,6 +789,41 @@ struct ReleaseSpec {
     /// `release-manifest.json`. A consumer-contract value the repository
     /// declares; the generic renderer never invents one.
     pub(crate) manifest_schema: String,
+    /// The trusted producer workflow a `workflow_run` event must come from
+    /// before a rolling lane publishes. Empty renders no `workflow_run`
+    /// trigger: the lane keeps its push/dispatch surface exactly.
+    pub(crate) producer_workflow: String,
+    /// The producer conclusion the publish gate requires. Empty means the
+    /// only admitted value, `success`; anything else is a usage error.
+    pub(crate) producer_conclusion: String,
+    /// The dispatch modes the workflows offer (`validate`, `build`,
+    /// `rehearse`; publication stays tag-triggered and is never a dispatch
+    /// option). Empty keeps the legacy trigger surface byte-identical.
+    pub(crate) modes: Vec<String>,
+    /// Extra members packaged into each release archive next to the built
+    /// binary. Empty keeps the single-binary archive exactly.
+    pub(crate) archive_members: Vec<String>,
+    /// The archive checksum sidecar algorithm. Empty means `sha256`, the
+    /// only algorithm the runtime implements.
+    pub(crate) archive_checksum: String,
+    /// The `retention-days` release artifacts upload with. Zero keeps the
+    /// per-lane literals.
+    pub(crate) archive_retention_days: u32,
+    /// Credential setup/teardown pairs. Every setup renders with a paired
+    /// teardown that also runs under `if: always()`, so cancellation and
+    /// timeouts still restore host state.
+    pub(crate) credentials: Vec<ReleaseCredential>,
+}
+
+/// One credential the release lane mounts and must unmount: the setup
+/// command that materializes it and the teardown command that restores the
+/// host. Both are explicit repository inputs; the renderer pairs them and
+/// never invents either side.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ReleaseCredential {
+    pub(crate) name: String,
+    pub(crate) setup: String,
+    pub(crate) teardown: String,
 }
 
 /// Evidence produced by the read-only repository analysis pass.
@@ -1917,7 +1952,14 @@ fn apply_release(config: &mut ProjectConfig, release: &config::ReleaseSection) {
         || release.consumer_repository().is_some()
         || release.artifact_path().is_some()
         || release.description().is_some()
-        || release.manifest_schema().is_some();
+        || release.manifest_schema().is_some()
+        || release.producer_workflow().is_some()
+        || release.producer_conclusion().is_some()
+        || !release.modes().is_empty()
+        || !release.archive_members().is_empty()
+        || release.archive_checksum().is_some()
+        || release.archive_retention_days().is_some()
+        || !release.credentials().is_empty();
     if !declared {
         return;
     }
@@ -1954,6 +1996,35 @@ fn apply_release(config: &mut ProjectConfig, release: &config::ReleaseSection) {
     }
     if let Some(schema) = release.manifest_schema() {
         schema.clone_into(&mut spec.manifest_schema);
+    }
+    if let Some(producer) = release.producer_workflow() {
+        producer.clone_into(&mut spec.producer_workflow);
+    }
+    if let Some(conclusion) = release.producer_conclusion() {
+        conclusion.clone_into(&mut spec.producer_conclusion);
+    }
+    if !release.modes().is_empty() {
+        spec.modes = release.modes().to_vec();
+    }
+    if !release.archive_members().is_empty() {
+        spec.archive_members = release.archive_members().to_vec();
+    }
+    if let Some(checksum) = release.archive_checksum() {
+        checksum.clone_into(&mut spec.archive_checksum);
+    }
+    if let Some(retention) = release.archive_retention_days() {
+        spec.archive_retention_days = u32::try_from(retention.clamp(0, 90)).unwrap_or(0);
+    }
+    if !release.credentials().is_empty() {
+        spec.credentials = release
+            .credentials()
+            .iter()
+            .map(|credential| ReleaseCredential {
+                name: credential.name().unwrap_or_default().to_owned(),
+                setup: credential.setup().unwrap_or_default().to_owned(),
+                teardown: credential.teardown().unwrap_or_default().to_owned(),
+            })
+            .collect();
     }
     config.release = Some(spec);
 }
@@ -8501,6 +8572,56 @@ mod tests {
                 "targets",
             ],
             "emitted [release] keys changed; pinned runtimes reject unknown fields: {emitted}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Bindings reach the render spec but never the emitted runtime
+    /// contract: `producer_workflow`, `modes`, archive fields, and
+    /// credentials are generation-time-only, like `manifest_schema`, so a
+    /// pinned runtime keeps parsing the emitted table.
+    #[test]
+    fn release_bindings_stay_generation_time_only() {
+        let config = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\nkind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\nproducer_workflow = \"CI\"\nproducer_conclusion = \"success\"\nmodes = [\"validate\", \"rehearse\"]\narchive_members = [\"example-role\"]\narchive_checksum = \"sha256\"\narchive_retention_days = 14\n[[release.credential]]\nname = \"store\"\nsetup = \"mount\"\nteardown = \"unmount\"\n";
+        let root = configured_repository("release-bindings-emitted", Some(config));
+        let scanned = must(
+            scan_target(&root, RunnerMode::Github, "main"),
+            "scan configured repository",
+        );
+        let release = must_some(scanned.config.release.as_ref(), "release contract");
+        assert_eq!(release.producer_workflow, "CI");
+        assert_eq!(
+            release.modes,
+            ["validate".to_owned(), "rehearse".to_owned()]
+        );
+        assert_eq!(release.archive_members, ["example-role".to_owned()]);
+        assert_eq!(release.archive_retention_days, 14);
+        assert_eq!(release.credentials.len(), 1);
+        assert_eq!(release.credentials[0].teardown, "unmount");
+        let emitted = scanned.config.toml();
+        for key in [
+            "producer_workflow",
+            "producer_conclusion",
+            "modes",
+            "archive_members",
+            "archive_checksum",
+            "archive_retention_days",
+            "credential",
+        ] {
+            assert!(
+                !emitted.contains(key),
+                "pinned runtimes reject unknown field {key}: {emitted}"
+            );
+        }
+        let path = root.join(".github/ci/project.toml");
+        must(
+            fs::create_dir_all(must_some(path.parent(), "runtime config parent")),
+            "create runtime config directory",
+        );
+        must(fs::write(&path, &emitted), "write emitted runtime config");
+        must(
+            runtime::read_config_for_test(&path),
+            "emitted bindings config must parse through the runtime contract",
         );
         let _ = fs::remove_dir_all(root);
     }
