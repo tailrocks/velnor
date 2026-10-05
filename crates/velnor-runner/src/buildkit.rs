@@ -8713,7 +8713,7 @@ mod tests {
     }
 
     #[test]
-    fn old_builder_without_runtime_claim_waits_for_host_quiescence() {
+    fn old_builder_without_runtime_claim_stays_outside_domain_reaping() {
         let root = temp_root("legacy-reap-live-job-after-reboot");
         let run_root = root.join("run");
         let legacy = "velnor-builder-shared-trusted-branch-o_r".to_string();
@@ -8729,10 +8729,8 @@ mod tests {
         );
 
         assert!(report.deleted.is_empty());
-        assert!(report
-            .failures
-            .iter()
-            .any(|failure| { failure.contains(&legacy) && failure.contains("quiescence") }));
+        assert!(report.stopped.is_empty());
+        assert!(report.failures.is_empty());
         assert!(!claims_file(&run_root, &legacy).exists());
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -8763,7 +8761,7 @@ mod tests {
     }
 
     #[test]
-    fn old_builder_claim_mismatch_or_torn_json_blocks_upgrade_cleanup() {
+    fn unscoped_claim_payloads_stay_quarantined_during_reaping() {
         let legacy = "velnor-builder-shared-trusted-branch-o_r".to_string();
         let invalid_claims = [
             serde_json::to_vec(&serde_json::json!({
@@ -8791,6 +8789,7 @@ mod tests {
             let path = claims_file(&run_root, &legacy);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, invalid).unwrap();
+            let before = std::fs::read(&path).unwrap();
             let report = reap_idle_builders_with(
                 &run_root,
                 SystemTime::now(),
@@ -8803,8 +8802,9 @@ mod tests {
             );
 
             assert!(report.deleted.is_empty());
-            assert!(!report.failures.is_empty());
-            assert!(path.exists());
+            assert!(report.stopped.is_empty());
+            assert!(report.failures.is_empty());
+            assert_eq!(std::fs::read(&path).unwrap(), before);
             std::fs::remove_dir_all(&root).unwrap();
         }
     }
@@ -9386,141 +9386,105 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_reaper_waits_for_old_holders_then_removes_after_absent_repair() {
+    fn unscoped_builder_with_live_holder_is_not_adopted_or_reaped() {
         let root = temp_root("upgrade-reap-live-holder");
         let run_root = root.join("run");
         let legacy = "velnor-builder-shared-trusted-branch-o_r".to_string();
-        claim_builder_for_test_domain(&run_root, &legacy, "slot-old", "velnor-job-live").unwrap();
-
-        let held = reap_idle_builders_with(
+        let path = claims_file(&run_root, &legacy);
+        let claims = BuilderClaims {
+            builder: legacy.clone(),
+            holders: BTreeMap::from([(
+                "velnor-job-live".to_owned(),
+                BuilderHolder {
+                    container: "velnor-job-live".to_owned(),
+                    slot: "slot-old".to_owned(),
+                    claimed_unix: 1,
+                },
+            )]),
+        };
+        write_claims(&path, &claims).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let report = reap_idle_builders_with(
             &run_root,
             SystemTime::now(),
             || Ok(vec![legacy.clone()]),
             || Ok(["velnor-job-live".to_string()].into_iter().collect()),
-            |_| panic!("live holder must prevent daemon inspection"),
-            |_| panic!("live holder must prevent stopping"),
-            |_| panic!("live holder must not require a restart"),
-            |_| panic!("live holder must prevent deletion"),
+            |_| panic!("unscoped builder must not be inspected"),
+            |_| panic!("unscoped builder must not be stopped"),
+            |_| panic!("unscoped builder must not be restarted"),
+            |_| panic!("unscoped builder must not be removed"),
         );
-        assert!(held.deleted.is_empty());
-        assert_eq!(builder_holders(&run_root, &legacy, None).unwrap().len(), 1);
-
-        let removed = std::cell::RefCell::new(Vec::new());
-        let report = reap_idle_builders_with(
-            &run_root,
-            SystemTime::now(),
-            || Ok(vec![legacy.clone()]),
-            || Ok(BTreeSet::new()),
-            |_| {
-                Ok(crate::docker::client::ExitInfo {
-                    status: Some(crate::docker::client::ContainerState::Running),
-                    finished: None,
-                })
-            },
-            |builder| {
-                assert_eq!(builder, legacy);
-                Ok(true)
-            },
-            |_| panic!("absent repair found no racing holder"),
-            |builder| {
-                removed.borrow_mut().push(builder.to_string());
-                Ok(())
-            },
-        );
-        assert_eq!(report.stopped, vec![legacy.clone()]);
-        assert_eq!(report.deleted, vec![legacy.clone()]);
-        assert_eq!(*removed.borrow(), vec![legacy.clone()]);
-        assert!(builder_holders(&run_root, &legacy, None)
-            .unwrap()
-            .is_empty());
-        assert!(!claims_file(&run_root, &legacy).exists());
+        assert!(report.stopped.is_empty());
+        assert!(report.deleted.is_empty());
+        assert!(report.failures.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
 
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn upgrade_reaper_restarts_if_a_holder_arrives_during_legacy_stop() {
+    fn unscoped_builder_is_not_stopped_or_restarted() {
         let root = temp_root("upgrade-reap-stop-race");
         let run_root = root.join("run");
         let legacy = "velnor-builder-shared-trusted-branch-o_r".to_string();
-        claim_builder_for_test_domain(&run_root, &legacy, "slot-old", "velnor-job-old").unwrap();
-        abandon_claims(&run_root, &legacy);
-
-        let removed = std::cell::RefCell::new(Vec::new());
+        let path = claims_file(&run_root, &legacy);
+        write_claims(
+            &path,
+            &BuilderClaims {
+                builder: legacy.clone(),
+                holders: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
         let report = reap_idle_builders_with(
             &run_root,
             SystemTime::now(),
             || Ok(vec![legacy.clone()]),
             || Ok(BTreeSet::new()),
-            |_| {
-                Ok(crate::docker::client::ExitInfo {
-                    status: Some(crate::docker::client::ContainerState::Running),
-                    finished: None,
-                })
-            },
-            |builder| {
-                claim_builder_for_test_domain(&run_root, builder, "slot-new", "velnor-job-new")
-                    .unwrap();
-                Ok(true)
-            },
-            |_| Ok(true),
-            |builder| {
-                removed.borrow_mut().push(builder.to_string());
-                Ok(())
-            },
+            |_| panic!("unscoped builder must not be inspected"),
+            |_| panic!("unscoped builder must not be stopped"),
+            |_| panic!("unscoped builder must not be restarted"),
+            |_| panic!("unscoped builder must not be removed"),
         );
 
+        assert!(report.stopped.is_empty());
         assert!(report.deleted.is_empty());
         assert!(report.failures.is_empty(), "{:?}", report.failures);
-        assert!(removed.borrow().is_empty());
-        assert_eq!(builder_holders(&run_root, &legacy, None).unwrap().len(), 1);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
 
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn upgrade_reaper_retries_cleanup_after_missing_daemon_and_delete_failure() {
+    fn unscoped_builder_does_not_enter_the_cleanup_retry_path() {
         let root = temp_root("upgrade-reap-retry");
         let run_root = root.join("run");
         let legacy = "velnor-builder-shared-trusted-branch-o_r".to_string();
-        claim_builder_for_test_domain(&run_root, &legacy, "slot-old", "velnor-job-old").unwrap();
-        abandon_claims(&run_root, &legacy);
-        let now = SystemTime::now();
-        let inspect_missing = || {
-            Err(anyhow::Error::new(crate::docker::client::NotFound {
-                object: daemon_container_name(&legacy),
-            }))
-        };
-
-        let first = reap_idle_builders_with(
+        let path = claims_file(&run_root, &legacy);
+        write_claims(
+            &path,
+            &BuilderClaims {
+                builder: legacy.clone(),
+                holders: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let report = reap_idle_builders_with(
             &run_root,
-            now,
+            SystemTime::now(),
             || Ok(vec![legacy.clone()]),
             || Ok(BTreeSet::new()),
-            |_| inspect_missing(),
-            |_| panic!("missing daemon must not be stopped"),
-            |_| panic!("no active holder needs restart"),
-            |_| Err(anyhow::anyhow!("simulated interrupted volume cleanup")),
+            |_| panic!("unscoped builder must not be inspected"),
+            |_| panic!("unscoped builder must not be stopped"),
+            |_| panic!("unscoped builder must not be restarted"),
+            |_| panic!("unscoped builder must not be removed"),
         );
-        assert!(first.deleted.is_empty());
-        assert!(first
-            .failures
-            .iter()
-            .any(|failure| failure.contains("simulated interrupted volume cleanup")));
-        assert!(claims_file(&run_root, &legacy).exists());
-
-        let second = reap_idle_builders_with(
-            &run_root,
-            now,
-            || Ok(vec![legacy.clone()]),
-            || Ok(BTreeSet::new()),
-            |_| inspect_missing(),
-            |_| panic!("missing daemon must not be stopped"),
-            |_| panic!("no active holder needs restart"),
-            |_| Ok(()),
-        );
-        assert_eq!(second.deleted, vec![legacy.clone()]);
-        assert!(!claims_file(&run_root, &legacy).exists());
+        assert!(report.stopped.is_empty());
+        assert!(report.deleted.is_empty());
+        assert!(report.failures.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -10106,7 +10070,10 @@ mod tests {
 
         assert!(report.deleted.is_empty());
         assert_eq!(
-            report.unreadable_claims.into_iter().collect::<BTreeSet<_>>(),
+            report
+                .unreadable_claims
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
             BTreeSet::from([
                 owner_registry_file(&registry_root, &owner_corrupt)
                     .display()
