@@ -48,12 +48,14 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_RELEASE_BUILD");
     println!("cargo:rerun-if-env-changed=VELNOR_RELEASE_BUILD");
     println!("cargo:rerun-if-env-changed=VELNOR_PREVIEW_SOURCE_SHA");
+    println!("cargo:rerun-if-env-changed=VELNOR_PREVIEW_BUILD_VERSION");
     let crate_version = env("CARGO_PKG_VERSION");
 
     if std::env::var_os("CARGO_FEATURE_RELEASE_BUILD").is_none() {
         emit("VELNOR_SOURCE_SHA", "development");
         emit("VELNOR_SOURCE_TAG", "development");
         emit("VELNOR_BUILD_KIND", "development");
+        emit("VELNOR_BUILD_VERSION", &crate_version);
         return;
     }
     if std::env::var("VELNOR_RELEASE_BUILD").as_deref() != Ok("1") {
@@ -64,6 +66,7 @@ fn main() {
         emit("VELNOR_SOURCE_SHA", "development");
         emit("VELNOR_SOURCE_TAG", "development");
         emit("VELNOR_BUILD_KIND", "development");
+        emit("VELNOR_BUILD_VERSION", &crate_version);
         return;
     }
 
@@ -75,6 +78,8 @@ fn main() {
         emit("VELNOR_SOURCE_SHA", &sha);
         emit("VELNOR_SOURCE_TAG", &tag);
         emit("VELNOR_BUILD_KIND", "preview");
+        let display_version = preview_build_version(&crate_version, &sha);
+        emit("VELNOR_BUILD_VERSION", &display_version);
         return;
     }
 
@@ -82,6 +87,7 @@ fn main() {
     emit("VELNOR_SOURCE_SHA", &sha);
     emit("VELNOR_SOURCE_TAG", &tag);
     emit("VELNOR_BUILD_KIND", "release");
+    emit("VELNOR_BUILD_VERSION", &crate_version);
 }
 
 fn emit(key: &str, value: &str) {
@@ -149,13 +155,11 @@ fn derive_release_identity(crate_version: &str) -> (String, String) {
     (head, tag)
 }
 
-/// Derive `(commit_sha, tag)` for a rolling preview build. The generated
-/// preview workflow binds the exact commit it checked out and passes it in
-/// `VELNOR_PREVIEW_SOURCE_SHA`; build.rs proves the tree really is that commit
-/// and stamps a truthful source SHA. The tag is `preview` and the build kind is
-/// `preview`, so a preview binary is deliberately NOT a release build: it can
-/// never emit a publishable release record, it only carries the source identity
-/// the package's offline identity checks compare against.
+/// Derive `(commit_sha, tag)` for a rolling preview build. A source checkout
+/// proves identity through exact Git HEAD and a clean tree. A Homebrew source
+/// archive has no `.git`, so its root marker must contain the exact admitted
+/// SHA. Both modes retain the lockfile/version check. The preview tag remains
+/// `preview`, and preview builds cannot emit a stable release record.
 fn derive_preview_identity(crate_version: &str) -> (String, String) {
     let manifest_dir = PathBuf::from(env("CARGO_MANIFEST_DIR"));
     println!(
@@ -169,19 +173,36 @@ fn derive_preview_identity(crate_version: &str) -> (String, String) {
         panic!("preview-build: VELNOR_PREVIEW_SOURCE_SHA must be a 40-hex commit, got {sha:?}");
     }
 
-    let head = git(&manifest_dir, &["rev-parse", "HEAD"]);
-    if head != sha {
-        panic!(
-            "preview-build: VELNOR_PREVIEW_SOURCE_SHA {sha} does not name the checked-out HEAD {head}"
-        );
-    }
+    if git_checkout_exists(&manifest_dir) {
+        let head = git(&manifest_dir, &["rev-parse", "HEAD"]);
+        if head != sha {
+            panic!(
+                "preview-build: VELNOR_PREVIEW_SOURCE_SHA {sha} does not name the checked-out HEAD {head}"
+            );
+        }
 
-    let status = git(&manifest_dir, &["status", "--porcelain"]);
-    if !status.is_empty() {
-        panic!(
-            "preview-build: refusing to embed identity from a dirty tree ({} changed path(s))",
-            status.lines().count()
-        );
+        let status = git(&manifest_dir, &["status", "--porcelain"]);
+        if !status.is_empty() {
+            panic!(
+                "preview-build: refusing to embed identity from a dirty tree ({} changed path(s))",
+                status.lines().count()
+            );
+        }
+    } else {
+        let marker = manifest_dir.join("../../homebrew-preview-source.sha");
+        let metadata = std::fs::symlink_metadata(&marker).unwrap_or_else(|err| {
+            panic!("preview-build: source archive identity marker is unavailable: {err}")
+        });
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            panic!("preview-build: source archive identity marker must be a regular file");
+        }
+        let contents = std::fs::read(&marker).unwrap_or_else(|err| {
+            panic!("preview-build: cannot read source archive identity marker: {err}")
+        });
+        if contents != format!("{sha}\n").as_bytes() {
+            panic!("preview-build: source archive marker does not match VELNOR_PREVIEW_SOURCE_SHA");
+        }
+        println!("cargo:rerun-if-changed={}", marker.display());
     }
 
     // Same lockfile gate as a release build: a preview of crate version X must
@@ -194,6 +215,48 @@ fn derive_preview_identity(crate_version: &str) -> (String, String) {
     }
 
     (sha, "preview".to_string())
+}
+
+/// Apply the source-derived manifest version to the binary's human-facing
+/// identity. A source archive has no Git metadata, so the formula must pass its
+/// verified manifest version. Git-backed native/APT preview builds keep their
+/// existing crate-version behavior unless they explicitly provide a version.
+fn preview_build_version(crate_version: &str, source_sha: &str) -> String {
+    let version = match std::env::var("VELNOR_PREVIEW_BUILD_VERSION") {
+        Ok(version) => version,
+        Err(std::env::VarError::NotPresent) => {
+            let manifest_dir = PathBuf::from(env("CARGO_MANIFEST_DIR"));
+            if git_checkout_exists(&manifest_dir) {
+                return crate_version.to_string();
+            }
+            panic!("preview-build: VELNOR_PREVIEW_BUILD_VERSION is required for source archives");
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("preview-build: VELNOR_PREVIEW_BUILD_VERSION is not valid Unicode");
+        }
+    };
+    let Some(rest) = version.strip_prefix(&format!("{crate_version}-preview.")) else {
+        panic!("preview-build: VELNOR_PREVIEW_BUILD_VERSION has the wrong crate-version prefix");
+    };
+    let Some((count, short_sha)) = rest.split_once('+') else {
+        panic!("preview-build: VELNOR_PREVIEW_BUILD_VERSION must include source revision and SHA");
+    };
+    let parsed_count = count.parse::<u64>();
+    if parsed_count.is_err()
+        || parsed_count.is_ok_and(|value| value == 0 || value.to_string() != count)
+        || short_sha != &source_sha[..7]
+    {
+        panic!("preview-build: VELNOR_PREVIEW_BUILD_VERSION does not bind the source SHA");
+    }
+    version
+}
+
+fn git_checkout_exists(dir: &Path) -> bool {
+    Command::new("git")
+        .current_dir(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -218,7 +281,10 @@ fn git(dir: &Path, args: &[&str]) -> String {
 }
 
 fn is_full_sha(value: &str) -> bool {
-    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// Extract the `velnor-runner` version from `Cargo.lock`. Hand-scanned (no toml

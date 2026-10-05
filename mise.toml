@@ -47,6 +47,14 @@ run = "cargo nextest run --locked --package velnor-runner --features test-suppor
 description = "Compile all workspace targets with production default features"
 run = "cargo check --workspace --all-targets --locked"
 
+[tasks."homebrew:package"]
+description = "Build the source-SHA-bound Homebrew preview handoff"
+run = "cargo run --locked --package velnor-tools -- homebrew-preview package"
+
+[tasks."homebrew:verify"]
+description = "Rebuild and verify the Homebrew preview handoff against its source SHA"
+run = "cargo run --locked --package velnor-tools -- homebrew-preview verify"
+
 [tasks.test-release-feature-boundary]
 description = "Prove release-profile builds reject the loopback-only test feature"
 run = "bash scripts/check-release-feature-boundary.sh"

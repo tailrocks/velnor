@@ -106,7 +106,7 @@ pub fn embedded() -> EmbeddedIdentity {
         source_sha: env!("VELNOR_SOURCE_SHA").to_string(),
         tag: env!("VELNOR_SOURCE_TAG").to_string(),
         kind: env!("VELNOR_BUILD_KIND").to_string(),
-        crate_version: env!("CARGO_PKG_VERSION").to_string(),
+        crate_version: env!("VELNOR_BUILD_VERSION").to_string(),
     }
 }
 
