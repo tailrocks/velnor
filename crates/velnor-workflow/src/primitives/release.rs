@@ -2412,6 +2412,32 @@ fn gate_velnor_release_verify(output: &mut String, config: &ProjectConfig) {
     }
 }
 
+/// Delete one Actions cache entry with bounded retries. A delete the API no
+/// longer knows (HTTP 404) is progress a concurrent maintenance run already
+/// made, not a failure; an authorization refusal (HTTP 401/403) aborts the
+/// step instead of retrying a refusal that cannot succeed. Returns 0 when
+/// the entry is deleted or already gone, 1 after bounded retries, and 2 on
+/// authorization refusal.
+const MAINTENANCE_DELETE_CACHE_FN: &str = r#"          delete_cache_id() {
+            local id="$1" error attempt
+            for attempt in 1 2 3; do
+              error="$(gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" 2>&1 >/dev/null)" && return 0
+              if grep -qi 'not found' <<<"$error"; then
+                return 0
+              fi
+              if grep -Eq 'HTTP 40[13]' <<<"$error"; then
+                echo "::error::cache delete refused for id $id ($error); refusing to retry an authorization failure" >&2
+                return 2
+              fi
+              if (( attempt < 3 )); then
+                sleep $((attempt * 2))
+              fi
+            done
+            echo "::error::failed to delete cache id $id after bounded retries" >&2
+            return 1
+          }
+"#;
+
 const MAINTENANCE_WORKFLOW: &str = r#"name: Maintenance
 run-name: Maintenance · ${{ github.event_name }}
 
@@ -2419,7 +2445,7 @@ on:
   pull_request:
     types: [closed]
   schedule:
-    - cron: '31 3 * * *'
+    - cron: __MAINTENANCE_SCHEDULE__
   workflow_dispatch:
     inputs:
       pull_request_number:
@@ -2448,29 +2474,36 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request_number }}
         run: |
           set -euo pipefail
+__MAINTENANCE_DELETE_CACHE_FN__
           ref="refs/pull/$PR_NUMBER/merge"
           encoded="$(printf '%s' "$ref" | jq -sRr @uri)"
-          cache_ids="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" --jq '.actions_caches[].id')"
-          if [[ -z "$cache_ids" ]]; then
+          listing="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" --jq '.actions_caches[].id')" || {
+            echo "::error::failed to list cache entries for $ref" >&2
+            exit 1
+          }
+          if [[ -z "$listing" ]]; then
             echo "No merge-ref cache entries found for $ref"
             exit 0
           fi
+          mapfile -t cache_ids <<<"$listing"
+          deleted=0
           failed=0
-          while IFS= read -r id; do
+          for id in "${cache_ids[@]}"; do
             [[ -z "$id" ]] && continue
-            deleted=false
-            for delay in 1 2 4 8; do
-              if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null 2>&1; then
-                deleted=true
-                break
-              fi
-              sleep "$delay"
-            done
-            if [[ "$deleted" != true ]]; then
-              failed=$((failed + 1))
-              echo "::error::failed to delete cache id $id after retries" >&2
+            if (( deleted + failed >= __MAINTENANCE_MAX_DELETES__ )); then
+              echo "::error::maintenance delete bound reached (__MAINTENANCE_MAX_DELETES__ cache deletes); rerun maintenance to continue" >&2
+              exit 1
             fi
-          done <<< "$cache_ids"
+            if delete_cache_id "$id"; then
+              deleted=$((deleted + 1))
+            else
+              status=$?
+              if (( status == 2 )); then
+                exit 1
+              fi
+              failed=$((failed + 1))
+            fi
+          done
           if (( failed > 0 )); then
             echo "::error::$failed closed-PR cache entries could not be deleted; rerun maintenance" >&2
             exit 1
@@ -2491,7 +2524,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          for workflow in ci-main.yml nightly.yml; do
+          for workflow in __MAINTENANCE_PRODUCERS__; do
             if [[ "$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --status in_progress --limit 1 --json databaseId --jq 'length')" != "0" ]]; then
               echo "skip=true" >> "$GITHUB_OUTPUT"
               echo "$workflow is in_progress; skipping cache retention" >> "$GITHUB_STEP_SUMMARY"
@@ -2505,14 +2538,21 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Sweep closed-PR merge-ref caches
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+__MAINTENANCE_DELETE_CACHE_FN__
           failed=0
-          mapfile -t refs < <(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
-            --jq '.actions_caches[].ref' | grep -E '^refs/pull/[0-9]+/merge$' | sort -u)
+          processed=0
+          all_refs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '.actions_caches[].ref')" || {
+            echo "::error::failed to list cache scopes" >&2
+            exit 1
+          }
+          mapfile -t refs < <(printf '%s\n' "$all_refs" | grep -E '^refs/pull/[0-9]+/merge$' | sort -u)
           if ((${#refs[@]} == 0)); then
             echo "No merge-ref cache scopes found"
             exit 0
           fi
           for ref in "${refs[@]}"; do
+            [[ -z "$ref" ]] && continue
             pr="${ref#refs/pull/}"
             pr="${pr%/merge}"
             state="$(gh pr view "$pr" --json state --jq .state 2>/dev/null || echo unknown)"
@@ -2520,25 +2560,32 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Sweep closed-PR merge-ref caches
               continue
             fi
             encoded="$(printf '%s' "$ref" | jq -sRr @uri)"
-            mapfile -t cache_ids < <(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" \
-              --jq '.actions_caches[].id')
-            if ((${#cache_ids[@]} == 0)); then
+            listing="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" \
+              --jq '.actions_caches[].id')" || {
+              echo "::error::failed to list cache entries for $ref" >&2
+              exit 1
+            }
+            if [[ -z "$listing" ]]; then
               continue
             fi
+            mapfile -t cache_ids <<<"$listing"
             echo "Sweeping $ref ($pr): ${#cache_ids[@]} entries"
             for id in "${cache_ids[@]}"; do
-              deleted=false
-              for delay in 1 2 4 8; do
-                if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null 2>&1; then
-                  deleted=true
-                  break
-                fi
-                sleep "$delay"
-              done
-              if [[ "$deleted" != true ]]; then
-                failed=$((failed + 1))
-                echo "::error::failed to delete cache id $id for $ref after retries" >&2
+              [[ -z "$id" ]] && continue
+              if (( processed >= __MAINTENANCE_MAX_DELETES__ )); then
+                echo "::error::maintenance delete bound reached (__MAINTENANCE_MAX_DELETES__ cache deletes); rerun maintenance to continue" >&2
+                exit 1
               fi
+              if delete_cache_id "$id"; then
+                :
+              else
+                status=$?
+                if (( status == 2 )); then
+                  exit 1
+                fi
+                failed=$((failed + 1))
+              fi
+              processed=$((processed + 1))
             done
           done
           if (( failed > 0 )); then
@@ -2612,18 +2659,29 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Sweep closed-PR merge-ref caches
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+__MAINTENANCE_DELETE_CACHE_FN__
           evicted=0
           freed=0
           failed=0
           # The plan is applied verbatim, in its own order: generations beyond
           # their class bound first, then classes over budget, then the global
-          # sweep - which never touches a protected class.
+          # sweep - which never touches a protected class. The per-run delete
+          # bound stops the sweep instead of letting one run empty the
+          # account; the next run continues where this one stopped.
           while IFS=$'\t' read -r class reason id size key; do
-            if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null; then
+            if (( evicted + failed >= __MAINTENANCE_MAX_DELETES__ )); then
+              echo "::error::maintenance delete bound reached (__MAINTENANCE_MAX_DELETES__ cache deletes); rerun maintenance to continue" >&2
+              exit 1
+            fi
+            if delete_cache_id "$id"; then
               evicted=$((evicted + 1))
               freed=$((freed + size))
               echo "evicted id=$id class=$class reason=$reason size=$size key=$key"
             else
+              status=$?
+              if (( status == 2 )); then
+                exit 1
+              fi
               failed=$((failed + 1))
               echo "::warning::failed to evict cache id $id (class $class, key $key)" >&2
             fi
@@ -2730,6 +2788,22 @@ fn render_maintenance(config: &ProjectConfig) -> String {
 
     MAINTENANCE_WORKFLOW
         .replace("VELNOR_RUNTIME_SETUP_STEPS", &setup)
+        .replace(
+            "__MAINTENANCE_SCHEDULE__",
+            &yaml_scalar(&config.maintenance.schedule),
+        )
+        .replace(
+            "__MAINTENANCE_PRODUCERS__",
+            &config.maintenance.producers.join(" "),
+        )
+        .replace(
+            "__MAINTENANCE_MAX_DELETES__",
+            &config.maintenance.max_deletes.to_string(),
+        )
+        .replace(
+            "__MAINTENANCE_DELETE_CACHE_FN__",
+            MAINTENANCE_DELETE_CACHE_FN.trim_end_matches('\n'),
+        )
         .replace(
             "__MAINTENANCE_PRUNE_RUNNER__",
             &configured_runner(config, cache_lane),
@@ -3148,6 +3222,7 @@ mod tests {
             renovate_enabled: false,
             renovate_reason: String::new(),
             renovate: None,
+            maintenance: crate::MaintenanceSpec::default(),
             units: vec![unit("rust-example")],
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
@@ -3237,7 +3312,7 @@ mod tests {
             ),
             (
                 "maintenance.yml",
-                "dec062b10a81cc0add558b5ab3da547b8d818fd8079cc895845c55dd7f945c1d",
+                "41ef15b8f97eaa4503e592deb90be865cde0ef6b4912ef05c61cfc7c16f78dd7",
             ),
             (
                 "ci-release-package-signer.yml",
@@ -3563,6 +3638,91 @@ mod tests {
             let workflow = super::render_maintenance(&cfg);
             assert_maintenance_is_github_hosted(&workflow, &cfg);
         }
+    }
+
+    #[test]
+    fn maintenance_renders_declared_schedule_producers_and_bound() {
+        let mut cfg = config(&["maintenance.yml"], None);
+        cfg.maintenance = crate::MaintenanceSpec {
+            schedule: "17 4 * * *".to_owned(),
+            producers: vec!["ci-main.yml".to_owned()],
+            max_deletes: 50,
+        };
+        let workflow = super::render_maintenance(&cfg);
+        assert!(
+            workflow.contains("- cron: \"17 4 * * *\""),
+            "declared schedule: {workflow}"
+        );
+        assert!(
+            workflow.contains("for workflow in ci-main.yml; do"),
+            "declared producers: {workflow}"
+        );
+        assert!(
+            workflow.contains(">= 50"),
+            "declared delete bound: {workflow}"
+        );
+        assert!(
+            !workflow.contains("__MAINTENANCE_"),
+            "no placeholder survives rendering: {workflow}"
+        );
+        let defaults = super::render_maintenance(&config(&["maintenance.yml"], None));
+        assert!(defaults.contains("- cron: \"31 3 * * *\""), "{defaults}");
+        assert!(
+            defaults.contains("for workflow in ci-main.yml nightly.yml; do"),
+            "{defaults}"
+        );
+        assert!(defaults.contains(">= 500"), "{defaults}");
+    }
+
+    #[test]
+    fn maintenance_deletes_are_bounded_and_progress_aware() {
+        let cfg = config(&["maintenance.yml"], None);
+        let workflow = super::render_maintenance(&cfg);
+        assert_eq!(
+            workflow.matches("delete_cache_id() {").count(),
+            3,
+            "prune, sweep, and eviction share one delete helper: {workflow}"
+        );
+        for marker in [
+            "grep -qi 'not found'",
+            "grep -Eq 'HTTP 40[13]'",
+            "refusing to retry an authorization failure",
+            "after bounded retries",
+            "maintenance delete bound reached",
+            "rerun maintenance to continue",
+        ] {
+            assert!(workflow.contains(marker), "{marker}: {workflow}");
+        }
+        assert!(
+            !workflow.contains("for delay in 1 2 4 8"),
+            "the unbounded retry loop is gone: {workflow}"
+        );
+    }
+
+    #[test]
+    fn maintenance_passes_trusted_policy_audit() {
+        let cfg = config(&["maintenance.yml"], None);
+        let workflow = super::render_maintenance(&cfg);
+        let root = scanned_root("maintenance-audit");
+        let workflows = root.join(".github/workflows");
+        must(fs::create_dir_all(&workflows), "create audited workflows");
+        must(
+            fs::write(workflows.join("maintenance.yml"), &workflow),
+            "write audited maintenance.yml",
+        );
+        let audit = must(
+            crate::policy::audit_workflows(&root),
+            "audit maintenance workflow",
+        );
+        assert!(
+            audit.pull_request_target.is_empty(),
+            "{:?}",
+            audit.pull_request_target
+        );
+        assert!(audit.runners.is_empty(), "{:?}", audit.runners);
+        assert!(audit.actions.is_empty(), "{:?}", audit.actions);
+        assert!(audit.structure.is_empty(), "{:?}", audit.structure);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

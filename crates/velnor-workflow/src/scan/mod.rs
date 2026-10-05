@@ -24,7 +24,7 @@ use serde::Serialize;
 
 use crate::{
     default_workflow_files, identifier_suffix, AnalysisSummary, CacheSpec, GeneratorError,
-    ProjectConfig, RunnerMode, Unit, UnitKind,
+    MaintenanceSpec, ProjectConfig, RunnerMode, Unit, UnitKind,
 };
 
 /// Run the detector pipeline over `root` and return what it proved.
@@ -219,6 +219,7 @@ impl From<RepositoryShape> for ProjectConfig {
             renovate_enabled: false,
             renovate_reason: "Renovate is fail-closed. Enable only after declaring a Renovate config, trusted Velnor runners, and a dedicated PAT secret.".to_owned(),
             renovate: None,
+            maintenance: MaintenanceSpec::default(),
             units: shape.units,
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
