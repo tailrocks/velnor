@@ -173,6 +173,11 @@ mod tests {
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            platform: crate::platform::PlatformRequirement::portable(),
+            products: Vec::new(),
+            prerequisites: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            mbx: None,
         }
     }
 
@@ -2726,6 +2731,10 @@ pub(crate) mod lane_input {
     /// policy run consumes. Only the generator crate's owning Rust unit sets
     /// it, on the hosted lane, in the owner repository, on pull requests.
     pub(crate) const CANDIDATE_PUBLISH: &str = "candidate_publish";
+    /// `true` when the unit needs the Apple executor: a kind whose members
+    /// split across the default and Apple executors renders one collapsed
+    /// job per executor, and each job admits only its own callers.
+    pub(crate) const APPLE_EXECUTOR: &str = "apple_executor";
 
     /// Every per-unit input, in declaration order.
     pub(crate) const ALL: &[&str] = &[
@@ -2748,6 +2757,7 @@ pub(crate) mod lane_input {
         HOST_WARM_LAYERS,
         POLICY_RUNTIME,
         CANDIDATE_PUBLISH,
+        APPLE_EXECUTOR,
     ];
 
     /// The inputs declared as `type: boolean`. Callers pass them unquoted so
@@ -2762,6 +2772,7 @@ pub(crate) mod lane_input {
                 | CARGO_NET_OFFLINE
                 | POLICY_RUNTIME
                 | CANDIDATE_PUBLISH
+                | APPLE_EXECUTOR
         )
     }
 
@@ -2832,6 +2843,7 @@ pub(crate) struct LaneStepFacts {
     pub(crate) host_warm_layers: Vec<&'static str>,
     pub(crate) policy_runtime: bool,
     pub(crate) candidate_publish: bool,
+    pub(crate) apple_executor: bool,
 }
 
 impl LaneStepFacts {
@@ -2897,6 +2909,9 @@ impl LaneStepFacts {
         }
         if self.candidate_publish {
             values.push((lane_input::CANDIDATE_PUBLISH, "true".to_owned()));
+        }
+        if self.apple_executor {
+            values.push((lane_input::APPLE_EXECUTOR, "true".to_owned()));
         }
         values
     }
@@ -3020,7 +3035,10 @@ fn render_required_caller_verdicts(output: &mut String, callers: &[RequiredCalle
 impl WorkflowIr {
     pub(crate) fn from_config(config: &ProjectConfig) -> Self {
         let mut tools = BTreeSet::new();
-        let mr_boxington = config.units.iter().any(|unit| unit.kind == UnitKind::Rust);
+        let mr_boxington = config
+            .units
+            .iter()
+            .any(|unit| unit.kind == UnitKind::Rust && unit.uses_mbx());
         if config
             .units
             .iter()
@@ -3828,7 +3846,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     /// in full for every kind, so a caller can pass a unit's facts without
     /// knowing which of them the callee's collapsed block resolved to a
     /// literal: GitHub rejects a `with:` key the callee does not declare.
-    fn render_kind_units_header(kind: UnitKind) -> String {
+    /// `env` is the members' agreed job environment, rendered once at the
+    /// top level so every collapsed lane job of the kind exports it.
+    fn render_kind_units_header(kind: UnitKind, env: &BTreeMap<String, String>) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let _ = writeln!(
             output,
@@ -3837,6 +3857,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         );
         for name in lane_input::ALL {
             let _ = writeln!(output, "{}", lane_input::declaration(name));
+        }
+        if !env.is_empty() {
+            output.push_str("\nenv:\n");
+            for (name, value) in env {
+                let _ = writeln!(output, "  {name}: {}", yaml_scalar(value));
+            }
         }
         output.push_str("\njobs:\n");
         output
@@ -3866,7 +3892,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         if members.is_empty() {
             return Ok(None);
         }
-        let mut output = Self::render_kind_units_header(kind);
+        let env = crate::platform::agreed_env(&members, kind)?;
+        let mut output = Self::render_kind_units_header(kind, &env);
         self.append_lane_cargo_prep_jobs(&mut output, &members, contracts);
         self.render_collapsed_kind_verify_job(&mut output, &members, contracts)?;
         Ok(Some((kind_unit_workflow_file(kind), output)))
@@ -3886,13 +3913,21 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     /// The job gate of a collapsed lane job: the lane the caller selected, the
     /// unit's membership in the plan's selection, and the lane's admission
     /// predicate. Membership is a single `contains` over `inputs.unit`, never
-    /// an enumeration of the kind's units.
-    fn collapsed_lane_gate(&self, admission: LaneAdmission) -> String {
-        format!(
+    /// an enumeration of the kind's units. A kind split across executors adds
+    /// the `apple_executor` clause, so each partition admits only its own
+    /// callers; an unsplit kind carries no clause.
+    fn collapsed_lane_gate(&self, admission: LaneAdmission, apple: Option<bool>) -> String {
+        let mut gate = format!(
             "inputs.lane == '{}' && contains(format(',{{0}},', inputs.selected_units), format(',{{0}},', inputs.unit)) && ({})",
             admission.lane().as_str(),
             self.lane_admission_expression(admission)
-        )
+        );
+        match apple {
+            None => {}
+            Some(true) => gate.push_str(" && inputs.apple_executor"),
+            Some(false) => gate.push_str(" && inputs.apple_executor != true"),
+        }
+        gate
     }
 
     fn collapsed_timeout_minutes(
@@ -3946,16 +3981,49 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         }
         let github_members =
             self.collapsed_lane_members(members, contracts, RunnerMode::Github, None);
-        if !github_members.is_empty() {
-            let runs_on = self.runner_for(RunnerMode::Github);
+        // A kind split across executors (portable SwiftPM units beside Xcode
+        // scheme units) renders one collapsed job per executor: a single
+        // `runs-on` cannot serve both. An unsplit kind keeps the one job it
+        // has always rendered.
+        let (github_apple, github_default): (Vec<_>, Vec<_>) = github_members
+            .into_iter()
+            .partition(|unit| unit.platform.requires_apple());
+        let split = !github_apple.is_empty() && !github_default.is_empty();
+        if !github_default.is_empty() {
+            let runs_on = self.runner_for_unit(RunnerMode::Github, github_default[0]);
             self.render_collapsed_lane_verify_job(
                 output,
-                &github_members,
+                &github_default,
                 contracts,
                 RunnerMode::Github,
                 "verify-github",
                 RunnerMode::Github.display_name(),
                 &runs_on,
+                split.then_some(false),
+            )?;
+        }
+        if !github_apple.is_empty() {
+            let runs_on = self.runner_for_unit(RunnerMode::Github, github_apple[0]);
+            let (job_id, display_name) = if split {
+                (
+                    "verify-github-apple",
+                    format!("{} · Apple", RunnerMode::Github.display_name()),
+                )
+            } else {
+                (
+                    "verify-github",
+                    RunnerMode::Github.display_name().to_owned(),
+                )
+            };
+            self.render_collapsed_lane_verify_job(
+                output,
+                &github_apple,
+                contracts,
+                RunnerMode::Github,
+                job_id,
+                &display_name,
+                &runs_on,
+                split.then_some(true),
             )?;
         }
         let velnor_plain =
@@ -3972,6 +4040,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 "verify-velnor",
                 RunnerMode::Velnor.display_name(),
                 &runs_on,
+                None,
             )?;
         }
         if !velnor_trusted.is_empty() {
@@ -3985,6 +4054,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 "verify-velnor-trusted",
                 RunnerMode::Velnor.display_name(),
                 &runs_on,
+                None,
             )?;
         }
         Ok(())
@@ -3995,7 +4065,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     /// caller's inputs.
     #[expect(
         clippy::too_many_arguments,
-        reason = "the job identity (lane, id, display name, runner) is passed explicitly per lane job"
+        reason = "the job identity (lane, id, display name, runner, executor partition) is passed explicitly per lane job"
     )]
     fn render_collapsed_lane_verify_job(
         &self,
@@ -4006,11 +4076,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         job_id: &str,
         display_name: &str,
         runs_on: &str,
+        apple: Option<bool>,
     ) -> Result<(), GeneratorError> {
         // Every member of a collapsed job shares one admission class
         // (`collapsed_lane_members` splits the Velnor lane by trust), so the
         // first member's class is the job's.
-        let gate = self.collapsed_lane_gate(LaneAdmission::for_unit(lane, members[0]));
+        let gate = self.collapsed_lane_gate(LaneAdmission::for_unit(lane, members[0]), apple);
         let mut display_name = display_name.to_owned();
         // P0-6: a trust-gated Velnor lane with no online trusted runner fails
         // closed (the admission predicate carries `&& false`) and says so in
@@ -4158,6 +4229,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 && !self.repository.is_empty()
                 && self.repository == crate::workflow_setup_action_repository()
                 && unit_owns_workflow_crate(unit),
+            apple_executor: github_lane && unit.platform.requires_apple(),
         }
     }
 
@@ -4651,24 +4723,38 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     pub(crate) fn render_workflow_env(&self, output: &mut String, unit: &Unit) {
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
         let mold = self.mise_present && unit.kind != UnitKind::Swift;
-        let mut entries = Vec::new();
+        let mut entries: Vec<String> = Vec::new();
+        // Declared env shadows the generator defaults key by key, so a
+        // repository-owned build flag always wins and no key renders twice.
+        let shadowed = |key: &str| unit.env.contains_key(key);
         if tools.contains(&ToolRequirement::Sccache) {
-            entries.push("  CARGO_INCREMENTAL: \"0\"");
-            entries.push("  RUSTC_WRAPPER: sccache");
-            entries.push("  SCCACHE_GHA_ENABLED: \"true\"");
+            if !shadowed("CARGO_INCREMENTAL") {
+                entries.push("  CARGO_INCREMENTAL: \"0\"".to_owned());
+            }
+            if !shadowed("RUSTC_WRAPPER") {
+                entries.push("  RUSTC_WRAPPER: sccache".to_owned());
+            }
+            if !shadowed("SCCACHE_GHA_ENABLED") {
+                entries.push("  SCCACHE_GHA_ENABLED: \"true\"".to_owned());
+            }
         }
-        if mold {
-            entries.push("  RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"");
+        if mold && !shadowed("RUSTFLAGS") {
+            entries.push("  RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"".to_owned());
         }
-        if tools.contains(&ToolRequirement::OpenTofu) {
-            entries.push("  TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache");
+        if tools.contains(&ToolRequirement::OpenTofu) && !shadowed("TF_PLUGIN_CACHE_DIR") {
+            entries.push("  TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache".to_owned());
+        }
+        let mut declared = unit.env.iter().collect::<Vec<_>>();
+        declared.sort();
+        for (name, value) in declared {
+            entries.push(format!("  {name}: {}", yaml_scalar(value)));
         }
         if entries.is_empty() {
             return;
         }
         output.push_str("\nenv:\n");
         for entry in entries {
-            output.push_str(entry);
+            output.push_str(&entry);
             output.push('\n');
         }
     }
@@ -4882,16 +4968,28 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             })
             .flatten();
         let mut entries = Vec::<String>::new();
+        let shadowed = |key: &str| unit.env.contains_key(key);
         if tools.contains(&ToolRequirement::Sccache) {
-            entries.push("      CARGO_INCREMENTAL: \"0\"".to_owned());
-            entries.push("      RUSTC_WRAPPER: sccache".to_owned());
-            entries.push("      SCCACHE_GHA_ENABLED: \"true\"".to_owned());
+            if !shadowed("CARGO_INCREMENTAL") {
+                entries.push("      CARGO_INCREMENTAL: \"0\"".to_owned());
+            }
+            if !shadowed("RUSTC_WRAPPER") {
+                entries.push("      RUSTC_WRAPPER: sccache".to_owned());
+            }
+            if !shadowed("SCCACHE_GHA_ENABLED") {
+                entries.push("      SCCACHE_GHA_ENABLED: \"true\"".to_owned());
+            }
         }
-        if mold {
+        if mold && !shadowed("RUSTFLAGS") {
             entries.push("      RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"".to_owned());
         }
-        if tools.contains(&ToolRequirement::OpenTofu) {
+        if tools.contains(&ToolRequirement::OpenTofu) && !shadowed("TF_PLUGIN_CACHE_DIR") {
             entries.push("      TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache".to_owned());
+        }
+        let mut declared = unit.env.iter().collect::<Vec<_>>();
+        declared.sort();
+        for (name, value) in declared {
+            entries.push(format!("      {name}: {}", yaml_scalar(value)));
         }
         if lane == RunnerMode::Velnor
             && let Some(service) = postgres
@@ -4973,9 +5071,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // Velnor Planning does not publish a SOURCE_REV product. Manual GitHub
         // dispatch jobs bootstrap the pinned runtime themselves. Apple jobs
         // cannot consume a Linux-built plan artifact even when Planning is hosted.
+        // Portable SwiftPM jobs can: they run on the default executor.
         if self.control_plane_lane() != RunnerMode::Github
             || self.runners == RunnerMode::Velnor
-            || unit.kind == UnitKind::Swift
+            || unit.platform.requires_apple()
         {
             self.render_workflow_runtime_setup(output, lane);
         } else {
@@ -5497,8 +5596,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     }
 
     pub(crate) fn runner_for_unit(&self, lane: RunnerMode, unit: &Unit) -> String {
-        if unit.kind == UnitKind::Swift && lane == RunnerMode::Github {
-            return yaml_scalar(&self.macos_runner);
+        if lane == RunnerMode::Github {
+            return yaml_scalar(crate::platform::github_runner_for_unit(
+                &self.github_runner,
+                &self.macos_runner,
+                unit,
+            ));
         }
         if lane == RunnerMode::Velnor && unit.requires_trusted {
             // Generation validates the label is declared before rendering;
@@ -5513,7 +5616,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     }
 
     pub(crate) fn uses_mr_boxington(&self, unit: &Unit) -> bool {
-        self.mr_boxington && unit.kind == UnitKind::Rust
+        self.mr_boxington && unit.kind == UnitKind::Rust && unit.uses_mbx()
     }
 
     pub(crate) fn tools_for_unit(
@@ -5542,7 +5645,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 if mise_present {
                     tools.insert(ToolRequirement::Mise);
                 }
-                if mr_boxington {
+                if mr_boxington && unit.uses_mbx() {
                     tools.insert(ToolRequirement::MrBoxington);
                 } else {
                     tools.insert(ToolRequirement::Sccache);

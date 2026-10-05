@@ -48,6 +48,10 @@ fn swift_package_unit(package_root: &str) -> Unit {
     } else {
         format!("Swift package ({package_root})")
     };
+    // A SwiftPM package is portable: it verifies wherever its toolchain
+    // provisions, on the lane's default executor. Only Xcode scheme work
+    // below carries an Apple need.
+    result.platform = crate::platform::PlatformRequirement::swift_package();
     result
 }
 
@@ -165,6 +169,11 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            platform: crate::platform::PlatformRequirement::apple_xcode(),
+            products: Vec::new(),
+            prerequisites: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            mbx: None,
         };
         unit.watch.sort();
         unit.watch.dedup();

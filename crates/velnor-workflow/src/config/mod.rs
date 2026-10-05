@@ -348,6 +348,62 @@ pub(crate) struct UnitSection {
     /// their recorded digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     requires_trusted: Option<bool>,
+    /// The operating system the unit needs: `any`, `linux`, or `macos`.
+    /// Absent keeps what the scan derived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    os: Option<String>,
+    /// The architecture the unit needs: `any`, `x86_64`, or `aarch64`.
+    /// Absent keeps what the scan derived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    arch: Option<String>,
+    /// The SDK capabilities the unit needs, replacing what the scan derived.
+    /// `xcode` and `xcframework` resolve to a macOS executor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capabilities: Option<Vec<String>>,
+    /// Extra environment the unit's jobs export: build flags and product
+    /// outputs. Declared as `[units.env]`; replaces nothing, the scan
+    /// derives no env of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    env: Option<BTreeMap<String, String>>,
+    /// Whether this Rust unit verifies under the object transport. Absent
+    /// keeps the default (on for Rust); `false` opts out. Meaningless — and
+    /// refused as `true` — on any other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mbx: Option<bool>,
+    /// Named build products this unit produces for consumers, as
+    /// `[[units.products]]` rows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    products: Vec<ProductSection>,
+    /// Prerequisite edges this consumer declares, as
+    /// `[[units.prerequisites]]` rows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    prerequisites: Vec<PrerequisiteSection>,
+}
+
+/// One named build product a `[[units]]` row declares: the product's name,
+/// the repository task that rebuilds it, and the task outputs consumers
+/// receive as environment.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProductSection {
+    name: Option<String>,
+    task: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    env: Option<BTreeMap<String, String>>,
+}
+
+/// One prerequisite edge a `[[units]]` row declares: the producer unit, the
+/// product it builds, an optional task override, and the task inputs the
+/// consumer's prepare step exports.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PrerequisiteSection {
+    producer: Option<String>,
+    product: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    env: Option<BTreeMap<String, String>>,
 }
 
 /// The cache contract of a `[[unit]]` row. Each field is independent, so an
@@ -573,6 +629,189 @@ impl UnitSection {
 
     pub(crate) fn requires_trusted(&self) -> bool {
         self.requires_trusted == Some(true)
+    }
+
+    pub(crate) fn os(&self) -> Option<&str> {
+        self.os.as_deref()
+    }
+
+    pub(crate) fn arch(&self) -> Option<&str> {
+        self.arch.as_deref()
+    }
+
+    pub(crate) fn capabilities(&self) -> Option<&[String]> {
+        self.capabilities.as_deref()
+    }
+
+    pub(crate) fn mbx(&self) -> Option<bool> {
+        self.mbx
+    }
+
+    pub(crate) fn products(&self) -> &[ProductSection] {
+        &self.products
+    }
+
+    pub(crate) fn prerequisites(&self) -> &[PrerequisiteSection] {
+        &self.prerequisites
+    }
+
+    /// The platform requirement this row declares over `base`: the row
+    /// replaces the OS, architecture, and capability set it names and keeps
+    /// the rest.
+    ///
+    /// # Errors
+    /// Returns a usage error for an OS, architecture, or capability value
+    /// the platform vocabulary does not implement.
+    pub(crate) fn platform_requirement(
+        &self,
+        id: &str,
+        base: &crate::platform::PlatformRequirement,
+    ) -> Result<crate::platform::PlatformRequirement, GeneratorError> {
+        let mut requirement = base.clone();
+        if let Some(os) = self.os.as_deref() {
+            requirement.os =
+                crate::platform::PlatformRequirement::parse_os(os).map_err(|error| {
+                    GeneratorError::usage(format!("[[units]] {id} declares {error}"))
+                })?;
+        }
+        if let Some(arch) = self.arch.as_deref() {
+            requirement.arch =
+                crate::platform::PlatformRequirement::parse_arch(arch).map_err(|error| {
+                    GeneratorError::usage(format!("[[units]] {id} declares {error}"))
+                })?;
+        }
+        if let Some(capabilities) = self.capabilities.as_deref() {
+            let mut declared = BTreeSet::new();
+            for capability in capabilities {
+                if !crate::platform::PlatformRequirement::valid_capability(capability) {
+                    return Err(GeneratorError::usage(format!(
+                        "[[units]] {id} declares capability `{capability}`, which is not a capability name; use lowercase letters, digits, dots, underscores, and dashes"
+                    )));
+                }
+                if !declared.insert(capability.clone()) {
+                    return Err(GeneratorError::usage(format!(
+                        "[[units]] {id} declares capability `{capability}` more than once"
+                    )));
+                }
+            }
+            requirement.capabilities = declared;
+        }
+        Ok(requirement)
+    }
+
+    /// The validated env this row declares, when it declares any.
+    ///
+    /// # Errors
+    /// Returns a usage error for an env name or value that cannot render.
+    pub(crate) fn validated_env(
+        &self,
+        id: &str,
+    ) -> Result<Option<BTreeMap<String, String>>, GeneratorError> {
+        if let Some(env) = self.env.as_ref() {
+            crate::platform::validate_env(env, &format!("[[units]] {id}"))?;
+            return Ok(Some(env.clone()));
+        }
+        Ok(None)
+    }
+
+    /// The named products this row declares.
+    ///
+    /// # Errors
+    /// Returns a usage error for a product without a name, an invalid task
+    /// or env, or a name the row declares twice.
+    pub(crate) fn named_products(
+        &self,
+        id: &str,
+    ) -> Result<Vec<crate::platform::NamedProduct>, GeneratorError> {
+        let mut products = Vec::new();
+        for product in &self.products {
+            let name = product.name.as_deref().unwrap_or_default();
+            if !crate::platform::valid_product_name(name) {
+                return Err(GeneratorError::usage(format!(
+                    "[[units]] {id} declares a product without a valid name; name it with lowercase letters, digits, dots, underscores, and dashes"
+                )));
+            }
+            if products
+                .iter()
+                .any(|declared: &crate::platform::NamedProduct| declared.name == name)
+            {
+                return Err(GeneratorError::usage(format!(
+                    "[[units]] {id} declares product `{name}` twice; one row per product"
+                )));
+            }
+            if let Some(task) = product.task.as_deref()
+                && !crate::platform::valid_task_name(task)
+            {
+                return Err(GeneratorError::usage(format!(
+                    "[[units]] {id} declares product `{name}` with task `{task}`, which is not a repository task name; use letters, digits, and `_.:/-` without whitespace"
+                )));
+            }
+            if let Some(env) = product.env.as_ref() {
+                crate::platform::validate_env(env, &format!("[[units]] {id} product `{name}`"))?;
+            }
+            products.push(crate::platform::NamedProduct {
+                name: name.to_owned(),
+                task: product.task.clone(),
+                env: product.env.clone().unwrap_or_default(),
+            });
+        }
+        Ok(products)
+    }
+
+    /// The prerequisite edges this row declares.
+    ///
+    /// # Errors
+    /// Returns a usage error for an edge without a producer or product, an
+    /// invalid task or env, or an edge the row declares twice.
+    pub(crate) fn declared_prerequisites(
+        &self,
+        id: &str,
+    ) -> Result<Vec<crate::platform::Prerequisite>, GeneratorError> {
+        let mut prerequisites = Vec::new();
+        for prerequisite in &self.prerequisites {
+            let producer = prerequisite.producer.as_deref().unwrap_or_default();
+            let product = prerequisite.product.as_deref().unwrap_or_default();
+            if producer.is_empty() || product.is_empty() {
+                return Err(GeneratorError::usage(format!(
+                    "[[units]] {id} declares a prerequisite without both `producer` and `product`; name the unit that builds it and the product it builds"
+                )));
+            }
+            if !crate::platform::valid_product_name(product) {
+                return Err(GeneratorError::usage(format!(
+                    "[[units]] {id} declares a prerequisite on product `{product}`, which is not a product name"
+                )));
+            }
+            if prerequisites
+                .iter()
+                .any(|declared: &crate::platform::Prerequisite| {
+                    declared.producer == producer && declared.product == product
+                })
+            {
+                return Err(GeneratorError::usage(format!(
+                    "[[units]] {id} declares the prerequisite `{producer}:{product}` twice; one row per edge"
+                )));
+            }
+            if let Some(task) = prerequisite.task.as_deref()
+                && !crate::platform::valid_task_name(task)
+            {
+                return Err(GeneratorError::usage(format!(
+                    "[[units]] {id} declares prerequisite `{producer}:{product}` with task `{task}`, which is not a repository task name"
+                )));
+            }
+            if let Some(env) = prerequisite.env.as_ref() {
+                crate::platform::validate_env(
+                    env,
+                    &format!("[[units]] {id} prerequisite `{producer}:{product}`"),
+                )?;
+            }
+            prerequisites.push(crate::platform::Prerequisite {
+                producer: producer.to_owned(),
+                product: product.to_owned(),
+                task: prerequisite.task.clone(),
+                env: prerequisite.env.clone().unwrap_or_default(),
+            });
+        }
+        Ok(prerequisites)
     }
 }
 
@@ -1441,6 +1680,10 @@ fn validate_units(
                     "[[unit]] {id} declares `[unit.cache]` without both `key_files` and `paths`; a partial cache contract cannot be keyed"
                 )));
         }
+        row.platform_requirement(id, &crate::platform::PlatformRequirement::portable())?;
+        row.validated_env(id)?;
+        row.named_products(id)?;
+        row.declared_prerequisites(id)?;
         if let Some(tools) = row.mise_tools.as_deref() {
             if tools.is_empty() {
                 return Err(GeneratorError::usage(format!(
@@ -1511,6 +1754,11 @@ fn validate_unit_references(
     for row in units {
         for id in row.depends_on.iter().flatten() {
             report("depends_on", id)?;
+        }
+        for prerequisite in &row.prerequisites {
+            if let Some(producer) = prerequisite.producer.as_deref() {
+                report("prerequisite producer", producer)?;
+            }
         }
     }
     for id in version_bump_units.into_iter().flatten() {
