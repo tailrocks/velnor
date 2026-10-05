@@ -6,6 +6,7 @@
 //! renderer consumes the shape; repository-specific estate profiles are
 //! applied by the caller, never here.
 
+pub(crate) mod action;
 mod docker;
 mod docs;
 pub(crate) mod file_walk;
@@ -60,6 +61,7 @@ pub(crate) fn scan_shape(
     // Detector order is part of the contract: ids are sorted stably below, so
     // the first detector to claim an id keeps the un-suffixed form.
     file_walk::detect(&context, &mut shape);
+    action::detect(&context, &mut shape)?;
     rust::detect(&context, &mut shape)?;
     signals::detect(&context, &mut shape);
     gradle::detect(&context, &mut shape)?;
