@@ -544,8 +544,7 @@ impl App {
             );
             return;
         };
-        let symlinks = generated_symlinks();
-        let plan = match plan_generated_write(output_root, &files, &symlinks, &inputs) {
+        let plan = match plan_generated_write(output_root, &files, &generated_symlinks(), &inputs) {
             Ok(plan) => plan,
             Err(error) => {
                 self.fail(FailedOperation::Review, error.to_string());
@@ -1052,7 +1051,6 @@ mod tests {
             adopted_workflow_surface: false,
             actionlint_config_variables_null: false,
             ci_required: true,
-            empty_selection_proof: false,
             ruleset_required_status_checks: Vec::new(),
             ruleset_external_status_checks: Vec::new(),
             package_update_channels: None,

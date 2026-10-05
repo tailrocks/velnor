@@ -11,7 +11,6 @@
 
 #![forbid(unsafe_code)]
 
-pub mod action_reference;
 pub mod cli_meta;
 pub mod condition;
 pub mod configuration;

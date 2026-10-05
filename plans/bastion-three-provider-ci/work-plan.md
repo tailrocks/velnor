@@ -54,7 +54,7 @@ A later generic fix returns to its affected author/verifier pair. Tooling is pub
 
 **Actions:**
 
-1. Read repository instructions first: `AGENTS.md` in `tailrocks/velnor`.
+1. Read repository instructions first: `AGENTS.md` (and `CLAUDE.md` symlink target) in `tailrocks/velnor`.
 2. `git fetch origin` in each working checkout; record current `main` SHAs:
    `gh api repos/tailrocks/velnor/git/ref/heads/main --jq .object.sha`,
    same for `jackin-project/jackin` and `ChainArgos/java-monorepo`.

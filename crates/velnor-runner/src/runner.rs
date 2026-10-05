@@ -17186,7 +17186,6 @@ mod tests {
     use crate::executor::STEP_PUBLISH_OVERFLOW_CAPACITY;
     use crate::protocol::acquire_reply_is_definitely_gone;
     use crate::slot_log::LIFECYCLE_LOG;
-    use velnor_model::action_reference::RepositoryActionReference;
 
     #[test]
     fn hosted_jit_endpoint_accepts_regional_actions_service_host() {
@@ -25326,7 +25325,6 @@ jobs:
         let script_steps = crate::script_step::github_script_steps(&job.steps, "/__w").unwrap();
         let local_plan = LocalActionPlan {
             step_id: "aggregate".into(),
-            workspace_root: Path::new("/tmp/workspace").into(),
             action_dir: Path::new("/tmp/workspace").join(".github/actions/aggregate-needs"),
             inputs: [("workflow-label".to_string(), "CI".to_string())].into(),
         };
@@ -25418,7 +25416,6 @@ runs:
         .unwrap();
         let local_plan = LocalActionPlan {
             step_id: "closure".into(),
-            workspace_root: Path::new("/tmp/workspace").into(),
             action_dir: Path::new("/tmp/workspace").join(".github/actions/l2-root"),
             inputs: BTreeMap::new(),
         };
@@ -25635,7 +25632,6 @@ runs:
         .unwrap();
         let local_plan = LocalActionPlan {
             step_id: "docs".into(),
-            workspace_root: Path::new("/tmp/workspace").into(),
             action_dir: Path::new("/tmp/workspace").join(".github/actions/check-deployed-docs"),
             inputs: [("github-token".to_string(), "ghs_token".to_string())].into(),
         };
@@ -25644,7 +25640,7 @@ runs:
 runs:
   using: composite
   steps:
-    - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c
+    - uses: jdx/mise-action@v4
       with:
         github_token: ${{ inputs.github-token }}
 "#,
@@ -25655,12 +25651,10 @@ runs:
         let nested_plan = RepositoryActionPlan {
             step_id: "docs-1".into(),
             repository: "jdx/mise-action".into(),
-            git_ref: "c2a87611a18de5b3828c5652fe268e992400cb5c".into(),
+            git_ref: "v4".into(),
             source_path: None,
-            repository_dir: Path::new("/tmp/actions")
-                .join("_actions/jdx_mise-action/c2a87611a18de5b3828c5652fe268e992400cb5c"),
-            action_dir: Path::new("/tmp/actions")
-                .join("_actions/jdx_mise-action/c2a87611a18de5b3828c5652fe268e992400cb5c"),
+            repository_dir: Path::new("/tmp/actions").join("_actions/jdx_mise-action/v4"),
+            action_dir: Path::new("/tmp/actions").join("_actions/jdx_mise-action/v4"),
             inputs: [("github_token".to_string(), "ghs_token".to_string())].into(),
             env: Vec::new(),
             condition: None,
@@ -25669,9 +25663,7 @@ runs:
         };
         let resolved = ResolvedAction {
             plan: nested_plan,
-            metadata_path: Path::new("/tmp/actions").join(
-                "_actions/jdx_mise-action/c2a87611a18de5b3828c5652fe268e992400cb5c/action.yml",
-            ),
+            metadata_path: Path::new("/tmp/actions").join("_actions/jdx_mise-action/v4/action.yml"),
             metadata: nested_metadata,
             runtime: ActionRuntime::JavaScript {
                 node: "node20".into(),
@@ -26371,19 +26363,17 @@ runs:
   using: composite
   steps:
     - id: upload
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      uses: actions/upload-artifact@v7
 "#,
         )
         .unwrap();
         let upload_plan = RepositoryActionPlan {
             step_id: "pages-upload".into(),
             repository: "actions/upload-artifact".into(),
-            git_ref: "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a".into(),
+            git_ref: "v7".into(),
             source_path: None,
-            repository_dir: actions_host
-                .join("_actions/actions_upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
-            action_dir: actions_host
-                .join("_actions/actions_upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
+            repository_dir: actions_host.join("_actions/actions_upload-artifact/v7"),
+            action_dir: actions_host.join("_actions/actions_upload-artifact/v7"),
             inputs: BTreeMap::new(),
             env: Vec::new(),
             condition: None,
@@ -26403,9 +26393,7 @@ runs:
         };
         let upload = ResolvedAction {
             plan: upload_plan,
-            metadata_path: actions_host.join(
-                "_actions/actions_upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/action.yml",
-            ),
+            metadata_path: actions_host.join("_actions/actions_upload-artifact/v7/action.yml"),
             runtime: upload_metadata.runtime().unwrap(),
             metadata: upload_metadata,
         };
@@ -26440,7 +26428,12 @@ runs:
         assert!(*continue_on_error);
     }
 
-    type TargetActionReference = RepositoryActionReference;
+    #[derive(Clone)]
+    struct TargetActionReference {
+        repository: String,
+        source_path: Option<String>,
+        git_ref: String,
+    }
 
     fn collect_repository_uses(
         value: &serde_yaml::Value,
@@ -26475,18 +26468,25 @@ runs:
     }
 
     fn target_repository_uses(value: &serde_yaml::Value) -> Option<TargetActionReference> {
-        let uses = value.as_str()?;
+        let uses = value.as_str()?.trim();
         if uses.starts_with('.') || uses.starts_with("docker://") {
             return None;
         }
-        let reference = RepositoryActionReference::parse(uses).ok()?;
-        if reference
-            .repository
-            .eq_ignore_ascii_case("actions/checkout")
-        {
+        let (path, git_ref) = uses.rsplit_once('@')?;
+        let parts = path.split('/').collect::<Vec<_>>();
+        if parts.len() < 2 {
             return None;
         }
-        Some(reference)
+        let repository = format!("{}/{}", parts[0], parts[1]);
+        if repository.eq_ignore_ascii_case("actions/checkout") {
+            return None;
+        }
+        let source_path = (parts.len() > 2).then(|| parts[2..].join("/"));
+        Some(TargetActionReference {
+            repository,
+            source_path,
+            git_ref: git_ref.to_string(),
+        })
     }
 
     fn workflow_files(root: &Path) -> Vec<PathBuf> {
@@ -27935,7 +27935,6 @@ runs:
         .unwrap();
         let plan = LocalActionPlan {
             step_id: "download-ci-xtask".into(),
-            workspace_root: Path::new("/path/that/does/not/exist").into(),
             action_dir: Path::new("/path/that/does/not/exist").into(),
             inputs: BTreeMap::new(),
         };

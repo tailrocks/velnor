@@ -101,7 +101,7 @@ impl Store {
     /// Open (and migrate) the default operational database.
     ///
     /// # Errors
-    /// Any open or migration failure as a `MachineErrorEnvelope`-backed
+    /// Any open or migration failure as a [`MachineErrorEnvelope`]-backed
     /// [`StoreError`]; a missing parent directory names the exact path.
     pub fn open_default() -> StoreResult<Self> {
         Self::open(DEFAULT_STATE_DB_PATH)

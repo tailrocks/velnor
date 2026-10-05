@@ -39,124 +39,6 @@ fn append_apple_toolchain_pin_watches(watch: &mut Vec<String>) {
 /// pin before rendering.
 pub(crate) const XCODEGEN_TOOL: &str = "xcodegen";
 
-const SWIFT_FORMAT_CONFIG: &str = ".swift-format";
-const SWIFT_LINT_CONFIGS: [&str; 2] = [".swiftlint.yml", ".swiftlint.yaml"];
-
-fn join_style_path(root: &str, name: &str) -> String {
-    if root == "." {
-        name.to_owned()
-    } else {
-        format!("{root}/{name}")
-    }
-}
-
-fn parent_style_path(path: &str) -> Option<String> {
-    if path == "." {
-        None
-    } else {
-        Some(
-            path.rsplit_once('/')
-                .map_or_else(|| ".".to_owned(), |(parent, _)| parent.to_owned()),
-        )
-    }
-}
-
-/// Find the nearest repository config at the unit root or one of its
-/// ancestors. A root unit never inherits a nested package's config.
-fn nearest_style_config(unit_root: &str, files: &[String], names: &[&str]) -> Option<String> {
-    let mut scope = unit_root.to_owned();
-    loop {
-        for name in names {
-            let candidate = join_style_path(&scope, name);
-            if files.iter().any(|file| file == &candidate) {
-                return Some(candidate);
-            }
-        }
-        let Some(parent) = parent_style_path(&scope) else {
-            break;
-        };
-        scope = parent;
-    }
-    None
-}
-
-fn relative_style_path(from: &str, to: &str) -> String {
-    let from_parts = if from == "." {
-        Vec::new()
-    } else {
-        from.split('/').collect::<Vec<_>>()
-    };
-    let to_parts = if to == "." {
-        Vec::new()
-    } else {
-        to.split('/').collect::<Vec<_>>()
-    };
-    let common = from_parts
-        .iter()
-        .zip(&to_parts)
-        .take_while(|(left, right)| left == right)
-        .count();
-    let mut parts = Vec::new();
-    parts.extend(std::iter::repeat_n("..", from_parts.len() - common));
-    parts.extend(to_parts[common..].iter().copied());
-    if parts.is_empty() {
-        ".".to_owned()
-    } else {
-        parts.join("/")
-    }
-}
-
-fn swift_style_checks(unit_root: &str, files: &[String]) -> Vec<(String, ValidationPhase, String)> {
-    let mut checks = Vec::new();
-    if let Some(config) = nearest_style_config(unit_root, files, &[SWIFT_FORMAT_CONFIG]) {
-        let config_arg = shell_quote(&relative_style_path(unit_root, &config));
-        checks.push((
-            format!(
-                "{}swift format lint --configuration {config_arg} --recursive --strict .",
-                shell_change_dir(unit_root)
-            ),
-            ValidationPhase::SwiftFormat,
-            config,
-        ));
-    }
-    if let Some(config) = nearest_style_config(unit_root, files, &SWIFT_LINT_CONFIGS) {
-        let config_arg = shell_quote(&relative_style_path(unit_root, &config));
-        checks.push((
-            format!(
-                "{}swiftlint lint --config {config_arg} --strict",
-                shell_change_dir(unit_root)
-            ),
-            ValidationPhase::SwiftLint,
-            config,
-        ));
-    }
-    checks
-}
-
-fn apply_swift_style_checks(unit: &mut Unit, files: &[String]) {
-    let checks = swift_style_checks(&unit.root, files);
-    if checks.is_empty() {
-        return;
-    }
-    let mut commands = checks
-        .iter()
-        .map(|(command, _, _)| command.clone())
-        .collect::<Vec<_>>();
-    commands.extend(std::mem::take(&mut unit.pr_commands));
-    unit.pr_commands = commands.clone();
-    unit.full_commands = commands;
-    let mut phases = checks
-        .iter()
-        .map(|(_, phase, _)| *phase)
-        .collect::<Vec<_>>();
-    phases.extend(std::mem::take(&mut unit.phases));
-    unit.phases = phases;
-    unit.watch
-        .extend(checks.into_iter().map(|(_, _, config)| config));
-    unit.watch.sort();
-    unit.watch.dedup();
-}
-
 /// Parse the repository's pinned Xcode toolchain, if it declares one.
 ///
 /// The root `.xcode-version` file carries one line, `MAJOR.MINOR[.PATCH]`.
@@ -325,79 +207,47 @@ fn parse_tools_version(contents: &str) -> Option<String> {
 /// Whether `contents` calls `call` (`".testTarget"`) with only whitespace
 /// between the name and the argument list.
 fn call_present(contents: &str, call: &str) -> bool {
-    let calls = swift_call_groups(contents, call);
-    calls.malformed || !calls.groups.is_empty()
+    let mut rest = contents;
+    while let Some(found) = rest.find(call) {
+        rest = &rest[found + call.len()..];
+        if rest
+            .trim_start_matches([' ', '\t', '\n', '\r'])
+            .starts_with('(')
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// The index just past the string literal opening at `bytes[start]` (`"` or
 /// `"""`), or `None` when it never closes.
 fn skip_string(bytes: &[u8], start: usize) -> Option<usize> {
-    let (quote, hashes) = if bytes.get(start) == Some(&b'"') {
-        (start, 0)
-    } else if bytes.get(start) == Some(&b'#') {
-        let mut quote = start;
-        while bytes.get(quote) == Some(&b'#') {
-            quote += 1;
-        }
-        if bytes.get(quote) != Some(&b'"') {
-            return None;
-        }
-        (quote, quote - start)
-    } else {
-        return None;
-    };
-    let multiline = bytes.get(quote + 1) == Some(&b'"') && bytes.get(quote + 2) == Some(&b'"');
-    let opening_len = if multiline { 3 } else { 1 };
-    let closing_len = opening_len + hashes;
-    let mut index = quote + opening_len;
-    while index + closing_len <= bytes.len() {
-        let closes = if multiline {
-            bytes[index..].starts_with(b"\"\"\"")
-        } else {
-            bytes[index] == b'"'
-        };
-        if closes
-            && !string_delimiter_is_escaped(bytes, index, hashes)
-            && bytes[index + opening_len..index + closing_len]
-                .iter()
-                .all(|byte| *byte == b'#')
-        {
-            return Some(index + closing_len);
-        }
-        if hashes == 0 && !multiline && bytes[index] == b'\\' {
-            index += 2;
-        } else {
+    if bytes.get(start + 1) == Some(&b'"') && bytes.get(start + 2) == Some(&b'"') {
+        let mut index = start + 3;
+        while index + 3 <= bytes.len() {
+            if bytes[index] == b'"' && bytes[index + 1] == b'"' && bytes[index + 2] == b'"' {
+                return Some(index + 3);
+            }
             index += 1;
+        }
+        return None;
+    }
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => {
+                index += 2;
+            }
+            b'"' => {
+                return Some(index + 1);
+            }
+            _ => {
+                index += 1;
+            }
         }
     }
     None
-}
-
-fn is_raw_string_start(bytes: &[u8], start: usize) -> bool {
-    if bytes.get(start) != Some(&b'#') {
-        return false;
-    }
-    let mut quote = start;
-    while bytes.get(quote) == Some(&b'#') {
-        quote += 1;
-    }
-    bytes.get(quote) == Some(&b'"')
-}
-
-fn string_delimiter_is_escaped(bytes: &[u8], quote: usize, hashes: usize) -> bool {
-    let mut slash = quote;
-    while slash > 0 && bytes[slash - 1] == b'\\' {
-        slash -= 1;
-    }
-    if (quote - slash) % 2 == 1 {
-        return true;
-    }
-    hashes > 0
-        && quote > hashes
-        && bytes[quote - hashes..quote]
-            .iter()
-            .all(|byte| *byte == b'#')
-        && bytes[quote - hashes - 1] == b'\\'
 }
 
 /// The index just past the block comment opening at `bytes[start]` (`/*`,
@@ -449,9 +299,6 @@ fn balanced_group(text: &str) -> Option<(&str, &str)> {
             b'"' => {
                 index = skip_string(bytes, index)?;
             }
-            b'#' if is_raw_string_start(bytes, index) => {
-                index = skip_string(bytes, index)?;
-            }
             b'/' if bytes.get(index + 1) == Some(&b'/') => {
                 while index < bytes.len() && bytes[index] != b'\n' {
                     index += 1;
@@ -478,17 +325,11 @@ fn read_quoted(literal: &str) -> Option<String> {
         match char {
             '\\' => {
                 let escaped = chars.next()?;
-                let decoded = match escaped {
+                out.push(match escaped {
                     'n' => '\n',
                     't' => '\t',
-                    'r' => '\r',
-                    '0' => '\0',
-                    '\\' => '\\',
-                    '"' => '"',
-                    '\'' => '\'',
-                    _ => return None,
-                };
-                out.push(decoded);
+                    other => other,
+                });
             }
             '"' => {
                 return Some(out);
@@ -497,6 +338,34 @@ fn read_quoted(literal: &str) -> Option<String> {
                 out.push(char);
             }
         }
+    }
+    None
+}
+
+/// The string literal passed as `key:` inside `group`, or `None` when the key
+/// is absent, non-literal, or multiline.
+fn string_arg(group: &str, key: &str) -> Option<String> {
+    let mut rest = group;
+    while let Some(found) = rest.find(key) {
+        let before = rest[..found].chars().next_back();
+        rest = &rest[found + key.len()..];
+        if before.is_some_and(|char| char.is_alphanumeric() || char == '_') {
+            continue;
+        }
+        let Some(value) = rest
+            .trim_start_matches([' ', '\t', '\n', '\r'])
+            .strip_prefix(':')
+        else {
+            continue;
+        };
+        let value = value.trim_start_matches([' ', '\t', '\n', '\r']);
+        let Some(literal) = value.strip_prefix('"') else {
+            continue;
+        };
+        if literal.starts_with("\"\"") {
+            return None;
+        }
+        return read_quoted(literal);
     }
     None
 }
@@ -524,111 +393,6 @@ fn identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
-fn qualified_swift_call(call: &str) -> Option<&'static str> {
-    match call {
-        ".testTarget" => Some("Target.testTarget"),
-        ".binaryTarget" => Some("Target.binaryTarget"),
-        _ => None,
-    }
-}
-
-fn module_qualified_swift_call(call: &str) -> Option<&'static str> {
-    match call {
-        ".testTarget" => Some("PackageDescription.Target.testTarget"),
-        ".binaryTarget" => Some("PackageDescription.Target.binaryTarget"),
-        "Product.executable" => Some("PackageDescription.Product.executable"),
-        _ => None,
-    }
-}
-
-struct SwiftCallGroups<'a> {
-    groups: Vec<&'a str>,
-    malformed: bool,
-}
-
-fn swift_call_marker_end(contents: &str, bytes: &[u8], index: usize, call: &str) -> Option<usize> {
-    if !contents[index..].starts_with(call)
-        || (index != 0 && (identifier_byte(bytes[index - 1]) || bytes[index - 1] == b'.'))
-        || (index + call.len() != bytes.len() && identifier_byte(bytes[index + call.len()]))
-    {
-        return None;
-    }
-    Some(index + call.len())
-}
-
-fn swift_call_groups<'a>(contents: &'a str, call: &str) -> SwiftCallGroups<'a> {
-    let bytes = contents.as_bytes();
-    let qualified = qualified_swift_call(call);
-    let module_qualified = module_qualified_swift_call(call);
-    let mut groups = Vec::new();
-    let mut malformed = false;
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'"' => {
-                let Some(next) = skip_string(bytes, index) else {
-                    malformed = true;
-                    break;
-                };
-                index = next;
-            }
-            b'#' if is_raw_string_start(bytes, index) => {
-                let Some(next) = skip_string(bytes, index) else {
-                    malformed = true;
-                    break;
-                };
-                index = next;
-            }
-            b'/' if bytes.get(index + 1) == Some(&b'/') => {
-                while index < bytes.len() && bytes[index] != b'\n' {
-                    index += 1;
-                }
-            }
-            b'/' if bytes.get(index + 1) == Some(&b'*') => {
-                let Some(next) = skip_block_comment(bytes, index) else {
-                    malformed = true;
-                    break;
-                };
-                index = next;
-            }
-            _ => {
-                let marker_end = swift_call_marker_end(contents, bytes, index, call)
-                    .or_else(|| {
-                        qualified.and_then(|qualified| {
-                            swift_call_marker_end(contents, bytes, index, qualified)
-                        })
-                    })
-                    .or_else(|| {
-                        module_qualified.and_then(|qualified| {
-                            swift_call_marker_end(contents, bytes, index, qualified)
-                        })
-                    });
-                let Some(marker_end) = marker_end else {
-                    let width = contents[index..].chars().next().map_or(1, char::len_utf8);
-                    index += width;
-                    continue;
-                };
-                let Some(group_start) = skip_trivia(bytes, marker_end) else {
-                    malformed = true;
-                    break;
-                };
-                if bytes.get(group_start) != Some(&b'(') {
-                    index = marker_end;
-                    continue;
-                }
-                let group = &contents[group_start..];
-                let Some((inner, after)) = balanced_group(group) else {
-                    malformed = true;
-                    break;
-                };
-                groups.push(inner);
-                index = group_start + group.len() - after.len();
-            }
-        }
-    }
-    SwiftCallGroups { groups, malformed }
-}
-
 fn contains_interpolation(literal: &str) -> bool {
     let bytes = literal.as_bytes();
     let mut index = 0;
@@ -648,6 +412,26 @@ fn contains_interpolation(literal: &str) -> bool {
     false
 }
 
+fn executable_marker_end(contents: &str, bytes: &[u8], index: usize) -> Option<usize> {
+    const SHORTHAND: &str = ".executable";
+    const QUALIFIED: &str = "Product.executable";
+    if contents[index..].starts_with(SHORTHAND)
+        && (index == 0 || (!identifier_byte(bytes[index - 1]) && bytes[index - 1] != b'.'))
+        && (index + SHORTHAND.len() == bytes.len()
+            || !identifier_byte(bytes[index + SHORTHAND.len()]))
+    {
+        return Some(index + SHORTHAND.len());
+    }
+    if contents[index..].starts_with(QUALIFIED)
+        && (index == 0 || !identifier_byte(bytes[index - 1]))
+        && (index + QUALIFIED.len() == bytes.len()
+            || !identifier_byte(bytes[index + QUALIFIED.len()]))
+    {
+        return Some(index + QUALIFIED.len());
+    }
+    None
+}
+
 /// A top-level literal `key: "value"` argument in a Swift call. Nested
 /// target/dependency arguments, comments, interpolations, and expressions do
 /// not count: the scanner must never infer a product name from executable
@@ -659,9 +443,6 @@ fn literal_string_arg(group: &str, key: &str) -> Option<String> {
     while index < bytes.len() {
         match bytes[index] {
             b'"' => index = skip_string(bytes, index)?,
-            b'#' if is_raw_string_start(bytes, index) => {
-                index = skip_string(bytes, index)?;
-            }
             b'/' if bytes.get(index + 1) == Some(&b'/') => {
                 while index < bytes.len() && bytes[index] != b'\n' {
                     index += 1;
@@ -696,7 +477,8 @@ fn literal_string_arg(group: &str, key: &str) -> Option<String> {
                 }
                 let value = skip_trivia(bytes, colon + 1)?;
                 if bytes.get(value) != Some(&b'"')
-                    || (bytes.get(value + 1) == Some(&b'"') && bytes.get(value + 2) == Some(&b'"'))
+                    || bytes.get(value + 1) == Some(&b'"')
+                    || bytes.get(value + 2) == Some(&b'"')
                 {
                     return None;
                 }
@@ -725,19 +507,53 @@ struct ExecutableProductFacts {
 /// Discover only literal `.executable(name: "...")` product declarations.
 /// This lexer skips Swift strings/comments and never evaluates the manifest.
 fn parse_executable_products(contents: &str) -> ExecutableProductFacts {
+    let bytes = contents.as_bytes();
     let mut names = BTreeSet::new();
     let mut has_dynamic_name = false;
-    for call in [".executable", "Product.executable"] {
-        let calls = swift_call_groups(contents, call);
-        has_dynamic_name |= calls.malformed;
-        for group in calls.groups {
-            match literal_string_arg(group, "name") {
-                Some(name) if !name.is_empty() => {
-                    names.insert(name);
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                let Some(next) = skip_string(bytes, index) else {
+                    break;
+                };
+                index = next;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
                 }
-                _ => {
-                    has_dynamic_name = true;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                let Some(next) = skip_block_comment(bytes, index) else {
+                    break;
+                };
+                index = next;
+            }
+            _ => {
+                let Some(marker_end) = executable_marker_end(contents, bytes, index) else {
+                    let width = contents[index..].chars().next().map_or(1, char::len_utf8);
+                    index += width;
+                    continue;
+                };
+                let Some(group_start) = skip_trivia(bytes, marker_end) else {
+                    break;
+                };
+                if bytes.get(group_start) != Some(&b'(') {
+                    index = marker_end;
+                    continue;
                 }
+                let group = &contents[group_start..];
+                let Some((inner, after)) = balanced_group(group) else {
+                    break;
+                };
+                match literal_string_arg(inner, "name") {
+                    Some(name) if !name.is_empty() => {
+                        names.insert(name);
+                    }
+                    _ => has_dynamic_name = true,
+                }
+                index = group_start + group.len() - after.len();
             }
         }
     }
@@ -748,15 +564,25 @@ fn parse_executable_products(contents: &str) -> ExecutableProductFacts {
 }
 
 fn parse_binary_targets(contents: &str) -> Vec<BinaryTarget> {
-    swift_call_groups(contents, ".binaryTarget")
-        .groups
-        .into_iter()
-        .map(|inner| BinaryTarget {
-            name: literal_string_arg(inner, "name"),
-            path: literal_string_arg(inner, "path"),
-            url: literal_string_arg(inner, "url"),
-        })
-        .collect()
+    let mut targets = Vec::new();
+    let mut rest = contents;
+    while let Some(found) = rest.find(".binaryTarget") {
+        rest = &rest[found + ".binaryTarget".len()..];
+        let group = rest.trim_start_matches([' ', '\t', '\n', '\r']);
+        if !group.starts_with('(') {
+            continue;
+        }
+        let Some((inner, after)) = balanced_group(group) else {
+            break;
+        };
+        targets.push(BinaryTarget {
+            name: string_arg(inner, "name"),
+            path: string_arg(inner, "path"),
+            url: string_arg(inner, "url"),
+        });
+        rest = after;
+    }
+    targets
 }
 
 fn parse_package_facts(contents: &str) -> PackageFacts {
@@ -799,19 +625,16 @@ struct XcodeGenSpec {
 }
 
 impl XcodeGenSpec {
-    /// Every `*.xcframework` path the merged targets link, deduplicated by
-    /// normalized repository path: targets sort by name from the merge, so
-    /// the collection is deterministic. One consumer record per path keeps
-    /// the native join from wiring the same product edge twice when two
-    /// targets or spellings link one framework.
-    fn xcframeworks(&self, consumer_root: &str) -> Vec<String> {
+    /// Every `*.xcframework` path the merged targets link, deduplicated:
+    /// targets sort by name from the merge, so the collection is
+    /// deterministic. One consumer record per path keeps the native join
+    /// from wiring the same product edge twice when two targets link one
+    /// framework.
+    fn xcframeworks(&self) -> Vec<String> {
         let mut frameworks = Vec::new();
-        let mut seen = BTreeSet::new();
         for target in &self.targets {
             for framework in &target.frameworks {
-                let identity = resolve_repo_path(consumer_root, framework)
-                    .unwrap_or_else(|| framework.clone());
-                if seen.insert(identity) {
+                if !frameworks.contains(framework) {
                     frameworks.push(framework.clone());
                 }
             }
@@ -1671,7 +1494,6 @@ fn xcode_scheme_unit(
         mbx: None,
         prepared_tools: Vec::new(),
     };
-    apply_swift_style_checks(&mut unit, files);
     unit.watch.sort();
     unit.watch.dedup();
     unit
@@ -1705,21 +1527,11 @@ pub(crate) fn detect(
             ));
         }
         let mut unit = swift_package_unit(&package_root, &facts);
-        apply_swift_style_checks(&mut unit, context.files);
         unit.xcode.clone_from(&xcode);
-        let mut seen_binary_targets = BTreeSet::new();
         for target in &facts.binary_targets {
             let name = target.name.as_deref().unwrap_or("<unnamed>");
             match (&target.path, &target.url) {
                 (Some(path), _) => {
-                    let identity = (
-                        resolve_repo_path(&package_root, path)
-                            .unwrap_or_else(|| format!("raw:{path}")),
-                        target.name.clone(),
-                    );
-                    if !seen_binary_targets.insert(identity) {
-                        continue;
-                    }
                     unit.platform = crate::s2::provider::Platform::MacosArm64;
                     unit.capabilities.native_macos_arm64 = true;
                     shape.swift_consumers.push(SwiftBinaryConsumer {
@@ -1814,48 +1626,18 @@ fn detect_xcodegen_specs(
         shape.detected.push(format!("xcodegen:{}", merged.path));
         let (unit, unit_notes) = xcodegen_unit(&merged, context.files);
         shape.limitations.extend(unit_notes);
-        let consumer_root = parent_path(&merged.path);
-        let owner_ids = if let Some(mut unit) = unit {
-            apply_swift_style_checks(&mut unit, context.files);
+        if let Some(mut unit) = unit {
             unit.xcode = xcode.cloned();
             let unit_id = unit.id.clone();
             shape.units.push(unit);
-            vec![unit_id]
-        } else {
-            // A committed generated project is executed by its shared-scheme
-            // units. Keep the native edge on every matching scheme so a
-            // project with several shared schemes cannot lose the producer
-            // prerequisite merely because XcodeGen generation is skipped.
-            let project_name = format!("{}.xcodeproj", merged.name);
-            shape
-                .units
-                .iter()
-                .filter(|candidate| {
-                    candidate.kind == UnitKind::Swift
-                        && candidate.root == consumer_root
-                        && candidate
-                            .pr_commands
-                            .iter()
-                            .any(|command| command.contains(&project_name))
-                })
-                .map(|candidate| candidate.id.clone())
-                .collect::<Vec<_>>()
-        };
-        if owner_ids.is_empty() {
-            shape.limitations.push(format!(
-                "XcodeGen spec `{}` is covered by a committed generated project, but no shared scheme unit owns `{}`; linked native products cannot be joined statically.",
-                merged.path, merged.name
-            ));
-            continue;
-        }
-        // A linked `*.xcframework` joins the same native-producer edge a
-        // `.binaryTarget` path does: without a consumer record the unit
-        // renders with no prerequisite, no transport edge, and no
-        // diagnostic, and `xcodebuild` fails on the missing bundle. Paths
-        // resolve against the spec's own directory, like package roots do
-        // for `Package.swift` stanzas.
-        for unit_id in owner_ids {
-            for framework in merged.xcframeworks(&consumer_root) {
+            // A linked `*.xcframework` joins the same native-producer edge
+            // a `.binaryTarget` path does: without a consumer record the
+            // unit renders with no prerequisite, no transport edge, and no
+            // diagnostic, and `xcodebuild` fails on the missing bundle.
+            // Paths resolve against the spec's own directory, like package
+            // roots do for `Package.swift` stanzas.
+            let consumer_root = parent_path(&merged.path);
+            for framework in merged.xcframeworks() {
                 shape.swift_consumers.push(SwiftBinaryConsumer {
                     manifest: merged.path.clone(),
                     consumer_root: consumer_root.clone(),
@@ -1934,22 +1716,8 @@ mod tests {
     fn test_targets_count_with_any_gap_before_parens() {
         assert!(parse_package_facts(".testTarget(name: \"App\")").has_tests);
         assert!(parse_package_facts(".testTarget (name: \"App\")").has_tests);
-        assert!(parse_package_facts(".testTarget /* comment */ (name: \"App\")").has_tests);
-        assert!(parse_package_facts("Target.testTarget(name: \"App\")").has_tests);
-        assert!(
-            parse_package_facts("PackageDescription.Target.testTarget(name: \"App\")").has_tests
-        );
         assert!(!parse_package_facts(".target(name: \"App\")").has_tests);
         assert!(!parse_package_facts("// see .testTarget docs").has_tests);
-        assert!(!parse_package_facts("let text = \".testTarget(name: \\\"Fake\\\")\"").has_tests);
-        assert!(!parse_package_facts("let text = #\".testTarget(name: \"Fake\")\"#").has_tests);
-        assert!(
-            !parse_package_facts(
-                ".not_testTarget(name: \"Fake\")\nOther.testTarget(name: \"Fake\")"
-            )
-            .has_tests
-        );
-        assert!(parse_package_facts(".testTarget(").has_tests);
     }
 
     #[test]
@@ -1996,31 +1764,6 @@ mod tests {
     }
 
     #[test]
-    fn one_character_literal_product_is_run() {
-        let facts = parse_package_facts(r#".executable(name: "A")"#);
-        assert_eq!(facts.executable_products, vec!["A".to_owned()]);
-        let unit = super::swift_package_unit("native", &facts);
-        assert_eq!(
-            unit.pr_commands,
-            vec![
-                "cd -- 'native' && swift build".to_owned(),
-                "cd -- 'native' && swift run --skip-build --product 'A'".to_owned(),
-            ]
-        );
-    }
-
-    #[test]
-    fn unsupported_literal_escapes_are_not_guessed() {
-        let facts = parse_package_facts(r#".executable(name: "App\u{1F600}")"#);
-        assert!(facts.executable_products.is_empty());
-        assert!(facts.has_dynamic_executable_products);
-        let binary = parse_package_facts(
-            r#".binaryTarget(name: "Bridge", path: "Build/\u{2F}Bridge.xcframework")"#,
-        );
-        assert_eq!(binary.binary_targets[0].path, None);
-    }
-
-    #[test]
     fn swift_package_units_run_products_without_rebuilding() {
         let facts = parse_package_facts(
             r#"
@@ -2039,10 +1782,6 @@ mod tests {
                 "cd -- 'native' && swift test --parallel".to_owned(),
             ]
         );
-        assert!(unit
-            .pr_commands
-            .iter()
-            .all(|command| !command.contains("swift run:")));
         assert_eq!(
             unit.phases,
             vec![
@@ -2077,32 +1816,6 @@ mod tests {
             limitation.contains("executable products without literal names")
         }));
         let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn executable_markers_inside_raw_strings_are_not_run() {
-        let facts = parse_package_facts(
-            "let text = #\".executable(name: \"Fake\")\"#\n\
-             /* .executable(name: \"Comment\") */\n\
-             .executable(name: \"Real\")\n\
-             PackageDescription.Product.executable(name: \"ModuleQualified\")",
-        );
-        assert_eq!(
-            facts.executable_products,
-            vec!["ModuleQualified".to_owned(), "Real".to_owned()]
-        );
-        assert!(!facts.has_dynamic_executable_products);
-    }
-
-    #[test]
-    fn escaped_multiline_string_delimiters_are_not_executable_markers() {
-        let facts = parse_package_facts(
-            r#"let text = """
-escaped \""" .executable(name: "Fake")
-"""
-.executable(name: "Real")"#,
-        );
-        assert_eq!(facts.executable_products, vec!["Real".to_owned()]);
     }
 
     #[test]
@@ -2150,28 +1863,6 @@ escaped \""" .executable(name: "Fake")
             Some("../target/Bridge.xcframework")
         );
         assert_eq!(facts.binary_targets[0].url, None);
-    }
-
-    #[test]
-    fn binary_target_markers_inside_comments_and_strings_are_ignored() {
-        let facts = parse_package_facts(
-            "let text = \".binaryTarget(name: \\\"Fake\\\", path: \\\"Fake.xcframework\\\")\"\n\
-             // .binaryTarget(name: \"Comment\", path: \"Comment.xcframework\")\n\
-             .binaryTarget /* comment */ (name: \"Real\", path: \"Real.xcframework\")\n\
-             Target.binaryTarget(name: \"Qualified\", path: \"Qualified.xcframework\")\n\
-             PackageDescription.Target.binaryTarget(name: \"ModuleQualified\", path: \"ModuleQualified.xcframework\")",
-        );
-        assert_eq!(facts.binary_targets.len(), 3);
-        assert_eq!(facts.binary_targets[0].name.as_deref(), Some("Real"));
-        assert_eq!(
-            facts.binary_targets[0].path.as_deref(),
-            Some("Real.xcframework")
-        );
-        assert_eq!(facts.binary_targets[1].name.as_deref(), Some("Qualified"));
-        assert_eq!(
-            facts.binary_targets[2].name.as_deref(),
-            Some("ModuleQualified")
-        );
     }
 
     #[test]
@@ -2630,86 +2321,6 @@ escaped \""" .executable(name: "Fake")
     }
 
     #[test]
-    fn duplicate_normalized_package_references_make_one_native_edge() {
-        let root = native_fixture(&[
-            ("libs/bridge-ffi/boltffi.toml", NATIVE_BOLTFFI),
-            ("libs/bridge-ffi/Cargo.toml", NATIVE_CARGO),
-            ("rust-toolchain.toml", NATIVE_TOOLCHAIN),
-            (
-                "clients/desktop/Package.swift",
-                &native_package(
-                    ".binaryTarget(name: \"BridgeCoreFFI\", path: \"../../target/xcframework/BridgeCore.xcframework\"),\n        .binaryTarget(name: \"BridgeCoreFFI\", path: \"../../target/xcframework/./BridgeCore.xcframework\")",
-                ),
-            ),
-        ]);
-        let shape = scan_native(&root);
-        let consumer = must_some(
-            shape
-                .units
-                .iter()
-                .find(|unit| unit.id == "swift-package-clients-desktop"),
-            "swift package consumer",
-        );
-        assert_eq!(consumer.prerequisites.len(), 1, "{consumer:?}");
-        assert!(
-            shape.swift_consumers.is_empty(),
-            "joined consumers are drained"
-        );
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn committed_xcodegen_project_keeps_native_join_on_shared_scheme() {
-        let root = native_fixture(&[
-            ("libs/bridge-ffi/boltffi.toml", NATIVE_BOLTFFI),
-            ("libs/bridge-ffi/Cargo.toml", NATIVE_CARGO),
-            ("rust-toolchain.toml", NATIVE_TOOLCHAIN),
-            (
-                "app/project.yml",
-                "name: Widget\ntargets:\n  WidgetApp:\n    type: application\n    platform: macOS\n    dependencies:\n      - framework: ../target/xcframework/BridgeCore.xcframework\n",
-            ),
-            (
-                "app/Widget.xcodeproj/xcshareddata/xcschemes/WidgetApp.xcscheme",
-                "<Scheme><BuildAction/></Scheme>\n",
-            ),
-            (
-                "app/Widget.xcodeproj/xcshareddata/xcschemes/WidgetTests.xcscheme",
-                "<Scheme><BuildAction/><TestAction/></Scheme>\n",
-            ),
-        ]);
-        let shape = scan_native(&root);
-        assert!(
-            !shape
-                .units
-                .iter()
-                .any(|unit| unit.id.starts_with("swift-xcodegen-")),
-            "the committed project owns verification"
-        );
-        let consumers = shape
-            .units
-            .iter()
-            .filter(|unit| unit.id.starts_with("swift-xcodeproj-"))
-            .collect::<Vec<_>>();
-        assert_eq!(consumers.len(), 2, "{consumers:?}");
-        for consumer in consumers {
-            assert_eq!(consumer.prerequisites.len(), 1, "{consumer:?}");
-        }
-        let consumer = must_some(
-            shape
-                .units
-                .iter()
-                .find(|unit| unit.id == "swift-xcodeproj-widgetapp"),
-            "committed shared-scheme consumer",
-        );
-        assert_eq!(consumer.prerequisites.len(), 1, "{consumer:?}");
-        assert!(
-            shape.swift_consumers.is_empty(),
-            "joined consumers are drained"
-        );
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn merged_spec_collects_linked_xcframeworks() {
         let files = spec_files(&[(
             "app/project.yml",
@@ -2730,7 +2341,7 @@ escaped \""" .executable(name: "Fake")
             "only the xcframework bundle root is collected, once, without the trailing slash: {:?}",
             lib.frameworks
         );
-        assert_eq!(spec.xcframeworks("app"), lib.frameworks);
+        assert_eq!(spec.xcframeworks(), lib.frameworks);
     }
 
     #[test]
@@ -2880,7 +2491,7 @@ escaped \""" .executable(name: "Fake")
     }
 
     #[test]
-    fn native_join_escalates_producer_and_prepends_pack() {
+    fn native_join_escalates_producer_and_appends_pack() {
         let root = native_fixture(&[
             ("libs/bridge-ffi/boltffi.toml", NATIVE_BOLTFFI),
             ("libs/bridge-ffi/Cargo.toml", NATIVE_CARGO),
@@ -2903,33 +2514,34 @@ escaped \""" .executable(name: "Fake")
         // requirement instead of staying a portable Linux unit.
         assert_eq!(producer.platform, crate::s2::provider::Platform::MacosArm64);
         assert!(producer.capabilities.native_macos_arm64);
-        // The typed recipe lands before the unit's own checks, in both lanes:
+        // The typed recipe lands after the unit's own checks, in both lanes:
         // wipe, two snapshots, pack, two drift diffs (the fixture keeps
         // the default generated `Package.swift`).
         for commands in [&producer.pr_commands, &producer.full_commands] {
             assert!(commands.len() > 6, "{commands:?}");
-            let head = &commands[..6];
+            let tail = &commands[commands.len() - 6..];
             assert_eq!(
-                head[0],
+                tail[0],
                 "rm -rf 'target/xcframework/BridgeCore.xcframework'"
             );
             assert!(
-                head[1].contains("cp -R ") && head[1].contains("velnor-boltffi-staging"),
+                tail[1].contains("cp -R ") && tail[1].contains("velnor-boltffi-staging"),
                 "bindings snapshot: {}",
-                head[1]
+                tail[1]
             );
             assert!(
-                head[2].contains("Package.swift") && head[2].contains("cp "),
+                tail[2].contains("Package.swift") && tail[2].contains("cp "),
                 "package snapshot: {}",
-                head[2]
+                tail[2]
             );
             assert_eq!(
-                head[3],
+                tail[3],
                 "cd -- 'libs/bridge-ffi' && MACOSX_DEPLOYMENT_TARGET='16.0' boltffi -v pack apple"
             );
             assert!(
-                head[4].starts_with("diff -r ") && head[5].starts_with("diff "),
-                "drift diffs: {head:?}"
+                tail[4].starts_with("diff -r ") && tail[5].starts_with("diff "),
+                "drift diffs: {:?}",
+                &tail[4..]
             );
         }
         assert!(
@@ -3419,51 +3031,6 @@ escaped \""" .executable(name: "Fake")
             "producer product carries a digest",
         );
         assert!(is_hex_digest(&digest), "digest is hex SHA-256: {digest}");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn native_swift_style_config_fixture_adds_checks_to_scan_output() {
-        let root = native_fixture(&[
-            (
-                "clients/desktop/Package.swift",
-                &native_package(".target(name: \"App\")"),
-            ),
-            (
-                "clients/desktop/Sources/App.swift",
-                "public func app() {}\n",
-            ),
-            (".swift-format", "{}\n"),
-            (".swiftlint.yml", "included: [Sources]\n"),
-        ]);
-        let shape = scan_native(&root);
-        let unit = must_some(
-            shape
-                .units
-                .iter()
-                .find(|unit| unit.id == "swift-package-clients-desktop"),
-            "Swift package unit",
-        );
-        assert_eq!(
-            unit.pr_commands,
-            vec![
-                "cd -- 'clients/desktop' && swift format lint --configuration '../../.swift-format' --recursive --strict .".to_owned(),
-                "cd -- 'clients/desktop' && swiftlint lint --config '../../.swiftlint.yml' --strict".to_owned(),
-                "cd -- 'clients/desktop' && swift build".to_owned(),
-                "cd -- 'clients/desktop' && swift test --parallel".to_owned(),
-            ]
-        );
-        assert_eq!(
-            unit.phases,
-            vec![
-                ValidationPhase::SwiftFormat,
-                ValidationPhase::SwiftLint,
-                ValidationPhase::SwiftBuild,
-                ValidationPhase::SwiftTest,
-            ]
-        );
-        assert!(unit.watch.contains(&".swift-format".to_owned()));
-        assert!(unit.watch.contains(&".swiftlint.yml".to_owned()));
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -258,16 +258,6 @@ impl CiUnit {
         Ok(selected)
     }
 
-    /// The first runnable phase a phased unit carries. Preconditions are
-    /// inserted ahead of scanner-derived phases, so prerequisite-only
-    /// consumers can run them before their stored check command too.
-    fn first_runnable_phase(&self) -> Option<ValidationPhase> {
-        ValidationPhase::RUNNABLE
-            .iter()
-            .copied()
-            .find(|phase| self.phases.contains(phase))
-    }
-
     /// The stored prerequisite check commands for a lane. The Velnor lane
     /// drops Cargo's `--no-deps`: `mbx check` does not expose it. The flag
     /// adaptation is the preserved lane rule; phase selection itself never
@@ -574,7 +564,7 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
                 .map(|value| {
                     ValidationPhase::parse(value).ok_or_else(|| {
                         GeneratorError::usage(format!(
-                            "unsupported --phase: {value}; use precondition, fmt, clippy, test, doctest, xcodegen-generate, swift-build, swift-run, swift-test, or check"
+                            "unsupported --phase: {value}; use fmt, clippy, test, doctest, xcodegen-generate, swift-build, swift-run, swift-test, or check"
                         ))
                     })
                 })
@@ -635,7 +625,7 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
                 if let Some(entries_path) = options.get("entries") {
                     cache_budget_report(entries_path)?;
                 } else {
-                    println!("{}", retention_policy_for_plan()?.total_bytes);
+                    println!("{}", retention_policy_for_plan().total_bytes);
                 }
                 return Ok(true);
             }
@@ -803,27 +793,16 @@ fn read_cache_entries(entries_path: &str) -> Result<Vec<SnapshotCacheEntry>, Gen
 
 /// Resolve the GitHub Actions retention policy from `.github-gen/velnor-workflow.toml`
 /// when present, otherwise the generator default.
-fn retention_policy_for_plan() -> Result<RetentionPolicy, GeneratorError> {
-    let root = std::env::current_dir()
-        .map_err(|error| GeneratorError::usage(format!("resolve repository root: {error}")))?;
-    retention_policy_for_root(&root)
-}
-
-fn retention_policy_for_root(root: &Path) -> Result<RetentionPolicy, GeneratorError> {
-    // Config discovery follows the repository tree. Validate the physical
-    // boundary first so a symlinked or special-file config cannot be read and
-    // an invalid discovery cannot silently fall back to defaults.
-    crate::scan::file_walk::validate_scan_root(root)?;
-    let discovered = crate::config::discover(root)?;
+fn retention_policy_for_plan() -> RetentionPolicy {
+    let discovered = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| crate::config::discover(&cwd).ok().flatten());
     let policy = discovered
         .as_ref()
         .map_or_else(RetentionPolicy::default_policy, |config| {
             RetentionPolicy::from_config(config.cache_github())
         });
-    Ok(retention_policy_with_declared_tools(
-        policy,
-        discovered.as_ref(),
-    ))
+    retention_policy_with_declared_tools(policy, discovered.as_ref())
 }
 
 /// Extend a retention policy with the prepared-tools class when the
@@ -1169,8 +1148,7 @@ fn append_step_output(path: &Path, text: &str) -> std::io::Result<()> {
 /// Emit per-class totals and headroom for the maintenance budget step.
 fn cache_budget_report(entries_path: &str) -> Result<(), GeneratorError> {
     let entries = read_cache_entries(entries_path)?;
-    let policy = retention_policy_for_plan()?;
-    let report = budget_report(&entries, &policy);
+    let report = budget_report(&entries, &retention_policy_for_plan());
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     serde_json::to_writer(&mut handle, &report)
@@ -1218,8 +1196,7 @@ fn cache_plan(entries_path: Option<&str>, now: Option<&str>) -> Result<(), Gener
             .as_secs()
             .cast_signed(),
     };
-    let policy = retention_policy_for_plan()?;
-    let plan = plan_evictions(&entries, &policy, now_epoch);
+    let plan = plan_evictions(&entries, &retention_policy_for_plan(), now_epoch);
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     serde_json::to_writer(&mut handle, &plan)
@@ -3199,44 +3176,14 @@ fn prerequisite_commands(
     phase: Option<ValidationPhase>,
 ) -> Result<Vec<String>, GeneratorError> {
     match phase {
-        None | Some(ValidationPhase::Check) => {
+        None | Some(ValidationPhase::Fmt | ValidationPhase::Check) => {
             if unit.phases.is_empty() {
                 // Units without phase tags — TOML the phase model predates,
-                // declared units — keep the base clippy→check rewrite
-                // instead of silently no-oping.
+                // declared units, regen-gated units — keep the base
+                // clippy→check rewrite instead of silently no-oping.
                 Ok(legacy_prerequisite_commands(unit, lane, scope))
-            } else if unit.first_runnable_phase() == Some(ValidationPhase::Precondition) {
-                let mut commands =
-                    unit.commands_for_phase(lane, scope, ValidationPhase::Precondition)?;
-                commands.extend(unit.commands_for_phase(lane, scope, ValidationPhase::Check)?);
-                Ok(commands)
             } else {
                 unit.commands_for_phase(lane, scope, ValidationPhase::Check)
-            }
-        }
-        Some(ValidationPhase::Precondition) => {
-            if unit.phases.is_empty() {
-                Ok(legacy_prerequisite_commands(unit, lane, scope))
-            } else {
-                let mut commands =
-                    unit.commands_for_phase(lane, scope, ValidationPhase::Precondition)?;
-                if unit.first_runnable_phase() == Some(ValidationPhase::Precondition) {
-                    commands.extend(unit.commands_for_phase(
-                        lane,
-                        scope,
-                        ValidationPhase::Check,
-                    )?);
-                }
-                Ok(commands)
-            }
-        }
-        Some(ValidationPhase::Fmt) => {
-            if unit.phases.is_empty() {
-                Ok(legacy_prerequisite_commands(unit, lane, scope))
-            } else if unit.first_runnable_phase() == Some(ValidationPhase::Fmt) {
-                unit.commands_for_phase(lane, scope, ValidationPhase::Check)
-            } else {
-                Ok(Vec::new())
             }
         }
         // The prerequisite tier compiles the unit once, in the first
@@ -5323,31 +5270,22 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn debian_collect_rejects_stale_cross_arch_outputs_in_both_roots() {
-        // A cached amd64 package and the current arm64 package are an
-        // ambiguous corpus even when cargo-deb left entries in both scan
-        // roots; fail closed and name both packages in the log.
+    fn debian_collect_rejects_two_distinct_debs_with_their_paths() {
+        // Two genuinely different file names are still an ambiguous pick:
+        // fail closed, and name both paths so the log diagnoses itself.
         let (root, canonical, twin) = debian_output_fixture("distinct");
         let dist = root.join("dist");
-        let stale_amd64 = "velnor-runner_0.1.277~preview.362+f7bc191_amd64.deb";
-        let current_arm64 = "velnor-runner_0.1.277~preview.369+507e722_arm64.deb";
-        for directory in [&canonical, &twin] {
-            must(
-                std::fs::write(directory.join(stale_amd64), b"stale amd64"),
-                "write stale amd64 deb",
-            );
-            must(
-                std::fs::write(directory.join(current_arm64), b"current arm64"),
-                "write current arm64 deb",
-            );
-        }
+        must(
+            std::fs::write(canonical.join("widget_1.2.3_amd64.deb"), b"one"),
+            "write first deb",
+        );
+        must(
+            std::fs::write(twin.join("widget_1.2.4_amd64.deb"), b"two"),
+            "write second deb",
+        );
         let error = must_fail(
-            collect_debian_packages_from(
-                &[canonical, twin],
-                &dist,
-                Some("velnor-runner-preview-0.1.277~preview.369+507e722-arm64.deb"),
-            ),
-            "stale cross-arch debs must fail closed",
+            collect_debian_packages_from(&[canonical, twin], &dist, Some("widget-1.2.3-amd64.deb")),
+            "two distinct debs must fail closed",
         );
         let message = error.to_string();
         assert!(
@@ -5355,7 +5293,8 @@ pub(crate) mod tests {
             "unexpected error: {message}"
         );
         assert!(
-            message.contains(stale_amd64) && message.contains(current_arm64),
+            message.contains("widget_1.2.3_amd64.deb")
+                && message.contains("widget_1.2.4_amd64.deb"),
             "error must list both paths: {message}"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -6302,78 +6241,6 @@ workspace_check = true
     }
 
     #[test]
-    fn precondition_phase_zips_with_runtime_selection_and_prerequisites() {
-        let unit = CiUnit {
-            id: "rust-app".to_owned(),
-            label: "rust-app".to_owned(),
-            kind: "rust".to_owned(),
-            root: ".".to_owned(),
-            watch: vec!["crates/app/**".to_owned()],
-            github_pr_commands: vec![
-                "echo precondition".to_owned(),
-                "cargo fmt --check".to_owned(),
-            ],
-            github_full_commands: vec![
-                "echo precondition".to_owned(),
-                "cargo fmt --check".to_owned(),
-            ],
-            velnor_pr_commands: vec!["echo precondition".to_owned(), "mbx fmt --check".to_owned()],
-            velnor_full_commands: vec![
-                "echo precondition".to_owned(),
-                "mbx fmt --check".to_owned(),
-            ],
-            phases: vec![ValidationPhase::Precondition, ValidationPhase::Fmt],
-            check_commands: vec!["cargo check --locked --no-deps".to_owned()],
-            depends_on: Vec::new(),
-            tool_version: None,
-            cache: None,
-            workspace_check: false,
-            reads_closed: false,
-        };
-        for lane in [RunnerLane::Github, RunnerLane::Velnor] {
-            let expected_check = if lane == RunnerLane::Velnor {
-                "cargo check --locked"
-            } else {
-                "cargo check --locked --no-deps"
-            };
-            assert_eq!(
-                must(
-                    unit.commands_for_phase(lane, Scope::Affected, ValidationPhase::Precondition),
-                    "precondition selection",
-                ),
-                vec!["echo precondition"]
-            );
-            assert_eq!(
-                must(
-                    unit.commands_for_phase(lane, Scope::Affected, ValidationPhase::Fmt),
-                    "format selection",
-                )
-                .len(),
-                1
-            );
-            assert_eq!(
-                must(
-                    prerequisite_commands(&unit, lane, Scope::Affected, None),
-                    "full prerequisite tier",
-                ),
-                vec!["echo precondition", expected_check]
-            );
-        }
-        assert_eq!(
-            must(
-                prerequisite_commands(
-                    &unit,
-                    RunnerLane::Github,
-                    Scope::Affected,
-                    Some(ValidationPhase::Precondition),
-                ),
-                "precondition prerequisite tier",
-            ),
-            vec!["echo precondition", "cargo check --locked --no-deps"]
-        );
-    }
-
-    #[test]
     fn prerequisite_tier_falls_back_to_clippy_rewrite_without_phases() {
         // Old-TOML shape: no `phases` or `check_commands` keys, so both
         // deserialize empty. The prerequisite tier must behave byte-identical
@@ -6738,7 +6605,7 @@ workspace_check = true
         assert!(
             error
                 .to_string()
-                .contains("unsupported --phase: fuzz; use precondition, fmt, clippy, test, doctest, xcodegen-generate, swift-build, swift-run, swift-test, or check"),
+                .contains("unsupported --phase: fuzz; use fmt, clippy, test, doctest, xcodegen-generate, swift-build, swift-run, swift-test, or check"),
             "the failure lists the valid phases: {error}"
         );
         // A valid phase parses through to execution: the missing config,
@@ -9282,49 +9149,6 @@ workspace_check = true
             policy.classes.len(),
             RetentionPolicy::default_policy().classes.len() + 1
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn retention_policy_refuses_a_symlinked_generation_config_tree() {
-        use std::os::unix::fs::symlink;
-
-        let root = std::env::temp_dir().join(format!(
-            "velnor-retention-policy-root-{}",
-            crate::unique_suffix()
-        ));
-        let outside = std::env::temp_dir().join(format!(
-            "velnor-retention-policy-target-{}",
-            crate::unique_suffix()
-        ));
-        must(
-            std::fs::create_dir_all(&outside),
-            "create external config tree",
-        );
-        must(
-            std::fs::write(outside.join("velnor-workflow.toml"), "schema = 1\n"),
-            "write external generation config",
-        );
-        must(
-            std::fs::create_dir_all(&root),
-            "create retention policy root",
-        );
-        must(
-            symlink(&outside, root.join(".github-gen")),
-            "create symlinked generation config tree",
-        );
-
-        let error = must_fail(
-            retention_policy_for_root(&root),
-            "symlinked generation config must fail before discovery",
-        );
-        assert!(
-            error.to_string().contains("escapes the repository"),
-            "unexpected error: {error}"
-        );
-
-        let _ = std::fs::remove_dir_all(&root);
-        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]

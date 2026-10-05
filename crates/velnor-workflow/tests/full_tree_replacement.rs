@@ -223,6 +223,8 @@ enum Drift {
     ExtraFile(&'static str),
     ExtraDir(&'static str),
     MakeExecutable(&'static str),
+    RetargetLink,
+    LinkToFile,
 }
 
 fn apply_drift(output: &Path, drift: &Drift) {
@@ -249,6 +251,16 @@ fn apply_drift(output: &Path, drift: &Drift) {
         Drift::MakeExecutable(relative) => make_executable(&output.join(relative)),
         #[cfg(not(unix))]
         Drift::MakeExecutable(_) => {}
+        Drift::RetargetLink => {
+            let link = output.join(".github/CLAUDE.md");
+            fs::remove_file(&link).unwrap();
+            symlink(&PathBuf::from("actionlint.yaml"), &link);
+        }
+        Drift::LinkToFile => {
+            let link = output.join(".github/CLAUDE.md");
+            fs::remove_file(&link).unwrap();
+            fs::write(&link, "squatter\n").unwrap();
+        }
     }
 }
 
@@ -260,11 +272,14 @@ fn check_rejects_every_drift_class(pipeline: Pipeline, drift: &Drift, label: &st
         !outcome.status.success(),
         "{label}: check must fail on drift"
     );
-    // A hand edit is never repaired: the ownership proof refuses it, so the
-    // tree cannot silently absorb a manual change.
+    // A hand edit, a retargeted link, and a file squatting the link are
+    // the drifts `--force` must not repair: the ownership proof refuses
+    // them, so the tree cannot silently absorb a manual change.
     let force = run_generate(&root, &output, true);
     let refusal = match drift {
         Drift::Edit(_) => Some("manually modified"),
+        Drift::RetargetLink => Some("manually modified generator symlink"),
+        Drift::LinkToFile => Some("expected generator-owned symlink"),
         Drift::Delete(_) | Drift::ExtraFile(_) | Drift::ExtraDir(_) | Drift::MakeExecutable(_) => {
             None
         }
@@ -398,6 +413,26 @@ fn s2_check_rejects_executable_mode() {
     );
 }
 
+#[test]
+fn v1_check_rejects_retargeted_link() {
+    check_rejects_every_drift_class(Pipeline::V1, &Drift::RetargetLink, "v1-retarget");
+}
+
+#[test]
+fn s2_check_rejects_retargeted_link() {
+    check_rejects_every_drift_class(Pipeline::S2, &Drift::RetargetLink, "s2-retarget");
+}
+
+#[test]
+fn v1_check_rejects_file_squatting_link() {
+    check_rejects_every_drift_class(Pipeline::V1, &Drift::LinkToFile, "v1-squatter");
+}
+
+#[test]
+fn s2_check_rejects_file_squatting_link() {
+    check_rejects_every_drift_class(Pipeline::S2, &Drift::LinkToFile, "s2-squatter");
+}
+
 #[cfg(unix)]
 fn symlink_escape_never_touches_external_targets(pipeline: Pipeline) {
     let (root, output) = fixture(pipeline, "symlink-escape");
@@ -491,7 +526,7 @@ fn generated_paths_stay_within_the_output_tree(pipeline: Pipeline) {
     );
     let stderr = String::from_utf8_lossy(&outcome.stderr);
     assert!(
-        stderr.contains("inside `.github/`"),
+        stderr.contains("normalized repository-relative path"),
         "refusal must name the boundary: {stderr}"
     );
     assert!(
@@ -520,14 +555,13 @@ fn reserved_agent_path_spellings_are_rejected(pipeline: Pipeline) {
     fs::create_dir_all(source.parent().unwrap()).unwrap();
     fs::write(&source, "evil\n").unwrap();
 
-    // A redundant separator must not dodge the reserved-path guard: the
-    // comparison is over paths, not strings.
+    // The canonical spelling reaches the renderer's reserved-path guard.
     let config = root.join(".github-gen/velnor-workflow.toml");
     let base = fs::read_to_string(&config).unwrap();
     fs::write(
         &config,
         format!(
-            "{base}\n[[static_files]]\nfile = \".github//AGENTS.md\"\nsource = \".github-gen/sources/evil.md\"\n"
+            "{base}\n[[static_files]]\nfile = \".github/AGENTS.md\"\nsource = \".github-gen/sources/evil.md\"\n"
         ),
     )
     .unwrap();
@@ -551,120 +585,6 @@ fn v1_reserved_agent_path_spellings_are_rejected() {
 #[test]
 fn s2_reserved_agent_path_spellings_are_rejected() {
     reserved_agent_path_spellings_are_rejected(Pipeline::S2);
-}
-
-fn reserved_policy_path_spellings_are_rejected(pipeline: Pipeline) {
-    for (index, file) in [
-        ".github/workflows/ci-policy.yml",
-        ".github//workflows/ci-policy.yml",
-        ".github/workflows/./ci-policy.yml",
-        ".github/workflows/CI-POLICY.yml",
-        ".github/WORKFLOWS/ci-policy.yml",
-        ".github/workflow\u{017f}/ci-policy.yml",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let root = minimal_root(&format!("{}-reserved-policy-{index}", pipeline.name()));
-        write_config(pipeline, &root);
-        let output = output_for(&root);
-        let _ = fs::remove_dir_all(&output);
-        fs::create_dir_all(output.join(".github/workflows")).unwrap();
-        let existing_policy = output.join(".github/workflows/ci-policy.yml");
-        fs::write(&existing_policy, "preserve existing policy\n").unwrap();
-        let source = root.join(".github-gen/sources/policy.yml");
-        fs::create_dir_all(source.parent().unwrap()).unwrap();
-        fs::write(&source, "name: untrusted replacement\n").unwrap();
-
-        let config = root.join(".github-gen/velnor-workflow.toml");
-        let base = fs::read_to_string(&config).unwrap();
-        fs::write(
-            &config,
-            format!(
-                "{base}\n[[static_files]]\nfile = \"{file}\"\nsource = \".github-gen/sources/policy.yml\"\n"
-            ),
-        )
-        .unwrap();
-        let outcome = run_generate(&root, &output, true);
-        assert!(
-            !outcome.status.success(),
-            "security-owned policy path spelling `{file}` must fail"
-        );
-        let stderr = String::from_utf8_lossy(&outcome.stderr);
-        assert!(
-            stderr.contains("generator owns this path")
-                && stderr.contains(".github/workflows/ci-policy.yml"),
-            "refusal must identify the reserved policy workflow: {stderr}"
-        );
-        assert_eq!(
-            fs::read_to_string(&existing_policy).unwrap(),
-            "preserve existing policy\n",
-            "rejection must not overwrite the existing policy entrypoint"
-        );
-    }
-}
-
-#[test]
-fn v1_reserved_policy_path_spellings_are_rejected() {
-    reserved_policy_path_spellings_are_rejected(Pipeline::V1);
-}
-
-#[test]
-fn s2_reserved_policy_path_spellings_are_rejected() {
-    reserved_policy_path_spellings_are_rejected(Pipeline::S2);
-}
-
-fn unicode_policy_path_alias_is_rejected_with_entrypoint_rendered(pipeline: Pipeline) {
-    let root = minimal_root(&format!("{}-reserved-policy-unicode", pipeline.name()));
-    write_config(pipeline, &root);
-    let output = output_for(&root);
-    let _ = fs::remove_dir_all(&output);
-    let source = root.join(".github-gen/sources/policy.yml");
-    fs::create_dir_all(source.parent().unwrap()).unwrap();
-    fs::write(&source, "name: untrusted replacement\n").unwrap();
-
-    let config = root.join(".github-gen/velnor-workflow.toml");
-    let base = fs::read_to_string(&config).unwrap();
-    let base = base.replacen(
-        "[workflow]\n",
-        "[workflow]\nfiles = [\"ci-pr.yml\", \"ci-policy.yml\"]\n",
-        1,
-    );
-    assert!(
-        base.contains("files = [\"ci-pr.yml\", \"ci-policy.yml\"]"),
-        "fixture workflow surface must render ci-policy.yml"
-    );
-    fs::write(
-        &config,
-        format!(
-            "{base}\n[[static_files]]\nfile = \".github/workflow\u{017f}/ci-policy.yml\"\nsource = \".github-gen/sources/policy.yml\"\n"
-        ),
-    )
-    .unwrap();
-
-    let outcome = run_generate(&root, &output, true);
-    assert!(
-        !outcome.status.success(),
-        "a Unicode filesystem alias must fail even when the canonical workflow is omitted"
-    );
-    let stderr = String::from_utf8_lossy(&outcome.stderr);
-    assert!(
-        stderr.contains("generator owns this path")
-            && stderr.contains(".github/workflows/ci-policy.yml"),
-        "refusal must identify the canonical policy workflow: {stderr}"
-    );
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(output);
-}
-
-#[test]
-fn v1_unicode_policy_path_alias_is_rejected_when_entrypoint_is_omitted() {
-    unicode_policy_path_alias_is_rejected_with_entrypoint_rendered(Pipeline::V1);
-}
-
-#[test]
-fn s2_unicode_policy_path_alias_is_rejected_when_entrypoint_is_omitted() {
-    unicode_policy_path_alias_is_rejected_with_entrypoint_rendered(Pipeline::S2);
 }
 
 #[cfg(unix)]
@@ -801,4 +721,45 @@ fn force_normalizes_executable_modes() {
         );
         check_ok(&root, &output);
     }
+}
+
+/// Incident regression: a policy-checkout-shaped tree — a full render
+/// whose committed state records the generator-owned `.github/CLAUDE.md`
+/// symlink with the link on disk — must plan, check, and publish clean
+/// under every mode. The owned link is expected output: never stale,
+/// never unknown, never refused.
+fn owned_symlink_renders_clean_in_policy_checkout_shape(pipeline: Pipeline) {
+    let (root, output) = fixture(pipeline, "owned-link-clean");
+    let link = output.join(".github/CLAUDE.md");
+    assert_eq!(
+        fs::read_link(&link).unwrap(),
+        PathBuf::from("AGENTS.md"),
+        "the render must carry the owned link"
+    );
+    let state =
+        fs::read_to_string(output.join(".github/ci/.github-actions-generator-state")).unwrap();
+    assert!(
+        state.contains(".github/CLAUDE.md"),
+        "the committed state must record the owned link"
+    );
+    generate_ok(&root, &output, false);
+    check_ok(&root, &output);
+    generate_ok(&root, &output, true);
+    assert_eq!(
+        fs::read_link(&link).unwrap(),
+        PathBuf::from("AGENTS.md"),
+        "every mode must leave the owned link alone"
+    );
+    check_ok(&root, &output);
+    assert_no_staging_leftovers(&output);
+}
+
+#[test]
+fn v1_owned_symlink_renders_clean_in_policy_checkout_shape() {
+    owned_symlink_renders_clean_in_policy_checkout_shape(Pipeline::V1);
+}
+
+#[test]
+fn s2_owned_symlink_renders_clean_in_policy_checkout_shape() {
+    owned_symlink_renders_clean_in_policy_checkout_shape(Pipeline::S2);
 }

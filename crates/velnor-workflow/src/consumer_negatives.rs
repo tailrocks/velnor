@@ -180,19 +180,6 @@ if [[ "$command" == "api" ]]; then
   endpoint="${2:-}"
   log "api endpoint=$endpoint"
   case "$endpoint" in
-    repos/*/contents/crates/velnor-workflow/Cargo.toml?ref=*)
-      printf '{"content":""}\n'
-      exit 0
-      ;;
-    repos/*/git/blobs/*)
-      blob="${endpoint##*/}"
-      if [[ ! -f "$GH_STUB_DIR/blobs/$blob.json" ]]; then
-        echo "stub serves no blob response for $endpoint" >&2
-        exit 1
-      fi
-      cat "$GH_STUB_DIR/blobs/$blob.json"
-      exit 0
-      ;;
     repos/*/git/trees/*)
       if [[ ! -f "$GH_STUB_DIR/trees.json" ]]; then
         echo "stub serves no trees response for $endpoint" >&2
@@ -218,11 +205,16 @@ printf 'jq %s\n' "$*" >> "$JQ_STUB_LOG"
 exec "$REAL_JQ" "$@"
 "#;
 
-/// Shim implementing exactly the `install -Dm0755 <src> <dst>` form the
-/// Velnor provisioner uses. Anything else fails loudly, so script drift
-/// surfaces instead of silently passing.
+/// Shim implementing the directory and file install forms used by generated
+/// workflows. Anything else fails loudly, so script drift surfaces instead
+/// of silently passing.
 const STUB_INSTALL: &str = r#"#!/bin/bash
 printf 'install %s\n' "$*" >> "$INSTALL_STUB_LOG"
+if [[ "${1:-}" == "-d" && "${2:-}" == "-m" && "${3:-}" == "0700" && $# -eq 4 ]]; then
+  mkdir -p "$4"
+  chmod 0700 "$4"
+  exit 0
+fi
 if [[ "${1:-}" == "-Dm0755" && $# -eq 3 ]]; then
   mkdir -p "$(dirname "$3")"
   cp "$2" "$3"
@@ -385,14 +377,7 @@ fn init_unrelated_checkout(root: &Path, name: &str) -> PathBuf {
 fn setup_action_source() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../.github-gen/sources/actions/setup-velnor-workflow/action.yml");
-    let path = if path.exists() {
-        path
-    } else {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures/actions/setup-velnor-workflow/action.yml")
-    };
-    let source = must(fs::read_to_string(&path), "read setup action");
-    crate::closure_inputs::render_setup_action(&source)
+    must(fs::read_to_string(&path), "read setup action")
 }
 
 fn dedent(body: &str, indent: usize) -> String {
@@ -451,16 +436,16 @@ fn velnor_provisioner_script(checkout: &str) -> String {
     dedent(&step[at + marker.len()..], 10)
 }
 
-/// The candidate-acquire verification tail: artifact download through
+/// The candidate-acquire tail: artifact download through
 /// manifest binding. The extraction point is pinned — the tail must open
 /// with the download block and still contain every trust gate — so script
 /// drift fails here instead of silently testing less.
-fn candidate_verify_tail(revision: &str) -> String {
-    let step = crate::policy_candidate_step(revision, "main");
+fn candidate_acquire_tail(revision: &str) -> String {
+    let policy_step = crate::policy_candidate_step(revision);
     let marker = "candidate=\"$RUNNER_TEMP/velnor-workflow-candidate\"";
-    let at = must_some(step.find(marker), "locate candidate download block");
-    let line_start = step[..at].rfind('\n').map_or(0, |index| index + 1);
-    let tail = dedent(&step[line_start..], 10);
+    let at = must_some(policy_step.find(marker), "locate candidate download block");
+    let line_start = policy_step[..at].rfind('\n').map_or(0, |index| index + 1);
+    let tail = dedent(&policy_step[line_start..], 10);
     assert!(
         tail.starts_with("candidate=\"$RUNNER_TEMP/velnor-workflow-candidate\"\n"),
         "the tail opens with the download block"
@@ -476,6 +461,10 @@ fn candidate_verify_tail(revision: &str) -> String {
             "the candidate tail still contains the {gate} gate"
         );
     }
+    assert!(
+        !tail.contains("--closure"),
+        "the credentialed acquire tail never executes the downloaded binary"
+    );
     tail
 }
 
@@ -713,8 +702,6 @@ impl ConsumerFixture {
     /// the committed tree converted entry-for-entry, so API resolution
     /// yields the same listing — and closure — as a local `ls-tree`.
     fn serve_trees(&self) {
-        use std::io::Write as _;
-
         let output = must(
             Command::new("git")
                 .arg("-C")
@@ -725,8 +712,6 @@ impl ConsumerFixture {
         );
         assert!(output.status.success(), "ls-tree fixture revision");
         let mut tree = Vec::new();
-        let blob_dir = self.serve.join("blobs");
-        must(fs::create_dir_all(&blob_dir), "create blob responses");
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             let (meta, path) = must_some(line.split_once('\t'), "fixture ls-tree shape");
             let mut fields = meta.split(' ');
@@ -739,43 +724,6 @@ impl ConsumerFixture {
                 "sha": sha,
                 "path": path,
             }));
-            if kind == "blob" && path.ends_with("Cargo.toml") {
-                let contents = must(
-                    fs::read(self.checkout.join(path)),
-                    "read fixture Cargo manifest",
-                );
-                let mut encoder = must(
-                    Command::new("base64")
-                        .stdin(std::process::Stdio::piped())
-                        .stdout(std::process::Stdio::piped())
-                        .spawn(),
-                    "spawn fixture base64 encoder",
-                );
-                must(
-                    must_some(encoder.stdin.take(), "encoder stdin is piped").write_all(&contents),
-                    "encode fixture manifest",
-                );
-                let encoded_manifest_output =
-                    must(encoder.wait_with_output(), "wait for base64 encoder");
-                assert!(
-                    encoded_manifest_output.status.success(),
-                    "fixture manifest encoding succeeds"
-                );
-                let content = String::from_utf8_lossy(&encoded_manifest_output.stdout)
-                    .lines()
-                    .collect::<String>();
-                let response = serde_json::json!({
-                    "encoding": "base64",
-                    "content": content,
-                });
-                must(
-                    fs::write(
-                        blob_dir.join(format!("{sha}.json")),
-                        must(serde_json::to_string(&response), "render blob response"),
-                    ),
-                    "serve manifest blob",
-                );
-            }
         }
         assert!(!tree.is_empty(), "the fixture revision has a tree");
         let response = serde_json::json!({
@@ -957,7 +905,7 @@ impl ConsumerFixture {
         head_candidate: &str,
         extra: &[(&str, &str)],
     ) -> (Output, PathBuf) {
-        let tail = candidate_verify_tail(&self.revision);
+        let tail = candidate_acquire_tail(&self.revision);
         let runner_temp = self.root.join("runner-temp");
         must(fs::create_dir_all(&runner_temp), "create runner temp");
         let runner_temp_str = must_some(runner_temp.to_str(), "runner temp is UTF-8");
@@ -975,9 +923,6 @@ impl ConsumerFixture {
             ("name", name),
             ("run_id", run_id),
             ("head_candidate", head_candidate),
-            ("render_candidate", head_candidate),
-            ("CANDIDATE_SHA", self.revision.as_str()),
-            ("RENDER_SHA", self.revision.as_str()),
         ];
         env.extend_from_slice(extra);
         (self.run_script("candidate", &tail, &env, None), env_file)
@@ -992,7 +937,6 @@ fn candidate_manifest(fixture: &ConsumerFixture, closure: &str, digest: &str) ->
         "run_id": "12345678",
         "revision": fixture.revision.as_str(),
         "closure": closure,
-        "build_revision": fixture.revision.as_str(),
         "binary_sha256": digest,
     })
 }
@@ -1596,11 +1540,7 @@ fn candidate_acquire_exports_bound_product() {
     let env = must(fs::read_to_string(&env_file), "read github env");
     assert!(
         env.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY="),
-        "the candidate binary exports in its own slot: {env}"
-    );
-    assert!(
-        !env.contains("VELNOR_WORKFLOW_PINNED_BINARY="),
-        "candidate acquisition preserves the pinned runtime slot: {env}"
+        "the binary exports: {env}"
     );
     assert!(
         env.contains("VELNOR_WORKFLOW_CANDIDATE_MANIFEST="),

@@ -1,4 +1,3 @@
-#![allow(rustdoc::all)]
 //! Velnor's benchmark harness.
 //!
 //! This crate exists because the project had no benchmark of its product. The

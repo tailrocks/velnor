@@ -1011,7 +1011,6 @@ mod tests {
             automatic_providers: ProviderId::ALL.into_iter().collect(),
             selectors: crate::s2::scan::default_selectors(),
             ci_required: true,
-            empty_selection_proof: false,
             repository: repository.to_owned(),
             workflow_revision: "0".repeat(40),
             rust_needs: RustNeeds::Parallel,
@@ -1889,19 +1888,6 @@ mod tests {
                 .args(["-euo", "pipefail", "-c", script])
                 .env("NEEDS_JSON", serde_json::Value::Object(needs).to_string())
                 .env("SELECTED_UNITS", selected_units)
-                .env("PLAN_SCOPE", "affected")
-                .env(
-                    "PLANNED_NO_WORK",
-                    if nonempty_selection { "" } else { "true" },
-                )
-                .env(
-                    "NO_WORK_REASON",
-                    if nonempty_selection {
-                        ""
-                    } else {
-                        "empty diff selects no workload units"
-                    },
-                )
                 .env("PLAN_DIGEST", "synthetic-plan-digest")
                 .env("EXCLUDED", "[]")
                 .env(
@@ -1991,122 +1977,6 @@ mod tests {
 
         let pull_request_script = required_gate_script(&ir, &nodes, false);
         assert!(!pull_request_script.contains("result_for_job policy"));
-    }
-
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the shell fixture covers every accepted and rejected proof combination"
-    )]
-    #[test]
-    fn required_gate_rejects_unproven_empty_json_selection() {
-        let unit = rust_unit("rust", "crates/rust");
-        let mut ir = owner_test_ir("example/empty-selection-proof", vec![unit.clone()]);
-        ir.empty_selection_proof = true;
-        let nodes = vec![GraphNode::Unit {
-            unit_id: unit.id.clone(),
-            job_id: stack_group_job_id(unit.kind),
-            name: sidebar_group_name(&unit),
-            file: nested_unit_workflow_file(&unit),
-        }];
-        let callers = ir.required_callers(&nodes, None);
-        let script = required_gate_script(&ir, &nodes, true);
-        assert!(script.contains("if [[ ( \"$PLANNED_NO_WORK\" != \"true\" )"));
-
-        let run = |selected: &str,
-                   scope: &str,
-                   planned_no_work: &str,
-                   reason: &str,
-                   omit_callers: bool| {
-            let mut needs = serde_json::Map::new();
-            needs.insert("plan".to_owned(), serde_json::json!({"result": "success"}));
-            needs.insert(
-                "policy".to_owned(),
-                serde_json::json!({"result": "success"}),
-            );
-            if !omit_callers {
-                for caller in &callers {
-                    needs.insert(
-                        caller.job_id.clone(),
-                        serde_json::json!({"result": "skipped"}),
-                    );
-                }
-            }
-            must_ok(
-                Command::new("bash")
-                    .args(["-euo", "pipefail", "-c", &script])
-                    .env("NEEDS_JSON", serde_json::Value::Object(needs).to_string())
-                    .env("SELECTED_UNITS", selected)
-                    .env("PLAN_SCOPE", scope)
-                    .env("PLANNED_NO_WORK", planned_no_work)
-                    .env("NO_WORK_REASON", reason)
-                    .env("PLAN_DIGEST", "synthetic-plan-digest")
-                    .env("EXCLUDED", "[]")
-                    .env(
-                        "EXPECTED_CALLERS",
-                        super::required_execution_contract(&callers),
-                    )
-                    .env("PROVIDER_ADMITTED_GITHUB_HOSTED", "true")
-                    .env("PROVIDER_ADMITTED_GITHUB_SELF_HOSTED", "true")
-                    .env("PROVIDER_ADMITTED_VELNOR", "true")
-                    .env("PROVIDER_ADMITTED_GITHUB_HOSTED_TRUSTED", "true")
-                    .env("PROVIDER_ADMITTED_GITHUB_SELF_HOSTED_TRUSTED", "true")
-                    .env("PROVIDER_ADMITTED_VELNOR_TRUSTED", "true")
-                    .env("PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED", "true")
-                    .output(),
-                "bash and jq execute empty-selection gate fixture",
-            )
-            .status
-            .success()
-        };
-
-        for reason in [
-            "empty diff selects no workload units",
-            "no changed path selected a workload unit",
-            "no selected workload unit runs on the admitted lanes",
-        ] {
-            assert!(
-                run("[]", "affected", "true", reason, false),
-                "proven affected no-work selection passes: {reason}"
-            );
-        }
-        assert!(run(
-            "[]",
-            "full",
-            "true",
-            "no selected workload unit runs on the admitted lanes",
-            false,
-        ));
-        assert!(!run(
-            "[]",
-            "affected",
-            "true",
-            "unrecognized no-work reason",
-            false,
-        ));
-        assert!(!run(
-            "[]",
-            "full",
-            "true",
-            "empty diff selects no workload units",
-            false,
-        ));
-        assert!(!run(
-            "[]",
-            "affected",
-            "",
-            "empty diff selects no workload units",
-            false,
-        ));
-        assert!(
-            !run(
-                "[]",
-                "affected",
-                "true",
-                "empty diff selects no workload units",
-                true,
-            ),
-            "a proven empty selection still rejects a missing caller result"
-        );
     }
 
     /// One job's body from a rendered workflow. Job bodies indent past two
@@ -3247,7 +3117,7 @@ mod tests {
         );
         assert!(
             checks < start,
-            "packaging reuses the checks' own build, after it: {hosted}"
+            "packaging runs after the unit checks: {hosted}"
         );
         let end = must_some(
             hosted.find("      - name: Report phase timings"),
@@ -3268,10 +3138,6 @@ mod tests {
                 "if: ${{ inputs.candidate_publish && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true') }}"
             ),
             "the publish step additionally gates on the prepare step's skip output: {hosted}"
-        );
-        assert!(
-            candidate.contains("CANDIDATE_MERGE_SHA: ${{ inputs.head_sha }}"),
-            "the merge SHA names the checked-out tree: {candidate}"
         );
         assert!(
             candidate.contains("CANDIDATE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}"),
@@ -3320,11 +3186,6 @@ mod tests {
             "the base candidate closure feeds the skip gate: {candidate}"
         );
         assert!(
-            candidate
-                .contains("velnor-workflow closure --rev=\"$CANDIDATE_MERGE_SHA\" --candidate"),
-            "the merge candidate closure selects the fast path: {candidate}"
-        );
-        assert!(
             candidate.contains("git show \"$BASE:.github-gen/velnor-workflow.toml\""),
             "the base pin is read from the base tree: {candidate}"
         );
@@ -3337,50 +3198,33 @@ mod tests {
             "an unchanged generator skips the publish: {candidate}"
         );
         assert!(
-            candidate.contains("test -x target/debug/velnor-workflow"),
-            "the fast path reuses the job's own binary: {candidate}"
-        );
-        assert!(
-            candidate.contains("binary=\"target/debug/velnor-workflow\"")
-                && candidate.contains("build_rev=\"$CANDIDATE_MERGE_SHA\""),
-            "the fast path records the merge tree as the build revision: {candidate}"
-        );
-        assert!(
-            candidate.contains("use_unit_binary=false")
-                && candidate.contains(
-                    "if [[ \"$(env -i PATH=\"$PATH\" target/debug/velnor-workflow --closure)\" == \"$head_closure\" ]]; then"
-                )
-                && candidate.contains("if [[ \"$use_unit_binary\" == true ]]; then"),
-            "the fast path reuses the checks' binary only when it already reports the head closure (the checks may build wider features): {candidate}"
+            candidate.contains("worktree=\"$RUNNER_TEMP/velnor-workflow-head\"")
+                && candidate.contains("git worktree add --detach \"$worktree\" \"$PR_HEAD\"")
+                && candidate.contains("cargo build --locked -p velnor-workflow"),
+            "the publisher builds the exact PR-head candidate with default features: {candidate}"
         );
         assert_eq!(
             candidate.matches("cargo build").count(),
             1,
-            "the slow path builds exactly once: {candidate}"
+            "the publisher builds the candidate exactly once: {candidate}"
         );
         assert!(
             candidate.contains("cargo build --locked -p velnor-workflow"),
-            "the slow build pins the lockfile and the generator package: {candidate}"
-        );
-        assert!(
-            candidate.contains(
-                "env -i PATH=\"$PATH\" cargo build --locked -p velnor-workflow --manifest-path"
-            ),
-            "the candidate build clears runner environment before executing PR build scripts: {candidate}"
+            "the build pins the lockfile and generator package: {candidate}"
         );
         assert!(
             candidate.contains("--manifest-path \"$worktree/crates/velnor-workflow/Cargo.toml\""),
-            "the slow build compiles the head worktree: {candidate}"
+            "the build compiles the PR-head worktree: {candidate}"
         );
         assert!(
             !candidate.contains("--no-default-features")
                 && !candidate.contains("--all-features")
                 && !candidate.contains("cargo install"),
-            "the slow build uses default features, the candidate feature set: {candidate}"
+            "the build uses default features, the policy candidate feature set: {candidate}"
         );
         assert!(
             candidate.contains("git worktree add --detach \"$worktree\" \"$PR_HEAD\""),
-            "the slow path checks the head out beside the job: {candidate}"
+            "the source worktree is the PR head: {candidate}"
         );
         assert!(
             candidate.contains("trap 'git worktree remove --force \"$worktree\"' EXIT"),
@@ -3395,12 +3239,14 @@ mod tests {
         assert!(
             candidate.contains("binary=\"$worktree/target/debug/velnor-workflow\"")
                 && candidate.contains("build_rev=\"$PR_HEAD\""),
-            "the slow path records the head as the build revision: {candidate}"
+            "the manifest records the exact PR-head build revision: {candidate}"
         );
         assert!(
-            candidate.contains("env -i PATH=\"$PATH\" \"$stage/velnor-workflow\" --closure")
-                && candidate.contains("[[ \"$reported\" == \"$head_closure\" ]]"),
-            "the staged binary proves its closure and build revision before upload: {candidate}"
+            !candidate.contains("target/debug/velnor-workflow --closure")
+                && !candidate.contains("\"$stage/velnor-workflow\" --closure")
+                && !candidate.contains("reported=\"$(\"$stage/velnor-workflow\"")
+                && candidate.contains("--arg closure \"$head_closure\""),
+            "the publisher binds the trusted head closure without executing candidate code: {candidate}"
         );
         for argument in [
             "--arg profile debug",
@@ -3601,30 +3447,29 @@ mod tests {
     }
 
     #[test]
-    fn no_work_branch_contract_binds_empty_selection_proof() {
-        let mut ir = owner_test_ir("example/s4-branch", vec![rust_unit("rust", "crates/rust")]);
-        ir.empty_selection_proof = true;
+    fn no_work_branch_contract_is_presence_only() {
+        let ir = owner_test_ir("example/s4-branch", vec![rust_unit("rust", "crates/rust")]);
         let nodes = aggregate_fixture_nodes(&ir);
         for kind in [WorkflowKind::PullRequest, WorkflowKind::Main] {
             let surface = ir.render_nested(kind, &nodes, None);
             assert!(
-                surface.contains("never `false`")
-                    && surface.contains("PLAN_SCOPE: ${{ needs.plan.outputs.scope }}")
-                    && surface
-                        .contains("PLANNED_NO_WORK: ${{ needs.plan.outputs.planned_no_work }}")
-                    && surface.contains("NO_WORK_REASON: ${{ needs.plan.outputs.no_work_reason }}"),
+                surface.contains("never `false`"),
                 "{kind:?} documents the presence-only marker contract: {surface}"
             );
-            // The required gate branches only on its shell-bound proof, never
-            // on a literal `false` plan output.
+            // The contract comment itself names the legal comparison; only
+            // code lines count as branches.
             let code = surface
                 .lines()
                 .filter(|line| !line.trim_start().starts_with('#'))
                 .collect::<Vec<_>>()
                 .join("\n");
             assert!(
-                code.contains("$PLANNED_NO_WORK") && !code.contains("planned_no_work == 'false'"),
-                "{kind:?} binds no-work proof without a literal false branch: {surface}"
+                !code.contains("planned_no_work == 'false'"),
+                "{kind:?} never branches on the impossible `false` value: {surface}"
+            );
+            assert!(
+                !code.contains("planned_no_work ==") && !code.contains("planned_no_work !="),
+                "{kind:?} branches nowhere on the marker: the aggregate tolerates no-work itself: {surface}"
             );
         }
     }
@@ -4945,19 +4790,15 @@ fn unit_owns_workflow_crate(unit: &Unit) -> bool {
 ///
 /// The step skips the publish (`skip=true`, exit 0) when the head candidate
 /// closure equals the base pin's: no generator change, nothing to publish.
-/// Otherwise the fast path reuses the checks' own `target/debug/velnor-workflow`
-/// when the merge closure equals the head closure (zero builds), and the slow
-/// path builds the generator once from an explicit head worktree in this same
-/// step (same job, same toolchain, warm cargo home — a separate job would
-/// duplicate checkout, toolchain, and cache for a rare event). Either way the
-/// step stages the binary, proves it self-reports the head closure, and writes
-/// the manifest the policy consumer verifies (`profile`, `platform`,
-/// `repository`, `run_id`, `revision` = PR-head SHA, `closure` = head
-/// candidate closure, `build_revision` = tree the binary compiled from,
-/// `binary_sha256`). The slow build clears the runner environment before
-/// invoking Cargo, so PR build scripts receive only the executable search path.
-/// The publish step uploads both files under the name the
-/// policy derives the same way (`velnor-workflow-candidate-<closure16>-<os>-<arch>`).
+/// Otherwise it builds the generator once from an explicit head worktree in
+/// this step. The trusted CLI computes the head closure from git objects; this
+/// authenticated publisher never executes the PR-built binary. It stages the
+/// bytes and writes the manifest the policy consumer verifies (`profile`,
+/// `platform`, `repository`, `run_id`, `revision` and `build_revision` = PR-head
+/// SHA, `closure` = trusted head candidate closure, `binary_sha256`). The
+/// token-free policy evaluator later executes the candidate against isolated
+/// snapshots. The publish step uploads both files under the name the policy
+/// derives the same way (`velnor-workflow-candidate-<closure16>-<os>-<arch>`).
 ///
 /// Both steps carry the pull-request same-repo gate directly after their name
 /// line (the presence-gate combiner only merges an `if:` it finds there),
@@ -4970,7 +4811,6 @@ fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         id: candidate
         env:
-          CANDIDATE_MERGE_SHA: ${{{{ inputs.head_sha }}}}
           CANDIDATE_PR_HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
           CANDIDATE_BASE_SHA: ${{{{ inputs.base_sha }}}}
         run: |
@@ -4996,46 +4836,21 @@ fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          merge_closure="$(velnor-workflow closure --rev="$CANDIDATE_MERGE_SHA" --candidate)"
-          worktree=""
-          use_unit_binary=false
-          if [[ "$merge_closure" == "$head_closure" ]]; then
-            test -x target/debug/velnor-workflow || {{ echo "::error::candidate packaging needs the unit's own target/debug/velnor-workflow; the checks must build the generator binary" >&2; exit 1; }}
-            # The checks may build with different features than the candidate
-            # profile stamps, so only reuse their binary when it already
-            # reports the head closure; otherwise fall through to a clean
-            # default-features build below.
-            if [[ "$(env -i PATH="$PATH" target/debug/velnor-workflow --closure)" == "$head_closure" ]]; then
-              use_unit_binary=true
-            fi
-          fi
-          if [[ "$use_unit_binary" == true ]]; then
-            binary="target/debug/velnor-workflow"
-            build_rev="$CANDIDATE_MERGE_SHA"
-          else
-            worktree="$RUNNER_TEMP/velnor-workflow-head"
-            rm -rf "$worktree"
-            git worktree add --detach "$worktree" "$PR_HEAD"
-            trap 'git worktree remove --force "$worktree"' EXIT
-            env -i PATH="$PATH" cargo build --locked -p velnor-workflow --manifest-path "$worktree/crates/velnor-workflow/Cargo.toml"
-            binary="$worktree/target/debug/velnor-workflow"
-            build_rev="$PR_HEAD"
-          fi
+          worktree="$RUNNER_TEMP/velnor-workflow-head"
+          rm -rf "$worktree"
+          git worktree add --detach "$worktree" "$PR_HEAD"
+          trap 'git worktree remove --force "$worktree"' EXIT
+          cargo build --locked -p velnor-workflow --manifest-path "$worktree/crates/velnor-workflow/Cargo.toml"
+          binary="$worktree/target/debug/velnor-workflow"
+          build_rev="$PR_HEAD"
           stage="$RUNNER_TEMP/velnor-workflow-candidate"
           rm -rf "$stage"
-          mkdir -p "$stage"
+          install -d -m 0700 "$stage"
           install -m 0755 "$binary" "$stage/velnor-workflow"
           digest="$(sha256sum "$stage/velnor-workflow" | awk '{{print $1}}')"
-          reported="$(env -i PATH="$PATH" "$stage/velnor-workflow" --closure)"
-          [[ "$reported" == "$head_closure" ]] || {{ echo "::error::candidate reports closure $reported, head $PR_HEAD declares $head_closure" >&2; exit 1; }}
-          reported_revision="$(env -i PATH="$PATH" "$stage/velnor-workflow" --revision)"
           jq -n --arg profile debug --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repository "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg revision "$PR_HEAD" --arg closure "$head_closure" --arg build_revision "$build_rev" --arg binary_sha256 "$digest" '{{profile: $profile, platform: $platform, repository: $repository, run_id: $run_id, revision: $revision, closure: $closure, build_revision: $build_revision, binary_sha256: $binary_sha256}}' > "$stage/candidate-manifest.json"
-          manifest_build_revision="$(jq -er '.build_revision' "$stage/candidate-manifest.json")"
-          [[ "$reported_revision" == "$manifest_build_revision" ]] || {{ echo "::error::candidate reports revision $reported_revision, manifest build_revision $manifest_build_revision" >&2; exit 1; }}
-          if [[ "$worktree" != "" ]]; then
-            git worktree remove --force "$worktree"
-            trap - EXIT
-          fi
+          git worktree remove --force "$worktree"
+          trap - EXIT
           echo "name=velnor-workflow-candidate-${{head_closure:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}" >> "$GITHUB_OUTPUT"
       - name: Publish candidate generator product
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'
@@ -6418,7 +6233,6 @@ pub(crate) struct WorkflowIr {
     // static universe; there is no dispatch-side provider input to default.
     pub(crate) selectors: SelectorMap,
     pub(crate) ci_required: bool,
-    pub(crate) empty_selection_proof: bool,
     pub(crate) repository: String,
     /// The D19 generator pin (`ProjectConfig::workflow_revision`).
     pub(crate) workflow_revision: String,
@@ -7333,29 +7147,6 @@ fn render_required_admission_env(workflow: &WorkflowIr, callers: &[RequiredCalle
     output
 }
 
-/// The planner proof the required aggregate must inspect when no unit was
-/// selected. The planner emits the marker only for a proven no-work plan;
-/// the aggregate additionally binds the scope and reason so an empty caller
-/// set cannot become a vacuous PASS.
-fn render_required_no_work_env() -> String {
-    format!(
-        "          PLAN_SCOPE: {}\n          PLANNED_NO_WORK: {}\n          NO_WORK_REASON: {}\n",
-        github_expression("needs.plan.outputs.scope"),
-        github_expression("needs.plan.outputs.planned_no_work"),
-        github_expression("needs.plan.outputs.no_work_reason"),
-    )
-}
-
-/// Reject an empty JSON selection unless the planner proved the legitimate
-/// affected no-work or lane-filtered case. The caller verdicts still render
-/// after this guard, so missing, skipped, and incomplete results retain their
-/// existing fail-closed behavior.
-fn render_required_empty_selection_guard(output: &mut String) {
-    output.push_str(
-        "          if jq -e 'type == \"array\" and length == 0' <<<\"$SELECTED_UNITS\" >/dev/null; then\n            if [[ ( \"$PLANNED_NO_WORK\" != \"true\" ) || ( \"$PLAN_SCOPE\" != \"affected\" && \"$NO_WORK_REASON\" != \"no selected workload unit runs on the admitted lanes\" ) || ( \"$NO_WORK_REASON\" != \"empty diff selects no workload units\" && \"$NO_WORK_REASON\" != \"no changed path selected a workload unit\" && \"$NO_WORK_REASON\" != \"no selected workload unit runs on the admitted lanes\" ) ]]; then\n              echo \"required CI gate rejected empty selection: expected affected no-work proof or admitted-lane proof (scope=$PLAN_SCOPE, planned_no_work=$PLANNED_NO_WORK, reason=$NO_WORK_REASON)\" >&2\n              exit 1\n            fi\n            echo \"required CI gate accepted explicit no-work plan: scope=$PLAN_SCOPE reason=$NO_WORK_REASON\"\n          fi\n",
-    );
-}
-
 /// The canonical execution obligations the aggregate check may validate. The
 /// plan is untrusted workflow output, so the gate must reject a unit/provider
 /// pair that the renderer did not emit a caller for instead of silently
@@ -7458,7 +7249,6 @@ impl WorkflowIr {
             automatic_providers: config.automatic_providers.clone(),
             selectors: config.selectors.clone(),
             ci_required: config.ci_required,
-            empty_selection_proof: config.empty_selection_proof,
             repository: config.repository.clone(),
             workflow_revision: config.workflow_revision.clone(),
             declared_ruleset_contexts: crate::s2::declared_ruleset_contexts_literal(config),
@@ -7555,7 +7345,7 @@ impl WorkflowIr {
             aggregate_triggers(WorkflowKind::Nightly, &self.default_branch);
         let concurrency = aggregate_concurrency_block(self, WorkflowKind::Nightly, false);
         let default_branch = yaml_scalar(&self.default_branch);
-        let runner = self.control_plane_runner();
+        let runner = self.runs_on_yaml(self.control_plane_provider());
         let dispatch_if = self.control_plane_gated_condition(
             "github.event_name != 'workflow_dispatch' || !inputs.simulate_failure",
         );
@@ -7939,39 +7729,28 @@ impl WorkflowIr {
         let plan_digest = github_expression("needs.plan.outputs.plan_digest");
         let excluded = github_expression("needs.plan.outputs.excluded");
         let expected_callers = required_execution_contract(&callers);
-        let control_plane = self.control_plane_provider();
-        let runner = if control_plane == ProviderId::GithubHosted {
-            crate::yaml_scalar(crate::POLICY_VALIDATION_RUNNER)
-        } else {
-            self.runs_on_yaml(control_plane)
-        };
         let _ = write!(
             output,
             "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n",
             self.control_plane_gated_condition(aggregate_job_guard(cancel_in_progress)),
             needs.join(", "),
-            runner,
+            self.runs_on_yaml(self.control_plane_provider()),
         );
         // The aggregate scores first, the shell verdict re-confirms after:
         // conjunction, so either side failing fails the check. A hosted
         // control plane downloads the verified plan-artifact runtime the
         // plan publishes for this download; a local control plane scores
         // with the ambient fleet runtime, like every other local job.
-        let runtime_steps = workflow_runtime_download(control_plane, &self.workflow_revision);
+        let runtime_steps =
+            workflow_runtime_download(self.control_plane_provider(), &self.workflow_revision);
         output.push_str(&render_aggregate_score_steps(
             &runtime_steps,
             self.pins.download_artifact,
         ));
-        let no_work_env = if self.empty_selection_proof {
-            render_required_no_work_env()
-        } else {
-            String::new()
-        };
         let _ = write!(
             output,
-            "      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_DIGEST: {plan_digest}\n          EXCLUDED: {excluded}\n          EXPECTED_CALLERS: {}\n{}{}",
+            "      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_DIGEST: {plan_digest}\n          EXCLUDED: {excluded}\n          EXPECTED_CALLERS: {}\n{}",
             yaml_scalar(&expected_callers),
-            no_work_env,
             render_required_admission_env(self, &callers),
         );
         if simulate_failure {
@@ -8015,9 +7794,6 @@ impl WorkflowIr {
                 "          result=\"$(result_for_job {job})\"\n          if [[ \"$result\" != success ]]; then\n            echo \"required CI prerequisite {job} did not pass: $result\" >&2\n            exit 1\n          fi"
             );
         }
-        if self.empty_selection_proof {
-            render_required_empty_selection_guard(output);
-        }
         render_required_caller_verdicts(output, &callers);
         if check_name == REQUIRED_CHECK {
             let _ = writeln!(
@@ -8025,7 +7801,7 @@ impl WorkflowIr {
                 "  required:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
                 crate::s2::control_job_name("Required"),
                 self.control_plane_gated_condition(aggregate_job_guard(cancel_in_progress)),
-                runner
+                self.runs_on_yaml(self.control_plane_provider())
             );
         }
     }
@@ -8042,7 +7818,7 @@ impl WorkflowIr {
             output,
             "  nightly-alert:\n    name: {}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{needs_job}]\n    runs-on: {}\n    permissions:\n      contents: read\n      issues: write\n    steps:\n      - name: Open or update nightly failure signal\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          NIGHTLY_RESULT: ${{{{ needs.{needs_job}.result }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          if [[ \"$NIGHTLY_RESULT\" == success ]]; then\n            exit 0\n          fi\n          echo \"::error::{needs_job} failed: $NIGHTLY_RESULT\"\n          existing=\"$(gh api \"repos/$GITHUB_REPOSITORY/issues?state=open\" --jq '.[] | select(.title == \"Nightly CI red\") | .number' | sed -n '1p')\"\n          body=\"{needs_job} result: $NIGHTLY_RESULT\nRun: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"\n          if [[ -n \"$existing\" ]]; then\n            gh api --method PATCH \"repos/$GITHUB_REPOSITORY/issues/$existing\" -f body=\"$body\" >/dev/null\n          else\n            gh api --method POST \"repos/$GITHUB_REPOSITORY/issues\" -f title='Nightly CI red' -f body=\"$body\" >/dev/null\n          fi",
             crate::s2::control_job_name("Nightly red-to-signal"),
-            self.control_plane_runner()
+            self.runs_on_yaml(self.control_plane_provider())
         );
         let bad_body = format!(
             r#"          body="{needs_job} result: $NIGHTLY_RESULT
@@ -9687,23 +9463,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             return;
         }
         // Manual dispatch jobs bootstrap the pinned runtime themselves. The
-        // setup acquisition serves every job the Linux x86_64 plan artifact
-        // cannot: ARM and Apple jobs, jobs using another hosted selector, and
-        // Swift jobs, which set the runtime up wherever they land. Collapsed
-        // partitions are executor-homogeneous, so the selector represents
-        // the job.
-        let hosted_linux_selector =
-            self.selectors
-                .get(&ProviderId::GithubHosted)
-                .is_some_and(|selector| {
-                    selector.runs_on.len() == 1
-                        && crate::platform::uses_linux_x64_runtime_artifact_runner(
-                            &selector.runs_on[0],
-                        )
-                });
-        if !hosted_linux_selector
-            || unit.platform != crate::s2::provider::Platform::LinuxX64
-            || unit.kind == UnitKind::Swift
+        // setup acquisition serves every job the Linux-built plan artifact
+        // cannot: Apple jobs, whose executor never matches what the hosted
+        // plan publishes, and Swift jobs, which stay executor-uniform and
+        // set the runtime up wherever they land. A macOS Rust unit (a
+        // `BoltFFI` producer the join forced onto macOS) bootstraps
+        // through the setup action exactly like a Swift unit, while other
+        // Linux units keep the plan download. Collapsed partitions are
+        // executor-homogeneous, so the sampled member represents the job.
+        if unit.kind == UnitKind::Swift
+            || unit.platform == crate::s2::provider::Platform::MacosArm64
         {
             self.render_workflow_runtime_setup(output, provider);
         } else {
@@ -9717,17 +9486,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     /// visibility provider.
     pub(crate) fn control_plane_provider(&self) -> ProviderId {
         crate::s2::provider::control_plane_provider(&self.providers)
-    }
-
-    /// The runner for hosted control-plane jobs is fixed to the Docker-capable
-    /// policy image. Local control planes retain their configured selector.
-    fn control_plane_runner(&self) -> String {
-        let provider = self.control_plane_provider();
-        if provider == ProviderId::GithubHosted {
-            crate::yaml_scalar(crate::POLICY_VALIDATION_RUNNER)
-        } else {
-            self.runs_on_yaml(provider)
-        }
     }
 
     /// The `runs-on:` YAML value routing one provider to its selector. Pure
@@ -9795,16 +9553,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         );
         outputs.push("      planned_no_work: ${{ steps.plan.outputs.planned_no_work }}".to_owned());
         outputs.push("      no_work_reason: ${{ steps.plan.outputs.no_work_reason }}".to_owned());
-        let runner = if control_plane == ProviderId::GithubHosted {
-            crate::yaml_scalar(crate::POLICY_VALIDATION_RUNNER)
-        } else {
-            self.runs_on_yaml(control_plane)
-        };
         let _ = writeln!(
             output,
             "  plan:\n    name: {}\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_PROVIDERS: {automatic}\n          VELNOR_EVENT_TRUSTED: ${{{{ ({trusted}) && 'true' || 'false' }}}}\n          {expected_work_env}: {expected_work_file}\n        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          mkdir -p {expected_work_dir}\n          velnor-workflow plan --config .github/ci/project.toml\n",
             crate::s2::control_job_name("Planning"),
-            runner,
+            self.runs_on_yaml(self.control_plane_provider()),
             outputs.join("\n"),
             self.pins.checkout,
             base_sha = base_sha,
@@ -9828,23 +9581,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     pub(crate) fn render_policy(&self, output: &mut String) {
         let local = self.control_plane_provider().is_local();
         let gate = local.then(|| crate::s2::control_plane_trusted_gate(&self.default_branch));
-        let runner = if local {
-            self.runs_on_yaml(self.control_plane_provider())
-        } else {
-            crate::yaml_scalar(crate::POLICY_VALIDATION_RUNNER)
-        };
         output.push_str(&crate::s2::policy_job(&crate::s2::PolicyJobSpec {
             name: "Policy",
             revision: &self.workflow_revision,
-            runner: &runner,
+            runner: &self.runs_on_yaml(self.control_plane_provider()),
             repository: &self.repository,
             cache_backend: if local { "local" } else { "github" },
             trusted_gate: gate.as_deref(),
             default_branch: &self.default_branch,
             declared_ruleset_contexts: &self.declared_ruleset_contexts,
-            candidate_artifact_wiring: crate::candidate_artifact_wiring_enabled(
-                &self.workflow_revision,
-            ),
         }));
     }
 
@@ -10057,7 +9802,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                     tools.insert(ToolRequirement::Mise);
                 }
             }
-            UnitKind::Docs | UnitKind::GithubAction => {}
+            UnitKind::Docs => {}
         }
         // Declared tools and mise-run commands provision through mise whatever
         // the kind: the scan cannot see tools a test invokes at runtime, so
@@ -10464,7 +10209,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         }
         if hosted && tools.contains(&ToolRequirement::Homebrew) {
             output.push_str(
-                "      - name: Prepare Linuxbrew path\n        shell: bash\n        run: |\n          set -euo pipefail\n          if command -v brew >/dev/null 2>&1; then\n            exit 0\n          fi\n          linuxbrew_bin=/home/linuxbrew/.linuxbrew/bin\n          linuxbrew_sbin=/home/linuxbrew/.linuxbrew/sbin\n          if [[ ! -x \"$linuxbrew_bin/brew\" ]]; then\n            printf '%s\\n' 'Homebrew unavailable: install brew or expose it on PATH' >&2\n            exit 1\n          fi\n          [[ -n \"${GITHUB_PATH:-}\" ]] || { printf '%s\\n' 'GITHUB_PATH is unavailable' >&2; exit 1; }\n          printf '%s\\n%s\\n' \"$linuxbrew_bin\" \"$linuxbrew_sbin\" >> \"$GITHUB_PATH\"\n",
+                "      - name: Prepare Linuxbrew path\n        shell: bash\n        run: |\n          set -euo pipefail\n          if command -v brew >/dev/null 2>&1; then\n            exit 0\n          fi\n          linuxbrew_bin=/home/user/.linuxbrew/bin\n          linuxbrew_sbin=/home/user/.linuxbrew/sbin\n          if [[ ! -x \"$linuxbrew_bin/brew\" ]]; then\n            printf '%s\\n' 'Homebrew unavailable: install brew or expose it on PATH' >&2\n            exit 1\n          fi\n          [[ -n \"${GITHUB_PATH:-}\" ]] || { printf '%s\\n' 'GITHUB_PATH is unavailable' >&2; exit 1; }\n          printf '%s\\n%s\\n' \"$linuxbrew_bin\" \"$linuxbrew_sbin\" >> \"$GITHUB_PATH\"\n",
             );
         }
     }

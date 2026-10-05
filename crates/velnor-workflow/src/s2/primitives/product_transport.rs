@@ -19,7 +19,7 @@
 //! cross-run reuse stays disabled until the exact-product cache can bind the
 //! stronger identity.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
@@ -146,7 +146,7 @@ pub(crate) fn ready_records(edges: &[(String, String)]) -> Option<String> {
 
 /// One staged symlink: its target plus whether the target was a directory,
 /// so Windows recreation can pick the file or directory variant.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct LinkEntry {
     target: String,
     dir: bool,
@@ -352,109 +352,6 @@ fn manifest_rel(value: &str) -> Result<String, GeneratorError> {
     Ok(value.to_owned())
 }
 
-/// Validate declared output roots before they are used for copying or
-/// containment. Overlapping roots otherwise stage and install the same tree
-/// more than once, making clear/install order significant.
-fn validate_output_roots(outputs: &[String], command: &str) -> Result<(), GeneratorError> {
-    let mut roots = BTreeSet::new();
-    for output in outputs {
-        manifest_rel(output)?;
-        if !roots.insert(output.as_str()) {
-            return Err(GeneratorError::usage(format!(
-                "{command} declares duplicate output root: {output}"
-            )));
-        }
-        if roots.iter().any(|root| {
-            *root != output
-                && (output.starts_with(&format!("{root}/"))
-                    || root.starts_with(&format!("{output}/")))
-        }) {
-            return Err(GeneratorError::usage(format!(
-                "{command} declares overlapping output roots: {output}"
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// Reject existing symlink/non-directory ancestors while permitting a
-/// declared output itself to be a symlink.
-fn validate_source_ancestors(root: &Path, relative: &str) -> Result<(), GeneratorError> {
-    let mut current = root.to_path_buf();
-    let mut components = relative.split('/').peekable();
-    while let Some(component) = components.next() {
-        if components.peek().is_none() {
-            break;
-        }
-        current.push(component);
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(GeneratorError::usage(format!(
-                    "product output parent is a symlink: {}",
-                    current.display()
-                )));
-            }
-            Ok(metadata) if metadata.is_dir() => {}
-            Ok(_) => {
-                return Err(GeneratorError::usage(format!(
-                    "product output parent is not a directory: {}",
-                    current.display()
-                )));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-            Err(error) => {
-                return Err(GeneratorError::io(
-                    "inspect product output parent",
-                    &current,
-                    &error,
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Create only real parent directories below the trusted workspace root.
-/// `create_dir_all` follows an existing symlink and could redirect installs.
-fn create_parent_directories(root: &Path, relative: &str) -> Result<(), GeneratorError> {
-    let mut current = root.to_path_buf();
-    let mut components = relative.split('/').peekable();
-    while let Some(component) = components.next() {
-        if components.peek().is_none() {
-            break;
-        }
-        current.push(component);
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(GeneratorError::usage(format!(
-                    "product install parent is a symlink: {}",
-                    current.display()
-                )));
-            }
-            Ok(metadata) if metadata.is_dir() => {}
-            Ok(_) => {
-                return Err(GeneratorError::usage(format!(
-                    "product install parent is not a directory: {}",
-                    current.display()
-                )));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir(&current).map_err(|error| {
-                    GeneratorError::io("create product install parent", &current, &error)
-                })?;
-            }
-            Err(error) => {
-                return Err(GeneratorError::io(
-                    "inspect product install parent",
-                    &current,
-                    &error,
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Walk the staged outputs without following symlinks, recording regular
 /// files with digests, links with targets, and directories for recreation.
 /// Parent directories above the declared roots are skipped: the installer
@@ -500,6 +397,7 @@ fn collect_staged(
         if file_type.is_symlink() {
             let target = fs::read_link(&path)
                 .map_err(|error| GeneratorError::io("digest staged product", &path, &error))?;
+            let dir = path.is_dir();
             let target = target.to_str().ok_or_else(|| {
                 GeneratorError::usage(format!(
                     "staged product link target is not UTF-8: {}",
@@ -510,10 +408,7 @@ fn collect_staged(
                 rel,
                 LinkEntry {
                     target: target.to_owned(),
-                    // Resolve the kind from the staged manifest below. Calling
-                    // `path.is_dir()` here follows the link and may inspect a
-                    // path outside the product tree.
-                    dir: false,
+                    dir,
                 },
             );
         } else if file_type.is_dir() {
@@ -536,7 +431,9 @@ pub(crate) fn stage_product(root: &Path, request: &StageRequest) -> Result<usize
             "stage-product needs at least one output; refusing to stage an empty product",
         ));
     }
-    validate_output_roots(&request.outputs, "stage-product")?;
+    for output in &request.outputs {
+        manifest_rel(output)?;
+    }
     if request.producer.is_empty() || request.product.is_empty() {
         return Err(GeneratorError::usage(
             "stage-product needs a non-empty --producer and --product",
@@ -564,7 +461,6 @@ pub(crate) fn stage_product(root: &Path, request: &StageRequest) -> Result<usize
     fs::create_dir_all(&dest)
         .map_err(|error| GeneratorError::io("create product stage", &dest, &error))?;
     for output in &request.outputs {
-        validate_source_ancestors(root, output)?;
         let source = root.join(output);
         if fs::symlink_metadata(&source).is_err() {
             return Err(GeneratorError::usage(format!(
@@ -572,7 +468,10 @@ pub(crate) fn stage_product(root: &Path, request: &StageRequest) -> Result<usize
             )));
         }
         let target = dest.join(output);
-        create_parent_directories(&dest, output)?;
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| GeneratorError::io("stage product output", &target, &error))?;
+        }
         copy_tree(&source, &target)?;
     }
     let mut files = BTreeMap::new();
@@ -587,7 +486,7 @@ pub(crate) fn stage_product(root: &Path, request: &StageRequest) -> Result<usize
         &mut dirs,
     )?;
     dirs.sort();
-    let mut manifest = ProductManifest {
+    let manifest = ProductManifest {
         schema: MANIFEST_SCHEMA.to_owned(),
         producer: request.producer.clone(),
         product: request.product.clone(),
@@ -598,7 +497,6 @@ pub(crate) fn stage_product(root: &Path, request: &StageRequest) -> Result<usize
         links,
         dirs,
     };
-    validate_link_targets(&mut manifest, &request.outputs, false)?;
     let count = manifest.files.len();
     let rendered = serde_json::to_string_pretty(&manifest)
         .map_err(|error| GeneratorError::usage(format!("render product manifest: {error}")))?;
@@ -634,112 +532,16 @@ fn under_outputs(rel: &str, outputs: &[String]) -> bool {
         .any(|root| rel == root || rel.starts_with(&format!("{root}/")))
 }
 
-/// Resolve a link target lexically from its link parent. Targets must stay
-/// inside a declared output root on every host, including Windows-style
-/// absolute/drive paths.
-fn resolve_link_target(link: &str, target: &str) -> Result<String, GeneratorError> {
-    if target.is_empty() || target.chars().any(char::is_control) {
-        return Err(GeneratorError::usage(format!(
-            "product link target is empty or contains control characters: {link}"
-        )));
+fn link_target_safe(target: &str) -> bool {
+    if target.is_empty() {
+        return false;
     }
-    let target = target.replace('\\', "/");
-    let first = target.split('/').next().unwrap_or_default();
-    let drive_qualified = first.len() >= 2
-        && first.as_bytes()[1] == b':'
-        && first.as_bytes()[0].is_ascii_alphabetic();
-    if target.starts_with('/') || drive_qualified {
-        return Err(GeneratorError::usage(format!(
-            "product link target is absolute or root-relative: {link} -> {target}"
-        )));
+    let path = Path::new(target);
+    if path.is_absolute() {
+        return false;
     }
-    let mut components = link.rsplit_once('/').map_or_else(Vec::new, |(parent, _)| {
-        parent.split('/').map(str::to_owned).collect()
-    });
-    for segment in target.split('/') {
-        if segment.is_empty() {
-            return Err(GeneratorError::usage(format!(
-                "product link target contains an empty path segment: {link} -> {target}"
-            )));
-        }
-        match segment {
-            "." => {}
-            ".." => {
-                if components.pop().is_none() {
-                    return Err(GeneratorError::usage(format!(
-                        "product link target escapes the product tree: {link} -> {target}"
-                    )));
-                }
-            }
-            segment => components.push(segment.to_owned()),
-        }
-    }
-    if components.is_empty() {
-        return Err(GeneratorError::usage(format!(
-            "product link target resolves outside declared outputs: {link} -> {target}"
-        )));
-    }
-    Ok(components.join("/"))
+    !target.split('/').any(|segment| segment == "..")
 }
-
-/// Require every symlink target (including chained links) to stay inside a
-/// declared output root. Dangling in-root links remain valid and preserve the
-/// existing product contract. Also derive the target kind without following
-/// filesystem symlinks.
-fn validate_link_targets(
-    manifest: &mut ProductManifest,
-    outputs: &[String],
-    check_kinds: bool,
-) -> Result<(), GeneratorError> {
-    let files = manifest.files.keys().cloned().collect::<BTreeSet<_>>();
-    let dirs = manifest.dirs.iter().cloned().collect::<BTreeSet<_>>();
-    let links = manifest.links.clone();
-    for (path, entry) in &mut manifest.links {
-        let expected_dir;
-        let mut target = resolve_link_target(path, &entry.target)?;
-        if !under_outputs(&target, outputs) {
-            return Err(GeneratorError::usage(format!(
-                "product link target escapes the declared output roots: {path}"
-            )));
-        }
-        let mut seen = BTreeSet::from([path.clone()]);
-        loop {
-            if files.contains(&target) {
-                expected_dir = false;
-                break;
-            }
-            if dirs.contains(&target) {
-                expected_dir = true;
-                break;
-            }
-            let Some(next) = links.get(&target) else {
-                // A dangling target inside a declared root is safe and was
-                // already supported by the transport.
-                expected_dir = false;
-                break;
-            };
-            if !seen.insert(target.clone()) {
-                return Err(GeneratorError::usage(format!(
-                    "product link cycle detected at {target}"
-                )));
-            }
-            target = resolve_link_target(&target, &next.target)?;
-            if !under_outputs(&target, outputs) {
-                return Err(GeneratorError::usage(format!(
-                    "product link target escapes the declared output roots: {path}"
-                )));
-            }
-        }
-        if check_kinds && entry.dir != expected_dir {
-            return Err(GeneratorError::usage(format!(
-                "product link target type mismatch: {path}"
-            )));
-        }
-        entry.dir = expected_dir;
-    }
-    Ok(())
-}
-
 /// Verify one downloaded artifact and install it: check the manifest
 /// identity, digest every staged file, require the structural files, and
 /// install only under the declared output roots. Returns the installed
@@ -755,15 +557,16 @@ pub(crate) fn verify_product(
             request.marker
         )));
     }
-    validate_output_roots(&request.outputs, "verify-product")?;
+    for output in &request.outputs {
+        manifest_rel(output)?;
+    }
     let stage = root.join(&request.stage);
-    let mut manifest = load_manifest(&stage)?;
+    let manifest = load_manifest(&stage)?;
     check_manifest_identity(&manifest, request)?;
     check_manifest_paths(&manifest, request)?;
-    validate_link_targets(&mut manifest, &request.outputs, true)?;
     let dest = stage.join(STAGED_OUTPUTS_DIR);
     verify_staged_contents(&manifest, &dest, request)?;
-    install_verified_product(&manifest, &request.outputs, root, &dest)?;
+    install_verified_product(&manifest, root, &dest)?;
     export_marker(request)?;
     Ok(manifest.files.len())
 }
@@ -881,76 +684,6 @@ fn check_manifest_paths(
     Ok(())
 }
 
-/// Walk the staged tree without following symlinks. This rejects an
-/// unmanifested symlink ancestor before digest or install operations can use it.
-fn walk_staged(
-    dir: &Path,
-    prefix: &str,
-    manifest: &ProductManifest,
-    outputs: &[String],
-    seen: &mut BTreeSet<String>,
-) -> Result<(), GeneratorError> {
-    let mut entries: Vec<fs::DirEntry> = fs::read_dir(dir)
-        .map_err(|error| GeneratorError::io("walk staged product", dir, &error))?
-        .collect::<Result<_, _>>()
-        .map_err(|error| GeneratorError::io("walk staged product", dir, &error))?;
-    entries.sort_by_key(fs::DirEntry::file_name);
-    for entry in entries {
-        let path = entry.path();
-        let name = entry.file_name().into_string().map_err(|name| {
-            GeneratorError::usage(format!(
-                "product artifact path is not UTF-8: {}",
-                PathBuf::from(name).display()
-            ))
-        })?;
-        let rel = if prefix.is_empty() {
-            name
-        } else {
-            format!("{prefix}/{name}")
-        };
-        manifest_rel(&rel)?;
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|error| GeneratorError::io("inspect staged product", &path, &error))?;
-        if metadata.file_type().is_symlink() {
-            if !manifest.links.contains_key(&rel) {
-                return Err(GeneratorError::usage(format!(
-                    "product artifact contains unmanifested symlink: {rel}"
-                )));
-            }
-            seen.insert(rel);
-        } else if metadata.is_dir() {
-            let declared = manifest.dirs.iter().any(|item| item == &rel);
-            let implicit_root_parent = outputs.iter().any(|output| {
-                output.len() > rel.len()
-                    && output.starts_with(&rel)
-                    && output.as_bytes().get(rel.len()) == Some(&b'/')
-            });
-            if !declared && !implicit_root_parent {
-                return Err(GeneratorError::usage(format!(
-                    "product artifact contains an unmanifested directory: {rel}"
-                )));
-            }
-            if manifest.files.contains_key(&rel) || manifest.links.contains_key(&rel) {
-                return Err(GeneratorError::usage(format!(
-                    "product artifact entry is a directory but manifest declares a file or link: {rel}"
-                )));
-            }
-            if declared {
-                seen.insert(rel.clone());
-            }
-            walk_staged(&path, &rel, manifest, outputs, seen)?;
-        } else {
-            if !manifest.files.contains_key(&rel) {
-                return Err(GeneratorError::usage(format!(
-                    "product artifact contains an unmanifested file: {rel}"
-                )));
-            }
-            seen.insert(rel);
-        }
-    }
-    Ok(())
-}
-
 /// Digest every staged file against the manifest, confirm every staged
 /// link, and require every declared structural file.
 fn verify_staged_contents(
@@ -958,35 +691,6 @@ fn verify_staged_contents(
     dest: &Path,
     request: &VerifyRequest,
 ) -> Result<(), GeneratorError> {
-    let outputs_dir = fs::symlink_metadata(dest).map_err(|_| {
-        GeneratorError::usage("product outputs directory missing from artifact".to_owned())
-    })?;
-    if outputs_dir.file_type().is_symlink() || !outputs_dir.is_dir() {
-        return Err(GeneratorError::usage(
-            "product outputs artifact entry is not a directory".to_owned(),
-        ));
-    }
-    let mut seen = BTreeSet::new();
-    walk_staged(dest, "", manifest, &request.outputs, &mut seen)?;
-    for output in &request.outputs {
-        if !seen.contains(output) {
-            return Err(GeneratorError::usage(format!(
-                "product output root missing from artifact: {output}"
-            )));
-        }
-    }
-    for rel in manifest
-        .files
-        .keys()
-        .chain(manifest.links.keys())
-        .chain(manifest.dirs.iter())
-    {
-        if !seen.contains(rel) {
-            return Err(GeneratorError::usage(format!(
-                "product manifest entry missing from artifact: {rel}"
-            )));
-        }
-    }
     for (rel, digest) in &manifest.files {
         let path = dest.join(rel);
         let metadata = fs::symlink_metadata(&path).map_err(|_| {
@@ -1013,6 +717,11 @@ fn verify_staged_contents(
                 "product link mismatch in artifact: {rel}"
             )));
         }
+        if !link_target_safe(&link.target) {
+            return Err(GeneratorError::usage(format!(
+                "product link target escapes the product tree: {rel}"
+            )));
+        }
     }
     for want in &request.output_files {
         manifest_rel(want)?;
@@ -1029,33 +738,33 @@ fn verify_staged_contents(
 /// then regular files. Every target was containment-checked already.
 fn install_verified_product(
     manifest: &ProductManifest,
-    outputs: &[String],
     root: &Path,
     dest: &Path,
 ) -> Result<(), GeneratorError> {
-    // Clear each declared root after checking its parents. This also removes
-    // stale contents and prevents a pre-existing root symlink redirecting
-    // newly installed children.
-    for output in outputs {
-        create_parent_directories(root, output)?;
-        clear_target(&root.join(output))?;
-    }
     let mut dirs = manifest.dirs.clone();
     dirs.sort();
     for rel in &dirs {
         let target = root.join(rel);
-        create_parent_directories(root, rel)?;
-        fs::create_dir(&target)
+        clear_target(&target)?;
+        fs::create_dir_all(&target)
             .map_err(|error| GeneratorError::io("install product directory", &target, &error))?;
     }
     for (rel, link) in &manifest.links {
         let target = root.join(rel);
-        create_parent_directories(root, rel)?;
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| GeneratorError::io("install product link", &target, &error))?;
+        }
+        clear_target(&target)?;
         create_link(Path::new(&link.target), &target, link.dir)?;
     }
     for rel in manifest.files.keys() {
         let target = root.join(rel);
-        create_parent_directories(root, rel)?;
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| GeneratorError::io("install product file", &target, &error))?;
+        }
+        clear_target(&target)?;
         copy_file(&dest.join(rel), &target)?;
     }
     Ok(())
@@ -1824,40 +1533,6 @@ mod tests {
             },
         );
         assert!(format!("{}", escape.expect_err("escape")).contains("normal form"));
-
-        let overlapping = stage_product(
-            &root,
-            &StageRequest {
-                outputs: vec!["out".to_owned(), "out/Foo.xcframework".to_owned()],
-                ..stage_request(&root.join("overlap-stage"))
-            },
-        );
-        assert!(format!("{}", overlapping.expect_err("overlapping roots"))
-            .contains("overlapping output roots"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn stage_rejects_symlinked_source_ancestor() {
-        let root = scratch("source-parent-link");
-        let outside = scratch("source-parent-link-outside");
-        std::fs::create_dir_all(outside.join("Foo.xcframework")).expect("create outside product");
-        std::fs::write(outside.join("Foo.xcframework/libfoo.a"), "outside")
-            .expect("write outside product");
-        std::os::unix::fs::symlink(&outside, root.join("out")).expect("link output parent");
-
-        let result = stage_product(
-            &root,
-            &StageRequest {
-                outputs: vec!["out/Foo.xcframework".to_owned()],
-                ..stage_request(&root.join("stage"))
-            },
-        );
-        let message = format!("{}", result.expect_err("source parent link must fail"));
-        assert!(
-            message.contains("product output parent is a symlink"),
-            "{message}"
-        );
     }
 
     fn staged(root: &std::path::Path) -> std::path::PathBuf {
@@ -1949,75 +1624,6 @@ mod tests {
             !consumer.join("out").exists(),
             "nothing installs on failure"
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn verify_rejects_symlinked_install_parent_without_writing_outside() {
-        let producer = scratch("install-parent-producer");
-        let stage = staged(&producer);
-        let consumer = scratch("install-parent-consumer");
-        let outside = scratch("install-parent-outside");
-        let sentinel = outside.join("sentinel");
-        std::fs::write(&sentinel, "keep").expect("outside sentinel");
-        std::os::unix::fs::symlink(&outside, consumer.join("out")).expect("link install parent");
-        let env_file = consumer.join("github-env");
-
-        let result = verify_product(&consumer, &verify_request(&stage, &env_file));
-        let message = format!("{}", result.expect_err("install parent link must fail"));
-        assert!(
-            message.contains("product install parent is a symlink"),
-            "{message}"
-        );
-        assert_eq!(std::fs::read(&sentinel).expect("sentinel remains"), b"keep");
-        assert!(!env_file.exists(), "failed install must not export marker");
-    }
-
-    #[test]
-    fn verify_rejects_symlink_target_outside_declared_roots() {
-        let stage = staged(&scratch("unsafe-link-producer"));
-        let manifest_path = stage.join(super::MANIFEST_FILE);
-        let mut manifest: super::ProductManifest =
-            serde_json::from_slice(&std::fs::read(&manifest_path).expect("manifest bytes"))
-                .expect("parse manifest");
-        manifest
-            .links
-            .get_mut("out/Foo.xcframework/Current")
-            .expect("fixture symlink")
-            .target = "../../outside".to_owned();
-        std::fs::write(
-            &manifest_path,
-            serde_json::to_vec(&manifest).expect("serialize manifest"),
-        )
-        .expect("write modified manifest");
-
-        let consumer = scratch("unsafe-link-consumer");
-        let env_file = consumer.join("github-env");
-        let result = verify_product(&consumer, &verify_request(&stage, &env_file));
-        let message = format!("{}", result.expect_err("escaping link must fail"));
-        assert!(
-            message.contains("escapes the declared output roots"),
-            "{message}"
-        );
-        assert!(
-            !consumer.join("out").exists(),
-            "nothing installs on failure"
-        );
-    }
-
-    #[test]
-    fn verify_rejects_overlapping_output_roots() {
-        let stage = staged(&scratch("overlap-producer"));
-        let consumer = scratch("overlap-consumer");
-        let result = verify_product(
-            &consumer,
-            &VerifyRequest {
-                outputs: vec!["out".to_owned(), "out/Foo.xcframework".to_owned()],
-                ..verify_request(&stage, &consumer.join("github-env"))
-            },
-        );
-        assert!(format!("{}", result.expect_err("overlapping roots"))
-            .contains("overlapping output roots"));
     }
 
     #[test]

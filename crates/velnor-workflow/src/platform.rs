@@ -250,16 +250,6 @@ pub(crate) fn github_runner_for_unit<'a>(
     }
 }
 
-/// Whether a configured GitHub-hosted runner is the hosted Velnor runtime
-/// artifact producer's Linux `x86_64` executor.
-///
-/// The artifact is built on [`crate::POLICY_VALIDATION_RUNNER`] (Linux `x86_64`).
-/// Other Ubuntu labels, including `ubuntu-24.04-arm`, do not prove that the
-/// consumer matches the producer, so those jobs bootstrap the runtime.
-pub(crate) fn uses_linux_x64_runtime_artifact_runner(runner: &str) -> bool {
-    runner == crate::POLICY_VALIDATION_RUNNER
-}
-
 /// A named build product one unit produces for others: an `XCFramework`
 /// bundle, a generated header set, a packed archive. `task` is the repository
 /// task that rebuilds it (run through the task runner, never a shell string),
@@ -580,7 +570,7 @@ fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), Generator
             }
         }
         if let Some(commands) = prepared.remove(&unit.id) {
-            prepend_prepare_commands(unit, &commands)?;
+            prepend_prepare_commands(unit, &commands);
         }
     }
     Ok(())
@@ -611,11 +601,32 @@ fn materialize_product_input_watches(config: &mut ProjectConfig) {
 /// Prepend prepare commands ahead of every command vector the unit runs, so
 /// the product rebuilds before the unit's own checks on every lane and in
 /// local runs, which read the same serialized vectors.
-fn prepend_prepare_commands(unit: &mut Unit, commands: &[String]) -> Result<(), GeneratorError> {
-    unit.prepend_precondition_commands(commands)?;
+fn prepend_prepare_commands(unit: &mut Unit, commands: &[String]) {
+    let mut pr_commands = commands.to_vec();
+    pr_commands.extend(unit.pr_commands.iter().cloned());
+    unit.pr_commands = pr_commands;
+    let mut full_commands = commands.to_vec();
+    full_commands.extend(unit.full_commands.iter().cloned());
+    unit.full_commands = full_commands;
+    for commands_for_lane in [
+        &mut unit.github_pr_commands,
+        &mut unit.github_full_commands,
+        &mut unit.velnor_pr_commands,
+        &mut unit.velnor_full_commands,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let mut prefixed = commands.to_vec();
+        prefixed.extend(commands_for_lane.iter().cloned());
+        *commands_for_lane = prefixed;
+    }
+    // Prepare commands carry no phase tags and shift every position: the unit
+    // keeps the product rebuild ahead of its checks and verifies through the
+    // single legacy step.
+    unit.clear_phases();
     unit.watch.sort();
     unit.watch.dedup();
-    Ok(())
 }
 
 /// Describe a requirement for a placement diagnostic: the OS, the
@@ -705,14 +716,11 @@ pub(crate) fn agreed_env(
 mod tests {
     use super::{
         agreed_env, describe_requirement, executors_for, is_ffi_crate_type, lane_supports_platform,
-        prepare_command, resolve, uses_linux_x64_runtime_artifact_runner, valid_env_name,
-        valid_env_value, valid_product_input, valid_product_name, valid_task_name, Arch, Executor,
-        NamedProduct, Os, PlatformRequirement, Prerequisite, CAP_XCFRAMEWORK, CAP_XCODE,
+        prepare_command, resolve, valid_env_name, valid_env_value, valid_product_input,
+        valid_product_name, valid_task_name, Arch, Executor, NamedProduct, Os, PlatformRequirement,
+        Prerequisite, CAP_XCFRAMEWORK, CAP_XCODE,
     };
-    use crate::{
-        AnalysisSummary, MaintenanceSpec, RunnerMode, Unit, UnitKind, ValidationPhase,
-        VelnorRustNeeds,
-    };
+    use crate::{AnalysisSummary, MaintenanceSpec, RunnerMode, Unit, UnitKind, VelnorRustNeeds};
     use std::collections::{BTreeMap, BTreeSet};
 
     #[expect(
@@ -827,7 +835,6 @@ mod tests {
             adopted_workflow_surface: true,
             actionlint_config_variables_null: false,
             ci_required: true,
-            empty_selection_proof: false,
             ruleset_required_status_checks: Vec::new(),
             ruleset_external_status_checks: Vec::new(),
             package_update_channels: None,
@@ -948,15 +955,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_artifact_producer_requires_linux_x64_runner_label() {
-        assert!(uses_linux_x64_runtime_artifact_runner("ubuntu-24.04"));
-        assert!(!uses_linux_x64_runtime_artifact_runner("ubuntu-24.04-arm"));
-        assert!(!uses_linux_x64_runtime_artifact_runner("ubuntu-latest"));
-        assert!(!uses_linux_x64_runtime_artifact_runner("macos-26"));
-        assert!(!uses_linux_x64_runtime_artifact_runner("windows-2025"));
-    }
-
-    #[test]
     fn names_reject_shell_metacharacters() {
         assert!(valid_product_name("xcframework"));
         assert!(valid_product_name("sys-headers_v2"));
@@ -996,53 +994,6 @@ mod tests {
         assert_eq!(
             prepare_command("build-xcframework", &std::collections::BTreeMap::new()),
             "mise run build-xcframework"
-        );
-    }
-
-    #[test]
-    fn phased_rust_prepare_retains_validation_phases() {
-        let mut consumer = unit("rust-app", UnitKind::Rust);
-        consumer.pr_commands = vec![
-            "cargo fmt --check".to_owned(),
-            "cargo clippy --all-targets".to_owned(),
-            "cargo test --all-targets".to_owned(),
-        ];
-        consumer.full_commands = consumer.pr_commands.clone();
-        consumer.phases = vec![
-            ValidationPhase::Fmt,
-            ValidationPhase::Clippy,
-            ValidationPhase::Test,
-        ];
-        consumer.check_commands = vec!["cargo check --all-targets".to_owned()];
-        let prepare = "mise run build-xcframework".to_owned();
-
-        must_ok(
-            super::prepend_prepare_commands(&mut consumer, std::slice::from_ref(&prepare)),
-            "Rust prepare insertion",
-        );
-
-        assert_eq!(
-            consumer.pr_commands,
-            vec![
-                prepare.clone(),
-                "cargo fmt --check".to_owned(),
-                "cargo clippy --all-targets".to_owned(),
-                "cargo test --all-targets".to_owned(),
-            ]
-        );
-        assert_eq!(consumer.full_commands, consumer.pr_commands);
-        assert_eq!(
-            consumer.phases,
-            vec![
-                ValidationPhase::Precondition,
-                ValidationPhase::Fmt,
-                ValidationPhase::Clippy,
-                ValidationPhase::Test,
-            ]
-        );
-        assert_eq!(
-            consumer.check_commands,
-            vec!["cargo check --all-targets".to_owned()]
         );
     }
 

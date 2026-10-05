@@ -8468,45 +8468,6 @@ mod tests {
     }
 
     #[cfg(feature = "test-support")]
-    fn mock_request_content_length(headers: &[u8]) -> Option<usize> {
-        String::from_utf8_lossy(headers).lines().find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.trim()
-                .eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().ok())?
-        })
-    }
-
-    #[cfg(feature = "test-support")]
-    #[test]
-    fn mock_request_content_length_header_name_is_case_insensitive() {
-        assert_eq!(
-            mock_request_content_length(b"POST /upload HTTP/1.1\r\ncontent-length: 17\r\n\r\n"),
-            Some(17)
-        );
-    }
-
-    #[cfg(feature = "test-support")]
-    #[test]
-    fn mock_request_waits_for_the_full_content_length() {
-        let headers = b"POST /upload HTTP/1.1\r\nContent-Length: 4\r\n\r\n";
-        let mut request = headers.to_vec();
-        assert_eq!(mock_request_is_complete(&request), Some(false));
-        request.extend_from_slice(b"body");
-        assert_eq!(mock_request_is_complete(&request), Some(true));
-    }
-
-    #[cfg(feature = "test-support")]
-    fn mock_request_is_complete(request: &[u8]) -> Option<bool> {
-        let headers_end = request
-            .windows(4)
-            .position(|window| window == b"\r\n\r\n")?
-            + 4;
-        let content_length = mock_request_content_length(&request[..headers_end])?;
-        Some(request.len() >= headers_end.checked_add(content_length)?)
-    }
-
-    #[cfg(feature = "test-support")]
     #[test]
     fn artifact_upload_sends_finalize_hash_and_rejects_unsuccessful_finalize() {
         use std::io::{Read, Write};
@@ -8524,13 +8485,26 @@ mod tests {
                 let mut buffer = [0_u8; 4096];
                 loop {
                     let count = stream.read(&mut buffer).unwrap();
-                    if count > 0 {
-                        request.extend_from_slice(&buffer[..count]);
-                    }
-                    if mock_request_is_complete(&request) == Some(true) {
+                    if count == 0 {
                         break;
                     }
-                    assert!(count > 0, "request ended before the declared body arrived");
+                    request.extend_from_slice(&buffer[..count]);
+                    let Some(headers_end) =
+                        request.windows(4).position(|window| window == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers_end = headers_end + 4;
+                    let content_length = String::from_utf8_lossy(&request[..headers_end])
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("Content-Length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= headers_end + content_length {
+                        break;
+                    }
                 }
                 requests.push(request);
                 let (status, body) = match index {

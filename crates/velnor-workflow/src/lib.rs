@@ -1,4 +1,3 @@
-#![allow(rustdoc::all)]
 //! Safe, local generation and execution of a small GitHub Actions CI surface.
 //!
 //! The scanner reads repository metadata only. It never evaluates a build file,
@@ -12,1309 +11,16 @@ use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, IsTerminal, Read as _, Write as _};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
-use unicode_normalization::UnicodeNormalization;
 
 mod apt;
-pub(crate) mod candidate_sandbox;
 mod closure;
-mod closure_inputs {
-    //! Manifest-derived inputs for the workflow runtime source closure.
-    //!
-    //! Local Cargo path dependencies belong to the workflow product only when
-    //! declared by its manifest. Keeping this rule shared preserves the legacy
-    //! pathset for revisions without local dependencies.
-
-    use std::path::{Component, Path};
-
-    pub(crate) const BASE_CLOSURE_PATHS: &[&str] = &[
-        "crates/velnor-workflow",
-        "Cargo.toml",
-        "Cargo.lock",
-        "rust-toolchain.toml",
-        "rust-toolchain",
-        ".cargo",
-    ];
-
-    #[cfg(test)]
-    pub(crate) const VELNOR_MODEL_PATH: &str = "crates/velnor-model";
-
-    const PYTHON_RESOLVER: &str = r#""""TOML dependency probe embedded in the generated setup action."""
-
-import pathlib
-import sys
-import tomllib
-
-
-def fail(message: str) -> None:
-    raise SystemExit(f"closure dependency parse failed: {message}")
-
-
-def table(value, label):
-    if not isinstance(value, dict):
-        fail(f"{label} must be a table")
-    return value
-
-
-def dependency_sections(manifest):
-    root = table(manifest, "Cargo.toml root")
-    sections = []
-    for name in ("dependencies", "build-dependencies"):
-        if name in root:
-            sections.append((name, table(root[name], name)))
-    if "target" in root:
-        for target, target_value in table(root["target"], "target").items():
-            target_table = table(target_value, f"target.{target}")
-            for name in ("dependencies", "build-dependencies"):
-                if name in target_table:
-                    sections.append((f"target.{target}.{name}", table(target_table[name], name)))
-    return sections
-
-
-def resolved_path(base, path):
-    candidate = pathlib.PurePosixPath(path)
-    if candidate.is_absolute():
-        fail("dependency path must be relative")
-    parts = list(pathlib.PurePosixPath(base).parts)
-    for part in candidate.parts:
-        if part in ("", "."):
-            continue
-        if part == "..":
-            if not parts:
-                fail("dependency path escapes repository root")
-            parts.pop()
-        else:
-            parts.append(part)
-    return "/".join(parts)
-
-
-def local_dependency_paths(workflow, workspace, manifest_base="crates/velnor-workflow"):
-    workspace_root = table(workspace, "workspace Cargo.toml root")
-    workspace_section = workspace_root.get("workspace", {})
-    if not isinstance(workspace_section, dict):
-        fail("workspace must be a table")
-    workspace_dependencies = workspace_section.get("dependencies", {})
-    if not isinstance(workspace_dependencies, dict):
-        fail("workspace.dependencies must be a table")
-
-    base_paths = ("crates/velnor-workflow", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain", ".cargo")
-    paths = set()
-    for section, dependencies in dependency_sections(workflow):
-        for alias, declaration in dependencies.items():
-            inherited = False
-            effective = declaration
-            if isinstance(effective, dict) and 'workspace' in effective and not isinstance(effective['workspace'], bool):
-                fail(f"{section}.{alias}.workspace must be a boolean")
-            if isinstance(effective, dict) and effective.get("workspace") is True:
-                if "path" in effective:
-                    fail(f"{section}.{alias} sets both workspace and path")
-                if alias not in workspace_dependencies:
-                    fail(f"{section}.{alias} inherits a missing workspace dependency")
-                effective = workspace_dependencies[alias]
-                inherited = True
-            if isinstance(effective, str):
-                package = alias
-                path = None
-            elif isinstance(effective, dict):
-                package = effective.get("package", alias)
-                path = effective.get("path")
-                if not isinstance(package, str):
-                    fail(f"{section}.{alias}.package must be a string")
-                if path is not None and not isinstance(path, str):
-                    fail(f"{section}.{alias}.path must be a string")
-            else:
-                fail(f"{section}.{alias} must be a dependency string or table")
-            if path is None:
-                continue
-            base = "" if inherited else manifest_base
-            resolved = resolved_path(base, path)
-            if not resolved:
-                fail(f"{section}.{alias} resolves to repository root")
-            if any(resolved == base or resolved.startswith(base + "/") for base in base_paths):
-                continue
-            if any(base.startswith(resolved + "/") for base in base_paths):
-                fail(f"{section}.{alias} dependency path overlaps the base closure")
-            if any(base.startswith(resolved + "/") for base in base_paths):
-                fail(f"{section}.{alias} dependency path overlaps the base closure")
-            paths.add(resolved)
-    roots = []
-    for path in sorted(paths):
-        if any(path == root or path.startswith(root + "/") for root in roots):
-            continue
-        if any(path == root or path.startswith(root + "/") for root in base_paths):
-            continue
-        roots.append(path)
-    return roots
-
-
-def manifest_has_local_dependency(workflow, workspace, manifest_base):
-    return bool(local_dependency_paths(workflow, workspace, manifest_base))
-
-
-try:
-    with open(sys.argv[1], "rb") as workflow_file:
-        workflow = tomllib.load(workflow_file)
-    with open(sys.argv[2], "rb") as workspace_file:
-        workspace = tomllib.load(workspace_file)
-    import json
-    print(json.dumps(local_dependency_paths(workflow, workspace)))
-except (OSError, tomllib.TOMLDecodeError) as error:
-    fail(str(error))
-"#;
-
-    const PYTHON_TRANSITIVE_PATH_GUARD: &str = r"import sys, tomllib
-with open(sys.argv[1], 'rb') as source: manifest = tomllib.load(source)
-with open(sys.argv[2], 'rb') as source: workspace = tomllib.load(source)
-dependency_root, manifest_path = sys.argv[3], sys.argv[4]
-workspace_table = workspace.get('workspace', {})
-if not isinstance(workspace_table, dict): raise SystemExit('workspace must be a table')
-workspace_dependencies = workspace_table.get('dependencies', {})
-if not isinstance(workspace_dependencies, dict): raise SystemExit('workspace.dependencies must be a table')
-members = workspace_table.get('members', [])
-if not isinstance(members, list) or not all(isinstance(member, str) for member in members): raise SystemExit('workspace.members must be a string array')
-sections = []
-for name in ('dependencies', 'build-dependencies', 'dev-dependencies'):
-    if name in manifest: sections.append(manifest[name])
-target = manifest.get('target', {})
-if not isinstance(target, dict): raise SystemExit('target must be a table')
-for target_table in target.values():
-    if not isinstance(target_table, dict): raise SystemExit('target entry must be a table')
-    for name in ('dependencies', 'build-dependencies', 'dev-dependencies'):
-        if name in target_table: sections.append(target_table[name])
-for dependencies in sections:
-    if not isinstance(dependencies, dict): raise SystemExit('dependency section must be a table')
-    for alias, declaration in dependencies.items():
-        if isinstance(declaration, dict) and declaration.get('workspace') is True:
-            if 'path' in declaration:
-                raise SystemExit(f'conflicting workspace/path dependency: {alias}')
-            if manifest_path != dependency_root + '/Cargo.toml' or dependency_root not in members:
-                raise SystemExit(f'unproven nested workspace inheritance in {manifest_path}')
-            declaration = workspace_dependencies.get(alias)
-        elif isinstance(declaration, dict) and 'workspace' in declaration and not isinstance(declaration['workspace'], bool):
-            raise SystemExit(f'invalid workspace flag for dependency {alias}')
-        if isinstance(declaration, str): continue
-        if not isinstance(declaration, dict): raise SystemExit(f'invalid Cargo dependency {alias}')
-        if 'package' in declaration and not isinstance(declaration['package'], str):
-            raise SystemExit(f'invalid package name for dependency {alias}')
-        if 'path' in declaration and not isinstance(declaration['path'], str):
-            raise SystemExit(f'invalid path for dependency {alias}')
-        if 'path' in declaration: raise SystemExit(f'transitive Cargo path dependency: {alias}')
-";
-
-    /// Whether the emitter's own manifest declares a local path dependency.
-    /// This controls generated helper text; legacy trees keep their exact bytes.
-    pub(crate) fn current_package_has_model_dependency() -> Result<bool, String> {
-        let workflow = toml::from_str::<toml::Value>(include_str!("../Cargo.toml"))
-            .map_err(|error| format!("parse workflow Cargo.toml: {error}"))?;
-        let workspace = toml::from_str::<toml::Value>(include_str!("../../../Cargo.toml"))
-            .map_err(|error| format!("parse workspace Cargo.toml: {error}"))?;
-        Ok(!local_dependency_paths(&workflow, &workspace)?.is_empty())
-    }
-
-    /// Shell checks run by runtime-product producers before they mint a
-    /// closure. Keep these checks aligned with Rust and setup-action resolvers.
-    pub(crate) fn producer_closure_validation(paths: &[String], revision: &str) -> String {
-        let dependency_roots = paths.iter().skip(BASE_CLOSURE_PATHS.len());
-        if dependency_roots.clone().next().is_none() {
-            return String::new();
-        }
-        let mut script = String::from(
-            "[[ \"$(awk -F '\\t' '$1 ~ /^120000 / { found=1 } END { print found+0 }' <<<\"$listing\")\" == 0 ]] || { echo \\\"::error::source closure contains a Cargo/runtime symlink\\\" >&2; exit 1; }\n",
-        );
-        script.push_str("closure_guard_revision=\"${");
-        script.push_str(revision);
-        script.push_str("}\"\nclosure_guard_dir=\"$(mktemp -d)\"\n");
-        script.push_str("trap 'rm -rf \"$closure_guard_dir\"' EXIT\nif git cat-file -e \"${closure_guard_revision}:Cargo.toml\" 2>/dev/null; then git show \"${closure_guard_revision}:Cargo.toml\" > \"$closure_guard_dir/workspace.toml\"; else printf '[workspace]\\n' > \"$closure_guard_dir/workspace.toml\"; fi\n");
-        for dependency_root in dependency_roots {
-            let pathspec = crate::shell_quote(&format!(":(literal){dependency_root}"));
-            script.push_str("dependency_root=");
-            script.push_str(&crate::shell_quote(dependency_root));
-            script
-                .push_str("\ndependency_tree=\"$(git ls-tree -r \"${closure_guard_revision}\" -- ");
-            script.push_str(&pathspec);
-            script.push_str(")\"\n");
-            script.push_str("test \"$dependency_tree\" != '' || { echo \\\"::error::local Cargo dependency tree is missing: $dependency_root\\\" >&2; exit 1; }\n");
-            script.push_str("[[ \"$(awk '$1 == \"120000\" { found=1 } END { print found+0 }' <<<\"$dependency_tree\")\" == 0 ]] || { echo \\\"::error::local Cargo dependency contains a symlink: $dependency_root\\\" >&2; exit 1; }\n");
-            script.push_str("while IFS= read -r dependency_manifest; do\n  [[ \"$dependency_manifest\" == */Cargo.toml ]] || continue\n  git show \"${closure_guard_revision}:$dependency_manifest\" > \"$closure_guard_dir/dependency.toml\"\n  python3 - \"$closure_guard_dir/dependency.toml\" \"$closure_guard_dir/workspace.toml\" \"$dependency_root\" \"$dependency_manifest\" <<'PY'\n");
-            script.push_str(PYTHON_TRANSITIVE_PATH_GUARD);
-            script.push_str(
-                "\nPY\ndone < <(git ls-tree -r --name-only \"${closure_guard_revision}\" -- ",
-            );
-            script.push_str(&pathspec);
-            script.push_str(")\n");
-        }
-        script.push_str("rm -rf \"$closure_guard_dir\"\n");
-        script
-    }
-
-    /// Return the complete repository-owned setup action without rewriting it.
-    #[cfg(test)]
-    pub(crate) fn render_setup_action(action: &str) -> String {
-        action.to_owned()
-    }
-
-    /// Shell resolver for local-checkout publishers. The target revision is
-    /// already present in the checkout, so its manifests and model tree come
-    /// from `git show`/`ls-tree`; missing manifests and malformed TOML fail
-    /// closed instead of silently producing an incomplete closure.
-    pub(crate) fn local_shell_resolver(revision: &str, checkout: &str, indent: &str) -> String {
-        let mut script = format!(
-            "manifests=\"$(mktemp -d)\"\nif git -C \"${checkout}\" cat-file -e \"${revision}:crates/velnor-workflow/Cargo.toml\" 2>/dev/null; then\ngit -C \"${checkout}\" show \"${revision}:crates/velnor-workflow/Cargo.toml\" > \"$manifests/workflow.toml\"\nif git -C \"${checkout}\" cat-file -e \"${revision}:Cargo.toml\" 2>/dev/null; then git -C \"${checkout}\" show \"${revision}:Cargo.toml\" > \"$manifests/workspace.toml\"; else printf '[workspace]\\n' > \"$manifests/workspace.toml\"; fi\ndependency_paths=\"$(python3 - \"$manifests/workflow.toml\" \"$manifests/workspace.toml\" <<'PY'\n"
-        );
-        script.push_str(PYTHON_RESOLVER);
-        script.push_str("\nPY\n)\"\nelse\necho \"::error::workflow manifest unavailable at ${revision}\" >&2\nexit 1\nfi\ncheck_transitive_manifest() { python3 - \"$1\" \"$manifests/workspace.toml\" \"$2\" \"$3\" <<'PY'\n");
-        script.push_str(PYTHON_TRANSITIVE_PATH_GUARD);
-        script.push_str(
-            "\nPY\n}\n[[ \"$(awk -F '\\t' -v revision=\"${revision}\" '$1 ~ /^120000 / && !(revision == \"9567d50ca2b404e64d818dca845beec747518565\" && NF == 2 && $1 == \"120000 blob 47dc3e3d863cfb5727b87d785d09abf9743c0a72\" && $2 == \"crates/velnor-workflow/CLAUDE.md\") { found=1 } END { print found+0 }' <<<\"$listing\")\" == 0 ]] || { echo \"::error::source closure contains a Cargo/runtime symlink\" >&2; exit 1; }\nwhile IFS= read -r dependency_path; do\n  [[ \"$dependency_path\" != '' ]] || continue\n  dependency_tree=\"$(git -C \"${checkout}\" ls-tree -r \"${revision}\" -- \":(literal)$dependency_path\")\"\n  test \"$dependency_tree\" != '' || { echo \"::error::local Cargo dependency has no tracked source tree: $dependency_path\" >&2; exit 1; }\n  [[ \"$(awk '$1 == 120000 { found=1 } END { print found+0 }' <<<\"$dependency_tree\")\" == 0 ]] || { echo \"::error::local Cargo dependency contains a symlink: $dependency_path\" >&2; exit 1; }\n  while IFS= read -r manifest_path; do\n    [[ \"$manifest_path\" == */Cargo.toml || \"$manifest_path\" == Cargo.toml ]] || continue\n    git -C \"${checkout}\" show \"${revision}:$manifest_path\" > \"$manifests/dependency.toml\"\n    check_transitive_manifest \"$manifests/dependency.toml\" \"$dependency_path\" \"$manifest_path\"\n  done < <(git -C \"${checkout}\" ls-tree -r --name-only \"${revision}\" -- \":(literal)$dependency_path\")\n  listing+=$'\\n'\"$dependency_tree\"\ndone < <(python3 -c 'import json,sys; print(*json.load(sys.stdin), sep=\"\\n\")' <<<\"$dependency_paths\")\nrm -rf \"$manifests\"\n",
-        );
-        let script = script
-            .replace("${checkout}", &format!("${{{checkout}}}"))
-            .replace("${revision}", &format!("${{{revision}}}"));
-        indent_script(&script, indent)
-    }
-
-    /// API-side resolver for revisions outside the consumer checkout. The
-    /// caller has already fetched the recursive Git tree into `$tree`.
-    pub(crate) fn api_shell_resolver(indent: &str) -> String {
-        let mut script = String::from(
-            r#"manifests="$(mktemp -d)"
-workflow_blob="$(jq -r '.tree[] | select(.path == "crates/velnor-workflow/Cargo.toml") | .sha' <<<"$tree")"
-if [[ "$workflow_blob" != '' ]]; then
-workspace_blob="$(jq -r '.tree[] | select(.path == "Cargo.toml") | .sha' <<<"$tree")"
-gh api "repos/$PRODUCT_REPOSITORY/git/blobs/$workflow_blob" | jq -er '.content' | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read()))' > "$manifests/workflow.toml"
-if [[ "$workspace_blob" != '' ]]; then
-gh api "repos/$PRODUCT_REPOSITORY/git/blobs/$workspace_blob" | jq -er '.content' | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read()))' > "$manifests/workspace.toml"
-else
-printf '[workspace]\n' > "$manifests/workspace.toml"
-fi
-dependency_paths="$(python3 - "$manifests/workflow.toml" "$manifests/workspace.toml" <<'PY'
-"#,
-        );
-        script.push_str(PYTHON_RESOLVER);
-        script.push_str(
-            r#"PY
-)"
-else
-echo "::error::workflow manifest unavailable in revision tree" >&2
-exit 1
-fi
-check_transitive_manifest() { python3 - "$1" "$manifests/workspace.toml" "$2" "$3" <<'PY'
-import sys, tomllib
-with open(sys.argv[1], 'rb') as source: manifest = tomllib.load(source)
-with open(sys.argv[2], 'rb') as source: workspace = tomllib.load(source)
-dependency_root, manifest_path = sys.argv[3], sys.argv[4]
-workspace_table = workspace.get('workspace', {})
-if not isinstance(workspace_table, dict): raise SystemExit('workspace must be a table')
-workspace_dependencies = workspace_table.get('dependencies', {})
-if not isinstance(workspace_dependencies, dict): raise SystemExit('workspace.dependencies must be a table')
-members = workspace_table.get('members', [])
-if not isinstance(members, list) or not all(isinstance(member, str) for member in members): raise SystemExit('workspace.members must be a string array')
-sections = []
-for name in ('dependencies', 'build-dependencies', 'dev-dependencies'):
-    if name in manifest: sections.append(manifest[name])
-target = manifest.get('target', {})
-if not isinstance(target, dict): raise SystemExit('target must be a table')
-for target_table in target.values():
-    if not isinstance(target_table, dict): raise SystemExit('target entry must be a table')
-    for name in ('dependencies', 'build-dependencies', 'dev-dependencies'):
-        if name in target_table: sections.append(target_table[name])
-for dependencies in sections:
-    if not isinstance(dependencies, dict): raise SystemExit('dependency section must be a table')
-    for alias, declaration in dependencies.items():
-        if isinstance(declaration, dict) and declaration.get('workspace') is True:
-            if 'path' in declaration:
-                raise SystemExit(f'conflicting workspace/path dependency: {alias}')
-            if manifest_path != dependency_root + '/Cargo.toml' or dependency_root not in members:
-                raise SystemExit(f'unproven nested workspace inheritance in {manifest_path}')
-            declaration = workspace_dependencies.get(alias)
-        elif isinstance(declaration, dict) and 'workspace' in declaration and not isinstance(declaration['workspace'], bool):
-            raise SystemExit(f'invalid workspace flag for dependency {alias}')
-        if isinstance(declaration, str): continue
-        if not isinstance(declaration, dict): raise SystemExit(f'invalid Cargo dependency {alias}')
-        if 'package' in declaration and not isinstance(declaration['package'], str):
-            raise SystemExit(f'invalid package name for dependency {alias}')
-        if 'path' in declaration and not isinstance(declaration['path'], str):
-            raise SystemExit(f'invalid path for dependency {alias}')
-        if 'path' in declaration: raise SystemExit(f'transitive Cargo path dependency: {alias}')
-PY
-}
-jq -e --arg revision "${PINNED_REVISION}" '[.tree[] | select(.type != "tree") | select(.path == "Cargo.toml" or .path == "Cargo.lock" or .path == "rust-toolchain.toml" or .path == "rust-toolchain" or (.path | startswith("crates/velnor-workflow/")) or (.path | startswith(".cargo/"))) | select(.mode == "120000") | select(($revision == "9567d50ca2b404e64d818dca845beec747518565" and .type == "blob" and .sha == "47dc3e3d863cfb5727b87d785d09abf9743c0a72" and .path == "crates/velnor-workflow/CLAUDE.md") | not)] | length == 0' <<<"$tree" >/dev/null || { echo "::error::source closure contains a Cargo/runtime symlink" >&2; exit 1; }
-while IFS= read -r dependency_path; do
-  [[ "$dependency_path" != '' ]] || continue
-  dependency_tree="$(jq -r --arg path "$dependency_path" '[.tree[] | select(.type != "tree") | select(.path == $path or (.path | startswith($path + "/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"
-  test "$dependency_tree" != '' || { echo "::error::local Cargo dependency has no tracked source tree: $dependency_path" >&2; exit 1; }
-  [[ "$(awk '$1 == "120000" { found=1 } END { print found+0 }' <<<"$dependency_tree")" == 0 ]] || { echo "::error::local Cargo dependency contains a symlink: $dependency_path" >&2; exit 1; }
-  while IFS= read -r manifest_path; do
-    [[ "$manifest_path" == */Cargo.toml || "$manifest_path" == Cargo.toml ]] || continue
-    manifest_blob="$(jq -r --arg path "$manifest_path" '.tree[] | select(.path == $path) | .sha' <<<"$tree")"
-    gh api "repos/$PRODUCT_REPOSITORY/git/blobs/$manifest_blob" | jq -er '.content' | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read()))' > "$manifests/dependency.toml"
-    check_transitive_manifest "$manifests/dependency.toml" "$dependency_path" "$manifest_path"
-  done < <(jq -r --arg root "$dependency_path" '[.tree[] | select(.type == "blob") | select(.path == ($root + "/Cargo.toml") or (.path | startswith($root + "/") and endswith("/Cargo.toml"))) | .path] | sort[]' <<<"$tree")
-  listing+=$'\n'"$dependency_tree"
-done < <(python3 -c 'import json,sys; print(*json.load(sys.stdin), sep="\n")' <<<"$dependency_paths")
-rm -rf "$manifests"
-"#,
-        );
-        indent_script(&script, indent)
-    }
-
-    pub(crate) fn indent_script(script: &str, indent: &str) -> String {
-        let mut output =
-            String::with_capacity(script.len() + indent.len() * script.lines().count());
-        for line in script.lines() {
-            output.push_str(indent);
-            output.push_str(line);
-            output.push('\n');
-        }
-        output
-    }
-
-    /// Return the closure path list for a pair of manifests from one revision.
-    /// Invalid TOML, malformed dependency entries, and unresolved workspace
-    /// inheritance all fail closed instead of silently omitting source inputs.
-    pub(crate) fn closure_paths(
-        workflow_manifest: &str,
-        workspace_manifest: &str,
-    ) -> Result<Vec<String>, String> {
-        let workflow = toml::from_str::<toml::Value>(workflow_manifest)
-            .map_err(|error| format!("parse workflow Cargo.toml: {error}"))?;
-        let workspace = toml::from_str::<toml::Value>(workspace_manifest)
-            .map_err(|error| format!("parse workspace Cargo.toml: {error}"))?;
-        closure_paths_from_values(&workflow, &workspace)
-    }
-
-    pub(crate) fn manifest_has_local_dependency(
-        manifest_text: &str,
-        workspace_text: &str,
-        dependency_root: &str,
-        manifest_path: &str,
-    ) -> Result<bool, String> {
-        let manifest = toml::from_str::<toml::Value>(manifest_text)
-            .map_err(|error| format!("parse dependency Cargo.toml: {error}"))?;
-        let workspace = toml::from_str::<toml::Value>(workspace_text)
-            .map_err(|error| format!("parse workspace Cargo.toml: {error}"))?;
-        let workspace_dependencies = match workspace.get("workspace") {
-            Some(value) => {
-                let table = value.as_table().ok_or("workspace must be a TOML table")?;
-                match table.get("dependencies") {
-                    Some(value) => Some(
-                        value
-                            .as_table()
-                            .ok_or("workspace.dependencies must be a TOML table")?,
-                    ),
-                    None => None,
-                }
-            }
-            None => None,
-        };
-        let workspace_table = workspace
-            .get("workspace")
-            .and_then(toml::Value::as_table)
-            .ok_or("workspace must be a TOML table")?;
-        let members = workspace_table
-            .get("members")
-            .map(|members| {
-                members
-                    .as_array()
-                    .ok_or("workspace.members must be an array")?
-                    .iter()
-                    .map(|member| member.as_str().ok_or("workspace member must be a string"))
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .transpose()?
-            .unwrap_or_default();
-        for (section, dependencies) in dependency_sections(&manifest)? {
-            let dependencies = dependencies
-                .as_table()
-                .ok_or_else(|| format!("{section} must be a TOML table"))?;
-            for (alias, declaration) in dependencies {
-                if declaration.get("workspace").and_then(toml::Value::as_bool) == Some(true)
-                    && (manifest_path != format!("{dependency_root}/Cargo.toml")
-                        || !members.contains(&dependency_root))
-                {
-                    return Err(format!(
-                        "unproven nested workspace inheritance in {manifest_path}"
-                    ));
-                }
-                let (_, path, _) =
-                    effective_dependency(alias, declaration, workspace_dependencies, section)?;
-                if path.is_some() {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
-    }
-
-    fn closure_paths_from_values(
-        workflow: &toml::Value,
-        workspace: &toml::Value,
-    ) -> Result<Vec<String>, String> {
-        let mut paths = BASE_CLOSURE_PATHS
-            .iter()
-            .map(|p| (*p).to_owned())
-            .collect::<Vec<_>>();
-        let mut dependencies = local_dependency_paths(workflow, workspace)?;
-        dependencies.sort();
-        dependencies.dedup();
-        for path in dependencies {
-            let covered = BASE_CLOSURE_PATHS.iter().any(|base| {
-                path == *base
-                    || path
-                        .strip_prefix(base)
-                        .is_some_and(|suffix| suffix.starts_with('/'))
-            });
-            let covered_by_dependency = paths[BASE_CLOSURE_PATHS.len()..].iter().any(|root| {
-                path == *root
-                    || path
-                        .strip_prefix(root)
-                        .is_some_and(|suffix| suffix.starts_with('/'))
-            });
-            if !covered && !covered_by_dependency && !paths.contains(&path) {
-                paths.push(path);
-            }
-        }
-        Ok(paths)
-    }
-
-    fn local_dependency_paths(
-        workflow: &toml::Value,
-        workspace: &toml::Value,
-    ) -> Result<Vec<String>, String> {
-        let workspace_dependencies = match workspace.get("workspace") {
-            Some(value) => {
-                let table = value.as_table().ok_or("workspace must be a TOML table")?;
-                match table.get("dependencies") {
-                    Some(value) => Some(
-                        value
-                            .as_table()
-                            .ok_or("workspace.dependencies must be a TOML table")?,
-                    ),
-                    None => None,
-                }
-            }
-            None => None,
-        };
-
-        let mut paths = Vec::new();
-        for (section, dependencies) in dependency_sections(workflow)? {
-            if section == "dev-dependencies" || section.ends_with(".dev-dependencies") {
-                continue;
-            }
-            let dependencies = dependencies
-                .as_table()
-                .ok_or_else(|| format!("{section} must be a TOML table"))?;
-            for (alias, declaration) in dependencies {
-                let (_package, path, workspace_inherited) =
-                    effective_dependency(alias, declaration, workspace_dependencies, section)?;
-                let Some(path) = path else {
-                    continue;
-                };
-                let base = if workspace_inherited {
-                    ""
-                } else {
-                    "crates/velnor-workflow"
-                };
-                let resolved = normalize_repo_path(base, &path)?;
-                if resolved.is_empty() {
-                    return Err(format!("{section}.{alias} resolves to the repository root"));
-                }
-                if BASE_CLOSURE_PATHS
-                    .iter()
-                    .any(|base| base.starts_with(&format!("{resolved}/")))
-                {
-                    return Err(format!(
-                        "{section}.{alias} dependency path overlaps the base closure"
-                    ));
-                }
-                paths.push(resolved);
-            }
-        }
-        Ok(paths)
-    }
-
-    fn dependency_sections(
-        manifest: &toml::Value,
-    ) -> Result<Vec<(&'static str, &toml::Value)>, String> {
-        let mut sections = Vec::new();
-        let root = manifest
-            .as_table()
-            .ok_or_else(|| "Cargo.toml root must be a table".to_owned())?;
-        for name in ["dependencies", "build-dependencies", "dev-dependencies"] {
-            if let Some(value) = root.get(name) {
-                sections.push((name, value));
-            }
-        }
-        if let Some(targets) = root.get("target") {
-            let targets = targets
-                .as_table()
-                .ok_or_else(|| "Cargo.toml target must be a table".to_owned())?;
-            for (target, value) in targets {
-                let target = value
-                    .as_table()
-                    .ok_or_else(|| format!("target.{target} must be a table"))?;
-                for name in ["dependencies", "build-dependencies", "dev-dependencies"] {
-                    if let Some(value) = target.get(name) {
-                        sections.push((name, value));
-                    }
-                }
-            }
-        }
-        Ok(sections)
-    }
-
-    fn effective_dependency<'a>(
-        alias: &str,
-        declaration: &'a toml::Value,
-        workspace_dependencies: Option<&'a toml::map::Map<String, toml::Value>>,
-        section: &str,
-    ) -> Result<(Option<String>, Option<String>, bool), String> {
-        let mut declaration = declaration;
-        if !declaration.is_str() && !declaration.is_table() {
-            return Err(format!(
-                "{section}.{alias} must be a dependency string or table"
-            ));
-        }
-        let mut workspace_inherited = false;
-        if let Some(table) = declaration.as_table()
-            && table.contains_key("workspace")
-            && table
-                .get("workspace")
-                .and_then(toml::Value::as_bool)
-                .is_none()
-        {
-            return Err(format!("{section}.{alias}.workspace must be a boolean"));
-        }
-        if let Some(table) = declaration.as_table()
-            && table.get("workspace").and_then(toml::Value::as_bool) == Some(true)
-        {
-            if table.contains_key("path") {
-                return Err(format!(
-                    "{section}.{alias} cannot set both workspace = true and path"
-                ));
-            }
-            declaration = workspace_dependencies
-                .and_then(|dependencies| dependencies.get(alias))
-                .ok_or_else(|| {
-                    format!("{section}.{alias} inherits a missing workspace dependency")
-                })?;
-            workspace_inherited = true;
-            if !declaration.is_str() && !declaration.is_table() {
-                return Err(format!(
-                    "workspace dependency {alias} must be a dependency string or table"
-                ));
-            }
-        }
-        let table = declaration.as_table();
-        let package = table
-            .and_then(|table| table.get("package"))
-            .map(|value| {
-                value
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| format!("{section}.{alias}.package must be a string"))
-            })
-            .transpose()?
-            .or_else(|| Some(alias.to_owned()));
-        let path = table
-            .and_then(|table| table.get("path"))
-            .map(|value| {
-                value
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| format!("{section}.{alias}.path must be a string"))
-            })
-            .transpose()?;
-        Ok((package, path, workspace_inherited))
-    }
-
-    fn normalize_repo_path(base: &str, path: &str) -> Result<String, String> {
-        let path = Path::new(path);
-        if path.is_absolute() {
-            return Err("local dependency path must be relative".to_owned());
-        }
-        let mut components = Path::new(base)
-            .components()
-            .map(|component| match component {
-                Component::Normal(part) => Ok(part.to_string_lossy().into_owned()),
-                _ => Err("invalid workflow dependency base path".to_owned()),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        for component in path.components() {
-            match component {
-                Component::CurDir => {}
-                Component::Normal(part) => components.push(part.to_string_lossy().into_owned()),
-                Component::ParentDir => {
-                    if components.pop().is_none() {
-                        return Err("local dependency path escapes repository root".to_owned());
-                    }
-                }
-                Component::RootDir | Component::Prefix(_) => {
-                    return Err("local dependency path must stay within repository".to_owned());
-                }
-            }
-        }
-        Ok(components.join("/"))
-    }
-
-    #[cfg(test)]
-    #[expect(
-        clippy::expect_used,
-        reason = "a missing checked-in action fixture invalidates the resolver tests"
-    )]
-    fn setup_action_fixture() -> String {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.github-gen/sources/actions/setup-velnor-workflow/action.yml");
-        let path = if path.exists() {
-            path
-        } else {
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("fixtures/actions/setup-velnor-workflow/action.yml")
-        };
-        std::fs::read_to_string(path).expect("read setup-action fixture")
-    }
-
-    #[cfg(test)]
-    mod tests {
-        #![expect(
-            clippy::expect_used,
-            reason = "resolver test setup failures should report their direct cause"
-        )]
-
-        use super::*;
-
-        const ROOT: &str = "[workspace]\n";
-
-        struct ResolverFixture {
-            root: std::path::PathBuf,
-            repo: std::path::PathBuf,
-            mock_bin: std::path::PathBuf,
-        }
-
-        impl ResolverFixture {
-            fn new() -> Self {
-                use std::os::unix::fs::PermissionsExt;
-
-                let root = std::env::temp_dir().join(format!(
-                    "velnor-resolver-fixture-{}",
-                    crate::unique_suffix()
-                ));
-                let repo = root.join("repo");
-                let mock_bin = root.join("bin");
-                std::fs::create_dir_all(repo.join("crates/velnor-workflow"))
-                    .expect("create workflow crate");
-                std::fs::create_dir_all(repo.join("crates/velnor-model/src"))
-                    .expect("create model crate");
-                std::fs::create_dir_all(&mock_bin).expect("create mock bin");
-                std::fs::write(
-                    repo.join("Cargo.toml"),
-                    "[workspace]\nmembers = [\"crates/velnor-workflow\", \"crates/velnor-model\"]\n",
-                )
-                .expect("write workspace manifest");
-                std::fs::write(
-                    repo.join("crates/velnor-model/Cargo.toml"),
-                    "[package]\nname = \"velnor-model\"\nversion = \"0.1.0\"\n",
-                )
-                .expect("write model manifest");
-                std::fs::write(
-                    repo.join("crates/velnor-model/src/lib.rs"),
-                    "pub fn model() {}\n",
-                )
-                .expect("write model source");
-                let initial_manifest = "[package]\nname = \"velnor-workflow\"\nversion = \"0.1.0\"\n[dependencies.velnor-model]\npath = \"../velnor-model\"\n";
-                std::fs::write(
-                    repo.join("crates/velnor-workflow/Cargo.toml"),
-                    initial_manifest,
-                )
-                .expect("write workflow manifest");
-                Self::run_git(&repo, &["init", "-q"]);
-                Self::commit(&repo, "valid");
-                let mock_gh = mock_bin.join("gh");
-                std::fs::write(
-                    &mock_gh,
-                    "#!/usr/bin/env python3\nimport base64,json,os,subprocess,sys\nsha=sys.argv[-1].rsplit('/',1)[-1]\nblob=subprocess.check_output(['git','-C',os.environ['CHECKOUT_PATH'],'cat-file','blob',sha])\nprint(json.dumps({'content':base64.b64encode(blob).decode()}))\n",
-                )
-                .expect("write mock gh");
-                std::fs::set_permissions(&mock_gh, std::fs::Permissions::from_mode(0o755))
-                    .expect("make mock gh executable");
-                Self {
-                    root,
-                    repo,
-                    mock_bin,
-                }
-            }
-
-            fn run_git(repo: &std::path::Path, args: &[&str]) -> String {
-                let output = std::process::Command::new("git")
-                    .arg("-C")
-                    .arg(repo)
-                    .args(args)
-                    .output()
-                    .expect("git is available for resolver fixture");
-                assert!(
-                    output.status.success(),
-                    "git {args:?}: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                String::from_utf8_lossy(&output.stdout).trim().to_owned()
-            }
-
-            fn commit(repo: &std::path::Path, message: &str) {
-                Self::run_git(repo, &["add", "-A"]);
-                Self::run_git(
-                    repo,
-                    &[
-                        "-c",
-                        "user.name=fixture",
-                        "-c",
-                        "user.email=fixture@example.invalid",
-                        "commit",
-                        "-m",
-                        message,
-                    ],
-                );
-            }
-
-            fn set_manifest(&self, manifest: Option<&str>) {
-                let workflow_manifest = self.repo.join("crates/velnor-workflow/Cargo.toml");
-                if let Some(manifest) = manifest {
-                    std::fs::write(workflow_manifest, manifest).expect("write target manifest");
-                } else {
-                    std::fs::remove_file(workflow_manifest).expect("remove target manifest");
-                }
-                Self::commit(&self.repo, "fixture");
-            }
-
-            fn api_tree(&self) -> String {
-                let raw = Self::run_git(&self.repo, &["ls-tree", "-r", "--full-tree", "HEAD"]);
-                let entries: Vec<serde_json::Value> = raw
-                    .lines()
-                    .map(|line| {
-                        let (metadata, path) = line.split_once('\t').expect("tree entry path");
-                        let mut fields = metadata.split_whitespace();
-                        serde_json::json!({
-                            "mode": fields.next().expect("tree mode"),
-                            "type": fields.next().expect("tree type"),
-                            "sha": fields.next().expect("tree blob"),
-                            "path": path,
-                        })
-                    })
-                    .collect();
-                serde_json::json!({"truncated": false, "tree": entries}).to_string()
-            }
-
-            fn execute(&self, api: bool, resolver: &str) -> std::process::Output {
-                let tree = self.api_tree();
-                self.execute_with_tree(
-                    api,
-                    resolver,
-                    &tree,
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                )
-            }
-
-            fn execute_with_tree(
-                &self,
-                api: bool,
-                resolver: &str,
-                tree: &str,
-                pinned_revision: &str,
-            ) -> std::process::Output {
-                let revision = Self::run_git(&self.repo, &["rev-parse", "HEAD"]);
-                let mut shell = String::from("set -euo pipefail\n");
-                if api {
-                    shell.push_str("tree=\"$TREE_JSON\"\nlisting=\"\"\n");
-                } else {
-                    shell.push_str("listing=\"$(git -C \"$CHECKOUT_PATH\" ls-tree -r \"$INSTALL_REV\" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)\"\n");
-                }
-                shell.push_str(resolver);
-                shell.push_str("printf '%s\\n' \"$listing\"\n");
-                let mut command = std::process::Command::new("bash");
-                command
-                    .args(["-euo", "pipefail", "-c", &shell])
-                    .env("CHECKOUT_PATH", &self.repo)
-                    .env("INSTALL_REV", &revision)
-                    .env("PRODUCT_REPOSITORY", "fixture/repo")
-                    .env("PINNED_REVISION", pinned_revision)
-                    .env(
-                        "PATH",
-                        format!(
-                            "{}:{}",
-                            self.mock_bin.display(),
-                            std::env::var("PATH").expect("PATH")
-                        ),
-                    );
-                if api {
-                    command.env("TREE_JSON", tree);
-                }
-                command.output().expect("run resolver fixture")
-            }
-        }
-
-        impl Drop for ResolverFixture {
-            fn drop(&mut self) {
-                std::fs::remove_dir_all(&self.root).expect("remove resolver fixture");
-            }
-        }
-
-        fn assert_resolver_includes_model_and_fails_closed(api: bool) {
-            let fixture = ResolverFixture::new();
-            let resolver = if api {
-                api_shell_resolver("")
-            } else {
-                local_shell_resolver("INSTALL_REV", "CHECKOUT_PATH", "")
-            };
-            let valid = fixture.execute(api, &resolver);
-            assert!(
-                valid.status.success(),
-                "{}",
-                String::from_utf8_lossy(&valid.stderr)
-            );
-            assert_eq!(
-                String::from_utf8_lossy(&valid.stdout)
-                    .lines()
-                    .filter(|line| line.ends_with("crates/velnor-model/src/lib.rs"))
-                    .count(),
-                1,
-                "model source must enter the closure once"
-            );
-
-            fixture.set_manifest(None);
-            let missing = fixture.execute(api, &resolver);
-            assert!(!missing.status.success(), "missing manifest fails closed");
-            assert!(
-                String::from_utf8_lossy(&missing.stderr).contains("workflow manifest unavailable")
-            );
-
-            fixture.set_manifest(Some(
-                "[dependencies\nvelnor-model = { path = \"../velnor-model\" }\n",
-            ));
-            let malformed = fixture.execute(api, &resolver);
-            assert!(
-                !malformed.status.success(),
-                "malformed manifest fails closed"
-            );
-            assert!(String::from_utf8_lossy(&malformed.stderr)
-                .contains("closure dependency parse failed"));
-        }
-
-        #[test]
-        fn ignores_unrelated_model_tree_without_declared_local_dependency() {
-            let workflow = "[package]\nname = \"velnor-workflow\"\n[dependencies]\nserde = \"1\"\n";
-            assert_eq!(
-                closure_paths(workflow, ROOT).expect("valid manifests"),
-                BASE_CLOSURE_PATHS
-                    .iter()
-                    .map(|path| (*path).to_owned())
-                    .collect::<Vec<_>>()
-            );
-        }
-
-        #[test]
-        fn includes_inline_and_table_local_model_dependencies() {
-            for workflow in [
-            "[package]\nname = \"velnor-workflow\"\n[dependencies]\nvelnor-model = { path = \"../velnor-model\" }\n",
-            "[package]\nname = \"velnor-workflow\"\n[dependencies.velnor-model]\npath = \"../velnor-model\"\n",
-            "[package]\nname = \"velnor-workflow\"\n[target.'cfg(unix)'.dependencies]\nmodel = { package = \"velnor-model\", path = \"../velnor-model\" }\n",
-        ] {
-            let paths = closure_paths(workflow, ROOT).expect("valid local model dependency");
-            assert!(paths.iter().any(|path| path == VELNOR_MODEL_PATH));
-            }
-        }
-
-        #[test]
-        fn includes_generic_dotted_build_and_target_dependencies() {
-            let workflow = r#"
-[build-dependencies."build.helper"]
-path = "../../tools/helper"
-[target.'cfg(unix)'.dependencies.'native.helper']
-path = "../native-helper"
-"#;
-            let paths = closure_paths(workflow, ROOT).expect("valid dependency tables");
-            assert!(paths.contains(&"tools/helper".to_owned()));
-            assert!(paths.contains(&"crates/native-helper".to_owned()));
-        }
-
-        #[test]
-        fn dependency_already_covered_by_base_does_not_activate_resolver() {
-            let workflow = "[dependencies]\nlocal = { path = \".\" }\n";
-            assert_eq!(
-                closure_paths(workflow, ROOT).expect("valid path"),
-                BASE_CLOSURE_PATHS
-                    .iter()
-                    .map(|path| (*path).to_owned())
-                    .collect::<Vec<_>>()
-            );
-        }
-
-        #[test]
-        fn dev_only_local_dependency_keeps_legacy_runtime_closure() {
-            let workflow = "[dev-dependencies]\nhelper = { path = \"../../tools/helper\" }\n";
-            assert_eq!(
-                closure_paths(workflow, ROOT).expect("valid dev dependency"),
-                BASE_CLOSURE_PATHS
-                    .iter()
-                    .map(|path| (*path).to_owned())
-                    .collect::<Vec<_>>()
-            );
-            let base = BASE_CLOSURE_PATHS
-                .iter()
-                .map(|path| (*path).to_owned())
-                .collect::<Vec<_>>();
-            assert!(producer_closure_validation(&base, "head").is_empty());
-        }
-
-        #[test]
-        fn transitive_manifest_guard_detects_direct_and_workspace_local_paths() {
-            assert!(manifest_has_local_dependency(
-                "[dependencies]\nhelper = { path = \"../helper\" }\n",
-                ROOT,
-                "crates/velnor-model",
-                "crates/velnor-model/Cargo.toml"
-            )
-            .expect("valid local dependency manifest"));
-            assert!(manifest_has_local_dependency(
-                "[dependencies]\nhelper = { workspace = true, path = \"../shadow\" }\n",
-                "[workspace]\nmembers = [\"crates/velnor-model\"]\n[workspace.dependencies]\nhelper = \"1\"\n",
-                "crates/velnor-model",
-                "crates/velnor-model/Cargo.toml"
-            )
-            .is_err());
-            assert!(manifest_has_local_dependency(
-                "[dependencies]\nhelper = { package = 42, path = \"../helper\" }\n",
-                ROOT,
-                "crates/velnor-model",
-                "crates/velnor-model/Cargo.toml"
-            )
-            .is_err());
-            assert!(manifest_has_local_dependency(
-                "[dependencies]\nhelper = { workspace = true }\n",
-                "[workspace]\nmembers = [\"crates/velnor-model\"]\n[workspace.dependencies]\nhelper = { path = \"crates/helper\" }\n",
-                "crates/velnor-model",
-                "crates/velnor-model/Cargo.toml"
-            )
-            .expect("valid inherited dependency manifest"));
-            assert!(!manifest_has_local_dependency(
-                "[dependencies]\nserde = { workspace = true }\n",
-                "[workspace]\nmembers = [\"crates/velnor-model\"]\n[workspace.dependencies]\nserde = \"1\"\n",
-                "crates/velnor-model",
-                "crates/velnor-model/Cargo.toml"
-            )
-            .expect("registry workspace dependency"));
-            assert!(manifest_has_local_dependency(
-                "[dependencies]\nserde = { workspace = true }\n",
-                "[workspace]\nmembers = [\"crates/velnor-model\"]\n[workspace.dependencies]\nserde = \"1\"\n",
-                "crates/velnor-model/nested",
-                "crates/velnor-model/nested/Cargo.toml"
-            )
-            .is_err());
-        }
-
-        #[test]
-        fn collapses_nested_local_dependency_roots() {
-            let workflow = "[dependencies]\nouter = { path = \"../../vendor\" }\ninner = { path = \"../../vendor/inner\" }\n";
-            let paths = closure_paths(workflow, ROOT).expect("valid local paths");
-            assert_eq!(paths.iter().filter(|path| *path == "vendor").count(), 1);
-            assert!(!paths.contains(&"vendor/inner".to_owned()));
-        }
-
-        #[test]
-        fn includes_workspace_inherited_model_path() {
-            let workflow = "[package]\nname = \"velnor-workflow\"\n[dependencies]\nvelnor-model = { workspace = true }\n";
-            let workspace = "[workspace]\n[workspace.dependencies]\nvelnor-model = { path = \"crates/velnor-model\" }\n";
-            assert!(closure_paths(workflow, workspace)
-                .expect("valid workspace inheritance")
-                .iter()
-                .any(|path| path == VELNOR_MODEL_PATH));
-        }
-
-        #[test]
-        fn includes_renamed_workspace_inherited_model_path() {
-            let workflow =
-                "[package]\nname = \"velnor-workflow\"\n[dependencies]\nmodel = { workspace = true }\n";
-            let workspace = "[workspace]\n[workspace.dependencies]\nmodel = { package = \"velnor-model\", path = \"crates/velnor-model\" }\n";
-            assert!(closure_paths(workflow, workspace)
-                .expect("valid renamed workspace inheritance")
-                .iter()
-                .any(|path| path == VELNOR_MODEL_PATH));
-        }
-
-        #[test]
-        fn fails_closed_on_invalid_or_unresolved_manifest_input() {
-            assert!(closure_paths("[dependencies", ROOT).is_err());
-            let workflow = "[dependencies]\nvelnor-model = { workspace = true }\n";
-            assert!(closure_paths(workflow, ROOT).is_err());
-            assert!(closure_paths("[dependencies]\nhelper = 42\n", ROOT).is_err());
-            assert!(closure_paths("[dependencies]\nhelper = { path = \"..\" }\n", ROOT).is_err());
-            assert!(closure_paths(
-                "[dependencies]\nhelper = { workspace = true }\n",
-                "[workspace]\ndependencies = 42\n"
-            )
-            .is_err());
-            assert!(closure_paths(
-                "[dependencies]\nhelper = { workspace = true }\n",
-                "[workspace]\n[workspace.dependencies]\nhelper = 42\n"
-            )
-            .is_err());
-            let workflow = "[dependencies]\nvelnor-model = { path = \"../../../outside\" }\n";
-            assert!(closure_paths(workflow, ROOT).is_err());
-            let workflow =
-                "[[dependencies]]\npackage = \"velnor-model\"\npath = \"../velnor-model\"\n";
-            assert!(closure_paths(workflow, ROOT).is_err());
-            let workflow =
-                "[dependencies.model]\npackage = \"velnor-model\"\npath = \"../velnor-model\"\n";
-            assert!(closure_paths(workflow, ROOT)
-                .expect("valid multiline TOML dependency")
-                .iter()
-                .any(|path| path == VELNOR_MODEL_PATH));
-        }
-
-        #[test]
-        fn setup_action_renderer_preserves_repository_owned_bytes() {
-            let action = setup_action_fixture();
-            let rendered = render_setup_action(&action);
-            assert_eq!(rendered, action);
-            assert!(rendered.contains("dependency_tree="));
-            assert!(rendered.contains("workflow manifest unavailable at $INSTALL_REV"));
-            assert!(rendered.contains("workflow manifest unavailable in revision tree"));
-            assert!(!rendered.contains("include_model=false"));
-            assert!(rendered.contains("\"$INSTALL_REV:crates/velnor-workflow/Cargo.toml\""));
-            serde_yaml::from_str::<serde_yaml::Value>(&rendered)
-                .expect("repository-owned action is valid YAML");
-        }
-
-        #[test]
-        fn dependency_action_source_uses_toml_and_both_revision_sources() {
-            let action = setup_action_fixture();
-            let rendered = render_setup_action(&action);
-            assert_eq!(rendered, action);
-            assert!(rendered.contains(
-                "git -C \"$CHECKOUT_PATH\" show \"$INSTALL_REV:crates/velnor-workflow/Cargo.toml\""
-            ));
-            assert!(rendered.contains("repos/$PRODUCT_REPOSITORY/git/blobs/$workflow_blob"));
-            assert!(rendered.contains("dependency_tree="));
-            assert!(rendered.contains("startswith($path + \"/\")"));
-            assert!(rendered.contains("import tomllib"));
-            assert!(rendered.contains("listing+=$'\\n'\"$dependency_tree\""));
-            assert!(rendered.contains("local Cargo dependency contains a symlink"));
-            assert!(rendered.contains(
-                r#"[[ "$(awk -F '\t' '$1 ~ /^120000 / { found=1 } END { print found+0 }' <<<"$listing")" == 0 ]]"#
-            ));
-            assert!(rendered.contains(
-                "jq -e '[.tree[] | select(.type != \"tree\") | select(.path == \"Cargo.toml\""
-            ));
-            assert!(rendered.contains("| select(.mode == \"120000\")] | length == 0' <<<\"$tree\""));
-            assert!(!rendered.contains("9567d50ca2b404e64d818dca845beec747518565"));
-            assert!(!rendered.contains("47dc3e3d863cfb5727b87d785d09abf9743c0a72"));
-            assert!(!rendered.contains("crates/velnor-workflow/CLAUDE.md"));
-            assert!(rendered.contains("select(.path == \"Cargo.toml\" or .path == \"Cargo.lock\""));
-            let mut product_closure = BASE_CLOSURE_PATHS
-                .iter()
-                .map(|path| (*path).to_owned())
-                .collect::<Vec<_>>();
-            product_closure.push("crates/velnor-helper".to_owned());
-            assert!(producer_closure_validation(&product_closure, "head")
-                .contains("$1 ~ /^120000 / { found=1 }"));
-            assert!(rendered.contains("unproven nested workspace inheritance"));
-            assert!(rendered.contains("'dev-dependencies'"));
-            assert!(rendered.contains("manifest_path != dependency_root + '/Cargo.toml'"));
-            assert!(rendered.contains("-- \":(literal)$dependency_path\""));
-            serde_yaml::from_str::<serde_yaml::Value>(&rendered)
-                .expect("setup action is valid YAML");
-            for (index, script) in [
-                local_shell_resolver("INSTALL_REV", "CHECKOUT_PATH", ""),
-                api_shell_resolver(""),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                if index == 1 {
-                    assert!(
-                        script.find("manifests=\"$(mktemp -d)\"")
-                            < script.find("if [[ \"$workflow_blob\" != '' ]]")
-                    );
-                    assert!(script.contains("workflow manifest unavailable in revision tree"));
-                    assert!(!script.contains("dependency_paths='[]'"));
-                    assert!(script.contains("--arg revision \"${PINNED_REVISION}\""));
-                    assert!(script.contains("startswith(\"crates/velnor-workflow/\")"));
-                    assert!(script.contains(".sha == \"47dc3e3d863cfb5727b87d785d09abf9743c0a72\""));
-                } else {
-                    assert!(script.contains("${CHECKOUT_PATH}"));
-                    assert!(script.contains("${INSTALL_REV}"));
-                    assert!(!script.contains("${checkout}"));
-                    assert!(!script.contains("${revision}"));
-                    assert!(script.contains("-v revision=\"${INSTALL_REV}\""));
-                    assert!(script.contains("rm -rf \"$manifests\""));
-                }
-                std::fs::write(format!("/tmp/closure-bridge-resolver-{index}.sh"), &script)
-                    .expect("write shell resolver fixture");
-                let mut syntax = std::process::Command::new("bash")
-                    .args(["-n"])
-                    .stdin(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()
-                    .expect("bash is available for shell syntax verification");
-                std::io::Write::write_all(
-                    syntax.stdin.as_mut().expect("bash stdin"),
-                    script.as_bytes(),
-                )
-                .expect("write shell fragment");
-                let result = syntax.wait_with_output().expect("wait for bash -n");
-                assert!(
-                    result.status.success(),
-                    "resolver shell syntax {index}: {}",
-                    String::from_utf8_lossy(&result.stderr)
-                );
-            }
-        }
-
-        #[test]
-        fn local_resolver_includes_target_model_once_and_fails_closed() {
-            assert_resolver_includes_model_and_fails_closed(false);
-        }
-
-        #[test]
-        fn api_resolver_includes_target_model_once_and_fails_closed() {
-            assert_resolver_includes_model_and_fails_closed(true);
-        }
-
-        #[test]
-        fn api_resolver_scopes_legacy_symlink_exception_to_closure_path() {
-            let fixture = ResolverFixture::new();
-            let resolver = api_shell_resolver("");
-            let mut tree: serde_json::Value =
-                serde_json::from_str(&fixture.api_tree()).expect("fixture tree is valid JSON");
-            tree["tree"]
-                .as_array_mut()
-                .expect("tree entries")
-                .push(serde_json::json!({
-                    "mode": "120000",
-                    "type": "blob",
-                    "sha": "47dc3e3d863cfb5727b87d785d09abf9743c0a72",
-                    "path": ".github/CLAUDE.md"
-                }));
-            let outside_closure = fixture.execute_with_tree(
-                true,
-                &resolver,
-                &tree.to_string(),
-                "9567d50ca2b404e64d818dca845beec747518565",
-            );
-            assert!(
-                outside_closure.status.success(),
-                "outside-closure symlink is irrelevant: {}",
-                String::from_utf8_lossy(&outside_closure.stderr)
-            );
-
-            tree["tree"]
-                .as_array_mut()
-                .expect("tree entries")
-                .push(serde_json::json!({
-                    "mode": "120000",
-                    "type": "blob",
-                    "sha": "47dc3e3d863cfb5727b87d785d09abf9743c0a72",
-                    "path": "crates/velnor-workflow/CLAUDE.md\tattacker"
-                }));
-            let lookalike_path = fixture.execute_with_tree(
-                true,
-                &resolver,
-                &tree.to_string(),
-                "9567d50ca2b404e64d818dca845beec747518565",
-            );
-            assert!(
-                !lookalike_path.status.success(),
-                "tab-suffixed path must not match the exact legacy path"
-            );
-        }
-
-        #[test]
-        fn python_action_probe_matches_local_dependency_forms_and_fails_closed() {
-            fn probe(workflow: &str, workspace: &str) -> std::process::Output {
-                let root = std::env::temp_dir()
-                    .join(format!("velnor-closure-python-{}", crate::unique_suffix()));
-                std::fs::create_dir_all(&root).expect("create parser fixture");
-                let workflow_path = root.join("workflow.toml");
-                let workspace_path = root.join("workspace.toml");
-                std::fs::write(&workflow_path, workflow).expect("write workflow manifest");
-                std::fs::write(&workspace_path, workspace).expect("write workspace manifest");
-                let mut child = std::process::Command::new("python3")
-                    .arg("-")
-                    .arg(&workflow_path)
-                    .arg(&workspace_path)
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()
-                    .expect("python3 is available for the composite action resolver");
-                std::io::Write::write_all(
-                    child.stdin.as_mut().expect("python stdin"),
-                    PYTHON_RESOLVER.as_bytes(),
-                )
-                .expect("write embedded Python resolver");
-                let output = child.wait_with_output().expect("wait for Python resolver");
-                std::fs::remove_dir_all(root).expect("remove parser fixture");
-                output
-            }
-
-            for workflow in [
-            "[dependencies]\nvelnor-model = { path = \"../velnor-model\" }\n",
-            "[build-dependencies.velnor-model]\npath = \"../velnor-model\"\n",
-            "[target.'cfg(unix)'.dependencies]\nmodel = { package = \"velnor-model\", path = \"../velnor-model\" }\n",
-        ] {
-            let output = probe(workflow, ROOT);
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "[\"crates/velnor-model\"]");
-        }
-            let inherited = probe(
-            "[dependencies]\nvelnor-model = { workspace = true }\n",
-            "[workspace]\n[workspace.dependencies]\nvelnor-model = { path = \"crates/velnor-model\" }\n",
-        );
-            assert!(inherited.status.success());
-            assert_eq!(
-                String::from_utf8_lossy(&inherited.stdout).trim(),
-                "[\"crates/velnor-model\"]"
-            );
-            let renamed_inherited = probe(
-                "[dependencies]\nmodel = { workspace = true }\n",
-                "[workspace]\n[workspace.dependencies]\nmodel = { package = \"velnor-model\", path = \"crates/velnor-model\" }\n",
-            );
-            assert!(renamed_inherited.status.success());
-            assert_eq!(
-                String::from_utf8_lossy(&renamed_inherited.stdout).trim(),
-                "[\"crates/velnor-model\"]"
-            );
-            let unrelated = probe("[dependencies]\nserde = \"1\"\n", ROOT);
-            assert!(unrelated.status.success());
-            assert_eq!(String::from_utf8_lossy(&unrelated.stdout).trim(), "[]");
-            for workflow in [
-                "[dependencies]\nvelnor-model = { workspace = true }\n",
-                "[dependencies]\nvelnor-model = { path = \"../../../outside\" }\n",
-                "[dependencies\nvelnor-model = \"1\"\n",
-                "[[dependencies]]\npackage = \"velnor-model\"\npath = \"../velnor-model\"\n",
-                "[dependencies]\nmodel = { package = \"velnor-model\", path = \"../velnor-model\" }\nother_model = { package = \"velnor-model\", path = \"../../../outside\" }\n",
-            ] {
-                assert!(
-                    !probe(workflow, ROOT).status.success(),
-                    "invalid or unrelated input must not enable the optional path"
-                );
-            }
-            let multiline = probe(
-                "[dependencies.model]\npackage = \"velnor-model\"\npath = \"../velnor-model\"\n",
-                ROOT,
-            );
-            assert!(multiline.status.success());
-            assert_eq!(
-                String::from_utf8_lossy(&multiline.stdout).trim(),
-                "[\"crates/velnor-model\"]"
-            );
-        }
-    }
-}
 mod config;
 #[cfg(all(test, unix))]
 mod consumer_negatives;
@@ -1346,7 +52,7 @@ use crate::scan::file_walk::is_test_support_path;
 /// unchanged repository config must bump this revision, so recorded generator
 /// state can prove which revision produced the recorded outputs. Never reset
 /// or reuse a revision.
-pub const GENERATOR_REVISION: &str = "69";
+pub const GENERATOR_REVISION: &str = "66";
 
 const GENERATED_HEADER: &str = "# Generated by velnor-workflow. Regenerate; do not hand-edit.\n";
 
@@ -1365,8 +71,8 @@ const PACKAGE_UPDATE_WORKFLOW: &str = "package-update.yml";
 pub(crate) const RELEASE_WORKFLOW: &str = "release.yml";
 /// The consumer-side updater the granted channels are implemented by.
 const PACKAGE_UPDATER_WORKFLOW: &str = "package-updater.yml";
-// Keep the sidecar path stable so Velnor can adopt repositories generated by
-// the former standalone tool without losing overwrite ownership proof.
+// Keep the sidecar path stable so repositories generated by the former
+// standalone tool retain overwrite ownership proof.
 pub(crate) const OWNERSHIP_STATE: &str = ".github/ci/.github-actions-generator-state";
 const OWNERSHIP_STATE_HEADER: &str = "# Generated ownership state; do not edit.\n";
 // Schema 2 adds the generation inputs (`config`, `scan`, `generator`) beside
@@ -1388,305 +94,98 @@ pub(crate) const GITHUB_AGENTS_MD: &str = ".github/AGENTS.md";
 /// Both pipelines share this path so the emitted location can never drift
 /// between schemas.
 pub(crate) const CODEOWNERS_PATH: &str = ".github/CODEOWNERS";
-/// Repository-root-relative path of the base-owned pull-request policy
-/// workflow. Static passthrough files must never replace this trust entrypoint.
-pub(crate) const CI_POLICY_WORKFLOW: &str = ".github/workflows/ci-policy.yml";
-/// Repository-root-relative path of the generated pull-request CI workflow.
-pub(crate) const CI_PR_WORKFLOW: &str = ".github/workflows/ci-pr.yml";
-/// Retired semantic alias for `ci-pr.yml`; accepting its case/path aliases
-/// would silently omit a declared PR aggregate during exact-name dispatch.
-pub(crate) const CI_PR_LEGACY_WORKFLOW: &str = ".github/workflows/ci-pull-request.yml";
-/// Repository-root-relative path of the owner-only runtime product publisher.
-pub(crate) const CI_RUNTIME_PRODUCTS_WORKFLOW: &str = ".github/workflows/ci-runtime-products.yml";
-/// The policy validator executes untrusted generator products in the pinned
-/// Ubuntu Docker sandbox. Keep this control-plane job on a Linux hosted image
-/// even when the repository routes its application jobs to another hosted
-/// runner (for example, macOS).
-pub(crate) const POLICY_VALIDATION_RUNNER: &str = "ubuntu-24.04";
+/// Repository-root-relative path of the generator-owned symlink that points
+/// agents at [`GITHUB_AGENTS_MD`]. This is the only symlink the writer ever
+/// creates; every other symlink still fails closed.
+pub(crate) const GITHUB_CLAUDE_MD: &str = ".github/CLAUDE.md";
+/// The symlink target of [`GITHUB_CLAUDE_MD`], relative to `.github` so the
+/// link resolves inside any checkout or `--output` tree.
+pub(crate) const GITHUB_CLAUDE_MD_TARGET: &str = "AGENTS.md";
 
-/// Normalize one generated path for cross-platform ownership comparisons.
-/// NFKC runs before path parsing so fullwidth separators become separators;
-/// both slash spellings are then treated as separators, Windows trims trailing
-/// dots/spaces from components, and only ASCII remains after lowercase. The
-/// last rule is deliberate: Unicode lowercase is not full case folding, so a
-/// residual non-ASCII character is rejected instead of guessed equivalent.
-fn normalized_path_string(value: &str) -> Option<String> {
-    let normalized = value
-        .nfkc()
-        .flat_map(char::to_lowercase)
-        .nfkc()
-        .collect::<String>();
-    if !normalized.is_ascii() {
-        return None;
-    }
-    Some(normalized.replace('\\', "/"))
-}
-
-fn normalized_path_components(value: &str) -> Option<Vec<String>> {
-    let separators_normalized = normalized_path_string(value)?;
-    Some(
-        Path::new(&separators_normalized)
-            .components()
-            .filter_map(|component| match component {
-                Component::CurDir => None,
-                Component::Normal(part) => {
-                    Some(part.to_str()?.trim_end_matches([' ', '.']).to_owned())
-                }
-                other => Some(other.as_os_str().to_str()?.to_owned()),
-            })
-            .collect(),
-    )
-}
-
-fn windows_device_name(component: &str) -> bool {
-    let stem = component
-        .split('.')
-        .next()
-        .unwrap_or(component)
-        .trim_end_matches([' ', '.']);
-    matches!(stem, "con" | "prn" | "aux" | "nul" | "conin$" | "conout$")
-        || stem
-            .strip_prefix("com")
-            .or_else(|| stem.strip_prefix("lpt"))
-            .is_some_and(|suffix| {
-                suffix.len() == 1 && suffix.as_bytes()[0].is_ascii_digit() && suffix != "0"
-            })
-}
-
-/// Whether a path spelling is safe for a generated output. This is stricter
-/// than alias comparison: generated names must not depend on Windows name
-/// trimming, DOS short-name lookup, Unicode case folding, or device parsing.
-pub(crate) fn path_spelling_is_supported(value: &str) -> bool {
-    let Some(normalized) = normalized_path_string(value) else {
-        return false;
-    };
-    let mut under_github = false;
-    let mut saw_component = false;
-    for component in Path::new(&normalized).components() {
-        let Component::Normal(part) = component else {
-            if matches!(component, Component::CurDir) {
-                continue;
-            }
-            return false;
-        };
-        let Some(part) = part.to_str() else {
-            return false;
-        };
-        let trimmed = part.trim_end_matches([' ', '.']);
-        if trimmed.is_empty() || trimmed != part {
-            return false;
-        }
-        if part
-            .chars()
-            .any(|character| character == ':' || character.is_control())
-        {
-            return false;
-        }
-        if windows_device_name(part) {
-            return false;
-        }
-        under_github |= part == ".github";
-        if under_github && part.contains('~') {
-            return false;
-        }
-        saw_component = true;
-    }
-    saw_component
-}
-
-/// Whether two path spellings can name the same path on a case-insensitive
-/// filesystem. The final component also admits conservative Windows 8.3
-/// aliases, so `CI-POL~1.YML` cannot dodge a long reserved name.
-pub(crate) fn path_spellings_alias(left: &str, right: &str) -> bool {
-    fn windows_short_name_alias(short: &str, long: &str) -> bool {
-        let Some((short_stem, short_extension)) = short.rsplit_once('.') else {
-            return false;
-        };
-        let Some((long_stem, long_extension)) = long.rsplit_once('.') else {
-            return false;
-        };
-        if long_stem.chars().count() <= 8 && long_extension.chars().count() <= 3 {
-            return false;
-        }
-        if short_stem.chars().count() > 8
-            || short_extension.is_empty()
-            || short_extension.chars().count() > 3
-            || short_extension != long_extension.chars().take(3).collect::<String>()
-        {
-            return false;
-        }
-        let Some((prefix, sequence)) = short_stem.rsplit_once('~') else {
-            return false;
-        };
-        if prefix.is_empty()
-            || sequence.is_empty()
-            || !sequence.bytes().all(|byte| byte.is_ascii_digit())
-        {
-            return false;
-        }
-        let direct_prefix = long_stem.chars().take(6).collect::<String>();
-        let compact_prefix = long_stem
-            .chars()
-            .filter(char::is_ascii_alphanumeric)
-            .take(6)
-            .collect::<String>();
-        prefix == direct_prefix || prefix == compact_prefix
-    }
-
-    let (Some(left), Some(right)) = (
-        normalized_path_components(left),
-        normalized_path_components(right),
-    ) else {
-        return false;
-    };
-    if left == right {
-        return true;
-    }
-    let Some((left_name, left_parents)) = left.split_last() else {
-        return false;
-    };
-    let Some((right_name, right_parents)) = right.split_last() else {
-        return false;
-    };
-    left_parents == right_parents
-        && (windows_short_name_alias(left_name, right_name)
-            || windows_short_name_alias(right_name, left_name))
-}
-
-pub(crate) fn generator_owned_static_file_path(path: &str) -> Option<&'static str> {
-    [
-        GITHUB_AGENTS_MD,
-        CODEOWNERS_PATH,
-        CI_POLICY_WORKFLOW,
-        CI_PR_WORKFLOW,
-        CI_PR_LEGACY_WORKFLOW,
-        CI_RUNTIME_PRODUCTS_WORKFLOW,
-        OWNERSHIP_STATE,
-    ]
-    .into_iter()
-    .find(|reserved| path_spellings_alias(path, reserved))
-}
-
-/// Reject a static passthrough that aliases any output already rendered by
-/// the generator. Comparing against the complete assembled surface makes
-/// output ownership structural: a new generated workflow cannot silently
-/// become vulnerable to last-writer-wins without also being covered here.
-pub(crate) fn first_static_file_output_collision<'a>(
-    static_paths: impl IntoIterator<Item = &'a str>,
-    generated_paths: impl IntoIterator<Item = &'a PathBuf>,
-) -> Option<(String, String)> {
-    let generated_paths = generated_paths
-        .into_iter()
-        .filter_map(|path| path.to_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-
-    for static_path in static_paths {
-        if let Some(generated_path) = generated_paths
-            .iter()
-            .find(|generated_path| path_spellings_alias(static_path, generated_path.as_str()))
-        {
-            return Some((static_path.to_owned(), generated_path.clone()));
-        }
-    }
-    None
-}
-
-/// Reject a generated surface path that aliases the base-owned policy
-/// entrypoint. The canonical policy workflow is emitted by the assembly
-/// layer, so a primitive may never contribute a path that could replace it.
-/// Keeping the spelling check here makes the primitive and final assembly
-/// guards share the same case and NFKC rules.
-pub(crate) fn reject_reserved_policy_output(
-    path: &Path,
-    origin: &str,
-) -> Result<(), GeneratorError> {
-    let Some(value) = path.to_str() else {
-        return Err(GeneratorError::usage(format!(
-            "{origin} uses a non-UTF-8 generated path `{}`; generated paths must be UTF-8",
-            path.display()
-        )));
-    };
-    if path_spellings_alias(value, CI_POLICY_WORKFLOW) {
-        return Err(GeneratorError::usage(format!(
-            "{origin} attempts to render reserved `{CI_POLICY_WORKFLOW}` at `{}`; the policy workflow is generator-owned",
-            path.display()
-        )));
-    }
-    if path_spellings_alias(value, CI_PR_LEGACY_WORKFLOW) {
-        return Err(GeneratorError::usage(format!(
-            "{origin} uses retired PR workflow alias `{}` at `{}`; declare canonical `ci-pr.yml` instead",
-            CI_PR_LEGACY_WORKFLOW,
-            path.display()
-        )));
-    }
-    if !path_spelling_is_supported(value) {
-        return Err(GeneratorError::usage(format!(
-            "{origin} uses an unsupported generated path spelling `{}`; generated paths must use safe ASCII-compatible names",
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
-fn validate_generated_writer_path(
-    path: &Path,
-    origin: &str,
-    allow_canonical_policy_file: bool,
-) -> Result<(), GeneratorError> {
-    let Some(value) = path.to_str() else {
-        return Err(GeneratorError::usage(format!(
-            "{origin} uses a non-UTF-8 generated path `{}`; generated paths must be UTF-8",
-            path.display()
-        )));
-    };
-    if path_spellings_alias(value, CI_POLICY_WORKFLOW)
-        && !(allow_canonical_policy_file && path == Path::new(CI_POLICY_WORKFLOW))
+/// Whether a config or manifest path is a normalized repository-relative path.
+pub(crate) fn is_normalized_repository_path(value: &str) -> bool {
+    if value.is_empty()
+        || value.starts_with('/')
+        || value.contains('\\')
+        || value.chars().any(char::is_control)
     {
-        return Err(GeneratorError::usage(format!(
-            "{origin} aliases reserved `{CI_POLICY_WORKFLOW}` at `{}`; only the canonical generated policy file is allowed",
-            path.display()
-        )));
+        return false;
     }
-    if path_spellings_alias(value, CI_PR_LEGACY_WORKFLOW) {
-        return Err(GeneratorError::usage(format!(
-            "{origin} uses retired PR workflow alias `{CI_PR_LEGACY_WORKFLOW}` at `{}`; declare canonical `ci-pr.yml` instead",
-            path.display()
-        )));
+    let Some(first) = value.split('/').next() else {
+        return false;
+    };
+    if first.len() >= 2 && first.as_bytes()[0].is_ascii_alphabetic() && first.as_bytes()[1] == b':'
+    {
+        return false;
     }
-    if !path_spelling_is_supported(value) {
-        return Err(GeneratorError::usage(format!(
-            "{origin} uses an unsupported generated path spelling `{}`; generated paths must use safe ASCII-compatible names",
-            path.display()
-        )));
-    }
-    Ok(())
+    value.split('/').all(|segment| {
+        !segment.is_empty()
+            && segment != "."
+            && segment != ".."
+            && segment != ".git"
+            && !segment.contains(':')
+    })
 }
 
-fn validate_reserved_writer_outputs(
-    files: &BTreeMap<PathBuf, String>,
-    symlinks: &BTreeMap<PathBuf, PathBuf>,
+/// Whether a path is under one of the two repository trees managed by the
+/// generator. Static sources must stay outside both trees.
+pub(crate) fn is_generated_output_tree_path(path: &Path) -> bool {
+    path.to_str().is_some_and(|value| {
+        is_normalized_repository_path(value)
+            && (value == ".github"
+                || value.starts_with(".github/")
+                || value == "config"
+                || value.starts_with("config/"))
+    })
+}
+
+/// Whether a path is a permitted generator-owned output target. The ownership
+/// manifest itself is always protected from config-driven output.
+pub(crate) fn is_managed_output_path(path: &Path) -> bool {
+    let ownership_state = Path::new(OWNERSHIP_STATE);
+    is_generated_output_tree_path(path)
+        && path != Path::new(".github")
+        && path != Path::new("config")
+        && !path.starts_with(ownership_state)
+        && !ownership_state.starts_with(path)
+}
+
+/// Reject file paths that collide by equality or by one path being another's
+/// parent. The ownership sidecar participates in every generated output set.
+pub(crate) fn validate_managed_output_path_overlaps<'a>(
+    paths: impl IntoIterator<Item = &'a Path>,
 ) -> Result<(), GeneratorError> {
-    for path in files.keys() {
-        validate_generated_writer_path(path, "generated file", true)?;
-    }
-    for path in symlinks.keys() {
-        validate_generated_writer_path(path, "generated symlink", false)?;
+    let mut paths = paths.into_iter().map(Path::to_path_buf).collect::<Vec<_>>();
+    paths.push(PathBuf::from(OWNERSHIP_STATE));
+    paths.sort();
+    for (index, left) in paths.iter().enumerate() {
+        for right in paths.iter().skip(index + 1) {
+            if left.starts_with(right) || right.starts_with(left) {
+                return Err(GeneratorError::usage(format!(
+                    "managed output paths overlap: `{}` and `{}`",
+                    left.display(),
+                    right.display()
+                )));
+            }
+        }
     }
     Ok(())
 }
 
-/// Return the canonical generator-owned path when a workflow basename aliases
-/// one of its reserved workflow outputs.
-pub(crate) fn generator_owned_workflow_name(name: &str) -> Option<&'static str> {
-    let path = Path::new(".github/workflows").join(name);
-    generator_owned_static_file_path(path.to_str()?)
+/// The generator-owned symlinks every render emits: exactly
+/// `.github/CLAUDE.md -> AGENTS.md`. Both pipelines share this map so the
+/// emitted link can never drift between schemas.
+pub(crate) fn generated_symlinks() -> BTreeMap<PathBuf, PathBuf> {
+    BTreeMap::from([(
+        PathBuf::from(GITHUB_CLAUDE_MD),
+        PathBuf::from(GITHUB_CLAUDE_MD_TARGET),
+    )])
 }
 
-/// Generated outputs never include symlinks. The empty map is explicit so
-/// both schema pipelines share the same writer contract and repository
-/// symlinks remain rejected by the ownership checks.
-pub(crate) fn generated_symlinks() -> BTreeMap<PathBuf, PathBuf> {
-    BTreeMap::new()
+/// Whether `relative` is the one generator-owned symlink path. The writer
+/// lifts its symlink refusal only behind this predicate.
+pub(crate) fn is_generator_owned_symlink(relative: &Path) -> bool {
+    relative == Path::new(GITHUB_CLAUDE_MD)
 }
 
 /// GitHub's CODEOWNERS reference, linked from every reviewer validation
@@ -1809,9 +308,9 @@ pub(crate) const SOURCE_PROFILE: &str = env!("VELNOR_WORKFLOW_PROFILE");
 /// installing the runtime artifact's policy binary so `--check` never needs
 /// the network.
 pub const VELNOR_WORKFLOW_PINNED_BINARY_ENV: &str = "VELNOR_WORKFLOW_PINNED_BINARY";
-/// Names the candidate binary downloaded from the same-repository PR run.
-/// The candidate renderer is untrusted and must never replace the pinned
-/// policy runtime slot; policy consumes it only with its matching manifest.
+/// Names the same-PR candidate renderer. It is separate from the trusted
+/// pinned renderer so a candidate can never replace the pin before Policy
+/// verifies it against the audited tree.
 pub const VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV: &str = "VELNOR_WORKFLOW_CANDIDATE_BINARY";
 /// Names the candidate manifest binding the env-slot candidate binary: the
 /// `candidate-manifest.json` the policy job's acquire step downloaded beside
@@ -1821,20 +320,6 @@ pub const VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV: &str = "VELNOR_WORKFLOW_CANDIDAT
 /// `--candidate-manifest` overrides this fallback; empty or missing disables
 /// the env-slot candidate.
 pub const VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV: &str = "VELNOR_WORKFLOW_CANDIDATE_MANIFEST";
-
-/// The published base validator used during candidate-workflow bootstrap.
-/// Keeping `[generator].revision` at this exact pin preserves the established
-/// generated workflow bytes. Promoting the pin to a newer renderer opts into
-/// the candidate artifact wiring after that renderer is available as the
-/// trusted validator.
-pub(crate) const LEGACY_CANDIDATE_POLICY_PIN: &str = "e988d793937c044275e4086b00856444c60f6ab8";
-
-/// The legacy pin is the typed opt-out sentinel for candidate workflow
-/// wiring. The pin change is the promotion step; no extra config key is
-/// introduced for older validators to reject.
-pub(crate) fn candidate_artifact_wiring_enabled(revision: &str) -> bool {
-    revision != LEGACY_CANDIDATE_POLICY_PIN
-}
 // The D19 generator pin is not a source literal: a constant naming the commit
 // that carries it can never equal that commit, so a tree rendered by the
 // pinned generator could never be byte-identical to the tree that declares the
@@ -1848,7 +333,7 @@ const MR_BOXINGTON_VERSION: &str = "1.12.0";
 /// mbx's action-store budget setting (`gc.max_size`). It is the bound the
 /// automatic sweep prunes the store to after a build, and the only budget
 /// that applies on a hosted runner: `gc.max_total_size` is unset there and
-/// governs the Velnor hosts' combined store (`config/fleet/velnor-host.env`).
+/// applies to persistent local-host stores.
 pub(crate) const MR_BOXINGTON_STORE_BUDGET_ENV: &str = "MBX_GC_MAX_SIZE";
 /// The action-store budget every GitHub-backend Mr. Boxington job exports.
 ///
@@ -2336,26 +821,18 @@ impl UnitKind {
 }
 
 /// One typed validation phase of a unit's commands. The scan tags each
-/// command it structures (Rust fmt/clippy/test/doctest, Swift format/lint,
-/// `XcodeGen` generation, and Swift build/run/test); contract primitives tag
-/// commands they must prepend as preconditions. Generated jobs run one step
-/// per runnable phase behind `--phase`, and the prerequisite tier selects the
-/// check phase. Phase membership is positional data, never substring
-/// detection on command text.
+/// command it structures (Rust fmt/clippy/test/doctest, `XcodeGen` generation,
+/// and Swift build/run/test); generated jobs run
+/// one step per runnable phase behind `--phase`, and the prerequisite tier
+/// selects the check phase. Phase membership is positional data, never
+/// substring detection on command text.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ValidationPhase {
-    /// A command required before the scanner-derived validation phases, such
-    /// as regeneration or a product rebuild.
-    Precondition,
     Fmt,
     Clippy,
     Test,
     Doctest,
-    #[serde(rename = "swift-format")]
-    SwiftFormat,
-    #[serde(rename = "swift-lint")]
-    SwiftLint,
     #[serde(rename = "xcodegen-generate")]
     XcodegenGenerate,
     #[serde(rename = "swift-build")]
@@ -2368,18 +845,15 @@ pub enum ValidationPhase {
 }
 
 impl ValidationPhase {
-    /// Runnable phases begin with preconditions, then formatting, lints,
-    /// tests, doctests, Swift style checks, `XcodeGen` generation, Swift builds
-    /// and executable runs, then tests. `Check` is prerequisite-only and never
+    /// The runnable phases in step order: formatting first, then lints, then
+    /// tests, then doctests, then `XcodeGen` generation, then Swift builds and
+    /// executable runs, then tests. `Check` is prerequisite-only and never
     /// renders a validation step.
-    pub(crate) const RUNNABLE: [Self; 11] = [
-        Self::Precondition,
+    pub(crate) const RUNNABLE: [Self; 8] = [
         Self::Fmt,
         Self::Clippy,
         Self::Test,
         Self::Doctest,
-        Self::SwiftFormat,
-        Self::SwiftLint,
         Self::XcodegenGenerate,
         Self::SwiftBuild,
         Self::SwiftRun,
@@ -2389,13 +863,10 @@ impl ValidationPhase {
     /// The phase a `--phase` selector or `phases` TOML entry names.
     pub(crate) fn parse(value: &str) -> Option<Self> {
         Some(match value {
-            "precondition" => Self::Precondition,
             "fmt" => Self::Fmt,
             "clippy" => Self::Clippy,
             "test" => Self::Test,
             "doctest" => Self::Doctest,
-            "swift-format" => Self::SwiftFormat,
-            "swift-lint" => Self::SwiftLint,
             "xcodegen-generate" => Self::XcodegenGenerate,
             "swift-build" => Self::SwiftBuild,
             "swift-run" => Self::SwiftRun,
@@ -2409,13 +880,10 @@ impl ValidationPhase {
     /// `validation_phases` workflow-input record.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::Precondition => "precondition",
             Self::Fmt => "fmt",
             Self::Clippy => "clippy",
             Self::Test => "test",
             Self::Doctest => "doctest",
-            Self::SwiftFormat => "swift-format",
-            Self::SwiftLint => "swift-lint",
             Self::XcodegenGenerate => "xcodegen-generate",
             Self::SwiftBuild => "swift-build",
             Self::SwiftRun => "swift-run",
@@ -2427,13 +895,10 @@ impl ValidationPhase {
     /// The GitHub Actions step name of one runnable phase.
     pub(crate) fn step_name(self) -> &'static str {
         match self {
-            Self::Precondition => "Preconditions",
             Self::Fmt => "Formatting check",
             Self::Clippy => "Clippy check",
             Self::Test => "Tests",
             Self::Doctest => "Doctests",
-            Self::SwiftFormat => "Swift format check",
-            Self::SwiftLint => "Swift lint check",
             Self::XcodegenGenerate => "XcodeGen project generation",
             Self::SwiftBuild => "Swift build",
             Self::SwiftRun => "Swift executable runs",
@@ -2452,19 +917,11 @@ impl ValidationPhase {
     }
 
     /// Native Apple phases do not need a Rust-style prerequisite tier. Any
-    /// other phase set must carry an explicit check command. A precondition
-    /// also does not imply a Rust-style check; Apple units can prepend one to
-    /// their typed phases without acquiring a synthetic Cargo check.
+    /// other phase set must carry an explicit check command.
     pub(crate) fn allows_empty_prerequisites(self) -> bool {
         matches!(
             self,
-            Self::Precondition
-                | Self::SwiftFormat
-                | Self::SwiftLint
-                | Self::XcodegenGenerate
-                | Self::SwiftBuild
-                | Self::SwiftRun
-                | Self::SwiftTest
+            Self::XcodegenGenerate | Self::SwiftBuild | Self::SwiftRun | Self::SwiftTest
         )
     }
 }
@@ -2495,9 +952,8 @@ pub struct Unit {
     /// `i` names the phase command `i` belongs to. Empty means unphased
     /// (custom, policy, and Docker units keep the single legacy step). A
     /// phased unit keeps every command vector at exactly this length with no
-    /// lane overrides; typed precondition mutations prepend matching tags,
-    /// while any other mutation that cannot preserve the alignment clears the
-    /// phases instead.
+    /// lane overrides; any mutation that cannot preserve the alignment
+    /// clears the phases instead.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) phases: Vec<ValidationPhase>,
     /// The prerequisite-tier check commands, built by the scan from the
@@ -2607,126 +1063,9 @@ impl Unit {
             .collect()
     }
 
-    /// Prefix commands required before validation on every command lane.
-    /// Phased units get one `precondition` tag per inserted command, so their
-    /// existing phase identity and order remain intact. A phased unit must be
-    /// in one of two complete states across all lanes: every lane already has
-    /// the whole prefix, or no lane has any of it. Refusing partial state
-    /// prevents a PR/full or provider override from acquiring a different
-    /// positional phase map.
-    pub(crate) fn prepend_precondition_commands(
-        &mut self,
-        commands: &[String],
-    ) -> Result<(), GeneratorError> {
-        let mut requested = Vec::new();
-        for command in commands {
-            if !requested.contains(command) {
-                requested.push(command.clone());
-            }
-        }
-        if requested.is_empty() {
-            return Ok(());
-        }
-
-        let phased = self.has_phases();
-        let phase_count = self.phases.len();
-        let mut lanes = vec![
-            ("shared PR", &mut self.pr_commands),
-            ("shared full", &mut self.full_commands),
-        ];
-        if let Some(commands) = self.github_pr_commands.as_mut() {
-            lanes.push(("GitHub PR", commands));
-        }
-        if let Some(commands) = self.github_full_commands.as_mut() {
-            lanes.push(("GitHub full", commands));
-        }
-        if let Some(commands) = self.velnor_pr_commands.as_mut() {
-            lanes.push(("Velnor PR", commands));
-        }
-        if let Some(commands) = self.velnor_full_commands.as_mut() {
-            lanes.push(("Velnor full", commands));
-        }
-
-        if phased {
-            for (lane, commands) in &lanes {
-                if commands.len() != phase_count {
-                    return Err(GeneratorError::usage(format!(
-                        "unit `{}` has {phase_count} validation phases but {lane} carries {} commands; refusing a precondition insertion that would misalign phases",
-                        self.id,
-                        commands.len()
-                    )));
-                }
-            }
-
-            // 0 = no requested command anywhere, 1 = the complete requested
-            // prefix with no later duplicate, 2 = a partial or misplaced
-            // prefix. Only states 0 and 1 compose positionally.
-            let prefix_state = |lane: &[String]| {
-                if lane.starts_with(&requested)
-                    && !lane[requested.len()..]
-                        .iter()
-                        .any(|command| requested.contains(command))
-                {
-                    1_u8
-                } else if requested.iter().all(|command| !lane.contains(command)) {
-                    0_u8
-                } else {
-                    2_u8
-                }
-            };
-            let state = prefix_state(lanes[0].1);
-            if state == 2 || lanes.iter().any(|(_, lane)| prefix_state(lane) != state) {
-                return Err(GeneratorError::usage(format!(
-                    "unit `{}` has a partial or misplaced precondition across command lanes; all lanes must omit the gate or carry the same prefix",
-                    self.id
-                )));
-            }
-            if state == 1 {
-                if self.phases[..requested.len()]
-                    .iter()
-                    .any(|phase| *phase != ValidationPhase::Precondition)
-                {
-                    return Err(GeneratorError::usage(format!(
-                        "unit `{}` has a precondition command without a matching precondition phase tag",
-                        self.id
-                    )));
-                }
-                return Ok(());
-            }
-            if self.phases.contains(&ValidationPhase::Precondition) {
-                return Err(GeneratorError::usage(format!(
-                    "unit `{}` has a precondition phase tag without a matching command prefix",
-                    self.id
-                )));
-            }
-
-            for (_, lane) in &mut lanes {
-                for command in requested.iter().rev() {
-                    lane.insert(0, command.clone());
-                }
-            }
-            let mut phase_tags = vec![ValidationPhase::Precondition; requested.len()];
-            phase_tags.extend(self.phases.iter().copied());
-            self.phases = phase_tags;
-            return Ok(());
-        }
-
-        // Unphased units have no positional tags to preserve. Normalize each
-        // lane to one copy of the requested prefix, including provider
-        // overrides, so a gate cannot be silently skipped on one executor.
-        for (_, lane) in &mut lanes {
-            for command in requested.iter().rev() {
-                lane.retain(|candidate| candidate != command);
-                lane.insert(0, command.clone());
-            }
-        }
-        Ok(())
-    }
-
     /// Drop the phase model after a command mutation that cannot preserve
     /// the positional alignment: the unit keeps every command in order and
-    /// verifies through the single legacy step. Typed precondition mutations
-    /// use [`Self::prepend_precondition_commands`] instead.
+    /// verifies through the single legacy step.
     pub(crate) fn clear_phases(&mut self) {
         self.phases.clear();
         self.check_commands.clear();
@@ -2877,8 +1216,6 @@ pub(crate) struct CheckProfileSpec {
     pub(crate) needs: Vec<String>,
     pub(crate) timeout_minutes: u32,
     pub(crate) artifacts: Vec<String>,
-    /// Whether artifact paths are exact required files. Generation-time only.
-    pub(crate) artifacts_required: bool,
     /// An advisory profile reports without gating: the rendered job carries
     /// `continue-on-error`.
     pub(crate) advisory: bool,
@@ -3123,9 +1460,6 @@ pub struct ProjectConfig {
     pub(crate) actionlint_config_variables_null: bool,
     /// Require the generated CI aggregate check to conclude the workflow.
     pub(crate) ci_required: bool,
-    /// Enable the generation-only empty-selection proof in required
-    /// aggregates. The flag is intentionally absent from runtime `project.toml`.
-    pub(crate) empty_selection_proof: bool,
     /// Status-check contexts the repository ruleset gates on that `ci-pr.yml`
     /// or `ci-policy.yml` must expose as job display names.
     pub(crate) ruleset_required_status_checks: Vec<String>,
@@ -3209,7 +1543,7 @@ pub(crate) struct ReviewerRule {
     pub(crate) owners: Vec<String>,
 }
 
-pub(crate) fn default_workflow_files() -> Vec<String> {
+fn default_workflow_files() -> Vec<String> {
     vec![
         "ci-pr.yml".to_owned(),
         "ci-policy.yml".to_owned(),
@@ -3413,10 +1747,13 @@ fn scan_target(
     runners: RunnerMode,
     default_branch: &str,
 ) -> Result<ScannedTarget, GeneratorError> {
-    // Validate the complete repository boundary before config discovery or
-    // detector reads can follow a repository-controlled link.
-    scan::file_walk::validate_scan_root(root)?;
     let generation = config::discover(root)?;
+    let declared_static_outputs = generation
+        .as_ref()
+        .into_iter()
+        .flat_map(config::RepoGenerationConfig::static_files)
+        .filter_map(|row| row.file().map(PathBuf::from))
+        .collect::<BTreeSet<_>>();
     let exclude = generation
         .as_ref()
         .map(config::RepoGenerationConfig::scan_exclude)
@@ -3432,7 +1769,13 @@ fn scan_target(
         .as_ref()
         .and_then(config::RepoGenerationConfig::default_branch)
         .unwrap_or(default_branch);
-    let shape = scan::scan_shape(root, scan_runners, scan_default_branch, exclude)?;
+    let shape = scan::scan_shape_with_declared_outputs(
+        root,
+        scan_runners,
+        scan_default_branch,
+        exclude,
+        &declared_static_outputs,
+    )?;
     let mut config = ProjectConfig::from(shape.clone());
     if let Some(generation) = &generation {
         apply_generation_config(&mut config, generation, root)?;
@@ -4193,6 +2536,9 @@ fn apply_generation_config(
     generation: &config::RepoGenerationConfig,
     root: &Path,
 ) -> Result<(), GeneratorError> {
+    // Static output rows are used by `read_static_files`; reject malformed
+    // paths before they can be joined to the repository root or opened.
+    config::validate_static_files(generation.static_files())?;
     if let Some(repository) = generation.repository() {
         repository.clone_into(&mut config.repository);
     }
@@ -4231,9 +2577,6 @@ fn apply_generation_config(
     }
     if let Some(ci_required) = generation.ci_required() {
         config.ci_required = ci_required;
-    }
-    if let Some(empty_selection_proof) = generation.empty_selection_proof() {
-        config.empty_selection_proof = empty_selection_proof;
     }
     if !generation.ruleset_required_status_checks().is_empty() {
         config.ruleset_required_status_checks =
@@ -4535,7 +2878,6 @@ fn apply_check_profiles(
                 .and_then(|timeout| u32::try_from(timeout).ok())
                 .unwrap_or(primitives::check_profiles::DEFAULT_CHECK_PROFILE_TIMEOUT_MINUTES),
             artifacts: row.artifacts().unwrap_or_default().to_vec(),
-            artifacts_required: row.artifacts_required(),
             advisory: row.status().is_some_and(|status| status == "advisory"),
             env: row.env().clone(),
             permissions: row.permissions().clone(),
@@ -5353,7 +3695,7 @@ fn parse_mise_task_names(root: &Path) -> Result<Vec<String>, GeneratorError> {
 
 /// Read the repository-local files the generated output owns verbatim. The
 /// repository owns the bytes at `source`; the generator owns the write to
-/// `file`, which stays inside `.github/`.
+/// `file`, which stays inside an approved generated output tree.
 ///
 /// # Errors
 /// Returns errors for a declared source that is missing, unreadable, or not
@@ -5363,14 +3705,49 @@ fn read_static_files(
     rows: &[config::StaticFileSection],
     root: &Path,
 ) -> Result<(), GeneratorError> {
+    // Keep this check at the I/O boundary as well as before the generation
+    // config is applied. Callers must never open a source on malformed rows.
+    config::validate_static_files(rows)?;
+    let output_paths = rows
+        .iter()
+        .filter_map(config::StaticFileSection::file)
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    if !output_paths.is_empty() {
+        reject_managed_symlink_ancestors(root, output_paths.iter())?;
+    }
+    let owned_paths = if rows.is_empty() {
+        BTreeSet::new()
+    } else {
+        crate::s2::generator_owned_output_paths(root)
+            .map_err(|error| GeneratorError::usage(error.to_string()))?
+    };
     for row in rows {
         let (Some(file), Some(source)) = (row.file(), row.source()) else {
             continue;
         };
-        let path = config::validate_static_file_source(root, source)?;
-        let content = fs::read_to_string(&path).map_err(|error| {
-            GeneratorError::io("read declared static file source", &path, &error)
-        })?;
+        let output_relative = PathBuf::from(file);
+        let output = output_relative.as_path();
+        let output_path = root.join(output);
+        reject_managed_symlink_ancestors(root, std::iter::once(&output_relative))?;
+        match fs::symlink_metadata(&output_path) {
+            Ok(_) if !owned_paths.contains(output) => {
+                return Err(GeneratorError::usage(format!(
+                    "refusing to claim existing unowned static output: {}; remove it or establish generator ownership before declaring it",
+                    output.display()
+                )));
+            }
+            Ok(_) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => {
+                return Err(GeneratorError::io(
+                    "inspect declared static output",
+                    &output_path,
+                    &error,
+                ));
+            }
+        }
+        let content = read_static_source_file(root, source)?;
         config.static_files.push(StaticFile {
             path: file.to_owned(),
             source: source.to_owned(),
@@ -5378,6 +3755,60 @@ fn read_static_files(
         });
     }
     Ok(())
+}
+
+/// Read a declared source without following symlinked parents or a symlinked
+/// leaf. The captured preimage also detects replacement while it is read.
+pub(crate) fn read_static_source_file(root: &Path, source: &str) -> Result<String, GeneratorError> {
+    if !is_normalized_repository_path(source) || is_generated_output_tree_path(Path::new(source)) {
+        return Err(GeneratorError::usage(format!(
+            "static source must be a normalized repository-relative path outside `.github/` and `config/`, found `{source}`"
+        )));
+    }
+    let relative = Path::new(source);
+    let mut directory = root.to_path_buf();
+    if let Some(parent) = relative.parent() {
+        for component in parent.components() {
+            directory.push(component);
+            match fs::symlink_metadata(&directory) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(GeneratorError::usage(format!(
+                        "refusing symlinked static source directory: {}",
+                        directory.display()
+                    )));
+                }
+                Ok(metadata) if !metadata.is_dir() => {
+                    return Err(GeneratorError::usage(format!(
+                        "static source parent is not a directory: {}",
+                        directory.display()
+                    )));
+                }
+                Ok(_) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error) => {
+                    return Err(GeneratorError::io(
+                        "inspect static source directory",
+                        &directory,
+                        &error,
+                    ));
+                }
+            }
+        }
+    }
+    let path = root.join(relative);
+    let preimage = capture_file_preimage(&path, relative)?;
+    let bytes = preimage.bytes().ok_or_else(|| {
+        GeneratorError::usage(format!(
+            "declared static source is missing: {}",
+            path.display()
+        ))
+    })?;
+    String::from_utf8(bytes.to_vec()).map_err(|_| {
+        GeneratorError::usage(format!(
+            "declared static source must be UTF-8: {}",
+            path.display()
+        ))
+    })
 }
 
 /// Carry validated `[[reviewers]]` rows onto the config in declaration
@@ -6032,9 +4463,8 @@ const MR_BOXINGTON_STORE_BUDGET_STEP: &str = "Bound the Mr. Boxington store";
 /// sweep between two Cargo commands evicts action results the post-step
 /// export still needs; the budget is therefore a property of "runs mbx on a
 /// hosted runner", checked over every rendered workflow instead of being
-/// remembered per job. A local-backend job runs on a Velnor host whose
-/// persistent store is budgeted by `config/fleet/velnor-host.env`; exporting
-/// the hosted ceiling there would shrink the shared store.
+/// remembered per job. A local-backend job uses a separately budgeted
+/// persistent store; exporting the hosted ceiling there would shrink it.
 ///
 /// # Errors
 /// Returns a usage error naming the workflow and job that breaks the rule.
@@ -6070,8 +4500,8 @@ pub(crate) fn validate_hosted_mr_boxington_store_budget(
             } else if budget.is_some() {
                 return Err(GeneratorError::usage(format!(
                     "{path}: job `{job}` exports the hosted Mr. Boxington store budget `{export}` \
-                     around a local-backend store; the Velnor host budgets its persistent store \
-                     in config/fleet/velnor-host.env, and the hosted ceiling would shrink it"
+                     around a local-backend store; the local persistent store has a separate \
+                     budget, and the hosted ceiling would shrink it"
                 )));
             }
         }
@@ -6967,9 +5397,7 @@ fn refresh_velnor_action_pins(template: &str) -> String {
 /// entrypoint (`Policy`, `pull_request_target` + `workflow_dispatch`) and the
 /// same job inside the trusted aggregates (`ci-main.yml`, `nightly.yml`),
 /// where a push to the default branch proves the validator the branch now
-/// carries passes on its own tree. The policy job grants only \`actions: read\`,
-/// \`contents: read\`, and \`pull-requests: read\` so it can inspect the
-/// candidate run and checkout.
+/// carries passes on its own tree.
 pub(crate) struct PolicyJobSpec<'a> {
     pub(crate) name: &'a str,
     /// The validator pin: the `velnor-workflow` commit whose `policy`
@@ -6992,10 +5420,7 @@ pub(crate) struct PolicyJobSpec<'a> {
     /// Declared `[policy]` contexts passed to `--ruleset-contexts` when the
     /// rulesets API answers 403 on private repositories.
     pub(crate) declared_ruleset_contexts: &'a str,
-    pub(crate) candidate_artifact_wiring: bool,
 }
-
-const HOSTED_POLICY_RUNS_ON: &str = "ubuntu-24.04";
 
 /// Shell fragment reading the audited tree's declared generator pin into
 /// `$pin` (fails closed when the tree declares none): `[generator]
@@ -7009,12 +5434,33 @@ fn audited_pin_script() -> &'static str {
 "#
 }
 
-/// Compatibility renderer used while `[generator].revision` is the legacy
-/// bootstrap pin. It looks up the artifact for `HEAD_SHA`, verifies its
-/// manifest, digest, and candidate closure, then exports it through the
-/// existing pinned-binary slot plus its manifest. Keep this fragment byte
-/// compatible with the bootstrap workflow until the pin is promoted.
-fn policy_candidate_step_legacy(revision: &str) -> String {
+/// Owner policy step acquiring the PR run's candidate generator product.
+/// When the audited pin shares the base validator's closure AND the tree
+/// matches the pin's render the step exits immediately (the Stage-0
+/// validator renders). A same-closure tree that differs from the pin's
+/// render falls through to the candidate path: that is a generator change
+/// in flight, and exiting early would strand the validator with no
+/// candidate binding (manifest cleared, pin leg red). Otherwise the step
+/// waits for the same-repository PR run at the audited head to publish the
+/// candidate artifact the Rust unit job packaged, verifies its manifest
+/// bindings and digest, requires the manifest closure to equal the audited
+/// head's candidate closure in full (not just the artifact-name prefix),
+/// and exports the binary as the candidate binary plus its manifest for the
+/// validator's manifest binding. It never executes the candidate. The trusted
+/// pinned binary remains separate.
+/// The poll name and the manifest gate both
+/// key off the head closure — the same identity the publisher names the
+/// artifact by and the validator's `wanted` binding checks — so the three
+/// legs rendezvous on one digest. Candidate closure and render probes run
+/// only inside the token-free policy evaluation, after semantic audit and
+/// actionlint have read the authoritative checkout. Fork generator changes fail closed: only same-repository runs
+/// are even considered. The same-repository select compares the embedded
+/// `.head_repository.id` object: the runs-list endpoint exposes no
+/// `.head_repository_id` scalar, and selecting on it matches nothing.
+/// The artifact check pipes the listing through real jq for the same
+/// class of reason: gh api has no `-e` flag, so gh-side evaluation can
+/// never report the match.
+fn policy_candidate_step(revision: &str) -> String {
     format!(
         r#"      - name: Acquire candidate generator product
         working-directory: policy-checkout
@@ -7037,6 +5483,7 @@ fn policy_candidate_step_legacy(revision: &str) -> String {
             # the diagnosis, on a match it is one line.
             if velnor-workflow --plain --check; then
               echo "pin $pin shares the base closure and renders the tree; the Stage-0 validator renders"
+              echo "{VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV}=" >> "$GITHUB_ENV"
               echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=" >> "$GITHUB_ENV"
               exit 0
             fi
@@ -7076,9 +5523,9 @@ fn policy_candidate_step_legacy(revision: &str) -> String {
           [[ -n "$run_id" ]] || {{ echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }}
           candidate="$RUNNER_TEMP/velnor-workflow-candidate"
           rm -rf "$candidate"
-          mkdir -p "$candidate"
+          install -d -m 0700 "$candidate"
           gh run download "$run_id" --name "$name" --dir "$candidate" --repo "$GITHUB_REPOSITORY"
-          jq -e --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and (.revision | test("^[0-9a-f]{{40}}$")) and (.build_revision | test("^[0-9a-f]{{40}}$")) and (.closure | test("^[0-9a-f]{{64}}$")) and (.binary_sha256 | test("^[0-9a-f]{{64}}$"))' "$candidate/candidate-manifest.json" >/dev/null
+          jq -e --arg head "$HEAD_SHA" --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and (.revision == $head) and (.build_revision | test("^[0-9a-f]{{40}}$")) and (.closure | test("^[0-9a-f]{{64}}$")) and (.binary_sha256 | test("^[0-9a-f]{{64}}$"))' "$candidate/candidate-manifest.json" >/dev/null
           if command -v sha256sum >/dev/null 2>&1; then
             actual="$(sha256sum "$candidate/velnor-workflow" | awk '{{print $1}}')"
           else
@@ -7089,149 +5536,8 @@ fn policy_candidate_step_legacy(revision: &str) -> String {
           chmod 0755 "$candidate/velnor-workflow"
           manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
           [[ "$manifest_closure" == "$head_candidate" ]] || {{ echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }}
-          echo "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
-          echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
-"#,
-        pin_script = audited_pin_script(),
-    )
-}
-
-/// Owner policy step acquiring the PR run's candidate generator product.
-/// When the audited pin shares the base validator's closure AND the tree
-/// matches the pin's render the step exits immediately (the Stage-0
-/// validator renders). A same-closure tree that differs from the pin's
-/// render falls through to the candidate path: that is a generator change
-/// in flight, and exiting early would strand the validator with no
-/// candidate binding (manifest cleared, pin leg red). Otherwise the step
-/// waits for the same-repository PR run at the resolved candidate head to
-/// publish the artifact the Rust unit job packaged, verifies its manifest
-/// bindings and digest, requires the candidate closure to equal the audited
-/// render closure before any candidate execution, and exports the binary in
-/// the dedicated candidate slot plus its manifest for the validator's
-/// binding. The trusted pinned binary slot stays unchanged. The poll name
-/// keys off the candidate closure; the manifest gate binds that closure to
-/// both the candidate revision and the audited render revision, so a squash
-/// merge whose main side changed closure inputs fails with an actionable
-/// rebase/rebuild error. The `--closure` probe runs later in a
-/// token-free policy step. The candidate is untrusted code and can inspect
-/// its parent process, so child-only environment clearing in this
-/// token-bearing acquisition step is not sufficient.
-/// On the trusted main push after a squash merge, the event SHA is the new
-/// squash commit, not the PR head that produced the candidate artifact. The
-/// step resolves that commit to exactly one merged, same-repository PR before
-/// polling; a direct push or an ambiguous association fails closed. Fork
-/// generator changes fail closed: only same-repository runs are even
-/// considered. The same-repository select compares the embedded
-/// `.head_repository.id` object: the runs-list endpoint exposes no
-/// `.head_repository_id` scalar, and selecting on it matches nothing.
-/// The artifact check pipes the listing through real jq for the same
-/// class of reason: gh api has no `-e` flag, so gh-side evaluation can
-/// never report the match.
-#[expect(
-    clippy::too_many_lines,
-    reason = "the candidate acquisition shell keeps its provenance gates together"
-)]
-fn policy_candidate_step(revision: &str, default_branch: &str) -> String {
-    format!(
-        r#"      - name: Acquire candidate generator product
-        working-directory: policy-checkout
-        env:
-          GH_TOKEN: ${{{{ github.token }}}}
-          EVENT_NAME: ${{{{ github.event_name }}}}
-          MERGE_SHA: ${{{{ github.sha }}}}
-          PR_HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
-          PR_HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name }}}}
-          DEFAULT_BRANCH: {default_branch}
-          BASE_PIN: {revision}
-        run: |
-          set -euo pipefail
-{pin_script}          base_closure="$(velnor-workflow closure --rev="$BASE_PIN")"
-          pin_closure="$(velnor-workflow closure --rev="$pin")"
-          if [[ "$pin_closure" == "$base_closure" ]]; then
-            # Same closure means the running base validator IS the pin's
-            # renderer, so --check decides tree==pin-render with no extra
-            # provisioning. A match exits early; a differ falls through to
-            # the candidate path (a generator change in flight) instead of
-            # stranding the validator with a cleared manifest and a red pin
-            # leg. The check output stays visible: on a fall-through it is
-            # the diagnosis, on a match it is one line.
-            if velnor-workflow --plain --check; then
-              echo "pin $pin shares the base closure and renders the tree; the Stage-0 validator renders"
-              echo "{VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV}=" >> "$GITHUB_ENV"
-              echo "{VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV}=" >> "$GITHUB_ENV"
-              exit 0
-            fi
-            echo "pin $pin shares the base closure but the tree differs from its render; falling through to the candidate path"
-          fi
-          if [[ "$EVENT_NAME" == "push" ]]; then
-            merged_pulls="$(gh api "repos/$GITHUB_REPOSITORY/commits/$MERGE_SHA/pulls" | jq -c --arg merge_sha "$MERGE_SHA" --arg repository "$GITHUB_REPOSITORY" --arg default_branch "$DEFAULT_BRANCH" '[.[] | select(.merge_commit_sha == $merge_sha and .merged_at != null and .base.ref == $default_branch and .base.repo.full_name == $repository and .head.repo.full_name == $repository) | {{head_sha: .head.sha, head_repository: .head.repo.full_name}}]')"
-            if [[ "$(jq 'length' <<<"$merged_pulls")" != "1" ]]; then
-              echo "::error::push $MERGE_SHA is not associated with exactly one merged same-repository pull request; direct pushes and ambiguous squash merges fail closed" >&2
-              exit 1
-            fi
-            CANDIDATE_SHA="$(jq -er '.[0].head_sha' <<<"$merged_pulls")"
-            HEAD_REPOSITORY="$(jq -er '.[0].head_repository' <<<"$merged_pulls")"
-            RENDER_SHA="$MERGE_SHA"
-          elif [[ "$EVENT_NAME" == "pull_request_target" ]]; then
-            CANDIDATE_SHA="$PR_HEAD_SHA"
-            HEAD_REPOSITORY="$PR_HEAD_REPOSITORY"
-            RENDER_SHA="$PR_HEAD_SHA"
-            [[ -n "$CANDIDATE_SHA" && -n "$HEAD_REPOSITORY" ]] || {{ echo "::error::pull_request_target has no same-repository head; candidate lookup fails closed" >&2; exit 1; }}
-          elif [[ "$EVENT_NAME" != "pull_request_target" ]]; then
-            echo "::error::candidate lookup requires pull_request_target or a squash-merge push, got $EVENT_NAME" >&2
-            exit 1
-          fi
-          [[ "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || {{ echo "::error::generator changes from forks cannot be verified here; open the generator change from a branch of $GITHUB_REPOSITORY" >&2; exit 1; }}
-          if ! git cat-file -e "$CANDIDATE_SHA^{{commit}}" 2>/dev/null; then
-            git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$CANDIDATE_SHA"
-          fi
-          head_candidate="$(velnor-workflow closure --rev="$CANDIDATE_SHA" --candidate)"
-          render_candidate="$(velnor-workflow closure --rev="$RENDER_SHA" --candidate)"
-          name="velnor-workflow-candidate-${{head_candidate:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}"
-          deadline=$((SECONDS + 900))
-          run_id=""
-          while (( SECONDS < deadline )); do
-            runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml/runs?head_sha=$CANDIDATE_SHA&event=pull_request&per_page=5" --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)]')"
-            waiting=false
-            seen=false
-            while read -r candidate_run; do
-              test "$candidate_run" != '' || continue
-              seen=true
-              status="$(jq -r .status <<<"$candidate_run")"
-              id="$(jq -r .id <<<"$candidate_run")"
-              # $name in the filter is a jq variable, not a shell expansion.
-              # shellcheck disable=SC2016
-              if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" | jq -e --arg name "$name" '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0' >/dev/null; then
-                run_id="$id"
-                break 2
-              fi
-              [[ "$status" == "completed" ]] || waiting=true
-            done <<<"$(jq -c '.[]' <<<"$runs")"
-            # No runs yet means the API has not indexed the sibling run, not
-            # that it will never come: keep polling until the deadline.
-            [[ "$seen" == "true" ]] || waiting=true
-            [[ "$waiting" == "true" ]] || {{ echo "::error::no same-repository PR run published candidate $name" >&2; exit 1; }}
-            sleep 15
-          done
-          [[ -n "$run_id" ]] || {{ echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }}
-          candidate="$RUNNER_TEMP/velnor-workflow-candidate"
-          rm -rf "$candidate"
-          mkdir -p "$candidate"
-          gh run download "$run_id" --name "$name" --dir "$candidate" --repo "$GITHUB_REPOSITORY"
-          jq -e --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" --arg revision "$CANDIDATE_SHA" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and .revision == $revision and (.revision | test("^[0-9a-f]{{40}}$")) and (.closure | test("^[0-9a-f]{{64}}$")) and (.build_revision | test("^[0-9a-f]{{40}}$")) and (.binary_sha256 | test("^[0-9a-f]{{64}}$"))' "$candidate/candidate-manifest.json" >/dev/null
-          if command -v sha256sum >/dev/null 2>&1; then
-            actual="$(sha256sum "$candidate/velnor-workflow" | awk '{{print $1}}')"
-          else
-            actual="$(shasum -a 256 "$candidate/velnor-workflow" | awk '{{print $1}}')"
-          fi
-          expected="$(jq -er .binary_sha256 "$candidate/candidate-manifest.json")"
-          [[ "$actual" == "$expected" ]] || {{ echo "::error::candidate digest mismatch" >&2; exit 1; }}
-          chmod 0755 "$candidate/velnor-workflow"
-          manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
-          [[ "$manifest_closure" == "$head_candidate" ]] || {{ echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }}
-          [[ "$manifest_closure" == "$render_candidate" ]] || {{ echo "::error::candidate revision $CANDIDATE_SHA closure $manifest_closure differs from audited render $RENDER_SHA closure $render_candidate; update the PR branch/rebuild the candidate after main changes" >&2; exit 1; }}
           echo "{VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
-          echo "{VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV}=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
+          echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
 "#,
         pin_script = audited_pin_script(),
     )
@@ -7299,15 +5605,9 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
         trusted_gate,
         default_branch,
         declared_ruleset_contexts,
-        candidate_artifact_wiring,
     } = *spec;
     let trusted_gate = trusted_gate.unwrap_or_default();
     let hosted = cache_backend == "github";
-    let runner = if hosted {
-        HOSTED_POLICY_RUNS_ON
-    } else {
-        runner
-    };
     let owner = !repository.is_empty() && repository == workflow_setup_action_repository();
     let ruleset_step = if hosted {
         format!(
@@ -7355,30 +5655,18 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
     };
     let renderer = if hosted {
         if owner {
-            if candidate_artifact_wiring {
-                policy_candidate_step(revision, default_branch)
-            } else {
-                policy_candidate_step_legacy(revision)
-            }
+            policy_candidate_step(revision)
         } else {
             policy_renderer_steps(repository, revision)
         }
     } else {
         String::new()
     };
-    let job_rendered = format!(
-        "  policy:\n    name: {name}\n{trusted_gate}    runs-on: {runner}\n    timeout-minutes: 20\n    # Trust invariant: this job runs the base branch's Stage-0 validator\n    # product against the audited tree under pull_request_target. It holds\n    # `contents: read` only, references no secrets, persists no credentials,\n    # and never compiles. When the audited tree differs from the declared\n    # pin's render, it additionally EXECUTES the PR run's prebuilt\n    # candidate generator — PR-built code, same-repository runs only, bound\n    # to the audited tree by manifest closure plus binary digest before\n    # execution — with no secret references, no persisted credentials, the\n    # read-only github.token confined to the Acquire/Ruleset API steps,\n    # and both candidate exec points tokenless.\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout repository history\n        uses: {}\n        with:\n          path: policy-checkout\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Check out audited head\n        working-directory: policy-checkout\n        env:\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n        run: |\n          set -euo pipefail\n          if ! git cat-file -e \"$HEAD_SHA^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"\n          fi\n          git checkout --quiet --detach \"$HEAD_SHA\"\n{setup_checkout}{validator}{renderer}{ruleset_step}      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: |\n          set -euo pipefail\n          velnor-workflow policy \\\n            --workflow-root \"$WORKFLOW_ROOT\" \\\n            --head-sha \"$HEAD_SHA\" \\\n            --base-sha \"$BASE_SHA\" \\\n            --candidate-manifest \"${{VELNOR_WORKFLOW_CANDIDATE_MANIFEST:-}}\" \\\n{policy_arguments}\n{actionlint_setup}      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
+    format!(
+        "  policy:\n    name: {name}\n{trusted_gate}    runs-on: {runner}\n    timeout-minutes: 20\n    # Trust invariant: this job runs the base branch's Stage-0 validator\n    # product against the audited tree under pull_request_target. It holds\n    # `contents: read` only, references no secrets, persists no credentials,\n    # and never compiles. When the audited tree differs from the declared\n    # pin's render, it additionally EXECUTES the PR run's prebuilt\n    # candidate generator — PR-built code, same-repository runs only, bound\n    # to the audited tree by manifest closure plus binary digest before\n    # execution — with no secret references, no persisted credentials, the\n    # read-only github.token confined to the Acquire/Ruleset API steps.\n    # Candidate code runs only in the token-free policy step, after trusted\n    # semantic and actionlint checks have read the checkout.\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout repository history\n        uses: {}\n        with:\n          path: policy-checkout\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Check out audited head\n        working-directory: policy-checkout\n        env:\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n        run: |\n          set -euo pipefail\n          if ! git cat-file -e \"$HEAD_SHA^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"\n          fi\n          git checkout --quiet --detach \"$HEAD_SHA\"\n{setup_checkout}{validator}{renderer}{ruleset_step}{actionlint_setup}      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: |\n          set -euo pipefail\n          velnor-workflow policy \\\n            --workflow-root \"$WORKFLOW_ROOT\" \\\n            --head-sha \"$HEAD_SHA\" \\\n            --base-sha \"$BASE_SHA\" \\\n            --candidate-manifest \"${{VELNOR_WORKFLOW_CANDIDATE_MANIFEST:-}}\" \\\n{policy_arguments}",
         ActionPin::Checkout.reference(),
         actionlint_setup = actionlint_setup_step(cache_backend),
-    );
-    if candidate_artifact_wiring {
-        job_rendered.replace(
-            "    permissions:\n      contents: read\n    steps:\n",
-            "    permissions:\n      actions: read\n      contents: read\n      pull-requests: read\n    steps:\n",
-        )
-    } else {
-        job_rendered
-    }
+    )
 }
 
 /// The step that provisions the pinned actionlint for the policy job. The
@@ -7454,7 +5742,7 @@ pub(crate) fn render_policy_entrypoint(config: &ProjectConfig) -> String {
     let runner = if velnor {
         control_plane_runner(config)
     } else {
-        yaml_scalar(POLICY_VALIDATION_RUNNER)
+        yaml_scalar(&config.github_runner)
     };
     let declared_ruleset_contexts = declared_ruleset_contexts_literal(config);
     let policy_job = policy_job(&PolicyJobSpec {
@@ -7466,7 +5754,6 @@ pub(crate) fn render_policy_entrypoint(config: &ProjectConfig) -> String {
         trusted_gate: gate.as_deref(),
         default_branch: &config.default_branch,
         declared_ruleset_contexts: &declared_ruleset_contexts,
-        candidate_artifact_wiring: candidate_artifact_wiring_enabled(&config.workflow_revision),
     });
     let concurrency = policy_concurrency_block(config);
     // `workflow_dispatch` lets a maintainer prove the validator the base
@@ -7596,6 +5883,9 @@ fn validate_both_lane_unit_coverage(
     }
     Ok(())
 }
+
+const CI_PR_WORKFLOW: &str = ".github/workflows/ci-pr.yml";
+const CI_POLICY_WORKFLOW: &str = ".github/workflows/ci-policy.yml";
 
 pub(crate) fn workflow_job_display_names(
     source: &str,
@@ -7895,46 +6185,10 @@ pub(crate) const HOSTED_WORKFLOW_RUNTIME_HOME: &str = "$HOME/.cache/velnor/workf
 /// the audited checkout's `.github-gen/velnor-workflow.toml`: the single
 /// source of truth is the audited tree, never the revision baked in when the
 /// workflow was rendered.
-#[expect(
-    clippy::panic,
-    reason = "invalid emitter manifests must fail closed before rendering policy"
-)]
 pub(crate) fn workflow_pinned_policy_runtime_velnor(checkout: &str) -> String {
-    let model_dependency = closure_inputs::current_package_has_model_dependency()
-        .unwrap_or_else(|error| panic!("resolve emitter model dependency: {error}"));
-    workflow_pinned_policy_runtime_velnor_with_model_dependency(checkout, model_dependency)
-}
-
-fn workflow_pinned_policy_runtime_velnor_with_model_dependency(
-    checkout: &str,
-    model_dependency: bool,
-) -> String {
     let product_repository = workflow_setup_action_repository();
-    let source_setup = if model_dependency {
-        let mut resolver = String::from(
-            "          listing=\"\"\n          if git -C \"$CHECKOUT_PATH\" cat-file -e \"$PINNED_REVISION^{commit}\" 2>/dev/null; then\n            listing=\"$(git -C \"$CHECKOUT_PATH\" ls-tree -r \"$PINNED_REVISION\" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)\"\n",
-        );
-        resolver.push_str(&closure_inputs::local_shell_resolver(
-            "PINNED_REVISION",
-            "CHECKOUT_PATH",
-            "          ",
-        ));
-        resolver.push_str(
-            r#"          else
-            tree="$(gh api "repos/$PRODUCT_REPOSITORY/git/trees/$PINNED_REVISION?recursive=1")" || { echo "::error::unknown generator revision $PINNED_REVISION" >&2; exit 1; }
-            [[ "$(jq -r '.truncated // false' <<<"$tree")" != "true" ]] || { echo "::error::tree API response is truncated; the closure cannot be proven" >&2; exit 1; }
-            listing="$(jq -r '[.tree[] | select(.type != "tree") | select(.path == "Cargo.toml" or .path == "Cargo.lock" or .path == "rust-toolchain.toml" or .path == "rust-toolchain" or (.path | startswith("crates/velnor-workflow/")) or (.path | startswith(".cargo/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"
-"#,
-        );
-        resolver.push_str(&closure_inputs::api_shell_resolver("          "));
-        resolver.push_str("          fi\n");
-        resolver
-    } else {
-        "          listing=\"\"\n          if git -C \"$CHECKOUT_PATH\" cat-file -e \"$PINNED_REVISION^{commit}\" 2>/dev/null; then\n            listing=\"$(git -C \"$CHECKOUT_PATH\" ls-tree -r \"$PINNED_REVISION\" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)\"\n          else\n            tree=\"$(gh api \"repos/$PRODUCT_REPOSITORY/git/trees/$PINNED_REVISION?recursive=1\")\" || { echo \"::error::unknown generator revision $PINNED_REVISION\" >&2; exit 1; }\n            [[ \"$(jq -r '.truncated // false' <<<\"$tree\")\" != \"true\" ]] || { echo \"::error::tree API response is truncated; the closure cannot be proven\" >&2; exit 1; }\n            listing=\"$(jq -r '[.tree[] | select(.type != \"tree\") | select(.path == \"Cargo.toml\" or .path == \"Cargo.lock\" or .path == \"rust-toolchain.toml\" or .path == \"rust-toolchain\" or (.path | startswith(\"crates/velnor-workflow/\")) or (.path | startswith(\".cargo/\"))) | \"\\(.mode) \\(.type) \\(.sha)\\t\\(.path)\"] | sort | join(\"\\n\")' <<<\"$tree\")\"\n          fi\n".to_owned()
-    };
-    let source_setup = source_setup.trim_end();
     format!(
-        "      - name: Provision pinned Velnor workflow policy runtime\n        shell: bash\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          CHECKOUT_PATH: {checkout}\n          PRODUCT_REPOSITORY: {product_repository}\n        run: |\n          set -euo pipefail\n          PINNED_REVISION=\"$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*\"([0-9a-f]{{40}})\".*/\\1/p' \"$CHECKOUT_PATH/.github-gen/velnor-workflow.toml\" | head -n 1)\"\n          test \"$PINNED_REVISION\" != '' || {{ echo \"::error::D19 pin missing from .github-gen/velnor-workflow.toml\" >&2; exit 1; }}\n          {source_setup}\n          test \"$listing\" != \'\' || {{ echo \"::error::revision $PINNED_REVISION has no closure inputs\" >&2; exit 1; }}\n          if command -v sha256sum >/dev/null 2>&1; then\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | sha256sum | awk '{{print $1}}')\"\n          else\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | shasum -a 256 | awk '{{print $1}}')\"\n          fi\n          binary=\"${{CARGO_HOME:-$HOME/.cargo}}/bin/velnor-workflow-policy\"\n          tag=\"velnor-workflow-runtime-v1-${{closure:0:16}}\"\n          asset=\"velnor-workflow-${{RUNNER_OS}}-${{RUNNER_ARCH}}\"\n          temporary=\"$(mktemp -d)\"\n          trap 'rm -rf \"$temporary\"' EXIT\n          if ! gh release download \"$tag\" --repo tailrocks/velnor --pattern manifest.json --dir \"$temporary\"; then\n            echo \"::error::no policy runtime product for revision $PINNED_REVISION (closure ${{closure:0:16}}); the mainline runtime-product publisher builds it after merge\" >&2\n            exit 1\n          fi\n          gh attestation verify \"$temporary/manifest.json\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main\n          jq -e --arg closure \"$closure\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg asset \"$asset\" '.closure == $closure and (.revision | test(\"^[0-9a-f]{{40}}$\")) and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{{64}}$\")) and .products[$platform].asset == $asset' \"$temporary/manifest.json\" >/dev/null\n          expected=\"$(jq -er --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" '.products[$platform].binary' \"$temporary/manifest.json\")\"\n          existing=\"\"\n          if [[ -x \"$binary\" ]]; then\n            if command -v sha256sum >/dev/null 2>&1; then\n              existing=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n            else\n              existing=\"$(shasum -a 256 \"$binary\" | awk '{{print $1}}')\"\n            fi\n          fi\n          if [[ \"$existing\" != \"$expected\" ]]; then\n            gh release download \"$tag\" --repo tailrocks/velnor --pattern \"$asset\" --dir \"$temporary\"\n            gh attestation verify \"$temporary/$asset\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main\n            if command -v sha256sum >/dev/null 2>&1; then\n              actual=\"$(sha256sum \"$temporary/$asset\" | awk '{{print $1}}')\"\n            else\n              actual=\"$(shasum -a 256 \"$temporary/$asset\" | awk '{{print $1}}')\"\n            fi\n            [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::policy runtime digest mismatch\" >&2; exit 1; }}\n            install -Dm0755 \"$temporary/$asset\" \"$binary\"\n          fi\n          check_slot() {{\n            if command -v sha256sum >/dev/null 2>&1; then\n              installed=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n            else\n              installed=\"$(shasum -a 256 \"$binary\" | awk '{{print $1}}')\"\n            fi\n            [[ \"$installed\" == \"$expected\" ]] || {{ echo \"::error::policy runtime slot changed after verification\" >&2; exit 1; }}\n          }}\n          check_slot\n          reported=\"$(\"$binary\" --closure)\"\n          [[ \"$reported\" == \"$closure\" ]] || {{ echo \"::error::pinned workflow policy runtime reports closure $reported, expected $closure\" >&2; exit 1; }}\n          manifest_revision=\"$(jq -er '.revision' \"$temporary/manifest.json\")\"\n          check_slot\n          reported_revision=\"$(\"$binary\" --revision)\"\n          [[ \"$reported_revision\" == \"$manifest_revision\" ]] || {{ echo \"::error::pinned workflow policy runtime reports revision $reported_revision, expected $manifest_revision\" >&2; exit 1; }}\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary\" >> \"$GITHUB_ENV\"\n"
+        "      - name: Provision pinned Velnor workflow policy runtime\n        shell: bash\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          CHECKOUT_PATH: {checkout}\n          PRODUCT_REPOSITORY: {product_repository}\n        run: |\n          set -euo pipefail\n          PINNED_REVISION=\"$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*\"([0-9a-f]{{40}})\".*/\\1/p' \"$CHECKOUT_PATH/.github-gen/velnor-workflow.toml\" | head -n 1)\"\n          test \"$PINNED_REVISION\" != '' || {{ echo \"::error::D19 pin missing from .github-gen/velnor-workflow.toml\" >&2; exit 1; }}\n          listing=\"\"\n          if git -C \"$CHECKOUT_PATH\" cat-file -e \"$PINNED_REVISION^{{commit}}\" 2>/dev/null; then\n            listing=\"$(git -C \"$CHECKOUT_PATH\" ls-tree -r \"$PINNED_REVISION\" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)\"\n          else\n            tree=\"$(gh api \"repos/$PRODUCT_REPOSITORY/git/trees/$PINNED_REVISION?recursive=1\")\" || {{ echo \"::error::unknown generator revision $PINNED_REVISION\" >&2; exit 1; }}\n            [[ \"$(jq -r '.truncated // false' <<<\"$tree\")\" != \"true\" ]] || {{ echo \"::error::tree API response is truncated; the closure cannot be proven\" >&2; exit 1; }}\n            listing=\"$(jq -r '[.tree[] | select(.type != \"tree\") | select(.path == \"Cargo.toml\" or .path == \"Cargo.lock\" or .path == \"rust-toolchain.toml\" or .path == \"rust-toolchain\" or (.path | startswith(\"crates/velnor-workflow/\")) or (.path | startswith(\".cargo/\"))) | \"\\(.mode) \\(.type) \\(.sha)\\t\\(.path)\"] | sort | join(\"\\n\")' <<<\"$tree\")\"\n          fi\n          test \"$listing\" != '' || {{ echo \"::error::revision $PINNED_REVISION has no closure inputs\" >&2; exit 1; }}\n          if command -v sha256sum >/dev/null 2>&1; then\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | sha256sum | awk '{{print $1}}')\"\n          else\n            closure=\"$(printf '%s\\nclosure-version:1\\nfeatures:\\nprofile:release\\n' \"$(LC_ALL=C sort <<<\"$listing\")\" | shasum -a 256 | awk '{{print $1}}')\"\n          fi\n          binary=\"${{CARGO_HOME:-$HOME/.cargo}}/bin/velnor-workflow-policy\"\n          tag=\"velnor-workflow-runtime-v1-${{closure:0:16}}\"\n          asset=\"velnor-workflow-${{RUNNER_OS}}-${{RUNNER_ARCH}}\"\n          temporary=\"$(mktemp -d)\"\n          trap 'rm -rf \"$temporary\"' EXIT\n          if ! gh release download \"$tag\" --repo tailrocks/velnor --pattern manifest.json --dir \"$temporary\"; then\n            echo \"::error::no policy runtime product for revision $PINNED_REVISION (closure ${{closure:0:16}}); the mainline runtime-product publisher builds it after merge\" >&2\n            exit 1\n          fi\n          gh attestation verify \"$temporary/manifest.json\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main\n          jq -e --arg closure \"$closure\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg asset \"$asset\" '.closure == $closure and (.revision | test(\"^[0-9a-f]{{40}}$\")) and .profile == \"release\" and .features == \"\" and (.products[$platform].binary | test(\"^[0-9a-f]{{64}}$\")) and .products[$platform].asset == $asset' \"$temporary/manifest.json\" >/dev/null\n          expected=\"$(jq -er --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" '.products[$platform].binary' \"$temporary/manifest.json\")\"\n          existing=\"\"\n          if [[ -x \"$binary\" ]]; then\n            if command -v sha256sum >/dev/null 2>&1; then\n              existing=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n            else\n              existing=\"$(shasum -a 256 \"$binary\" | awk '{{print $1}}')\"\n            fi\n          fi\n          if [[ \"$existing\" != \"$expected\" ]]; then\n            gh release download \"$tag\" --repo tailrocks/velnor --pattern \"$asset\" --dir \"$temporary\"\n            gh attestation verify \"$temporary/$asset\" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main\n            if command -v sha256sum >/dev/null 2>&1; then\n              actual=\"$(sha256sum \"$temporary/$asset\" | awk '{{print $1}}')\"\n            else\n              actual=\"$(shasum -a 256 \"$temporary/$asset\" | awk '{{print $1}}')\"\n            fi\n            [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::policy runtime digest mismatch\" >&2; exit 1; }}\n            install -Dm0755 \"$temporary/$asset\" \"$binary\"\n          fi\n          check_slot() {{\n            if command -v sha256sum >/dev/null 2>&1; then\n              installed=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n            else\n              installed=\"$(shasum -a 256 \"$binary\" | awk '{{print $1}}')\"\n            fi\n            [[ \"$installed\" == \"$expected\" ]] || {{ echo \"::error::policy runtime slot changed after verification\" >&2; exit 1; }}\n          }}\n          check_slot\n          reported=\"$(\"$binary\" --closure)\"\n          [[ \"$reported\" == \"$closure\" ]] || {{ echo \"::error::pinned workflow policy runtime reports closure $reported, expected $closure\" >&2; exit 1; }}\n          manifest_revision=\"$(jq -er '.revision' \"$temporary/manifest.json\")\"\n          check_slot\n          reported_revision=\"$(\"$binary\" --revision)\"\n          [[ \"$reported_revision\" == \"$manifest_revision\" ]] || {{ echo \"::error::pinned workflow policy runtime reports revision $reported_revision, expected $manifest_revision\" >&2; exit 1; }}\n          echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$binary\" >> \"$GITHUB_ENV\"\n"
     )
 }
 
@@ -8272,7 +6526,6 @@ pub(crate) fn render_tree(
             config.workflow_files.push(file.clone());
         }
     }
-    add_surface_workflow_files(&mut config, &surface)?;
     let files = generated_files_with_surface(&config, Some(&surface))?;
     let inputs = scanned.inputs;
     Ok(RenderedTree {
@@ -8281,65 +6534,6 @@ pub(crate) fn render_tree(
         symlinks: generated_symlinks(),
         inputs,
     })
-}
-
-/// Include every primitive-emitted workflow in the runtime workflow list.
-/// The project manifest and generated tree must describe the same outputs;
-/// relying on primitive-family-specific `added_files` leaves outputs from
-/// other primitives unlisted.
-fn add_surface_workflow_files(
-    config: &mut ProjectConfig,
-    surface: &primitives::Surface,
-) -> Result<(), GeneratorError> {
-    let workflow_dir = Path::new(".github/workflows");
-    for path in surface.files.keys() {
-        if !path.starts_with(workflow_dir) {
-            continue;
-        }
-        let Some(file) = path.file_name().and_then(|name| name.to_str()) else {
-            return Err(GeneratorError::usage(format!(
-                "primitive surface emits a workflow with an unsupported path: {}",
-                path.display()
-            )));
-        };
-        if path.parent() != Some(workflow_dir)
-            || Path::new(file).extension() != Some(std::ffi::OsStr::new("yml"))
-            || file.len() <= ".yml".len()
-            || file.contains(['/', '\\'])
-            || file.contains("..")
-            || !crate::path_spelling_is_supported(&path.display().to_string())
-        {
-            return Err(GeneratorError::usage(format!(
-                "primitive surface emits a workflow with an unsupported path: {}",
-                path.display()
-            )));
-        }
-        if !config.adopted_workflow_surface
-            && let Some(existing) = config
-                .units
-                .iter()
-                .map(nested_unit_workflow_file)
-                .find(|existing| crate::path_spellings_alias(existing, file))
-        {
-            return Err(GeneratorError::usage(format!(
-                "primitive surface workflow `{file}` aliases generated unit workflow `{existing}`"
-            )));
-        }
-        if let Some(existing) = config
-            .workflow_files
-            .iter()
-            .find(|existing| crate::path_spellings_alias(existing, file))
-        {
-            if existing != file {
-                return Err(GeneratorError::usage(format!(
-                    "primitive surface workflow `{file}` aliases configured workflow `{existing}`"
-                )));
-            }
-        } else {
-            config.workflow_files.push(file.to_owned());
-        }
-    }
-    Ok(())
 }
 
 #[cfg(any(feature = "tui", test))]
@@ -8378,16 +6572,6 @@ fn generated_files_with_surface(
 ) -> Result<BTreeMap<PathBuf, String>, GeneratorError> {
     let mut config = config.clone();
     add_owner_runtime_products_file(&mut config);
-    // Config validation normally rejects these rows during scanning, but the
-    // renderer also accepts a ProjectConfig directly. Keep security-owned
-    // output paths reserved at the assembly boundary in that path too.
-    for owned in &config.static_files {
-        if let Some(reserved) = generator_owned_static_file_path(&owned.path) {
-            return Err(GeneratorError::usage(format!(
-                "remove the `[[static_files]]` row for `{reserved}`: the generator owns this path"
-            )));
-        }
-    }
     // The trust-gated shape is a rendering input; refuse to render before the
     // IR silently falls back to skips for an undecided config.
     runners::validate_trusted_runner_availability(&config)?;
@@ -8402,11 +6586,6 @@ fn generated_files_with_surface(
     validate_both_automatic_contract(&config)?;
     validate_both_lane_unit_coverage(&config, surface)?;
     let mut files = BTreeMap::new();
-    if let Some(surface) = surface {
-        for path in surface.files.keys() {
-            reject_reserved_policy_output(path, "primitive surface output")?;
-        }
-    }
     files.insert(
         PathBuf::from(".github/actionlint.yaml"),
         render_actionlint_config(&config),
@@ -8437,7 +6616,6 @@ fn generated_files_with_surface(
     for workflow_file in &config.workflow_files {
         let path = PathBuf::from(".github/workflows").join(workflow_file);
         if let Some(content) = surface.and_then(|surface| surface.files.get(&path)) {
-            reject_reserved_policy_output(&path, "primitive surface output")?;
             files.insert(path, content.clone());
             continue;
         }
@@ -8451,7 +6629,7 @@ fn generated_files_with_surface(
                     return None;
                 }
                 match workflow_file.as_str() {
-                    "ci-pr.yml" => Some(generated_ci_pr(&workflow)),
+                    "ci-pr.yml" | "ci-pull-request.yml" => Some(generated_ci_pr(&workflow)),
                     "ci-policy.yml" => Some(generated_ci_policy(&config)),
                     "ci-release-package-signer.yml" => {
                         Some(generated_release_package_signer(&config))
@@ -8483,11 +6661,23 @@ fn generated_files_with_surface(
     for (path, content) in builtin_generated_actions() {
         files.entry(path).or_insert(content);
     }
-    if config.velnor_host_cache.has_overrides() {
-        files.insert(
-            PathBuf::from("config/fleet/velnor-host.env"),
-            config::render_velnor_host_env(&config.velnor_host_cache),
-        );
+    // The agent-instruction file is unconditional: every render owns these
+    // exact bytes, even for minimal repositories. A `static_files` row for a
+    // generator-owned agent path can never take effect, so it fails closed
+    // with a remediation instead of being silently overridden. The
+    // reviewer-assignment file is generator-owned the same way even though
+    // its emission is conditional: an unvalidated passthrough row must never
+    // stand in for typed `[[reviewers]]` input.
+    for reserved in [GITHUB_AGENTS_MD, GITHUB_CLAUDE_MD, CODEOWNERS_PATH] {
+        if config
+            .static_files
+            .iter()
+            .any(|owned| Path::new(&owned.path) == Path::new(reserved))
+        {
+            return Err(GeneratorError::usage(format!(
+                "remove the `[[static_files]]` row for `{reserved}`: the generator owns this path"
+            )));
+        }
     }
     files.insert(
         PathBuf::from(GITHUB_AGENTS_MD),
@@ -8506,61 +6696,22 @@ fn generated_files_with_surface(
             render_codeowners_contents(&rules),
         );
     }
-    // Primitive files are part of the generated tree. The workflow-family
-    // loop above consumes registered workflow outputs; emit every remaining
-    // primitive output here, accepting identical consumed entries and failing
-    // closed on collisions with another producer, including generator-owned
-    // AGENTS.md and CODEOWNERS paths.
-    if let Some(surface) = surface {
-        for (path, content) in &surface.files {
-            let path_text = path.to_str().ok_or_else(|| {
-                GeneratorError::usage(format!(
-                    "primitive surface output has an unsupported path: {}",
-                    path.display()
-                ))
-            })?;
-            if path_spellings_alias(path_text, OWNERSHIP_STATE) {
-                return Err(GeneratorError::usage(format!(
-                    "primitive surface output {} aliases generator-owned `{OWNERSHIP_STATE}`",
-                    path.display()
-                )));
-            }
-            let collision = files.keys().find(|existing| {
-                existing
-                    .to_str()
-                    .is_some_and(|existing| crate::path_spellings_alias(existing, path_text))
-            });
-            match collision {
-                None => {
-                    files.insert(path.clone(), content.clone());
-                }
-                Some(existing) if existing == path && files.get(existing) == Some(content) => {}
-                Some(existing) => {
-                    return Err(GeneratorError::usage(format!(
-                        "primitive surface output {} collides with generated file {}",
-                        path.display(),
-                        existing.display()
-                    )));
-                }
-            }
-        }
-    }
-    // Generate every owned output before inserting passthrough files. Alias
-    // aware collision rejection makes a BTreeMap insertion order incapable of
-    // transferring a generated workflow's ownership to static input.
-    let generated_paths = files
-        .keys()
-        .chain(surface.into_iter().flat_map(|surface| surface.files.keys()));
-    if let Some((static_path, generated_path)) = first_static_file_output_collision(
-        config.static_files.iter().map(|owned| owned.path.as_str()),
-        generated_paths,
-    ) {
-        return Err(GeneratorError::usage(format!(
-            "[[static_files]] output `{static_path}` aliases generated output `{generated_path}`; static files cannot replace generated outputs"
-        )));
-    }
+    let generated_links = generated_symlinks();
     for owned in &config.static_files {
-        files.insert(PathBuf::from(&owned.path), owned.content.clone());
+        let path = PathBuf::from(&owned.path);
+        if path == Path::new(OWNERSHIP_STATE)
+            || [GITHUB_AGENTS_MD, GITHUB_CLAUDE_MD, CODEOWNERS_PATH]
+                .iter()
+                .any(|reserved| path == Path::new(reserved))
+            || files.contains_key(&path)
+            || generated_links.contains_key(&path)
+        {
+            return Err(GeneratorError::usage(format!(
+                "`[[static_files]]` target collides with generator-owned output: {}",
+                path.display()
+            )));
+        }
+        files.insert(path, owned.content.clone());
     }
     validate_ruleset_required_status_checks(&config, &files)?;
     validate_hosted_mr_boxington_store_budget(&files)?;
@@ -8571,11 +6722,17 @@ fn generated_files_with_surface(
     // 10 MiB template budget; refuse a surface whose expansion passes the
     // generator's 5 MiB ceiling before it can fail every run at startup.
     template_memory::validate_template_memory(&files)?;
+    validate_managed_output_path_overlaps(
+        files
+            .keys()
+            .map(PathBuf::as_path)
+            .chain(generated_links.keys().map(PathBuf::as_path)),
+    )?;
     Ok(files)
 }
 
-/// Composite actions the generator always emits; repository `static_files`
-/// rows may override these paths when a consumer owns a forked copy.
+/// Composite actions the generator always emits. Static-file rows cannot
+/// collide with generated paths.
 fn builtin_generated_actions() -> BTreeMap<PathBuf, String> {
     BTreeMap::new()
 }
@@ -8588,12 +6745,6 @@ fn builtin_generated_actions() -> BTreeMap<PathBuf, String> {
 fn report_velnor_ci_outcomes_action_template() -> String {
     let action_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../.github-gen/sources/actions/report-velnor-ci-outcomes/action.yml");
-    let action_path = if action_path.exists() {
-        action_path
-    } else {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures/actions/report-velnor-ci-outcomes/action.yml")
-    };
     fs::read_to_string(&action_path).unwrap_or_else(|error| {
         panic!("read {}: {error}", action_path.display());
     })
@@ -8736,8 +6887,10 @@ enum FilePreimage {
         /// bits exactly.
         mode: u32,
     },
-    /// An unknown `.github` link slated for force-gated removal. Symlinks at
-    /// expected generated paths fail closed in [`capture_file_preimage`].
+    /// A symlink: either the generator-owned
+    /// [`.github/CLAUDE.md`](GITHUB_CLAUDE_MD) or an unknown `.github` link
+    /// slated for force-gated removal. Any other symlink at an expected
+    /// path still fails closed in [`capture_file_preimage`].
     Symlink {
         target: PathBuf,
     },
@@ -9123,8 +7276,11 @@ fn generated_file_purpose(path: &Path) -> &'static str {
         ".github/actionlint.yaml" => "actionlint runner-label contract",
         ".github/ci/project.toml" => "detected CI graph + binary runtime contract",
         ".github/AGENTS.md" => "generated-tree agent instructions",
+        ".github/CLAUDE.md" => "agent instruction entry point",
         ".github/workflows/AGENTS.md" => "workflow directory rule file",
-        value if value.ends_with("ci-pr.yml") => "parallel PR verification",
+        value if value.ends_with("ci-pull-request.yml") || value.ends_with("ci-pr.yml") => {
+            "parallel PR verification"
+        }
         value if value.ends_with("ci-policy.yml") => "base-owned pull-request policy gate",
         value if value.ends_with("ci-release-package-signer.yml") => {
             "release artifact provenance signer"
@@ -9280,7 +7436,27 @@ fn plan_generated_write_with_options(
         }
     }
     reject_symlinked_output_root(root)?;
-    reject_managed_symlink_ancestors(root, files.keys().chain(symlinks.keys()))?;
+    reject_managed_symlink_ancestors(root, std::iter::empty())?;
+    let ownership_path = PathBuf::from(OWNERSHIP_STATE);
+    let ownership_preimage = capture_file_preimage(&root.join(&ownership_path), &ownership_path)?;
+    let state_file = parse_ownership_state(root, &ownership_preimage)?;
+    let foreign_schema = match &state_file {
+        OwnershipStateFile::ForeignSchema { message } => Some(message.clone()),
+        _ => None,
+    };
+    let ownership = match &state_file {
+        OwnershipStateFile::Present(state) => Some(state),
+        OwnershipStateFile::Absent | OwnershipStateFile::ForeignSchema { .. } => None,
+    };
+    let mut managed_paths = files
+        .keys()
+        .chain(symlinks.keys())
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(state) = ownership {
+        managed_paths.extend(state.outputs.keys().cloned());
+    }
+    reject_managed_symlink_ancestors(root, managed_paths.iter())?;
     let preimages = files
         .keys()
         .map(|relative| {
@@ -9295,17 +7471,6 @@ fn plan_generated_write_with_options(
                 .map(|preimage| (relative.clone(), preimage))
         })
         .collect::<Result<BTreeMap<PathBuf, FilePreimage>, GeneratorError>>()?;
-    let ownership_path = PathBuf::from(OWNERSHIP_STATE);
-    let ownership_preimage = capture_file_preimage(&root.join(&ownership_path), &ownership_path)?;
-    let state_file = parse_ownership_state(root, &ownership_preimage)?;
-    let foreign_schema = match &state_file {
-        OwnershipStateFile::ForeignSchema { message } => Some(message.clone()),
-        _ => None,
-    };
-    let ownership = match &state_file {
-        OwnershipStateFile::Present(state) => Some(state),
-        OwnershipStateFile::Absent | OwnershipStateFile::ForeignSchema { .. } => None,
-    };
     // Both ownership proofs always run: chaining them with `||` would skip
     // the symlink proof — and its refusals — whenever the file proof
     // reports a refresh (which `--force` implies via adopt).
@@ -9537,9 +7702,6 @@ fn apply_generated_write_plan(
         return Ok(WriteOutcome::Unchanged);
     }
     let _generation_lock = GenerationLock::acquire(root, files.keys().chain(symlinks.keys()))?;
-    validate_generated_paths(files, symlinks)?;
-    reject_symlinked_output_root(root)?;
-    reject_managed_symlink_ancestors(root, files.keys().chain(symlinks.keys()))?;
     validate_plan_preimages(root, plan)?;
     revalidate_unknown_tree(root, files, symlinks, plan)?;
     // A pre-state version is safe to adopt only when every existing generated
@@ -9758,7 +7920,11 @@ impl StagedTree {
         for relative in &plan.stale {
             let planned =
                 planned_file(plan, relative, "generated plan has no stale-file preimage")?;
-            delete_reviewed_file(&root.join(relative), relative, &planned.preimage)?;
+            if is_generator_owned_symlink(relative) {
+                delete_reviewed_symlink(&root.join(relative), relative, &planned.preimage)?;
+            } else {
+                delete_reviewed_file(&root.join(relative), relative, &planned.preimage)?;
+            }
             self.removed.push(relative.clone());
         }
         for relative in &plan.changed {
@@ -10443,21 +8609,13 @@ fn reject_managed_symlink_ancestors<'a>(
     root: &Path,
     generated: impl IntoIterator<Item = &'a PathBuf>,
 ) -> Result<(), GeneratorError> {
-    let mut managed = BTreeSet::from([
-        PathBuf::from(".github"),
-        PathBuf::from("config"),
-        PathBuf::from("config/fleet"),
-    ]);
+    let mut managed = BTreeSet::from([PathBuf::from(".github"), PathBuf::from(".github/ci")]);
     for relative in generated {
         managed.extend(
             relative
                 .ancestors()
                 .skip(1)
-                .filter(|ancestor| {
-                    ancestor.starts_with(".github")
-                        || *ancestor == Path::new("config")
-                        || ancestor.starts_with("config/fleet")
-                })
+                .filter(|ancestor| is_generated_output_tree_path(ancestor))
                 .map(Path::to_path_buf),
         );
     }
@@ -10499,6 +8657,14 @@ fn capture_file_preimage(path: &Path, relative: &Path) -> Result<FilePreimage, G
         Err(error) => return Err(GeneratorError::io("inspect generated file", path, &error)),
     };
     if observed.file_type().is_symlink() {
+        // The single lifted refusal: the generator-owned `.github/CLAUDE.md`
+        // link reads back as its target. Every other symlink still fails
+        // closed, exactly like any other non-regular file.
+        if is_generator_owned_symlink(relative) {
+            let target = fs::read_link(path)
+                .map_err(|error| GeneratorError::io("read generator symlink", path, &error))?;
+            return Ok(FilePreimage::Symlink { target });
+        }
         return Err(GeneratorError::usage(format!(
             "refusing non-regular generated file: {}",
             relative.display()
@@ -10780,10 +8946,31 @@ fn stale_owned_files(
         }
         let path = root.join(relative);
         if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-            return Err(GeneratorError::usage(format!(
-                "refusing to remove symlinked stale generated file: {}",
-                path.display()
-            )));
+            // The single lifted refusal: a stale generator-owned link removes
+            // like any stale file once its recorded digest proves it. Every
+            // other symlinked stale path still fails closed.
+            if !is_generator_owned_symlink(relative) {
+                return Err(GeneratorError::usage(format!(
+                    "refusing to remove symlinked stale generated file: {}",
+                    path.display()
+                )));
+            }
+            let preimage = capture_file_preimage(&path, relative)?;
+            let Some(current) = preimage.symlink_target() else {
+                continue;
+            };
+            if symlink_target_digest(current) != *expected {
+                return Err(GeneratorError::usage(format!(
+                    "stale generated file was manually modified: {}",
+                    relative.display()
+                )));
+            }
+            stale.push(PlannedFile {
+                path: relative.clone(),
+                action: PlannedAction::Delete,
+                preimage,
+            });
+            continue;
         }
         let preimage = capture_file_preimage(&path, relative)?;
         let Some(current) = preimage.bytes() else {
@@ -10983,20 +9170,6 @@ fn parse_digest<'a>(
     Ok(state)
 }
 
-/// Serialize repository-relative ownership paths with a stable separator.
-/// Joining parsed components keeps the state schema portable while preserving
-/// a literal backslash in a Unix filename.
-pub(crate) fn ownership_state_path(relative: &Path) -> String {
-    let mut serialized = String::new();
-    for (index, component) in relative.components().enumerate() {
-        if index > 0 {
-            serialized.push('/');
-        }
-        serialized.push_str(&component.as_os_str().to_string_lossy());
-    }
-    serialized
-}
-
 fn ownership_state_content(
     files: &BTreeMap<PathBuf, String>,
     symlinks: &BTreeMap<PathBuf, PathBuf>,
@@ -11015,7 +9188,7 @@ fn ownership_state_content(
         let _ = writeln!(
             content,
             "{}\t{:016x}",
-            ownership_state_path(relative),
+            relative.display(),
             content_digest(generated)
         );
     }
@@ -11023,7 +9196,7 @@ fn ownership_state_content(
         let _ = writeln!(
             content,
             "{}\t{:016x}",
-            ownership_state_path(relative),
+            relative.display(),
             symlink_target_digest(target)
         );
     }
@@ -11032,15 +9205,7 @@ fn ownership_state_content(
 
 fn managed_relative_path(value: &str) -> Result<PathBuf, GeneratorError> {
     let path = Path::new(value);
-    if !path
-        .components()
-        .all(|component| matches!(component, Component::Normal(_)))
-    {
-        return Err(GeneratorError::usage(
-            "generated ownership state contains an unsafe path",
-        ));
-    }
-    if value.starts_with(".github/") || value == "config/fleet/velnor-host.env" {
+    if is_managed_output_path(path) {
         return Ok(path.to_path_buf());
     }
     Err(GeneratorError::usage(
@@ -11094,19 +9259,19 @@ fn validate_generated_paths(
     symlinks: &BTreeMap<PathBuf, PathBuf>,
 ) -> Result<(), GeneratorError> {
     for relative in files.keys().chain(symlinks.keys()) {
-        if relative.components().count() == 0
-            || !relative
-                .components()
-                .all(|component| matches!(component, Component::Normal(_)))
-        {
+        if !is_managed_output_path(relative) {
             return Err(GeneratorError::usage(format!(
                 "generated path escapes the output tree: {}",
                 relative.display()
             )));
         }
     }
-    validate_reserved_writer_outputs(files, symlinks)?;
-    Ok(())
+    validate_managed_output_path_overlaps(
+        files
+            .keys()
+            .map(PathBuf::as_path)
+            .chain(symlinks.keys().map(PathBuf::as_path)),
+    )
 }
 
 /// Every `.github` entry the render neither emits nor records: files,
@@ -11362,6 +9527,29 @@ fn delete_reviewed_file(
     // progress monotonic even if cleanup leaves a recoverable hidden backup.
     let _ = fs::remove_file(&backup);
     let _ = fs::remove_dir(&backup_dir);
+    Ok(())
+}
+
+/// Remove a stale generator-owned symlink after revalidating its preimage.
+/// The link must still be a link: anything else means the tree moved past
+/// the plan.
+fn delete_reviewed_symlink(
+    path: &Path,
+    relative: &Path,
+    expected: &FilePreimage,
+) -> Result<(), GeneratorError> {
+    if matches!(expected, FilePreimage::Missing) {
+        return Err(preimage_changed(relative));
+    }
+    let current = capture_file_preimage(path, relative)?;
+    if &current != expected {
+        return Err(preimage_changed(relative));
+    }
+    if !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(preimage_changed(relative));
+    }
+    fs::remove_file(path)
+        .map_err(|error| GeneratorError::io("remove stale generator symlink", path, &error))?;
     Ok(())
 }
 
@@ -12065,97 +10253,6 @@ mod tests {
         config
     }
 
-    /// The final assembly guard remains active even if a caller hands it a
-    /// synthetic primitive surface that bypassed the primitive-stage check.
-    #[test]
-    fn generation_assembly_rejects_reserved_policy_aliases() {
-        let canonical_config = scanned_fixture(RunnerMode::Github);
-        let canonical = must(
-            generated_files_with_surface(&canonical_config, None),
-            "canonical policy output remains assembled",
-        );
-        assert!(canonical.contains_key(Path::new(CI_POLICY_WORKFLOW)));
-
-        for alias in [
-            CI_POLICY_WORKFLOW,
-            ".github/workflows/CI-POLICY.yml",
-            ".github/workflows/ｃｉ-ｐｏｌｉｃｙ.yml",
-            CI_PR_LEGACY_WORKFLOW,
-            ".github/workflows/CI-PULL-REQUEST.yml",
-            ".github/workflows/ci－pull－request.yml",
-        ] {
-            let config = scanned_fixture(RunnerMode::Github);
-            let surface = primitives::Surface {
-                files: BTreeMap::from([(PathBuf::from(alias), "attacker\n".to_owned())]),
-                units: config.units.clone(),
-                contracts: BTreeMap::new(),
-                added_files: Vec::new(),
-            };
-            let error =
-                must_fail(generated_files_with_surface(&config, Some(&surface)), alias).to_string();
-            assert!(
-                error.contains(CI_POLICY_WORKFLOW) || error.contains(CI_PR_LEGACY_WORKFLOW),
-                "{error}"
-            );
-            assert!(error.contains("primitive surface output"), "{error}");
-        }
-    }
-
-    #[test]
-    fn generation_assembly_rejects_ownership_state_surface_output() {
-        let config = scanned_fixture(RunnerMode::Github);
-        let surface = primitives::Surface {
-            files: BTreeMap::from([(
-                PathBuf::from(".github/ci/.github-actions-generator-state"),
-                "primitive\n".to_owned(),
-            )]),
-            units: config.units.clone(),
-            contracts: BTreeMap::new(),
-            added_files: Vec::new(),
-        };
-        let error = must_fail(
-            generated_files_with_surface(&config, Some(&surface)),
-            "primitive surface must not claim the ownership state",
-        )
-        .to_string();
-        assert!(error.contains(OWNERSHIP_STATE), "{error}");
-        assert!(error.contains("primitive surface output"), "{error}");
-    }
-
-    #[test]
-    fn generation_assembly_keeps_and_protects_unregistered_surface_files() {
-        let mut config = scanned_fixture(RunnerMode::Github);
-        let surface_path = PathBuf::from(".github/actions/synthetic-surface.yml");
-        let surface = primitives::Surface {
-            files: BTreeMap::from([(surface_path.clone(), "primitive\n".to_owned())]),
-            units: config.units.clone(),
-            contracts: BTreeMap::new(),
-            added_files: Vec::new(),
-        };
-        let files = must(
-            generated_files_with_surface(&config, Some(&surface)),
-            "unregistered primitive surface output must be assembled",
-        );
-        assert_eq!(
-            files.get(&surface_path).map(String::as_str),
-            Some("primitive\n")
-        );
-
-        config.static_files.push(StaticFile {
-            path: ".github/actions/SYNTHETIC-SURFACE.yml".to_owned(),
-            source: ".github-gen/sources/static.yml".to_owned(),
-            content: "static override\n".to_owned(),
-        });
-        let error = must_fail(
-            generated_files_with_surface(&config, Some(&surface)),
-            "static input must not replace a primitive surface output",
-        )
-        .to_string();
-        assert!(error.contains("SYNTHETIC-SURFACE.yml"), "{error}");
-        assert!(error.contains("synthetic-surface.yml"), "{error}");
-        assert!(error.contains("aliases generated output"), "{error}");
-    }
-
     fn temporary_repository(name: &str) -> PathBuf {
         let root = env::temp_dir().join(format!("velnor-workflow-test-{name}-{}", unique_suffix()));
         must(fs::create_dir_all(&root), "create test repository");
@@ -12477,151 +10574,6 @@ mod tests {
     }
 
     #[test]
-    fn hosted_control_plane_artifact_stays_linux_when_app_runner_is_macos() {
-        let mut config = must(
-            scan_repository_with_default_branch(&fixture_root(), RunnerMode::Github, "main"),
-            "scan fixture for macOS hosted runtime handoff",
-        );
-        config.github_runner = "macos-15".to_owned();
-        let generator = WorkflowIr::from_config(&config);
-        let workflow = generator.render(WorkflowKind::Main);
-        let nightly = generator.render_nightly_dispatcher();
-        for job_id in ["dispatch-ci-main", "nightly-red-to-signal", "nightly-alert"] {
-            let job = yaml_job(&nightly, job_id);
-            assert!(
-                job.contains("runs-on: ubuntu-24.04"),
-                "hosted nightly control job must stay on Linux: {job}"
-            );
-            assert!(
-                !job.contains("runs-on: macos-15"),
-                "hosted nightly control job must not inherit the app runner: {job}"
-            );
-        }
-        let plan = yaml_job(&workflow, "plan");
-        assert!(
-            plan.contains("runs-on: ubuntu-24.04"),
-            "hosted Planning must publish the Linux runtime artifact: {plan}"
-        );
-        assert!(
-            !plan.contains("runs-on: macos-15"),
-            "Planning must not inherit the application runner: {plan}"
-        );
-        assert!(
-            plan.contains("name: velnor-workflow-runtime-")
-                && plan.contains("${{ runner.os }}-${{ runner.arch }}"),
-            "Planning must publish an OS-qualified runtime artifact: {plan}"
-        );
-
-        let required = yaml_job(&workflow, "ci-required");
-        assert!(
-            required.contains("runs-on: ubuntu-24.04"),
-            "the aggregate control plane must stay on Linux: {required}"
-        );
-        assert!(
-            !required.contains("runs-on: macos-15"),
-            "the aggregate must not inherit the application runner: {required}"
-        );
-        let required_mirror = yaml_job(&workflow, "required");
-        assert!(
-            required_mirror.contains("runs-on: ubuntu-24.04"),
-            "the required mirror must stay on the Linux control-plane runner: {required_mirror}"
-        );
-        assert!(
-            !required_mirror.contains("runs-on: macos-15"),
-            "the required mirror must not inherit the application runner: {required_mirror}"
-        );
-
-        let kind = must_some(
-            must(
-                generator.render_kind_unit_workflow(UnitKind::Rust, None),
-                "render hosted Rust reusable workflow",
-            ),
-            "hosted Rust reusable workflow",
-        )
-        .1;
-        assert!(
-            kind.contains("runs-on: macos-15"),
-            "application unit jobs keep their configured runner: {kind}"
-        );
-        assert!(
-            kind.contains("name: Set up Velnor workflow runtime")
-                && !kind.contains("name: Download Velnor workflow runtime"),
-            "macOS unit jobs must bootstrap instead of downloading the Linux artifact: {kind}"
-        );
-
-        let policy = generated_ci_policy(&config);
-        assert!(
-            policy.contains("runs-on: ubuntu-24.04") && !policy.contains("runs-on: macos-15"),
-            "Policy and Planning share the Docker-capable Linux runner: {policy}"
-        );
-    }
-
-    #[test]
-    fn hosted_arm_unit_bootstraps_runtime_instead_of_downloading_x64_artifact() {
-        let mut config = must(
-            scan_repository_with_default_branch(&fixture_root(), RunnerMode::Github, "main"),
-            "scan fixture for hosted ARM runtime handoff",
-        );
-        config.github_runner = "ubuntu-24.04-arm".to_owned();
-        let generator = WorkflowIr::from_config(&config);
-        let rust = must_some(
-            must(
-                generator.render_kind_unit_workflow(UnitKind::Rust, None),
-                "render hosted ARM Rust workflow",
-            ),
-            "hosted ARM Rust workflow",
-        )
-        .1;
-
-        assert!(
-            rust.contains("runs-on: ubuntu-24.04-arm"),
-            "application unit stays on its configured ARM runner: {rust}"
-        );
-        assert!(
-            rust.contains("name: Set up Velnor workflow runtime")
-                && !rust.contains("name: Download Velnor workflow runtime"),
-            "ARM units bootstrap the x64-produced runtime locally: {rust}"
-        );
-
-        let x64 = must(
-            scan_repository_with_default_branch(&fixture_root(), RunnerMode::Github, "main"),
-            "scan fixture for hosted x64 runtime handoff",
-        );
-        let x64_rust = must_some(
-            must(
-                WorkflowIr::from_config(&x64).render_kind_unit_workflow(UnitKind::Rust, None),
-                "render hosted x64 Rust workflow",
-            ),
-            "hosted x64 Rust workflow",
-        )
-        .1;
-        assert!(
-            x64_rust.contains("runs-on: ubuntu-24.04")
-                && x64_rust.contains("name: Download Velnor workflow runtime")
-                && !x64_rust.contains("name: Set up Velnor workflow runtime"),
-            "x64 Ubuntu units consume the Planning artifact: {x64_rust}"
-        );
-    }
-
-    #[test]
-    fn velnor_nightly_control_jobs_keep_the_configured_runner() {
-        let config = scanned_fixture(RunnerMode::Velnor);
-        let nightly = WorkflowIr::from_config(&config).render_nightly_dispatcher();
-        let runner = fixture_lane_selector();
-        for job_id in ["dispatch-ci-main", "nightly-red-to-signal", "nightly-alert"] {
-            let job = yaml_job(&nightly, job_id);
-            assert!(
-                job.contains(&runner),
-                "Velnor nightly control job must keep its configured runner: {job}"
-            );
-            assert!(
-                !job.contains("runs-on: ubuntu-24.04"),
-                "Velnor nightly control job must not be pinned to a hosted runner: {job}"
-            );
-        }
-    }
-
-    #[test]
     fn velnor_runtime_does_not_publish_an_orphan_artifact() {
         let config = must(
             scan_repository_with_default_branch(&fixture_root(), RunnerMode::Velnor, "main"),
@@ -12871,57 +10823,6 @@ mod tests {
         );
     }
 
-    #[expect(
-        clippy::expect_used,
-        reason = "test setup failures should report which rendered contract is missing"
-    )]
-    #[test]
-    fn velnor_provisioner_resolves_model_for_local_and_api_revision_sources() {
-        let legacy = workflow_pinned_policy_runtime_velnor_with_model_dependency("checkout", false);
-        assert!(!legacy.contains("manifests=\"$(mktemp -d)\""));
-
-        let model = workflow_pinned_policy_runtime_velnor_with_model_dependency("checkout", true);
-        assert!(model.contains(
-            "git -C \"$CHECKOUT_PATH\" show \"$PINNED_REVISION:crates/velnor-workflow/Cargo.toml\""
-        ));
-        assert!(model.contains("gh api \"repos/$PRODUCT_REPOSITORY/git/blobs/$workflow_blob\""));
-        assert!(model.contains("dependency_paths=\"$(python3 - \"$manifests/workflow.toml\""));
-        assert!(model.contains("startswith($path + \"/\")"));
-        assert!(model.contains("listing+=$'\\n'\"$dependency_tree\""));
-        assert!(model.contains("import tomllib"));
-
-        let start = model
-            .find(
-                "          if git -C \"$CHECKOUT_PATH\" cat-file -e \"$PINNED_REVISION^{commit}\"",
-            )
-            .expect("local/API resolver renders");
-        let end = model[start..]
-            .find("          if command -v sha256sum")
-            .map(|offset| start + offset)
-            .expect("resolver terminates before digest calculation");
-        serde_yaml::from_str::<serde_yaml::Value>(&model)
-            .expect("model-aware Velnor policy runtime is valid YAML");
-        let shell = model[start..end]
-            .lines()
-            .map(|line| line.strip_prefix("          ").unwrap_or(line))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut syntax = std::process::Command::new("bash")
-            .args(["-n"])
-            .stdin(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("bash is available for shell syntax verification");
-        std::io::Write::write_all(syntax.stdin.as_mut().expect("bash stdin"), shell.as_bytes())
-            .expect("write shell fragment");
-        let result = syntax.wait_with_output().expect("wait for bash -n");
-        assert!(
-            result.status.success(),
-            "local/API resolver shell syntax: {}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-    }
-
     #[test]
     fn velnor_provisioner_rehashes_the_slot_before_each_exec() {
         let step = workflow_pinned_policy_runtime_velnor("checkout");
@@ -13023,21 +10924,28 @@ mod tests {
             )),
             "the product repository is pinned in env: {step}"
         );
-        // Both products use the shared closure-input bridge: local revisions
-        // inspect tracked manifests, while remote revisions inspect the
-        // product tree and its workflow-manifest blob.
-        let action = closure_inputs::render_setup_action(&declared_setup_action());
-        for script in [&step, &action] {
-            assert!(script.contains("dependency_paths=\"$(python3"), "{script}");
-            assert!(
-                script.contains("git/blobs/$workflow_blob"),
-                "remote resolution reads the pinned workflow manifest: {script}"
+        // Byte-level conformance with the setup action's own fallback: the
+        // same canonical listing from the same product API, modulo the
+        // revision variable name and YAML indentation.
+        let action = declared_setup_action();
+        let normalize = |script: &str, from: &str, to: &str| {
+            let start = must_some(script.find("listing=\"\""), "the resolution block starts");
+            let end = must_some(
+                script.find("has no closure inputs"),
+                "the resolution block ends",
             );
-            assert!(
-                script.contains("local Cargo dependency has no tracked source tree"),
-                "local dependencies fail closed when their source is missing: {script}"
-            );
-        }
+            script[start..end]
+                .replace(from, to)
+                .lines()
+                .map(str::trim_start)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(
+            normalize(&step, "PINNED_REVISION", "INSTALL_REV"),
+            normalize(&action, "INSTALL_REV", "INSTALL_REV"),
+            "the provisioner resolves exactly like the setup action"
+        );
     }
 
     /// Run the provisioner's `run:` script against a consumer checkout that
@@ -13091,8 +10999,7 @@ mod tests {
             "100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tCargo.toml",
             "100644 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tCargo.lock",
             "100644 blob cccccccccccccccccccccccccccccccccccccccc\trust-toolchain.toml",
-            "100644 blob dddddddddddddddddddddddddddddddddddddddd\tcrates/velnor-workflow/Cargo.toml",
-            "100644 blob 1111111111111111111111111111111111111111\tcrates/velnor-workflow/src/lib.rs",
+            "100644 blob dddddddddddddddddddddddddddddddddddddddd\tcrates/velnor-workflow/src/lib.rs",
         ];
         let tree_entries: Vec<String> = listing
             .iter()
@@ -13107,10 +11014,6 @@ mod tests {
                 )
             })
             .chain([
-                "{\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"ffffffffffffffffffffffffffffffffffffffff\",\"path\":\"crates/velnor-model/Cargo.toml\"}"
-                    .to_owned(),
-                "{\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"2222222222222222222222222222222222222222\",\"path\":\"crates/velnor-model/src/lib.rs\"}"
-                    .to_owned(),
                 "{\"mode\":\"040000\",\"type\":\"tree\",\"sha\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"path\":\"crates/velnor-workflow/src\"}"
                     .to_owned(),
                 "{\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"ffffffffffffffffffffffffffffffffffffffff\",\"path\":\"UNRELATED.md\"}"
@@ -13129,37 +11032,8 @@ mod tests {
             ),
             "write stub trees response",
         );
-        for (sha, content) in [
-            (
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "W3dvcmtzcGFjZV0KbWVtYmVycyA9IFsiY3JhdGVzL3ZlbG5vci1tb2RlbCJdClt3b3Jrc3BhY2UuZGVwZW5kZW5jaWVzXQpzZXJkZSA9ICIxIgo=",
-            ),
-            (
-                "dddddddddddddddddddddddddddddddddddddddd",
-                "W2RlcGVuZGVuY2llc10KdmVsbm9yLW1vZGVsID0geyBwYXRoID0gIi4uL3ZlbG5vci1tb2RlbCIsIHZlcnNpb24gPSAiMC4xLjAiIH0K",
-            ),
-            (
-                "ffffffffffffffffffffffffffffffffffffffff",
-                "W3BhY2thZ2VdCm5hbWUgPSAidmVsbm9yLW1vZGVsIgp2ZXJzaW9uID0gIjAuMS4wIgpbZGVwZW5kZW5jaWVzXQpzZXJkZS53b3Jrc3BhY2UgPSB0cnVlCg==",
-            ),
-        ] {
-            must(
-                fs::write(
-                    log.join(format!("blob-{sha}.json")),
-                    format!("{{\"content\":\"{content}\"}}"),
-                ),
-                "write stub blob response",
-            );
-        }
-        let mut closure_listing = listing.iter().map(ToString::to_string).collect::<Vec<_>>();
-        closure_listing.extend([
-            "100644 blob ffffffffffffffffffffffffffffffffffffffff\tcrates/velnor-model/Cargo.toml"
-                .to_owned(),
-            "100644 blob 2222222222222222222222222222222222222222\tcrates/velnor-model/src/lib.rs"
-                .to_owned(),
-        ]);
         let closure = closure::canonical_digest(
-            &closure_listing,
+            &listing.iter().map(ToString::to_string).collect::<Vec<_>>(),
             closure::CI_FEATURES,
             closure::PROFILE_RELEASE,
         );
@@ -13200,7 +11074,7 @@ mod tests {
         must(
             fs::write(
                 stubs.join("gh"),
-                "#!/bin/sh\nif [ \"$1\" = api ]; then\n  echo \"$2\" >> \"$STUB_LOG/gh-api\"\n  case \"$2\" in\n    */git/blobs/*) blob=\"${2##*/}\"; cat \"$STUB_LOG/blob-$blob.json\";;\n    *) cat \"$STUB_LOG/trees.json\";;\n  esac\n  exit 0\nfi\nif [ \"$1\" = release ] && [ \"$2\" = download ]; then\n  shift 2\n  tag=\"$1\"; shift\n  dir=\"\"; patterns=\"\"\n  while [ $# -gt 0 ]; do\n    case \"$1\" in\n      --dir) dir=\"$2\"; shift 2;;\n      --pattern) patterns=\"$patterns $2\"; shift 2;;\n      *) shift;;\n    esac\n  done\n  echo \"$tag $patterns -> $dir\" >> \"$STUB_LOG/gh-download\"\n  for pattern in $patterns; do cp \"$STUB_LOG/asset-$pattern\" \"$dir/$pattern\"; done\n  exit 0\nfi\nif [ \"$1\" = attestation ]; then echo \"$@\" >> \"$STUB_LOG/gh-attest\"; exit 0; fi\necho \"unexpected gh invocation: $@\" >&2; exit 1\n",
+                "#!/bin/sh\nif [ \"$1\" = api ]; then\n  echo \"$2\" >> \"$STUB_LOG/gh-api\"\n  cat \"$STUB_LOG/trees.json\"\n  exit 0\nfi\nif [ \"$1\" = release ] && [ \"$2\" = download ]; then\n  shift 2\n  tag=\"$1\"; shift\n  dir=\"\"; patterns=\"\"\n  while [ $# -gt 0 ]; do\n    case \"$1\" in\n      --dir) dir=\"$2\"; shift 2;;\n      --pattern) patterns=\"$patterns $2\"; shift 2;;\n      *) shift;;\n    esac\n  done\n  echo \"$tag $patterns -> $dir\" >> \"$STUB_LOG/gh-download\"\n  for pattern in $patterns; do cp \"$STUB_LOG/asset-$pattern\" \"$dir/$pattern\"; done\n  exit 0\nfi\nif [ \"$1\" = attestation ]; then echo \"$@\" >> \"$STUB_LOG/gh-attest\"; exit 0; fi\necho \"unexpected gh invocation: $@\" >&2; exit 1\n",
             ),
             "write stub gh",
         );
@@ -13225,7 +11099,7 @@ mod tests {
             .map(|line| {
                 must_some(
                     line.strip_prefix("          "),
-                    &format!("rendered script line dedents: {line:?}"),
+                    "the rendered script dedents",
                 )
             })
             .collect();
@@ -13273,28 +11147,13 @@ mod tests {
             "consumer identity is never consulted: {stderr}"
         );
         let api = must(fs::read_to_string(log.join("gh-api")), "read api log");
-        let expected_api = [
+        assert_eq!(
+            api.trim(),
             format!(
                 "repos/{}/git/trees/{pin}?recursive=1",
                 workflow_setup_action_repository()
             ),
-            format!(
-                "repos/{}/git/blobs/dddddddddddddddddddddddddddddddddddddddd",
-                workflow_setup_action_repository()
-            ),
-            format!(
-                "repos/{}/git/blobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                workflow_setup_action_repository()
-            ),
-            format!(
-                "repos/{}/git/blobs/ffffffffffffffffffffffffffffffffffffffff",
-                workflow_setup_action_repository()
-            ),
-        ];
-        assert_eq!(
-            api.lines().collect::<Vec<_>>(),
-            expected_api.iter().map(String::as_str).collect::<Vec<_>>(),
-            "the closure and manifests resolve over the product repository API"
+            "the closure resolves over the product repository API"
         );
         let git_args = must(fs::read_to_string(log.join("git-args")), "read git log");
         assert!(
@@ -13574,12 +11433,6 @@ mod tests {
     fn declared_setup_action() -> String {
         let action_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../.github-gen/sources/actions/setup-velnor-workflow/action.yml");
-        let action_path = if action_path.exists() {
-            action_path
-        } else {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("fixtures/actions/setup-velnor-workflow/action.yml")
-        };
         must(
             fs::read_to_string(&action_path),
             "read declared setup action",
@@ -13725,7 +11578,6 @@ mod tests {
             adopted_workflow_surface: true,
             actionlint_config_variables_null: false,
             ci_required: true,
-            empty_selection_proof: false,
             ruleset_required_status_checks: Vec::new(),
             ruleset_external_status_checks: Vec::new(),
             package_update_channels: None,
@@ -14073,14 +11925,6 @@ mod tests {
             "write Package.resolved",
         );
         must(
-            fs::write(root.join(".swift-format"), "version: 1\n"),
-            "write SwiftFormat config",
-        );
-        must(
-            fs::write(root.join(".swiftlint.yml"), "disabled_rules: []\n"),
-            "write SwiftLint config",
-        );
-        must(
             fs::write(root.join("Sources/App/App.swift"), "import SwiftUI\n"),
             "write Swift source",
         );
@@ -14126,19 +11970,8 @@ mod tests {
         );
         assert_eq!(
             package.phases,
-            vec![
-                ValidationPhase::SwiftFormat,
-                ValidationPhase::SwiftLint,
-                ValidationPhase::SwiftBuild,
-                ValidationPhase::SwiftTest,
-            ]
+            vec![ValidationPhase::SwiftBuild, ValidationPhase::SwiftTest]
         );
-        assert!(package.watch.contains(&".swift-format".to_owned()));
-        assert!(package.watch.contains(&".swiftlint.yml".to_owned()));
-        assert!(package
-            .cache
-            .as_ref()
-            .is_some_and(|cache| { !cache.key_files.contains(&".swift-format".to_owned()) }));
         assert!(package
             .pr_commands
             .iter()
@@ -14156,19 +11989,8 @@ mod tests {
             .any(|command| command.contains("platform=iOS Simulator")));
         assert_eq!(
             xcode.phases,
-            vec![
-                ValidationPhase::SwiftFormat,
-                ValidationPhase::SwiftLint,
-                ValidationPhase::SwiftBuild,
-                ValidationPhase::SwiftTest,
-            ]
+            vec![ValidationPhase::SwiftBuild, ValidationPhase::SwiftTest]
         );
-        assert!(xcode.watch.contains(&".swift-format".to_owned()));
-        assert!(xcode.watch.contains(&".swiftlint.yml".to_owned()));
-        assert!(xcode
-            .cache
-            .as_ref()
-            .is_some_and(|cache| { !cache.key_files.contains(&".swift-format".to_owned()) }));
         for pin in ["mise.lock", ".swift-version", ".xcode-version"] {
             for (label, unit) in [("Swift package", package), ("Xcode scheme", xcode)] {
                 assert!(unit.cache.is_some(), "{label} must have a cache contract");
@@ -14194,14 +12016,7 @@ mod tests {
                 .find(|unit| unit.id == "swift-xcodeproj-buildonly"),
             "build-only Xcode scheme unit",
         );
-        assert_eq!(
-            build_only.phases,
-            vec![
-                ValidationPhase::SwiftFormat,
-                ValidationPhase::SwiftLint,
-                ValidationPhase::SwiftBuild,
-            ]
-        );
+        assert_eq!(build_only.phases, vec![ValidationPhase::SwiftBuild]);
         assert!(build_only
             .pr_commands
             .iter()
@@ -17330,12 +15145,9 @@ channel = "stable"
 
     #[test]
     fn generated_report_action_matches_authoritative_template() {
+        let template = report_velnor_ci_outcomes_action_template();
         let generated_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../.github/actions/report-velnor-ci-outcomes/action.yml");
-        if !generated_path.exists() {
-            return;
-        }
-        let template = report_velnor_ci_outcomes_action_template();
         let generated = must(
             fs::read_to_string(&generated_path),
             &format!("read {}", generated_path.display()),
@@ -18677,7 +16489,7 @@ channel = "stable"
                 root.join(".github-gen/velnor-workflow.toml"),
                 "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                  [workflow]\nrunners = \"both\"\nvelnor_labels = [\"self-hosted\", \"example-lane\"]\n\
-                 files = [\"ci-pr.yml\", \"release.yml\", \"ci-release-package-signer.yml\", \"ci-policy.yml\"]\n\n\
+                 files = [\"ci-pr.yml\", \"release.yml\", \"ci-release-package-signer.yml\"]\n\n\
                  [release]\nenabled = true\nkind = \"native\"\npackage = \"example\"\n\
                  binary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\", \"aarch64-unknown-linux-gnu\"]\n\
                  consumer_repository = \"example/consumer\"\n\n\
@@ -19973,7 +17785,6 @@ channel = "stable"
             trusted_gate: None,
             default_branch: "main",
             declared_ruleset_contexts: "ci-required,DCO,Policy",
-            candidate_artifact_wiring: true,
         })
     }
 
@@ -19987,7 +17798,6 @@ channel = "stable"
             trusted_gate: None,
             default_branch: "main",
             declared_ruleset_contexts: "ci-required,DCO,Policy",
-            candidate_artifact_wiring: true,
         })
     }
 
@@ -20468,7 +18278,6 @@ channel = "stable"
             adopted_workflow_surface: false,
             actionlint_config_variables_null: false,
             ci_required: true,
-            empty_selection_proof: false,
             ruleset_required_status_checks: Vec::new(),
             ruleset_external_status_checks: Vec::new(),
             package_update_channels: None,
@@ -20767,8 +18576,11 @@ channel = "stable"
             !velnor.contains("rulesets?"),
             "the Velnor policy job performs no ruleset lookup: {velnor}"
         );
-        assert!(velnor.matches("gh api").count() >= 1, "{velnor}");
-        assert!(!velnor.contains("repos/$GITHUB_REPOSITORY/"), "{velnor}");
+        assert_eq!(
+            velnor.matches("gh api").count(),
+            1,
+            "the only Velnor API call resolves the pin from the product repository: {velnor}"
+        );
         assert!(
             velnor.contains(
                 "gh api \"repos/$PRODUCT_REPOSITORY/git/trees/$PINNED_REVISION?recursive=1\""
@@ -20840,59 +18652,6 @@ channel = "stable"
     }
 
     #[test]
-    fn policy_job_grants_exact_read_only_api_permissions() {
-        for policy in [
-            hosted_policy_job("abc123"),
-            velnor_policy_job("abc123", "[self-hosted, velnor]"),
-        ] {
-            assert!(
-                policy.contains(
-                    "    permissions:\n      actions: read\n      contents: read\n      pull-requests: read\n    steps:\n"
-                ),
-                "{policy}"
-            );
-            assert!(
-                !policy.contains(
-                    "    permissions:\n      actions: read\n      contents: read\n    steps:\n"
-                ),
-                "policy must include pull-requests: read: {policy}"
-            );
-        }
-    }
-
-    #[test]
-    fn legacy_generator_pin_keeps_candidate_wiring_at_its_byte_compatible_default() {
-        assert!(!candidate_artifact_wiring_enabled(
-            LEGACY_CANDIDATE_POLICY_PIN
-        ));
-        assert!(candidate_artifact_wiring_enabled(
-            "1111111111111111111111111111111111111111"
-        ));
-
-        let job = policy_job(&PolicyJobSpec {
-            name: "Policy",
-            revision: LEGACY_CANDIDATE_POLICY_PIN,
-            runner: "ubuntu-24.04",
-            repository: workflow_setup_action_repository(),
-            cache_backend: "github",
-            trusted_gate: None,
-            default_branch: "main",
-            declared_ruleset_contexts: "ci-required,DCO,Policy",
-            candidate_artifact_wiring: candidate_artifact_wiring_enabled(
-                LEGACY_CANDIDATE_POLICY_PIN,
-            ),
-        });
-        assert!(
-            job.contains("    permissions:\n      contents: read\n    steps:\n"),
-            "the bootstrap pin retains the established permission bytes: {job}"
-        );
-        assert!(job.contains("HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}"));
-        assert!(job.contains("VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow"));
-        assert!(!job.contains("EVENT_NAME: ${{ github.event_name }}"));
-        assert!(!job.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY=$candidate/velnor-workflow"));
-    }
-
-    #[test]
     fn no_generated_file_passes_pin_build() {
         // `--pin-build` is a local-development escape hatch on both CLIs; no
         // generated file may pass it, or an unprovisioned pin would silently
@@ -20924,9 +18683,6 @@ channel = "stable"
             fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")),
             "repository root",
         );
-        if root.join(".velnor/config.toml").exists() {
-            return;
-        }
         let error = must_fail(
             scan_target(&root, RunnerMode::Both, "main"),
             "scanning the schema-2 repository with the schema-1 pipeline must fail",
@@ -20938,17 +18694,19 @@ channel = "stable"
     }
 
     /// The acquire step, the unit-job publisher, and the validator's
-    /// `wanted` binding rendezvous on one digest: the resolved candidate
-    /// revision's closure and the audited render revision's closure must
-    /// agree. The step derives the poll name from `CANDIDATE_SHA`, keeps
-    /// `RENDER_SHA` explicit for squash pushes, and rejects main changes that
-    /// make a PR-head artifact stale until the branch is updated and rebuilt.
+    /// `wanted` binding rendezvous on one digest: the audited head's
+    /// candidate closure. Polling by the pin's candidate closure while the
+    /// other two legs bind the head's is jointly satisfiable only when
+    /// pin..head is closure-clean, so no render-changing generator PR can
+    /// land green. The step therefore derives the poll name and the
+    /// manifest gate from `closure --rev $HEAD_SHA --candidate`, and no
+    /// `pin_candidate` derivation survives anywhere in the job.
     #[test]
     fn policy_candidate_step_binds_manifest_to_head_and_exports_it() {
         let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
         assert!(
             owner.contains(
-                "head_candidate=\"$(velnor-workflow closure --rev=\"$CANDIDATE_SHA\" --candidate)\""
+                "head_candidate=\"$(velnor-workflow closure --rev=\"$HEAD_SHA\" --candidate)\""
             ),
             "the acquire step derives the candidate from the audited head: {owner}"
         );
@@ -20972,23 +18730,21 @@ channel = "stable"
         );
         assert!(
             owner.contains(
-                "render_candidate=\"$(velnor-workflow closure --rev=\"$RENDER_SHA\" --candidate)\""
-            ) && owner.contains("\"$manifest_closure\" == \"$render_candidate\""),
-            "a PR artifact whose closure differs from the audited render fails closed: {owner}"
-        );
-        assert!(
-            owner.contains(".build_revision | test(\"^[0-9a-f]{40}$\")"),
-            "the manifest binds the binary build revision: {owner}"
-        );
-        assert!(
-            owner.contains("update the PR branch/rebuild the candidate after main changes"),
-            "closure divergence names its remediation: {owner}"
-        );
-        assert!(
-            owner.contains(
                 "echo \"VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json\" >> \"$GITHUB_ENV\""
             ),
             "the acquire step exports the manifest for the validator's binding: {owner}"
+        );
+        assert!(
+            owner.contains(&format!(
+                "echo \"{VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV}=$candidate/velnor-workflow\" >> \"$GITHUB_ENV\""
+            )),
+            "the acquire step exports the candidate in its separate slot: {owner}"
+        );
+        assert!(
+            !owner.contains(&format!(
+                "echo \"{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$candidate/velnor-workflow\""
+            )),
+            "the candidate cannot replace the trusted pin slot: {owner}"
         );
         assert!(
             owner.contains("echo \"VELNOR_WORKFLOW_CANDIDATE_MANIFEST=\" >> \"$GITHUB_ENV\""),
@@ -21003,6 +18759,11 @@ channel = "stable"
         assert!(
             owner.contains("::error::candidate digest mismatch"),
             "a binary whose digest disagrees with the manifest fails closed: {owner}"
+        );
+        assert!(
+            !owner.contains("Verify candidate closure in isolation")
+                && !owner.contains("\"$candidate/velnor-workflow\" --closure"),
+            "the token-bearing acquisition step never executes candidate code: {owner}"
         );
         for clause in [
             ".platform == $platform",
@@ -21068,44 +18829,37 @@ channel = "stable"
         );
     }
 
-    /// Candidate closure reads the resolved PR-head object, which the
-    /// checkout step cannot guarantee after a squash merge. The acquire step
-    /// fetches that candidate revision before deriving its artifact name;
-    /// the audited render revision remains checked out separately.
+    /// `closure --rev $HEAD_SHA` reads git objects at the audited head,
+    /// which the checkout step normally already fetched — but the acquire
+    /// step must not assume that: a missing head commit fails closed as a
+    /// fetch, never as a closure error. The fetch line matches the
+    /// checkout step's exactly, so both occurrences are asserted together.
     #[test]
     fn policy_acquire_fetches_head_before_deriving_its_candidate() {
         let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
-        let checkout_fetch =
-            "git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"";
+        let fetch = "git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"";
         assert_eq!(
-            owner.matches(checkout_fetch).count(),
-            1,
-            "the checkout step ensures the audited render commit: {owner}"
-        );
-        let candidate_fetch =
-            "git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$CANDIDATE_SHA\"";
-        assert_eq!(
-            owner.matches(candidate_fetch).count(),
-            1,
-            "the acquire step ensures the resolved PR-head commit: {owner}"
+            owner.matches(fetch).count(),
+            2,
+            "the checkout step and the acquire step both ensure the head commit: {owner}"
         );
         let acquire_fetch = must_some(
             owner
                 .find("Acquire candidate generator product")
                 .and_then(|start| {
                     owner[start..]
-                        .find("if ! git cat-file -e \"$CANDIDATE_SHA^{commit}\"")
+                        .find("if ! git cat-file -e \"$HEAD_SHA^{commit}\"")
                         .map(|offset| start + offset)
                 }),
-            "the acquire step guards its own candidate fetch",
+            "the acquire step guards its own head fetch",
         );
         let head = must_some(
             owner.find("head_candidate=\"$(velnor-workflow closure"),
-            "the candidate derivation is present",
+            "the head derivation is present",
         );
         assert!(
             acquire_fetch < head,
-            "the candidate commit is ensured before its artifact is derived: {owner}"
+            "the head commit is ensured before its candidate is derived: {owner}"
         );
     }
 
@@ -21145,21 +18899,46 @@ channel = "stable"
         );
     }
 
-    /// The acquire step downloads and validates the artifact without executing
-    /// it. Later token-free policy execution checks candidate closure and
-    /// rendered output; child-only environment clearing here would not protect
-    /// the token-bearing parent from inspection by candidate code.
+    /// Artifact acquisition alone holds the API token. Candidate execution
+    /// happens in policy evaluation after both trusted checkout readers.
     #[test]
-    fn policy_candidate_acquire_does_not_execute_candidate() {
+    fn policy_candidate_execution_follows_trusted_checkout_checks() {
         let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
+        let acquire = owner
+            .split("      - name: Acquire candidate generator product\n")
+            .nth(1)
+            .unwrap_or_default()
+            .split("      - name: Resolve required status checks\n")
+            .next()
+            .unwrap_or_default();
+        let lint = owner.find("      - name: Lint caller workflows\n");
+        let enforce = owner.find("      - name: Enforce workflow policy\n");
+        let lint_precedes_policy = match (lint, enforce) {
+            (Some(lint), Some(enforce)) => lint < enforce,
+            _ => false,
+        };
         assert!(
-            !owner.contains("reported=\"$(env -i"),
-            "the token-bearing acquire step never executes the candidate: {owner}"
+            acquire.contains("GH_TOKEN: ${{ github.token }}"),
+            "the acquire step alone has the API token: {acquire}"
         );
         assert!(
-            owner.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY=$candidate/velnor-workflow")
-                && !owner.contains("VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow"),
-            "the verified candidate is handed to later token-free policy execution in its separate slot: {owner}"
+            !acquire.contains("\"$candidate/velnor-workflow\" --closure")
+                && !owner.contains("Verify candidate closure in isolation"),
+            "acquisition never executes candidate code: {owner}"
+        );
+        assert!(
+            lint_precedes_policy,
+            "actionlint finishes before policy evaluation can execute a candidate: {owner}"
+        );
+        assert!(
+            enforce.is_some_and(|enforce| {
+                let evaluation = &owner[enforce..];
+                !evaluation.contains("GH_TOKEN")
+                    && !evaluation.contains("GITHUB_TOKEN")
+                    && !evaluation.contains("Lint caller workflows")
+                    && !evaluation.contains("working-directory: policy-checkout")
+            }),
+            "policy evaluation is token-free and the final checkout consumer: {owner}"
         );
     }
 
@@ -21190,12 +18969,18 @@ channel = "stable"
                 "the comment states the credential absence precisely: {job}"
             );
             assert!(
-                job.contains("read-only github.token confined to the Acquire/Ruleset API steps,"),
+                job.contains("read-only github.token confined to the Acquire/Ruleset API steps."),
                 "the comment confines the job token to the API steps: {job}"
             );
             assert!(
-                job.contains("and both candidate exec points tokenless."),
-                "the comment states both exec points hold no token: {job}"
+                job.contains(
+                    "Candidate code runs only in the token-free policy step, after trusted"
+                ),
+                "the comment puts candidate execution after trusted readers: {job}"
+            );
+            assert!(
+                job.contains("semantic and actionlint checks have read the checkout."),
+                "the comment names semantic and workflow lint checks: {job}"
             );
             assert!(
                 !job.contains("never by building pull-request code here"),
@@ -21245,39 +19030,6 @@ channel = "stable"
             crate::estate::approved_velnor_runner_group()
         )));
         assert!(!policy.contains("backend: local"));
-    }
-
-    #[test]
-    fn policy_entrypoint_uses_linux_when_application_runner_is_macos() {
-        let mut config = scanned_fixture(RunnerMode::Both);
-        config.github_runner = "macos-15".to_owned();
-        let policy = generated_ci_policy(&config);
-        assert!(
-            policy.contains("runs-on: ubuntu-24.04"),
-            "policy validation needs the Docker-capable Linux runner: {policy}"
-        );
-        assert!(
-            !policy.contains("runs-on: macos-15"),
-            "the policy job must not inherit the application runner: {policy}"
-        );
-
-        let rust_unit = must_some(
-            must(
-                WorkflowIr::from_config(&config).render_kind_unit_workflow(UnitKind::Rust, None),
-                "render hosted Rust reusable workflow",
-            ),
-            "hosted Rust reusable workflow",
-        )
-        .1;
-        assert!(
-            rust_unit.contains("runs-on: macos-15"),
-            "application unit jobs keep their configured runner: {rust_unit}"
-        );
-        assert!(
-            rust_unit.contains("name: Set up Velnor workflow runtime")
-                && !rust_unit.contains("name: Download Velnor workflow runtime"),
-            "macOS unit jobs must bootstrap instead of downloading the Linux artifact: {rust_unit}"
-        );
     }
 
     #[test]
@@ -22101,12 +19853,6 @@ channel = "stable"
         let baseline_keys = github_lane_cache_key_lines(
             &WorkflowIr::from_config(&baseline.config).render(WorkflowKind::Main),
         );
-        let artifact_path = PathBuf::from("config/fleet/velnor-host.env");
-        assert!(
-            !must(generated_files(&baseline.config), "generate baseline")
-                .contains_key(&artifact_path),
-            "an unconfigured host cache must not emit the fleet env file",
-        );
         must(
             fs::write(
                 root.join(".github-gen/velnor-workflow.toml"),
@@ -22127,15 +19873,6 @@ channel = "stable"
         assert_eq!(
             baseline_keys, with_cache_keys,
             "cache sections must not affect cache keys"
-        );
-        let files = must(
-            generated_files(&with_cache.config),
-            "generate configured cache",
-        );
-        assert_eq!(
-            files.get(&artifact_path).map(String::as_str),
-            Some(config::render_velnor_host_env(&with_cache.config.velnor_host_cache).as_str()),
-            "an explicit host cache override must emit its fleet env file",
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -22174,11 +19911,410 @@ channel = "stable"
             runtime::read_config_for_test(&path),
             "emitted project.toml must round-trip through runtime parser",
         );
-        let files = must(generated_files(&scanned.config), "generate");
-        assert!(
-            files.contains_key(&PathBuf::from("config/fleet/velnor-host.env")),
-            "generator must emit velnor-host.env fleet snippet",
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn declared_config_static_output_is_owned_pruned_and_scan_stable() {
+        const CONFIG: &str = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                            [workflow]\nvelnor_labels = [\"self-hosted\", \"fixture-runner\"]\n\n\
+                            [[static_files]]\nfile = \"config/runtime/example.env\"\n\
+                            source = \".github-gen/sources/example.env\"\n";
+        let root = configured_repository("config-static-output", Some(CONFIG));
+        let source = root.join(".github-gen/sources/example.env");
+        must(
+            fs::create_dir_all(must_some(source.parent(), "static source parent")),
+            "create static source directory",
         );
+        must(
+            fs::write(&source, "CACHE_LIMIT=32\n"),
+            "write static source",
+        );
+        let output = PathBuf::from("config/runtime/example.env");
+
+        let initial = must(
+            scan_target(&root, RunnerMode::Both, "main"),
+            "scan declared static output",
+        );
+        assert!(!initial
+            .shape
+            .files()
+            .contains(&output.to_string_lossy().into_owned()));
+        let scan_files = initial.shape.files().to_vec();
+        let files = must(generated_files(&initial.config), "render static output");
+        assert_eq!(
+            files.get(&output).map(String::as_str),
+            Some("CACHE_LIMIT=32\n")
+        );
+        write_generated_test_outputs(&root, &files, false);
+        assert!(root.join(&output).is_file());
+        let owned = must(
+            s2::generator_owned_output_paths(&root),
+            "read static output ownership",
+        );
+        assert!(owned.contains(&output));
+
+        let repeated = must(
+            scan_target(&root, RunnerMode::Both, "main"),
+            "rescan declared static output",
+        );
+        assert_eq!(repeated.shape.files(), scan_files);
+
+        let config_path = root.join(".github-gen/velnor-workflow.toml");
+        must(
+            fs::write(
+                &config_path,
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [workflow]\nvelnor_labels = [\"self-hosted\", \"fixture-runner\"]\n",
+            ),
+            "remove static output declaration",
+        );
+        let removed = must(
+            scan_target(&root, RunnerMode::Both, "main"),
+            "scan after static output declaration removal",
+        );
+        assert_eq!(removed.shape.files(), scan_files);
+        let next_files = must(
+            generated_files(&removed.config),
+            "render without static output",
+        );
+        assert!(!next_files.contains_key(&output));
+        write_generated_test_outputs(&root, &next_files, false);
+        assert!(!root.join(&output).exists(), "stale owned file is pruned");
+        write_generated_test_outputs(&root, &next_files, true);
+        let remaining_owned = must(
+            s2::generator_owned_output_paths(&root),
+            "read ownership after prune",
+        );
+        assert!(!remaining_owned.contains(&output));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generation_leaves_unconfigured_config_tree_symlink_alone() {
+        use std::os::unix::fs::symlink;
+
+        let root = temporary_repository("unconfigured-config-symlink");
+        let outside = temporary_directory("unconfigured-config-target");
+        must(
+            symlink(&outside, root.join("config")),
+            "create unrelated config symlink",
+        );
+        let config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "scan without config outputs",
+        );
+        let files = must(generated_files(&config), "render without config outputs");
+        must(
+            write_generated(&root, &files, false, false, false),
+            "write without claiming the config tree",
+        );
+        assert!(
+            fs::symlink_metadata(root.join("config"))
+                .is_ok_and(|metadata| metadata.file_type().is_symlink()),
+            "config symlink remains untouched"
+        );
+        assert!(
+            must(fs::read_dir(&outside), "inspect unrelated config target")
+                .next()
+                .is_none(),
+            "generation leaves the unrelated target empty"
+        );
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_static_outputs_reject_symlinked_ancestors() {
+        use std::os::unix::fs::symlink;
+
+        const CONFIG: &str = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                            [workflow]\nvelnor_labels = [\"self-hosted\", \"fixture-runner\"]\n\n\
+                            [[static_files]]\nfile = \"config/generated/example.env\"\n\
+                            source = \".github-gen/sources/example.env\"\n";
+        fn repository(name: &str) -> (PathBuf, PathBuf) {
+            let root = configured_repository(name, Some(CONFIG));
+            let source = root.join(".github-gen/sources/example.env");
+            must(
+                fs::create_dir_all(must_some(source.parent(), "static source parent")),
+                "create static source directory",
+            );
+            must(
+                fs::write(&source, "CACHE_LIMIT=32\n"),
+                "write static source",
+            );
+            (root, source)
+        }
+
+        let (missing_root, _) = repository("config-static-missing-target");
+        let missing_external = missing_root.with_extension("missing-external");
+        must(
+            fs::create_dir_all(&missing_external),
+            "create external directory",
+        );
+        must(
+            symlink(&missing_external, missing_root.join("config")),
+            "symlink config tree",
+        );
+        let error = must_some(
+            scan_target(&missing_root, RunnerMode::Both, "main").err(),
+            "a missing output through a symlinked parent must fail before metadata inspection",
+        )
+        .to_string();
+        assert!(
+            error.contains("refusing symlinked managed directory"),
+            "{error}"
+        );
+        must(
+            fs::remove_dir_all(missing_root),
+            "remove missing-target fixture",
+        );
+        must(
+            fs::remove_dir_all(missing_external),
+            "remove external directory",
+        );
+
+        let (existing_root, _) = repository("config-static-existing-target");
+        let initial = must(
+            scan_target(&existing_root, RunnerMode::Both, "main"),
+            "scan initial static target",
+        );
+        let initial_files = must(generated_files(&initial.config), "render initial target");
+        write_generated_test_outputs(&existing_root, &initial_files, false);
+        let relocated = existing_root.with_extension("relocated-config");
+        must(
+            fs::rename(existing_root.join("config"), &relocated),
+            "relocate owned config output tree",
+        );
+        must(
+            symlink(&relocated, existing_root.join("config")),
+            "symlink existing config output tree",
+        );
+        let error = must_some(
+            scan_target(&existing_root, RunnerMode::Both, "main").err(),
+            "an existing output through a symlinked parent must fail before metadata inspection",
+        )
+        .to_string();
+        assert!(
+            error.contains("refusing symlinked managed directory"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_to_string(relocated.join("generated/example.env"))
+                .ok()
+                .as_deref(),
+            Some("CACHE_LIMIT=32\n"),
+            "refusal leaves the existing owned file intact"
+        );
+        must(
+            fs::remove_dir_all(existing_root),
+            "remove existing-target fixture",
+        );
+        must(
+            fs::remove_dir_all(relocated),
+            "remove relocated output tree",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_static_sources_reject_symlinked_parents() {
+        use std::os::unix::fs::symlink;
+
+        const CONFIG: &str = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                            [workflow]\nvelnor_labels = [\"self-hosted\", \"fixture-runner\"]\n\n\
+                            [[static_files]]\nfile = \"config/generated/example.env\"\n\
+                            source = \".github-gen/sources/example.env\"\n";
+        let root = configured_repository("config-static-source-symlink", Some(CONFIG));
+        let external = root.with_extension("source-external");
+        must(
+            fs::create_dir_all(&external),
+            "create external source directory",
+        );
+        let external_source = external.join("example.env");
+        must(
+            fs::write(&external_source, "CACHE_LIMIT=32\n"),
+            "write external source",
+        );
+        must(
+            symlink(&external, root.join(".github-gen/sources")),
+            "symlink source parent",
+        );
+        let error = must_some(
+            scan_target(&root, RunnerMode::Both, "main").err(),
+            "symlinked source parent must fail",
+        )
+        .to_string();
+        assert!(
+            error.contains("refusing symlinked static source directory"),
+            "{error}"
+        );
+        must(fs::remove_dir_all(root), "remove source-symlink fixture");
+        must(
+            fs::remove_dir_all(external),
+            "remove external source directory",
+        );
+    }
+
+    #[test]
+    fn static_config_outputs_refuse_unowned_targets_and_engine_collisions() {
+        const PREFIX: &str = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                              [workflow]\nvelnor_labels = [\"self-hosted\", \"fixture-runner\"]\n\n";
+        let root = configured_repository(
+            "config-static-unowned-target",
+            Some(&format!(
+                "{PREFIX}[[static_files]]\nfile = \"config/runtime/example.env\"\n\
+                 source = \".github-gen/sources/example.env\"\n"
+            )),
+        );
+        let target = root.join("config/runtime/example.env");
+        must(
+            fs::create_dir_all(must_some(target.parent(), "unowned target parent")),
+            "create unowned target directory",
+        );
+        must(fs::write(&target, "handwritten\n"), "write unowned target");
+        let source = root.join(".github-gen/sources/example.env");
+        must(
+            fs::create_dir_all(must_some(source.parent(), "static source parent")),
+            "create static source directory",
+        );
+        must(
+            fs::write(&source, "CACHE_LIMIT=32\n"),
+            "write static source",
+        );
+        let error = must_some(
+            scan_target(&root, RunnerMode::Both, "main").err(),
+            "existing unowned target must fail",
+        )
+        .to_string();
+        assert!(error.contains("existing unowned static output"), "{error}");
+        let _ = fs::remove_dir_all(root);
+
+        let collision = configured_repository(
+            "config-static-engine-collision",
+            Some(&format!(
+                "{PREFIX}[[static_files]]\nfile = \".github/AGENTS.md\"\n\
+                 source = \".github-gen/sources/agents.md\"\n"
+            )),
+        );
+        let source = collision.join(".github-gen/sources/agents.md");
+        must(
+            fs::create_dir_all(must_some(source.parent(), "static source parent")),
+            "create collision source directory",
+        );
+        must(
+            fs::write(&source, "repository instructions\n"),
+            "write collision source",
+        );
+        let scanned = must(
+            scan_target(&collision, RunnerMode::Both, "main"),
+            "scan engine output collision",
+        );
+        let error = must_some(
+            generated_files(&scanned.config).err(),
+            "engine-owned path collision must fail",
+        )
+        .to_string();
+        assert!(error.contains("generator owns this path"), "{error}");
+        let _ = fs::remove_dir_all(collision);
+    }
+
+    #[test]
+    fn static_output_cannot_descend_from_engine_owned_file() {
+        let config = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                      [workflow]\nvelnor_labels = [\"self-hosted\", \"fixture-runner\"]\n\n\
+                      [[static_files]]\nfile = \".github/AGENTS.md/child\"\n\
+                      source = \".github-gen/sources/child.env\"\n";
+        let root = configured_repository("config-static-engine-descendant", Some(config));
+        let source = root.join(".github-gen/sources/child.env");
+        must(
+            fs::create_dir_all(must_some(source.parent(), "static source parent")),
+            "create static source directory",
+        );
+        must(fs::write(source, "child\n"), "write static source");
+        let scanned = must(
+            scan_target(&root, RunnerMode::Both, "main"),
+            "scan descendant static output",
+        );
+        let error = must_fail(
+            generated_files(&scanned.config),
+            "static output cannot descend from generated file",
+        );
+        assert!(
+            error.to_string().contains("managed output paths overlap"),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn overlapping_file_and_symlink_outputs_fail_before_staging() {
+        let root = temporary_directory("overlapping-generated-paths");
+        let files = BTreeMap::from([(
+            PathBuf::from(".github/CLAUDE.md/child"),
+            String::from("child\n"),
+        )]);
+        let symlinks = BTreeMap::from([(
+            PathBuf::from(GITHUB_CLAUDE_MD),
+            PathBuf::from(GITHUB_CLAUDE_MD_TARGET),
+        )]);
+        let error = must_fail(
+            write_generated_with_options(
+                &root,
+                &files,
+                &symlinks,
+                &GenerationInputs::parts(0, 0),
+                false,
+                false,
+                false,
+                false,
+            ),
+            "overlapping file and symlink outputs must fail before staging",
+        );
+        assert!(
+            error.to_string().contains("managed output paths overlap"),
+            "{error}"
+        );
+        assert!(
+            must(fs::read_dir(&root), "inspect rejected write root")
+                .next()
+                .is_none(),
+            "overlap rejection leaves the output root untouched"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn static_file_reader_rejects_external_source_before_opening_it() {
+        let generation = must(
+            config::parse(
+                Path::new("fixture.toml"),
+                b"schema = 1\n\n[[static_files]]\nfile = \"config/runtime/output.env\"\nsource = \"/etc/passwd\"\n",
+            ),
+            "parse unsafe static source row",
+        );
+        let root = temporary_directory("static-source-absolute");
+        let mut project = scanned_fixture(RunnerMode::Both);
+        let error = must_fail(
+            read_static_files(&mut project, generation.static_files(), &root),
+            "static reader must reject absolute sources before opening them",
+        )
+        .to_string();
+        assert!(
+            error.contains("source must be a normalized repository-relative path"),
+            "{error}"
+        );
+        assert!(
+            project.static_files.is_empty(),
+            "no external bytes were captured"
+        );
+        let reader_error = must_fail(
+            read_static_source_file(&root, "/etc/passwd"),
+            "source reader must reject absolute paths before opening them",
+        );
+        assert!(reader_error.to_string().contains("source must be"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -24319,126 +22455,6 @@ channel = "stable"
         );
         let _ = fs::remove_dir_all(root);
     }
-
-    #[test]
-    fn writer_rejects_reserved_policy_aliases_before_preimage_capture() {
-        let root = temporary_repository("reserved-policy-writer");
-        let policy_dir = root.join(".github/workflows");
-        must(fs::create_dir_all(&policy_dir), "create policy directory");
-        let sentinel = policy_dir.join("CI-POLICY.yml");
-        must(fs::write(&sentinel, "sentinel\n"), "write policy sentinel");
-        for alias in [
-            ".github/workflows/CI-POLICY.yml",
-            ".github/workflows/ｃｉ-ｐｏｌｉｃｙ.yml",
-            ".github／workflows／ci-policy.yml",
-            ".github\\workflows\\ci-policy.yml",
-            ".github/workflows/ci-policy.yml. ",
-            ".github/workflows/CI-POL~1.YML",
-        ] {
-            let files = BTreeMap::from([(PathBuf::from(alias), "evil\n".to_owned())]);
-            let error = must_some(
-                plan_generated_write(
-                    &root,
-                    &files,
-                    &BTreeMap::new(),
-                    &GenerationInputs::parts(0, 0),
-                )
-                .err(),
-                "reserved policy alias must fail before preimage capture",
-            );
-            assert!(error.to_string().contains(CI_POLICY_WORKFLOW), "{error}");
-            assert_eq!(
-                must(fs::read_to_string(&sentinel), "read policy sentinel"),
-                "sentinel\n",
-                "a refused alias must not mutate the existing policy preimage"
-            );
-        }
-
-        let symlinks = BTreeMap::from([(
-            PathBuf::from(".github/workflows/CI-POL~1.YML"),
-            PathBuf::from("target"),
-        )]);
-        let error = must_some(
-            plan_generated_write(
-                &root,
-                &BTreeMap::new(),
-                &symlinks,
-                &GenerationInputs::parts(0, 0),
-            )
-            .err(),
-            "reserved policy symlink must fail before preimage capture",
-        );
-        assert!(error.to_string().contains(CI_POLICY_WORKFLOW), "{error}");
-
-        must(fs::remove_file(&sentinel), "remove policy sentinel");
-        let canonical = BTreeMap::from([(
-            PathBuf::from(CI_POLICY_WORKFLOW),
-            "canonical policy\n".to_owned(),
-        )]);
-        must(
-            plan_generated_write(
-                &root,
-                &canonical,
-                &BTreeMap::new(),
-                &GenerationInputs::parts(0, 0),
-            ),
-            "the canonical policy file remains a writer-owned output",
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn writer_rejects_non_utf8_generated_paths_before_preimage_capture() {
-        use std::os::unix::ffi::OsStringExt as _;
-
-        let root = temporary_repository("non-utf8-generated-path");
-        let path = PathBuf::from(OsString::from_vec(b".github/non-utf8-\xff".to_vec()));
-        let files = BTreeMap::from([(path, "evil\n".to_owned())]);
-        let error = must_some(
-            plan_generated_write(
-                &root,
-                &files,
-                &BTreeMap::new(),
-                &GenerationInputs::parts(0, 0),
-            )
-            .err(),
-            "non-UTF-8 generated path must fail closed",
-        );
-        assert!(error.to_string().contains("non-UTF-8"), "{error}");
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn writer_rejects_unsafe_generated_path_spellings() {
-        let root = temporary_repository("unsafe-generated-path-spellings");
-        for path in [
-            ".github/workfl~1/ci-policy.yml",
-            ".github/workflows/ci-policy.yml:ads",
-            ".github/workflows/CON.txt",
-            ".github/workflows/CONIN$.txt",
-        ] {
-            let files = BTreeMap::from([(PathBuf::from(path), "evil\n".to_owned())]);
-            let error = must_some(
-                plan_generated_write(
-                    &root,
-                    &files,
-                    &BTreeMap::new(),
-                    &GenerationInputs::parts(0, 0),
-                )
-                .err(),
-                "unsafe generated path must fail before preimage capture",
-            );
-            assert!(
-                error
-                    .to_string()
-                    .contains("unsupported generated path spelling"),
-                "{error}"
-            );
-        }
-        let _ = fs::remove_dir_all(root);
-    }
-
     #[test]
     fn reserved_agent_path_with_redundant_separator_is_refused() {
         let root = temporary_repository("reserved-agent-spelling");
@@ -24662,6 +22678,61 @@ channel = "stable"
         );
         let _ = fs::remove_dir_all(root);
     }
+    #[test]
+    fn render_into_previous_era_tree_converges_clean() {
+        // Policy-candidate shape: the tree and its state predate the
+        // generator-owned link (as a pin-era scratch render does), and a
+        // fresh render carries it. The link is created, never flagged:
+        // unrecorded plus rendered means Create, not stale, not unknown.
+        let root = temporary_repository("previous-era-tree");
+        let mut previous = BTreeMap::new();
+        previous.insert(
+            PathBuf::from(".github/actionlint.yaml"),
+            "lint\n".to_owned(),
+        );
+        must(
+            write_generated(&root, &previous, false, false, false),
+            "write previous-era tree",
+        );
+        let mut current = previous.clone();
+        current.insert(PathBuf::from(".github/AGENTS.md"), "agents\n".to_owned());
+        let mut symlinks = BTreeMap::new();
+        symlinks.insert(PathBuf::from(GITHUB_CLAUDE_MD), PathBuf::from("AGENTS.md"));
+        must(
+            write_generated_with_options(
+                &root,
+                &current,
+                &symlinks,
+                &GenerationInputs::parts(0, 0),
+                false,
+                false,
+                true,
+                true,
+            ),
+            "a fresh render must converge over a previous-era tree",
+        );
+        assert_eq!(
+            must(
+                fs::read_link(root.join(GITHUB_CLAUDE_MD)),
+                "read created link"
+            ),
+            PathBuf::from("AGENTS.md")
+        );
+        assert!(matches!(
+            write_generated_with_options(
+                &root,
+                &current,
+                &symlinks,
+                &GenerationInputs::parts(0, 0),
+                false,
+                true,
+                false,
+                false,
+            ),
+            Ok(WriteOutcome::Unchanged)
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
     #[cfg(unix)]
     #[test]
     fn symlinked_legacy_guide_is_not_removed() {
@@ -24737,7 +22808,7 @@ channel = "stable"
     }
     #[cfg(unix)]
     #[test]
-    fn generation_refuses_symlinked_managed_directory() {
+    fn scan_refuses_symlinked_managed_directory() {
         let root = temporary_repository("symlinked-managed-directory");
         let outside = temporary_directory("symlink-target");
         must(
@@ -24753,30 +22824,12 @@ channel = "stable"
         );
         let error = must_some(
             scan_repository(&root, RunnerMode::Github).err(),
-            "symlinked managed directory must be rejected during scan",
+            "scan must reject a symlinked managed directory",
         );
-        assert!(error.to_string().contains("escapes the repository"));
+        assert!(error
+            .to_string()
+            .contains("refusing symlinked managed directory"));
         assert!(must(fs::read_dir(&outside), "read outside directory")
-            .next()
-            .is_none());
-        let _ = fs::remove_dir_all(root);
-        let _ = fs::remove_dir_all(outside);
-    }
-    #[cfg(unix)]
-    #[test]
-    fn generation_refuses_symlinked_fleet_directory() {
-        let root = temporary_repository("symlinked-fleet-directory");
-        let outside = temporary_directory("symlinked-fleet-target");
-        must(
-            std::os::unix::fs::symlink(&outside, root.join("config")),
-            "create fleet directory symlink",
-        );
-        let error = must_some(
-            scan_repository(&root, RunnerMode::Github).err(),
-            "symlinked fleet directory must be rejected during scan",
-        );
-        assert!(error.to_string().contains("escapes the repository"));
-        assert!(must(fs::read_dir(&outside), "read fleet target")
             .next()
             .is_none());
         let _ = fs::remove_dir_all(root);
@@ -25162,57 +23215,6 @@ channel = "stable"
         assert!(project.contains("profile = \"example-profile\""));
         assert!(project.contains("velnor_labels = [\"self-hosted\", \"example-lane\"]"));
         assert!(project.contains("github_runner = \"ubuntu-26.04\""));
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn declared_surface_reads_confined_symlinked_static_file_source() {
-        let config = format!(
-            "{DECLARED_SURFACE_CONFIG}\n\
-             [[static_files]]\n\
-             file = \".github/actions/example/action.yml\"\n\
-             source = \".github-gen/sources/actions/example/action.yml\"\n"
-        );
-        let root = declared_surface_repository(
-            "symlinked-static-source",
-            &config,
-            &[("owned.yml", DECLARED_SURFACE_TEMPLATE)],
-            &[(
-                "actions/example/action.yml",
-                "name: 'Example composite'\nruns:\n  using: composite\n  steps: []\n",
-            )],
-        );
-        let target = root.join(".github-gen/sources/inside.yml");
-        must(
-            fs::write(
-                &target,
-                "name: 'Confined composite'\nruns:\n  using: composite\n  steps: []\n",
-            ),
-            "write confined static source",
-        );
-        let source = root.join(".github-gen/sources/actions/example/action.yml");
-        must(fs::remove_file(&source), "remove regular static source");
-        must(
-            std::os::unix::fs::symlink("../../inside.yml", &source),
-            "create static source symlink",
-        );
-
-        let scanned = must(
-            scan_target(&root, RunnerMode::Both, "main"),
-            "a confined symlinked static source must be accepted",
-        );
-        let files = must(
-            generated_files(&scanned.config),
-            "generate declared surface",
-        );
-        assert_eq!(
-            files
-                .get(Path::new(".github/actions/example/action.yml"))
-                .map(String::as_str),
-            Some("name: 'Confined composite'\nruns:\n  using: composite\n  steps: []\n"),
-            "generated static file must read the confined symlink target",
-        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -25644,6 +23646,22 @@ channel = "stable"
         let _ = fs::remove_dir_all(root);
     }
 
+    fn write_generated_test_outputs(root: &Path, files: &BTreeMap<PathBuf, String>, check: bool) {
+        must(
+            write_generated_with_options(
+                root,
+                files,
+                &generated_symlinks(),
+                &GenerationInputs::parts(0, 0),
+                false,
+                check,
+                false,
+                false,
+            ),
+            "write generated test outputs",
+        );
+    }
+
     fn configured_repository(name: &str, config: Option<&str>) -> PathBuf {
         let root = temporary_repository(name);
         must(
@@ -25664,176 +23682,6 @@ channel = "stable"
         root
     }
 
-    fn static_file_repository_config(
-        repository: &str,
-        workflow_file: &str,
-        static_file: &str,
-    ) -> String {
-        format!(
-            "schema = 1\n\n[generator]\nrepository = \"{repository}\"\n\n\
-             [workflow]\nfiles = [\"{workflow_file}\", \"ci-policy.yml\"]\n\n\
-             [policy]\nci_required = false\n\n\
-             [[static_files]]\nfile = \"{static_file}\"\nsource = \".github-gen/sources/static.yml\"\n"
-        )
-    }
-
-    fn write_static_file_source(root: &Path) {
-        let source_directory = root.join(".github-gen/sources");
-        must(
-            fs::create_dir_all(&source_directory),
-            "create static source directory",
-        );
-        must(
-            fs::write(source_directory.join("static.yml"), "static source\n"),
-            "write static source",
-        );
-    }
-
-    #[test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "The static-output ownership matrix keeps all colliding generated paths together."
-    )]
-    fn static_files_cannot_replace_generated_workflows_and_keep_distinct_outputs() {
-        let cases = [
-            (
-                "static-ci-pr-case-alias",
-                "example/fixture",
-                "ci-pr.yml",
-                ".github/workflows/CI-Pr.yml",
-                ".github/workflows/ci-pr.yml",
-                true,
-            ),
-            (
-                "static-runtime-products-owner",
-                workflow_setup_action_repository(),
-                "ci-pr.yml",
-                ".github/workflows/ci-runtime-products.yml",
-                ".github/workflows/ci-runtime-products.yml",
-                true,
-            ),
-            (
-                "static-runtime-products-case-alias",
-                workflow_setup_action_repository(),
-                "ci-pr.yml",
-                ".github/workflows/CI-Runtime-Products.yml",
-                ".github/workflows/ci-runtime-products.yml",
-                true,
-            ),
-            (
-                "static-ci-policy-reserved",
-                "example/fixture",
-                "ci-pr.yml",
-                ".github/workflows/ci-policy.yml",
-                ".github/workflows/ci-policy.yml",
-                true,
-            ),
-            (
-                "static-ownership-state-reserved",
-                "example/fixture",
-                "ci-pr.yml",
-                OWNERSHIP_STATE,
-                OWNERSHIP_STATE,
-                true,
-            ),
-            (
-                "static-generated-ci-main-alias",
-                "example/fixture",
-                "ci-main.yml",
-                ".github/workflows/CI-Main.yml",
-                ".github/workflows/ci-main.yml",
-                false,
-            ),
-        ];
-        for (name, repository, workflow_file, static_file, generated_file, rejected_in_config) in
-            cases
-        {
-            let config = static_file_repository_config(repository, workflow_file, static_file);
-            let root = configured_repository(name, Some(&config));
-            write_static_file_source(&root);
-            let scan = scan_target(&root, RunnerMode::Github, "main");
-            let error = if rejected_in_config {
-                must_some(
-                    scan.err(),
-                    "reserved static output must fail config validation",
-                )
-                .to_string()
-            } else {
-                let scanned = must(scan, "scan static collision repository");
-                must_some(
-                    generated_files(&scanned.config).err(),
-                    "static output collision must fail during assembly",
-                )
-                .to_string()
-            };
-            if rejected_in_config {
-                assert!(error.contains("generator owns this path"), "{error}");
-            } else {
-                assert!(error.contains(static_file), "{error}");
-            }
-            assert!(error.contains(generated_file), "{error}");
-            let _ = fs::remove_dir_all(root);
-        }
-
-        let config = static_file_repository_config(
-            "example/fixture",
-            "ci-pr.yml",
-            ".github/notes/custom.yml",
-        );
-        let root = configured_repository("static-distinct-output", Some(&config));
-        write_static_file_source(&root);
-        let scanned = must(
-            scan_target(&root, RunnerMode::Github, "main"),
-            "scan distinct static output repository",
-        );
-        let files = must(
-            generated_files(&scanned.config),
-            "render distinct static output",
-        );
-        assert_eq!(
-            files
-                .get(&PathBuf::from(".github/notes/custom.yml"))
-                .map(String::as_str),
-            Some("static source\n")
-        );
-        assert!(files.contains_key(&PathBuf::from(".github/workflows/ci-pr.yml")));
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn direct_project_config_cannot_claim_unrendered_security_workflow_paths() {
-        let config = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
-             [workflow]\nfiles = [\"ci-policy.yml\"]\n\n\
-             [policy]\nci_required = false\n";
-        let root = configured_repository("static-direct-config", Some(config));
-        let scanned = must(
-            scan_target(&root, RunnerMode::Github, "main"),
-            "scan repository with policy-only workflow",
-        );
-        assert!(!scanned
-            .config
-            .workflow_files
-            .iter()
-            .any(|file| { file == "ci-pr.yml" || file == "ci-runtime-products.yml" }));
-
-        for path in [CI_PR_WORKFLOW, CI_RUNTIME_PRODUCTS_WORKFLOW] {
-            let mut direct_config = scanned.config.clone();
-            direct_config.static_files.push(StaticFile {
-                path: path.to_owned(),
-                source: ".github-gen/sources/static.yml".to_owned(),
-                content: "static override\n".to_owned(),
-            });
-            let error = must_some(
-                generated_files(&direct_config).err(),
-                "direct ProjectConfig must not claim a reserved workflow path",
-            )
-            .to_string();
-            assert!(error.contains("generator owns this path"), "{error}");
-            assert!(error.contains(path), "{error}");
-        }
-        let _ = fs::remove_dir_all(root);
-    }
-
     fn configured_repository_config(unit: &str) -> String {
         format!(
              "schema = 1\n\n[generator]\nrepository = \"tailrocks/fixture\"\n\n\
@@ -25844,7 +23692,7 @@ channel = "stable"
 
     #[test]
     fn generation_config_supported_overrides_reach_rendered_output() {
-        let config = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\ngithub_runner = \"ubuntu-test\"\nvelnor_labels = [\"self-hosted\", \"fixture-runner\"]\ndefault_branch = \"trunk\"\nempty_selection_proof = true\n\n[policy]\nci_required = false\nactionlint_config_variables_null = true\n";
+        let config = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\ngithub_runner = \"ubuntu-test\"\nvelnor_labels = [\"self-hosted\", \"fixture-runner\"]\ndefault_branch = \"trunk\"\n\n[policy]\nci_required = false\nactionlint_config_variables_null = true\n";
         let root = configured_repository("generation-overrides", Some(config));
         let scanned = must(
             scan_target(&root, RunnerMode::Both, "main"),
@@ -25857,7 +23705,6 @@ channel = "stable"
         );
         assert_eq!(scanned.config.default_branch, "trunk");
         assert!(!scanned.config.ci_required);
-        assert!(scanned.config.empty_selection_proof);
         assert!(scanned.config.actionlint_config_variables_null);
 
         let files = must(
@@ -25866,7 +23713,6 @@ channel = "stable"
         );
         let pull_request =
             WorkflowIr::from_config(&scanned.config).render(WorkflowKind::PullRequest);
-        assert!(WorkflowIr::from_config(&scanned.config).empty_selection_proof);
         let main = must_some(
             files.get(&PathBuf::from(".github/workflows/ci-main.yml")),
             "generated main workflow",
@@ -25881,11 +23727,6 @@ channel = "stable"
         assert!(main.contains("branches: [trunk]"));
         assert!(!main.contains("name: ci-required"));
         assert!(actionlint.contains("config-variables: null"));
-        let project = must_some(
-            files.get(&PathBuf::from(".github/ci/project.toml")),
-            "generated runtime project.toml",
-        );
-        assert!(!project.contains("empty_selection_proof"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -26017,19 +23858,6 @@ channel = "stable"
             "recorded inputs must match the current run"
         );
         let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn ownership_state_serializes_paths_with_forward_slashes() {
-        let files = BTreeMap::from([(
-            PathBuf::from(".github").join("workflows").join("ci.yml"),
-            "generated\n".to_owned(),
-        )]);
-        let state =
-            ownership_state_content(&files, &BTreeMap::new(), &GenerationInputs::parts(0, 0));
-
-        assert!(state.contains("[outputs]\n.github/workflows/ci.yml\t"));
-        assert!(!state.contains(".github\\workflows\\ci.yml"));
     }
 
     #[test]
