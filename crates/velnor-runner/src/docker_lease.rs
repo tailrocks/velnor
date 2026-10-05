@@ -14532,7 +14532,14 @@ mod tests {
         let generation = policy
             .begin_persistent_builder_setup(&builder, config_fingerprint)
             .unwrap();
-        let socket = root.join("fake-engine.sock");
+        let socket = PathBuf::from("/tmp").join(format!(
+            "velnor-recovery-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         domain.endpoint = test_endpoint_at_socket(&socket);
         let listener = UnixListener::bind(&socket).unwrap();
         let expected_path = format!("/v1.43/volumes/{volume}");
@@ -14577,6 +14584,7 @@ mod tests {
             volume_create_called = true;
         });
         server.join().unwrap();
+        std::fs::remove_file(&socket).unwrap();
 
         assert!(
             result.is_err(),
