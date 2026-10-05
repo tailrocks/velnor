@@ -13927,7 +13927,7 @@ mod tests {
         let detach_signal = Some(Arc::clone(&conns.shutdown));
         conns.abort();
 
-        assert!(try_lock_volume_name_at_for_test(&root, volume)
+        assert!(try_lock_volume_name_at_for_test(&root, &volume)
             .unwrap()
             .is_none());
 
@@ -13974,7 +13974,7 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        assert!(try_lock_volume_name_at_for_test(&root, volume)
+        assert!(try_lock_volume_name_at_for_test(&root, &volume)
             .unwrap()
             .is_some());
         engine_thread.join().unwrap();
@@ -13995,11 +13995,11 @@ mod tests {
             Some(root.clone()),
         )
         .unwrap();
-        let volume = "buildx_buildkit_builder-domain-test_state";
+        let (_domain, _creator, _fence, _builder, volume) =
+            test_pending_buildkit_create_fence(&root);
         let locks = policy
-            .lock_volume_names(&BTreeSet::from([volume.to_owned()]))
+            .lock_volume_names(&BTreeSet::from([volume.clone()]))
             .unwrap();
-        let _fence = test_pending_buildkit_create_fence(&root, volume);
         let (mut engine, mut host) = UnixStream::pair().unwrap();
         let (_guest, mut sink) = UnixStream::pair().unwrap();
         engine
@@ -14021,9 +14021,7 @@ mod tests {
         );
         assert!(result.is_err());
         drop(locks);
-        assert!(policy
-            .lock_volume_names(&BTreeSet::from([volume.to_owned()]))
-            .is_err());
+        assert!(policy.lock_volume_names(&BTreeSet::from([volume])).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -14438,12 +14436,11 @@ mod tests {
             |_, _, _| panic!("quarantined setup must not acquire a volume lock"),
         );
         let mut volume_create_called = false;
-        let result =
-            crate::executor::ensure_persistent_buildkit_volume_after_recovery(recovery, || {
-                volume_create_called = true;
-                Ok(())
-            });
-        let error = result.unwrap_err();
+        let result = recovery.and_then(|_| {
+            volume_create_called = true;
+            Ok(())
+        });
+        let error = result.expect_err("durable quarantine must block setup recovery");
 
         assert!(error.to_string().contains("quarantined"));
         assert!(
@@ -14521,19 +14518,20 @@ mod tests {
         );
         assert!(recovery.as_ref().unwrap().is_none());
         let mut volume_create_called = false;
-        let result =
-            crate::executor::ensure_persistent_buildkit_volume_after_recovery(recovery, || {
-                let volume_lock = policy.lock_volume_names_with_create_access(
+        let result = recovery.and_then(|_| {
+            policy
+                .lock_volume_names_with_create_access(
                     &BTreeSet::from([volume.clone()]),
                     Some(&domain),
                     None,
-                );
-                crate::executor::run_persistent_buildkit_volume_operation(volume_lock, || {
-                    volume_create_called = true;
-                    Ok(())
-                })
-            });
-        assert!(result.unwrap_err().to_string().contains("quarantined"));
+                )
+                .map(|_volume_lock| volume_create_called = true)
+        });
+        assert!(result
+            .err()
+            .expect("migrated runtime marker must block volume setup")
+            .to_string()
+            .contains("quarantined"));
         assert!(
             !volume_create_called,
             "migrated runtime marker must block executor volume creation"
@@ -14560,11 +14558,11 @@ mod tests {
             Some(&domain),
             None,
         );
-        let result = crate::executor::run_persistent_buildkit_volume_operation(volume_lock, || {
-            volume_create_called = true;
-            Ok(())
-        });
-        assert!(result.unwrap_err().to_string().contains("quarantined"));
+        assert!(volume_lock
+            .err()
+            .expect("durable quarantine must block volume setup")
+            .to_string()
+            .contains("quarantined"));
         assert!(
             !volume_create_called,
             "durable quarantine must survive runtime-root loss"
@@ -14664,11 +14662,7 @@ mod tests {
                 Some(&domain),
                 None,
             );
-            let result =
-                crate::executor::run_persistent_buildkit_volume_operation(volume_lock, || {
-                    volume_create_called = true;
-                    Ok(())
-                });
+            let result = volume_lock.map(|_volume_lock| volume_create_called = true);
             assert!(result.is_err());
             assert!(!volume_create_called);
             assert_eq!(std::fs::read(marker_path).unwrap(), marker_bytes);
@@ -14734,10 +14728,7 @@ mod tests {
             Some(&domain),
             None,
         );
-        let result = crate::executor::run_persistent_buildkit_volume_operation(volume_lock, || {
-            volume_create_called = true;
-            Ok(())
-        });
+        let result = volume_lock.map(|_volume_lock| volume_create_called = true);
         assert!(result.is_err());
         assert!(!volume_create_called);
         assert_eq!(std::fs::read(marker_path).unwrap(), marker_bytes);
@@ -17100,7 +17091,6 @@ mod tests {
         .is_err());
         assert!(policy.authorize(&exec_create).is_err());
         assert!(policy.authorize(&ready_exec_start).is_err());
-        drop(_volume_lock);
         drop(stale_exec_create);
         drop(stale_exec_start);
 

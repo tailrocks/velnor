@@ -6512,22 +6512,22 @@ mod tests {
         std::fs::create_dir_all(&identity_root).unwrap();
         let slot_a = crate::storage::StorageLayout {
             cache_root: root.join("slot-a/cache"),
-            lib_root: root.join("slot-a/lib"),
+            lib_root: identity_root.clone(),
             run_root: root.join("slot-a/run"),
             log_root: root.join("slot-a/log"),
             mode: "test-slot-a",
         };
         let slot_b = crate::storage::StorageLayout {
             cache_root: root.join("slot-b/cache"),
-            lib_root: root.join("slot-b/lib"),
+            lib_root: identity_root.clone(),
             run_root: root.join("slot-b/run"),
             log_root: root.join("slot-b/log"),
             mode: "test-slot-b",
         };
-        assert_ne!(slot_a.lib_root, slot_b.lib_root);
+        assert_eq!(slot_a.lib_root, slot_b.lib_root);
         assert_ne!(slot_a.run_root, slot_b.run_root);
-        let identity_a = slot_a.buildkit_identity_root_for_override(Some(&identity_root));
-        let identity_b = slot_b.buildkit_identity_root_for_override(Some(&identity_root));
+        let identity_a = slot_a.buildkit_identity_root();
+        let identity_b = slot_b.buildkit_identity_root();
         assert_eq!(identity_a, identity_b);
 
         let domain_a =
