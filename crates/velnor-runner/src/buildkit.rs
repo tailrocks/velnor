@@ -8813,6 +8813,7 @@ mod tests {
     fn current_builder_missing_claim_stays_pinned_after_reboot() {
         let root = temp_root("current-reap-after-reboot");
         let run_root = root.join("run");
+        std::fs::create_dir_all(run_root.join(CLAIMS_DIR)).unwrap();
         let registry_root = owner_registry_root(&root.join("lib"));
         let builder = test_builder();
         ensure_owner_record(&registry_root, &builder).unwrap();
@@ -9094,6 +9095,7 @@ mod tests {
     fn current_builder_missing_claim_with_live_job_is_not_stopped_or_removed() {
         let root = temp_root("current-reap-missing-claim-live-job");
         let run_root = root.join("run");
+        std::fs::create_dir_all(run_root.join(CLAIMS_DIR)).unwrap();
         let registry_root = owner_registry_root(&root.join("lib"));
         let builder = test_builder();
         ensure_owner_record(&registry_root, &builder).unwrap();
@@ -9630,13 +9632,14 @@ mod tests {
         let setup_lock = lock_builder_lifecycle(&domain.root, &builder).unwrap();
         let (started_tx, started_rx) = mpsc::channel();
         let stop_called = Arc::new(AtomicBool::new(false));
-        let release_domain = domain.clone();
+        assert!(domain.validate_current().is_err());
+        let release_root = domain.root.clone();
         let release_builder = builder.clone();
         let stop_flag = Arc::clone(&stop_called);
         let release_thread = std::thread::spawn(move || {
             started_tx.send(()).unwrap();
-            release_domain_builder_if_last(
-                &release_domain,
+            release_builder_for_test_domain(
+                &release_root,
                 &release_builder,
                 "old-job",
                 || {
@@ -9945,6 +9948,7 @@ mod tests {
     fn job_builder_records_round_trip_and_dedupe() {
         let root = temp_root("record");
         let temp = root.join("slot-1").join("temp");
+        std::fs::create_dir_all(temp.join("_velnor")).unwrap();
         let domain_token = TEST_BUILDKIT_DOMAIN_TOKEN;
         let job_container = "velnor-job-record";
         let builder_a = test_domain_builder_name("builder-a", "scope", TRUST_TIER_BRANCH, None);
