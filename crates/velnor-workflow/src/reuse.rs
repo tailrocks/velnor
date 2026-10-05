@@ -631,15 +631,6 @@ pub(crate) fn compile_ownership(
     for unit in units {
         let mut builder = GlobSetBuilder::new();
         for pattern in &unit.watch {
-            // A local reusable action written as `uses: ./` denotes the
-            // repository root. GlobSet treats `./` as a directory prefix
-            // and won't match ordinary repo-relative changed paths, so make
-            // that root ownership explicit as a recursive glob.
-            let pattern = if pattern == "./" || pattern == "." {
-                "**"
-            } else {
-                pattern
-            };
             let glob = Glob::new(pattern).map_err(|error| {
                 GeneratorError::usage(format!(
                     "invalid watch pattern `{pattern}` for unit {}: {error}",
@@ -3005,17 +2996,6 @@ mod tests {
             "the closed owner alone, not the open opaque unit"
         );
         assert!(selection.fallback_reason.is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn root_watch_glob_owns_repo_relative_paths() -> Result<(), Box<dyn std::error::Error>> {
-        let units = vec![watched("local-action", &["./"], &[])];
-        let compiled = compile_ownership(&units)?;
-        assert!(matches!(
-            classify_path(&compiled, ".github/workflows/ci.yml"),
-            PathVerdict::Owned { units } if units == BTreeSet::from(["local-action".to_owned()])
-        ));
         Ok(())
     }
 

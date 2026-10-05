@@ -427,11 +427,6 @@ fn dual_lane_automatic_velnor_units_pass_policy() {
     )
     .unwrap();
     enable_approved_velnor_pull_requests(&root);
-    git(&root, &["init", "-q", "-b", "main"]);
-    git(&root, &["config", "user.email", "check@test"]);
-    git(&root, &["config", "user.name", "check"]);
-    git(&root, &["add", "-A"]);
-    git(&root, &["commit", "-q", "-m", "fixture"]);
     let outcome = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
         .args(["--plain", "--force", "--default-branch", "main"])
         .arg(&root)
@@ -534,11 +529,6 @@ fn static_workflow_templates_path_is_rejected() {
 fn generate_twice_is_byte_identical_and_check_passes() {
     let root = unique_dir("generate-twice");
     write_rust_fixture(&root, 2);
-    git(&root, &["init", "-q", "-b", "main"]);
-    git(&root, &["config", "user.email", "check@test"]);
-    git(&root, &["config", "user.name", "check"]);
-    git(&root, &["add", "-A"]);
-    git(&root, &["commit", "-q", "-m", "fixture"]);
     let first = generate_with(&root, &[]);
     let second_output = root.parent().unwrap().join(format!(
         "{}-out-2",
@@ -656,11 +646,6 @@ fn write_cargo_shim(directory: &Path) -> PathBuf {
 #[cfg(unix)]
 fn check_command(root: &Path, output: &Path, shim_dir: &Path, sentinel: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"));
-    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
-    let path = std::env::join_paths(
-        std::iter::once(shim_dir.to_path_buf()).chain(std::env::split_paths(&inherited_path)),
-    )
-    .expect("valid test PATH");
     command
         .args([
             "--plain",
@@ -671,9 +656,10 @@ fn check_command(root: &Path, output: &Path, shim_dir: &Path, sentinel: &Path) -
             output.to_str().unwrap(),
             root.to_str().unwrap(),
         ])
-        // Keep the cargo shim first while retaining tools such as Docker
-        // needed to isolate candidate policy binaries.
-        .env("PATH", path)
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", shim_dir.to_str().unwrap()),
+        )
         .env("CARGO_SHIM_SENTINEL", sentinel)
         .env_remove("VELNOR_WORKFLOW_PINNED_BINARY")
         .env_remove("VELNOR_WORKFLOW_CANDIDATE_MANIFEST")
@@ -771,16 +757,6 @@ fn candidate_manifest_env_fallback_binds_the_env_slot_candidate() {
     // A pin the fixture history cannot contain, so resolution takes the
     // revision fallback against the provisioned fake below.
     let foreign_pin = "0123456789abcdef0123456789abcdef01234567";
-    // Candidate closure inspection requires the workflow crate manifest to
-    // exist in the committed fixture tree, just as it does in production.
-    let workflow_dir = root.join("crates/velnor-workflow");
-    fs::create_dir_all(workflow_dir.join("src")).unwrap();
-    fs::write(
-        workflow_dir.join("Cargo.toml"),
-        "[package]\nname = \"velnor-workflow\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-    )
-    .unwrap();
-    fs::write(workflow_dir.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
     let config = root.join(".github-gen/velnor-workflow.toml");
     let body = fs::read_to_string(&config).unwrap();
     fs::write(
@@ -791,12 +767,6 @@ fn candidate_manifest_env_fallback_binds_the_env_slot_candidate() {
         ),
     )
     .unwrap();
-    // The renderer compares candidate output against an immutable HEAD
-    // snapshot. Commit the edited config first so both views see the same
-    // candidate manifest closure.
-    git(&root, &["add", "crates/velnor-workflow"]);
-    git(&root, &["add", ".github-gen/velnor-workflow.toml"]);
-    git(&root, &["commit", "-q", "-m", "use foreign pin in fixture"]);
     let generated = generate(&root);
     let output = generated.output;
     let head = git_output(&root, &["rev-parse", "HEAD"]);
@@ -817,7 +787,7 @@ fn candidate_manifest_env_fallback_binds_the_env_slot_candidate() {
     fs::write(
         &manifest,
         format!(
-            "{{\"profile\":\"debug\",\"platform\":\"Linux-X64\",\"repository\":\"example/monorepo\",\"run_id\":\"1\",\"revision\":\"{head}\",\"closure\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"build_revision\":\"{head}\",\"binary_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}"
+            "{{\"profile\":\"debug\",\"platform\":\"Linux-X64\",\"repository\":\"example/monorepo\",\"run_id\":\"1\",\"revision\":\"{head}\",\"closure\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"binary_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}"
         ),
     )
     .unwrap();

@@ -287,11 +287,6 @@ fn promote_refuses_a_pin_its_source_cannot_render() {
     let generator = root.join("generator");
     fs::create_dir_all(generator.join("crates/velnor-workflow/src")).unwrap();
     fs::write(generator.join("Cargo.toml"), "[workspace]\n").unwrap();
-    fs::write(
-        generator.join("crates/velnor-workflow/Cargo.toml"),
-        "[package]\nname = \"velnor-workflow\"\n[dependencies]\n",
-    )
-    .unwrap();
     fs::write(generator.join("Cargo.lock"), "# lock\n").unwrap();
     fs::write(
         generator.join("crates/velnor-workflow/src/lib.rs"),

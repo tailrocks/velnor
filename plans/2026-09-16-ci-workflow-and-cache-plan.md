@@ -112,8 +112,8 @@ Canonical root `<VELNOR_STORAGE_ROOT>/cache/velnor/v1/<trust_scope>/<class>` —
 
 | Store class | Host path (`store_catalog.rs`) | Container mount (`container.rs`) | Scope | Budget env / runtime cap |
 | --- | --- | --- | --- | --- |
-| cargo | `…/cargo/registry/{cache,index}`, `…/cargo/git/db` (`:152`) | `/github/home/.cargo/registry/{cache,index}`, `…/git/db` (`:574-585`); **`registry/src` + `git/checkouts` are per-job** (`:565-569`) | trust | `VELNOR_BUDGET_CARGO_BYTES` = 20 GiB (`velnorctl/src/runtime.rs:421-426`) |
-| cargo bin | `…/cargo/bin` | `/github/home/.cargo/bin` (`:591-595`) | trust+repo | (cargo) |
+| cargo | `…/cargo/registry/{cache,index}`, `…/cargo/git/db` (`:152`) | `/github/home/user/registry/{cache,index}`, `…/git/db` (`:574-585`); **`registry/src` + `git/checkouts` are per-job** (`:565-569`) | trust | `VELNOR_BUDGET_CARGO_BYTES` = 20 GiB (`velnorctl/src/runtime.rs:421-426`) |
+| cargo bin | `…/cargo/bin` | `/github/home/user/bin` (`:591-595`) | trust+repo | (cargo) |
 | mise | `…/mise/` (`:165`) | `/opt/mise/installs` (slot+trust+repo, `:1422-1437`), `/opt/mise/cache` (trust, `:610-614`), `/opt/velnor/mise-binaries` | mixed | `VELNOR_BUDGET_MISE_BYTES` = 20 GiB (`:428-433`) |
 | mbx compiler | `…/compiler/mbx/<repository_id>` (`:217`; `github_adapter.rs:129-174`) | `/var/cache/mbx`; `MBX_CACHE_DIR=/var/cache/mbx/slots/<slot>` (`container.rs:1440-1457`) | trust+repo+**slot** | `MBX_GC_MAX_SIZE=20GiB` per slot, `MBX_GC_MAX_TOTAL_SIZE=50GiB`, `MBX_GC_AUTO=true` (`container.rs:463-471`) |
 | targets | `…/targets/` (`:178`) | `MBX_TARGET_ROOT=CARGO_TARGET_DIR=/var/cache/mbx/targets/slots/<slot>` (`:466,1466-1483`) | slot | `MBX_TARGET_MAX_SIZE=30GiB` per slot (runtime); `VELNOR_BUDGET_TARGETS_BYTES` = 200 GiB (gc only, `:400-405`) |
@@ -833,7 +833,7 @@ Method: local code/tests/generated YAML at `c273707d`; live gates remain **U** u
 
 | Claim | Verdict | Evidence |
 | --- | --- | --- |
-| `[cache.*]` schema; `velnor-host.env` emission | V | `config/mod.rs:110-143`; test `emitted_project_toml_ignores_cache_generation_config` |
+| `[cache.*]` schema; host environment output | V | Generic `[[static_files]]` owns the output path; `.github-gen/sources/velnor-host.env` is the copied byte source and must be updated with host budget changes. Cache tables remain generator-only planning inputs and do not rewrite that file. |
 | Fleet timer + runbook + BuildKit GC artifact | V | `debian/velnor-cache-gc.{timer,service}`; `config/fleet/RUNBOOK.md`; `buildkitd.gc.toml` |
 | D18 PR copy seed (was read-through overlay) | V | `trust_class.rs` `AdmittedTrust::cargo_seed_scope`; `storage.rs` `seed_cargo_store`; `runner.rs` `execute_script_job_inner` seed call before `github_job_container_spec`; `velnor-host.env:10` |
 | `VELNOR_STORAGE_ROOT` applied on fleet hosts | U | snippet only; no host apply evidence |

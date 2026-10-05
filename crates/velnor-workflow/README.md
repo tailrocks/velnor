@@ -29,22 +29,13 @@ proves the pin is reachable from the head and does not regress the base
 branch's validator, regenerates the tree with the generator built at that pin
 and requires a byte-identical result, and evaluates its own semantic rules
 (only the entrypoint on `pull_request_target`; every self-hosted job gated;
-every action SHA-pinned; the entrypoint workflow on `contents: read` and its
-policy job on `contents: read` or the exact read-only set `actions: read`,
-`contents: read`, and `pull-requests: read`, with no secrets;
+every action SHA-pinned; the entrypoint on `contents: read` with no secrets;
 the ruleset's required contexts emitted). Every rule prints `PASS`/`FAIL`
 with a one-line reason. Bump the pin with `velnor-workflow promote --rev HEAD`
 after the last generator change: it verifies the running binary renders with
 the pin's own source closure, then stamps the pin and regenerates the whole
 tree in a single commit; `--check` verifies the pinned generator renders the
 tree.
-
-During candidate-renderer bootstrap, the exact legacy D19 pin
-`e988d793937c044275e4086b00856444c60f6ab8` keeps policy workflow output at
-the established byte shape. Promoting `[generator] revision` to the newer
-renderer is the typed opt-in: it enables the hardened candidate-artifact
-handoff and read-only API permissions without adding a config key that the
-legacy validator would reject. The newer pin keeps that mode enabled.
 
 Runtime commands are derived from scanned capabilities, not from config-supplied
 shell arrays. GitHub-hosted execution is the automatic and omitted-dispatch
@@ -54,14 +45,6 @@ owns selection, dependency ordering, policy, release validation, and every
 never imported. The ownership sidecar stays at
 `.github/ci/.github-actions-generator-state`.
 
-Runner capabilities come from concrete scan evidence. Generated Dockerfile
-builds use Docker Buildx, so Docker units require Docker plus the runner's
-bundled Buildx/Compose capability; this does not infer Docker Compose services
-or Testcontainers use. A detected service adds Docker and service readiness.
-Rust units require Docker/Testcontainers when they directly depend on the
-`testcontainers` or `testcontainers-modules` crate. Rust, Gradle, Node, and Bun
-unit kinds alone do not imply a Docker requirement.
-
 Repositories may pin their generation inputs in an optional
 `.github-gen/velnor-workflow.toml` (`schema = 1`): the repository slug, runner
 and branch overrides, scan excludes, policy switches, and `[[declare]]` render
@@ -69,14 +52,15 @@ primitives. Generation is a function of the scanned repository shape, this
 config, and the generator revision (`GENERATOR_REVISION`); all three are
 recorded in the ownership sidecar (`schema = 2`) and `--check` fails when they
 no longer match the current run, even if every generated file is unchanged.
-When `[workflow].files` replaces the default list, it must still include
-`ci-policy.yml`, the base-owned policy entrypoint. `[[static_files]]` cannot
-claim `ci-policy.yml`, `ci-pr.yml`, or the owner-only `ci-runtime-products.yml`.
-It also cannot alias any output rendered by the generator, including paths
-that differ only by case or a supported filesystem alias. Non-colliding static
-files remain available. Policy audits every checked-in workflow; unknown
-workflow files fail generated-tree ownership checks and must be migrated into
-generator inputs before they can pass.
+
+`[[static_files]]` rows let the target repository own source bytes while the
+generator owns each declared output. Outputs may live below `.github/` or
+`config/`; sources must stay inside the repository and outside generated
+`.github/` content. Active declared outputs are omitted from scans. When a
+declaration is removed, its last sidecar-owned output stays omitted only for
+the generation that verifies and prunes it. After pruning, a manually
+recreated file becomes an ordinary scan input. There is no path-prefix
+exclusion for `config/`.
 
 The schema-1 Swift scanner fails closed for executable Swift products and
 recognized XcodeGen specs because it cannot emit their complete phase and
@@ -168,55 +152,21 @@ artifacts, scratch files, and linked-worktree `.git` files never enter the
 recorded scan input. A sidecar written by an older schema is never parsed:
 rerun generate on a byte-matching tree to move it to schema 2.
 
-## Hosted workflow runtime product
-
-Generated GitHub-hosted jobs acquire a prebuilt runtime through the composite
-action. For a consuming repository, pin `uses` to the full commit SHA of the
-action and set `rev` to the full commit SHA of the generator source whose
-closure identifies the runtime product. The values can differ: `uses` selects
-the action code, while `rev` selects the generator revision. The action never
-compiles Velnor or falls back to `cargo install`:
+Generated jobs install the runtime through the versioned composite action
+(mise-action model: declare a revision, get the binary on PATH, cached)
+instead of an inline `cargo install`, so toolchain setup stays centralized:
 
 ```yaml
 - name: Set up Velnor workflow runtime
   if: ${{ runner.environment == 'github-hosted' }}
-  uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@<action-commit-SHA>
+  uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@<full-SHA>
   with:
-    rev: <generator-commit-SHA>
+    rev: <full-SHA>
 ```
 
-For workflows generated inside the Velnor owner repository, `uses` points to the
-local action path `./.github/actions/setup-velnor-workflow`; `rev` still
-resolves to the full generator commit SHA. The trusted `ci-policy.yml` job
-checks out the setup action from the base commit into `policy-setup-action/`
-and uses `./policy-setup-action/.github/actions/setup-velnor-workflow`. Its
-trusted workflow validates and resolves the full `rev` before setup, so a pull
-request cannot supply the action code used to validate itself.
-
-The action resolves the source closure from the checkout when available, or
-from the GitHub trees API. On a cache miss, it downloads the platform binary
-and manifest from the immutable
-`velnor-workflow-runtime-v1-<closure-prefix>` release in the Velnor owner
-repository and verifies attestations for the downloaded binary and
-manifest against the mainline runtime-product publisher. The tag is only a
-locator. It checks the manifest's closure and platform, recomputes the binary
-SHA-256, then checks the binary's reported closure and revision. Missing
-products, unverifiable attestations, and mismatches fail closed; consumers
-never build the runtime.
-
-The Actions cache is only an acceleration, keyed by runner OS, architecture,
-and source closure. On a cache hit, the action revalidates the manifest,
-binary digest, and binary-reported closure and revision. Attestations for the
-downloaded binary and manifest are verified on download. A cache miss downloads
-the published release product; it does not compile it.
-
-For a `pull_request_target` run, GitHub executes the base branch's trusted
-`ci-policy.yml` and its referenced action code. A candidate PR cannot change
-the validator used to judge itself. If an action or closure-protocol change
-needs a newer resolver, the trusted base workflow must first advance through
-the repository maintainers' approved bootstrap; consumer pin adoption must
-wait until that base update and the immutable product for the target closure
-are available.
+The action isolates the install from job-level toolchain wrappers (for
+example an `RUSTC_WRAPPER` pointing at an `sccache` that is set up later in
+the job) and caches the cargo install keyed by revision and runner OS.
 
 ## Scheduled-check token capabilities
 
@@ -238,36 +188,3 @@ share a file with a `pull_request` trigger, because its task code would run
 with repository Actions-history access on contributor-controlled input. The
 maintenance workflow keeps cache mutation permissions job-scoped as well:
 only its cache-deletion jobs receive `actions: write`.
-
-## Required scheduled-check artifacts
-
-Scheduled-check artifacts remain best effort by default: the generated upload
-runs with `always()` and `if-no-files-found: warn`. A profile that produces
-evidence required by a downstream verifier can opt into the strict contract:
-
-```toml
-[[check_profile]]
-id = "ci-evidence"
-tasks = ["ci-evidence"]
-artifacts_required = true
-artifacts = [
-  "target/ci-evidence/rollup.json",
-  "target/ci-evidence/rollup.md",
-]
-```
-
-Strict artifacts must be non-empty, relative literal file paths whose visible
-slash-separated components start with an ASCII letter or digit and continue
-with ASCII letters, digits, `_`, `-`, or `.`. The producer rejects symlinked
-path components, requires every file to be non-empty, stages the exact
-relative tree, and uploads it with `success()` plus
-`if-no-files-found: error`. Globs, directories, traversal, absolute paths,
-whitespace, hidden names, and shell syntax are rejected during config
-validation.
-
-The producer exports the upload action's immutable artifact ID. A separate
-fresh verifier job downloads that exact ID and checks every declared path in
-the uploaded tree for a regular, non-empty file. A profile that depends on a
-strict profile waits for its verifier job and can read the same ID through
-`needs.verify-<profile>-artifacts.outputs.artifact_id`. The verifier has only
-`actions: read` permission and does not check out or run repository tasks.

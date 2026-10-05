@@ -46,35 +46,6 @@ fn write(path: &Path, content: &str) {
     must(fs::write(path, content), "write file");
 }
 
-#[cfg(unix)]
-fn restore_writable_tree(root: &Path) {
-    let metadata = must(fs::symlink_metadata(root), "inspect tree entry");
-    if metadata.file_type().is_symlink() {
-        return;
-    }
-    if metadata.is_dir() {
-        for entry in must(fs::read_dir(root), "read tree directory") {
-            let entry = must(entry, "read tree entry");
-            restore_writable_tree(&entry.path());
-        }
-        must(
-            fs::set_permissions(root, fs::Permissions::from_mode(0o755)),
-            "restore directory permissions",
-        );
-    }
-}
-
-#[cfg(unix)]
-fn private_snapshot_destination(name: &str) -> (PathBuf, PathBuf) {
-    let workspace = temporary_directory(name);
-    must(
-        fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700)),
-        "protect snapshot workspace",
-    );
-    let destination = workspace.join("source");
-    (workspace, destination)
-}
-
 fn fake_velnor_workflow(directory: &Path, revision: &str, closure: &str) -> PathBuf {
     let binary = directory.join("velnor-workflow");
     must(
@@ -88,6 +59,7 @@ fn fake_velnor_workflow(directory: &Path, revision: &str, closure: &str) -> Path
     );
     #[cfg(unix)]
     {
+        use std::os::unix::fs::PermissionsExt as _;
         must(
             fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
             "mark fake velnor-workflow executable",
@@ -109,6 +81,7 @@ fn fake_legacy_velnor_workflow(directory: &Path, revision: &str) -> PathBuf {
     );
     #[cfg(unix)]
     {
+        use std::os::unix::fs::PermissionsExt as _;
         must(
             fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
             "mark fake legacy velnor-workflow executable",
@@ -124,7 +97,6 @@ fn lookup(
 ) -> PinnedBinaryLookup {
     PinnedBinaryLookup {
         pinned_binary,
-        candidate_binary: None,
         search_path,
         install_root,
         build_forbidden: true,
@@ -133,33 +105,17 @@ fn lookup(
 }
 
 fn lookup_with_manifest(
-    candidate_binary: Option<PathBuf>,
+    pinned_binary: Option<PathBuf>,
     search_path: Option<std::ffi::OsString>,
     install_root: PathBuf,
     candidate_manifest: PathBuf,
 ) -> PinnedBinaryLookup {
     PinnedBinaryLookup {
-        pinned_binary: None,
-        candidate_binary,
+        pinned_binary,
         search_path,
         install_root,
         build_forbidden: true,
         candidate_manifest: Some(candidate_manifest),
-    }
-}
-
-fn candidate_lookup(
-    candidate_binary: Option<PathBuf>,
-    search_path: Option<std::ffi::OsString>,
-    install_root: PathBuf,
-) -> PinnedBinaryLookup {
-    PinnedBinaryLookup {
-        pinned_binary: None,
-        candidate_binary,
-        search_path,
-        install_root,
-        build_forbidden: true,
-        candidate_manifest: None,
     }
 }
 
@@ -378,54 +334,6 @@ fn generation_config(revision: &str) -> String {
     )
 }
 
-fn ownership_state_with_outputs(outputs: &[&str]) -> String {
-    let mut state = String::from(
-        "# Generated ownership state; do not edit.\nschema = 2\n[inputs]\nconfig\t0000000000000000\nscan\t0000000000000000\ngenerator\t66\n[outputs]\n",
-    );
-    for output in outputs {
-        state.push_str(output);
-        state.push_str("\t0000000000000000\n");
-    }
-    state
-}
-
-#[cfg(unix)]
-fn removed_static_row_fixture(name: &str) -> PathBuf {
-    let root = temporary_directory(name);
-    git_ok(&root, &["init", "-q", "-b", "main"]);
-    write(
-        &root.join(GENERATION_CONFIG),
-        "schema = 2\n\n[workflow]\nfiles = [\"ci-policy.yml\"]\n\n[[static_files]]\nfile = \".github/workflows/ci-static.yml\"\nsource = \".github-gen/ci-static.yml\"\n",
-    );
-    write(
-        &root.join(".github-gen/ci-static.yml"),
-        "name: Static workflow\non: workflow_dispatch\njobs: {}\n",
-    );
-    write(
-        &root.join(".github/workflows/ci-static.yml"),
-        "name: Former generated workflow\non: workflow_dispatch\njobs: {}\n",
-    );
-    write(
-        &root.join(".github/ci/.github-actions-generator-state"),
-        &ownership_state_with_outputs(&[".github/workflows/ci-static.yml"]),
-    );
-    let _ = commit(&root, "base owns static workflow");
-
-    write(
-        &root.join(GENERATION_CONFIG),
-        "schema = 2\n\n[workflow]\nfiles = [\"ci-policy.yml\"]\n\n[policy]\nexclude_workflows = [\"ci-ſtatic.yml\"]\n",
-    );
-    write(
-        &root.join(".github/ci/.github-actions-generator-state"),
-        &ownership_state_with_outputs(&[]),
-    );
-    let _ = commit(
-        &root,
-        "candidate removes static row and adds retired policy field",
-    );
-    root
-}
-
 /// History: `validator` (the base branch's pin) → `pin` → `head`. The pin
 /// descends from the validator, so the chain advances.
 #[test]
@@ -641,9 +549,7 @@ fn entrypoint_tree(name: &str, entrypoint: &str) -> PathBuf {
 }
 
 /// The generated entrypoint holds exactly the privileges the trust argument
-/// in `ci-policy.yml` states: workflow `contents: read`; the policy job may
-/// use `contents: read` or the exact final set `actions: read`, `contents: read`,
-/// and `pull-requests: read`; no secrets,
+/// in `ci-policy.yml` states: `contents: read` at both levels, no secrets,
 /// no persisted credentials, no deployment environment, one hosted job, and
 /// only the reviewed triggers.
 #[test]
@@ -657,7 +563,7 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
     assert!(audit.trigger.is_empty(), "{:?}", audit.trigger);
     assert!(audit.privileges.is_empty(), "{:?}", audit.privileges);
     assert!(
-        entrypoint.contains("references no secrets, persists no credentials, and never compiles."),
+        entrypoint.contains("with no secret references"),
         "the trust invariant states the absence honestly: {entrypoint}"
     );
     assert!(!entrypoint.contains("secrets."), "{entrypoint}");
@@ -667,8 +573,6 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
         "workflow and job level: {entrypoint}"
     );
     assert_eq!(entrypoint.matches("contents: read\n").count(), 2);
-    assert_eq!(entrypoint.matches("${{ github.token }}").count(), 1);
-    assert!(entrypoint.contains("GH_TOKEN: ${{ github.token }}"));
     assert!(entrypoint.contains("  workflow_dispatch:\n"));
     assert!(entrypoint.contains("# Trust invariant:"), "{entrypoint}");
     let pin = entrypoint_pin(&root, PIN_A);
@@ -686,65 +590,6 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
     let _ = fs::remove_dir_all(root);
 }
 
-#[test]
-fn entrypoint_audit_accepts_legacy_or_final_read_permissions_on_policy_job() {
-    let clean = hosted_entrypoint(PIN_A);
-    let legacy = clean.replacen(
-        "    permissions:\n      actions: read\n      contents: read\n      pull-requests: read\n",
-        "    permissions:\n      contents: read\n",
-        1,
-    );
-    let legacy_root = entrypoint_tree("entrypoint-legacy-contents-only", &legacy);
-    let legacy_audit = must(
-        audit_policy_entrypoint(&legacy_root, &VelnorPolicyContract::default()),
-        "audit legacy entrypoint",
-    );
-    assert!(
-        legacy_audit.trigger.is_empty(),
-        "{:?}",
-        legacy_audit.trigger
-    );
-    assert!(
-        legacy_audit.privileges.is_empty(),
-        "{:?}",
-        legacy_audit.privileges
-    );
-    let _ = fs::remove_dir_all(legacy_root);
-
-    let root = entrypoint_tree("entrypoint-final-read", &clean);
-    let audit = must(
-        audit_policy_entrypoint(&root, &VelnorPolicyContract::default()),
-        "audit final-read entrypoint",
-    );
-    assert!(audit.trigger.is_empty(), "{:?}", audit.trigger);
-    assert!(audit.privileges.is_empty(), "{:?}", audit.privileges);
-    assert!(clean.contains("actions: read\n      contents: read\n      pull-requests: read"));
-    let _ = fs::remove_dir_all(root);
-
-    let with_two_permissions = clean.replacen(
-        "    permissions:\n      actions: read\n      contents: read\n      pull-requests: read\n",
-        "    permissions:\n      actions: read\n      contents: read\n",
-        1,
-    );
-    let root = entrypoint_tree(
-        "entrypoint-actions-and-contents-only",
-        &with_two_permissions,
-    );
-    let audit = must(
-        audit_policy_entrypoint(&root, &VelnorPolicyContract::default()),
-        "audit incomplete final permissions entrypoint",
-    );
-    assert!(
-        audit
-            .privileges
-            .iter()
-            .any(|finding| finding.contains("pull-requests: read")),
-        "two-key permissions must remain rejected: {:?}",
-        audit.privileges
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
 /// The owner policy job acquires products (no `--rev <sha>` install) and its
 /// candidate step passes shell variables to `closure --rev=`: those variable
 /// references are not pin literals, so the pin rule still passes on the
@@ -752,7 +597,6 @@ fn entrypoint_audit_accepts_legacy_or_final_read_permissions_on_policy_job() {
 #[test]
 fn owner_entrypoint_pin_ignores_variable_references() {
     let job = crate::s2::policy_job(&PolicyJobSpec {
-        candidate_artifact_wiring: true,
         name: "Policy",
         revision: PIN_A,
         runner: "ubuntu-24.04",
@@ -790,142 +634,6 @@ fn owner_entrypoint_pin_ignores_variable_references() {
 }
 
 #[test]
-fn owner_policy_resolves_squash_merge_push_to_pr_head() {
-    let job = crate::s2::policy_job(&PolicyJobSpec {
-        candidate_artifact_wiring: true,
-        name: "Policy",
-        revision: PIN_A,
-        runner: "ubuntu-24.04",
-        repository: crate::s2::workflow_setup_action_repository(),
-        cache_backend: "github",
-        trusted_gate: None,
-        default_branch: "main",
-        declared_ruleset_contexts: "ci-required,Policy",
-    });
-    assert!(
-        job.contains("EVENT_NAME: ${{ github.event_name }}")
-            && job.contains("MERGE_SHA: ${{ github.sha }}"),
-        "candidate lookup distinguishes the push event and its squash commit: {job}"
-    );
-    let Some(candidate) = job
-        .split("      - name: Acquire candidate generator product")
-        .nth(1)
-        .and_then(|tail| {
-            tail.split("      - name: Resolve required status checks")
-                .next()
-        })
-    else {
-        panic!("owner policy candidate step")
-    };
-    assert!(
-        candidate.contains("PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}")
-            && candidate.contains(
-                "PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}"
-            )
-            && !candidate.contains("github.event.pull_request.head.sha || github.sha"),
-        "pull request lookup has no workflow_dispatch fallback: {job}"
-    );
-    assert!(
-        job.contains("actions: read\n      contents: read\n      pull-requests: read"),
-        "candidate API access is limited to the exact read-only Actions, contents, and pull-requests permissions: {job}"
-    );
-    assert!(
-        job.contains("repos/$GITHUB_REPOSITORY/commits/$MERGE_SHA/pulls"),
-        "a main push resolves its associated pull request through the commit API: {job}"
-    );
-    for clause in [
-        ".merge_commit_sha == $merge_sha",
-        ".merged_at != null",
-        ".base.ref == $default_branch",
-        ".base.repo.full_name == $repository",
-        ".head.repo.full_name == $repository",
-    ] {
-        assert!(
-            job.contains(clause),
-            "squash merge resolution requires {clause}: {job}"
-        );
-    }
-    assert!(
-        job.contains("CANDIDATE_SHA=\"$(jq -er '.[0].head_sha' <<<\"$merged_pulls\")\""),
-        "candidate lookup switches to the merged PR head SHA: {job}"
-    );
-    assert!(
-        job.contains("HEAD_REPOSITORY=\"$(jq -er '.[0].head_repository' <<<\"$merged_pulls\")\""),
-        "candidate lookup carries the merged PR head repository: {job}"
-    );
-    assert!(
-        job.contains(".revision == $revision"),
-        "the candidate manifest revision must match the resolved PR head: {job}"
-    );
-}
-
-#[test]
-fn owner_policy_fails_closed_for_direct_push_without_merged_pr() {
-    let job = crate::s2::policy_job(&PolicyJobSpec {
-        candidate_artifact_wiring: true,
-        name: "Policy",
-        revision: PIN_A,
-        runner: "ubuntu-24.04",
-        repository: crate::s2::workflow_setup_action_repository(),
-        cache_backend: "github",
-        trusted_gate: None,
-        default_branch: "main",
-        declared_ruleset_contexts: "ci-required,Policy",
-    });
-    assert!(
-        job.contains(
-            "push $MERGE_SHA is not associated with exactly one merged same-repository pull request"
-        ),
-        "a direct push has no trusted candidate source: {job}"
-    );
-    assert!(
-        job.contains("direct pushes and ambiguous squash merges fail closed")
-            && job.contains("exit 1"),
-        "direct push resolution exits before artifact polling: {job}"
-    );
-    assert!(
-        job.contains(
-            "candidate lookup requires pull_request_target or a squash-merge push, got $EVENT_NAME"
-        ),
-        "unsupported manual events also fail closed: {job}"
-    );
-}
-
-#[test]
-fn owner_policy_rejects_merge_sha_wrong_head_repository_and_revision() {
-    let job = crate::s2::policy_job(&PolicyJobSpec {
-        candidate_artifact_wiring: true,
-        name: "Policy",
-        revision: PIN_A,
-        runner: "ubuntu-24.04",
-        repository: crate::s2::workflow_setup_action_repository(),
-        cache_backend: "github",
-        trusted_gate: None,
-        default_branch: "main",
-        declared_ruleset_contexts: "ci-required,Policy",
-    });
-    assert!(
-        job.contains("actions/workflows/ci-pr.yml/runs?head_sha=$CANDIDATE_SHA"),
-        "candidate polling is keyed by the resolved PR head: {job}"
-    );
-    assert!(
-        !job.contains("actions/workflows/ci-pr.yml/runs?head_sha=$MERGE_SHA"),
-        "a squash merge SHA is never used as the candidate head: {job}"
-    );
-    assert!(
-        job.contains("HEAD_REPOSITORY=\"$(jq -er '.[0].head_repository' <<<\"$merged_pulls\")\"")
-            && job.contains("$HEAD_REPOSITORY\" == \"$GITHUB_REPOSITORY\""),
-        "a wrong head repository fails closed: {job}"
-    );
-    assert!(
-        job.contains(".repository == $repo")
-            && job.contains(".revision == $revision")
-            && job.contains(".build_revision | test"),
-        "wrong repository, resolved head revision, and build revision fail closed: {job}"
-    );
-}
-
-#[test]
 fn entrypoint_audit_names_each_escalation() {
     let clean = hosted_entrypoint(PIN_A);
     let cases: [(&str, &str, &str, &str); 6] = [
@@ -937,15 +645,15 @@ fn entrypoint_audit_names_each_escalation() {
         ),
         (
             "job-permissions",
-            "    permissions:\n      actions: read\n      contents: read\n      pull-requests: read\n",
-            "    permissions:\n      actions: read\n      contents: read\n      pull-requests: read\n      id-token: write\n",
-            "permissions must be exactly `contents: read` or `actions: read, contents: read, pull-requests: read`",
+            "    permissions:\n      contents: read\n",
+            "    permissions:\n      contents: read\n      id-token: write\n",
+            "permissions must be exactly `contents: read`",
         ),
         (
             "secret",
             "GH_TOKEN: ${{ github.token }}",
             "GH_TOKEN: ${{ secrets.ADMIN_TOKEN }}",
-            "must not reference the GitHub `secrets` context",
+            "must not reference `secrets.`",
         ),
         (
             "credentials",
@@ -983,149 +691,11 @@ fn entrypoint_audit_names_each_escalation() {
     }
 }
 
-#[test]
-fn entrypoint_audit_rejects_obfuscated_github_token_access() {
-    let clean = hosted_entrypoint(PIN_A);
-    let cases = [
-        (
-            "bracket-single",
-            "GH_TOKEN: ${{ github.token }}",
-            "GH_TOKEN: ${{ github['token'] }}",
-        ),
-        (
-            "bracket-double",
-            "GH_TOKEN: ${{ github.token }}",
-            "GH_TOKEN: ${{ github[\"token\"] }}",
-        ),
-        (
-            "bracket-indirect",
-            "GH_TOKEN: ${{ github.token }}",
-            "GH_TOKEN: ${{ github[format('token')] }}",
-        ),
-        (
-            "serialized-context",
-            "          WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout\n",
-            "          WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout\n          LEAK: ${{ toJSON(github) }}\n",
-        ),
-        (
-            "indirect-context",
-            "          WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout\n",
-            "          WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout\n          LEAK: ${{ format('{0}', github) }}\n",
-        ),
-    ];
-    for (name, from, to) in cases {
-        assert!(clean.contains(from), "{name}: fixture lacks {from:?}");
-        let mutated = clean.replacen(from, to, 1);
-        let root = entrypoint_tree(&format!("entrypoint-token-{name}"), &mutated);
-        let audit = must(
-            audit_policy_entrypoint(&root, &VelnorPolicyContract::default()),
-            "audit obfuscated token entrypoint",
-        );
-        assert!(
-            audit.privileges.iter().any(|finding| {
-                finding.contains("`github.token`") && finding.contains("only be bound as GH_TOKEN")
-            }),
-            "{name}: token access bypass must fail closed: {:?}",
-            audit.privileges
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-}
-
-#[test]
-fn entrypoint_audit_rejects_every_secrets_context_shape() {
-    let clean = hosted_entrypoint(PIN_A);
-    let cases = [
-        ("bracket", "${{ secrets['TOKEN'] }}"),
-        ("whitespace", "${{ secrets  .  TOKEN }}"),
-        ("case", "${{ SeCrEtS.TOKEN }}"),
-        ("serialized", "${{ toJSON(secrets) }}"),
-        ("indirect", "${{ format('{0}', secrets) }}"),
-    ];
-    for (name, expression) in cases {
-        let marker = "          WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout\n";
-        assert!(
-            clean.contains(marker),
-            "{name}: fixture lacks workflow marker"
-        );
-        let mutated = clean.replacen(
-            marker,
-            &format!("{marker}          LEAK: {expression}\n"),
-            1,
-        );
-        let root = entrypoint_tree(&format!("entrypoint-secrets-{name}"), &mutated);
-        let audit = must(
-            audit_policy_entrypoint(&root, &VelnorPolicyContract::default()),
-            "audit secrets-context entrypoint",
-        );
-        assert!(
-            audit
-                .privileges
-                .iter()
-                .any(|finding| finding.contains("must not reference the GitHub `secrets` context")),
-            "{name}: secrets context bypass must fail closed: {:?}",
-            audit.privileges
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-}
-
-#[test]
-fn entrypoint_audit_requires_unique_canonical_api_token_steps() {
-    let clean = hosted_entrypoint(PIN_A);
-    let marker = "      - name: Resolve required status checks\n";
-    assert!(clean.contains(marker), "fixture lacks ruleset API step");
-    let cases = [
-        (
-            "duplicate",
-            format!("{marker}{marker}"),
-            "must appear exactly once",
-        ),
-        (
-            "renamed",
-            "      - name: Resolve required status checks (copy)\n".to_owned(),
-            "canonical Acquire/Ruleset API steps",
-        ),
-        (
-            "bad-body",
-            "      - name: Resolve required status checks\n".to_owned(),
-            "canonical full structure and body",
-        ),
-    ];
-    for (name, replacement, expected) in cases {
-        let mut mutated = clean.replacen(marker, &replacement, 1);
-        if name == "bad-body" {
-            let body = "          echo \"RULESET_CONTEXTS=$contexts\" >> \"$GITHUB_ENV\"\n";
-            assert!(mutated.contains(body), "fixture lacks canonical API body");
-            mutated = mutated.replacen(
-                body,
-                "          echo \"$GH_TOKEN\" >&2\n          echo \"RULESET_CONTEXTS=$contexts\" >> \"$GITHUB_ENV\"\n",
-                1,
-            );
-        }
-        let root = entrypoint_tree(&format!("entrypoint-api-step-{name}"), &mutated);
-        let audit = must(
-            audit_policy_entrypoint(&root, &VelnorPolicyContract::default()),
-            "audit API-step entrypoint",
-        );
-        assert!(
-            audit
-                .privileges
-                .iter()
-                .any(|finding| finding.contains(expected)),
-            "{name}: canonical token-step bypass must fail closed: {:?}",
-            audit.privileges
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-}
-
 /// A Velnor-mode entrypoint runs on the approved self-hosted runner behind the
 /// trusted-event gate and never builds pull-request code.
 #[test]
 fn velnor_entrypoint_is_gated_and_never_builds_the_pin() {
     let job = crate::s2::policy_job(&PolicyJobSpec {
-        candidate_artifact_wiring: true,
         name: "Policy",
         revision: PIN_A,
         runner: "[self-hosted, velnor]",
@@ -1245,1507 +815,6 @@ fn ungated_trusted_velnor_job_fails_the_trusted_runners_rule() {
     );
     assert!(!report.passed());
     let _ = fs::remove_dir_all(ungated);
-}
-
-#[test]
-fn every_workflow_gets_full_semantic_audit_checks() {
-    let root = velnor_tree("workflow-audit-s2", &gated_trusted_job());
-    let generation_config = root.join(GENERATION_CONFIG);
-    let base = must(
-        fs::read_to_string(&generation_config),
-        "read generation config",
-    );
-    write(
-        &generation_config,
-        &format!(
-            "{base}\n[[static_files]]\nfile = \".github/workflows/ci-static.yml\"\nsource = \".github-gen/ci-static.yml\"\n"
-        ),
-    );
-    let unpinned = "name: Workflow\non:\n  workflow_dispatch:\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@v4\n";
-    write(&root.join(".github-gen/ci-static.yml"), unpinned);
-    write(&root.join(".github/workflows/ci-static.yml"), unpinned);
-    write(
-        &root.join(".github/workflows/ci-old.yml"),
-        "name: Old workflow\non:\n  pull_request_target:\n    types: [opened]\njobs:\n  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@v4\n",
-    );
-    write(
-        &root.join(".github/workflows/ci-invalid.yml"),
-        "name: Invalid workflow\non: pull_request_target\non: workflow_dispatch\n",
-    );
-    write(
-        &root.join(POLICY_ENTRYPOINT),
-        "name: Policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\n  workflow_dispatch:\npermissions:\n  contents: read\njobs:\n  policy:\n    runs-on: ubuntu-24.04\n    permissions:\n      contents: read\n    steps:\n      - uses: actions/checkout@v4\n",
-    );
-
-    let audit = must(audit_workflows(&root), "audit workflow tree");
-    for workflow in ["ci-static.yml", "ci-policy.yml", "ci-old.yml"] {
-        assert!(
-            audit.actions.iter().any(|finding| {
-                finding.contains(workflow) && finding.contains("not a full SHA pin")
-            }),
-            "semantic audit must include {workflow}: {:?}",
-            audit.actions
-        );
-    }
-    assert_eq!(
-        audit.pull_request_target.len(),
-        1,
-        "{:?}",
-        audit.pull_request_target
-    );
-    assert!(
-        audit
-            .pull_request_target
-            .iter()
-            .any(|finding| finding.contains("ci-old.yml")),
-        "a non-entrypoint pull_request_target workflow must fail: {:?}",
-        audit.pull_request_target
-    );
-    assert!(
-        audit.structure.iter().any(|finding| {
-            finding.contains("ci-invalid.yml") && finding.contains("parse workflow")
-        }),
-        "a malformed workflow must fail closed: {:?}",
-        audit.structure
-    );
-    assert!(
-        !audit
-            .pull_request_target
-            .iter()
-            .any(|finding| finding.contains("ci-policy.yml")),
-        "the policy entrypoint alone is admitted to pull_request_target"
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-fn required_artifact_policy_tree(name: &str) -> PathBuf {
-    required_artifact_policy_tree_for_runner(name, "github")
-}
-
-fn required_artifact_policy_tree_for_runner(name: &str, runner: &str) -> PathBuf {
-    let root = velnor_tree(name, &gated_trusted_job());
-    let consumer_runner = if runner == "velnor" {
-        "runner = \"velnor\"\n"
-    } else {
-        ""
-    };
-    let mut generation_config = format!(
-        "schema = 2\n\n[generator]\nrepository = \"example/consumer\"\n\n[[check_profile]]\nid = \"strict\"\nschedule = \"15 7 * * 1\"\nrunner = \"{runner}\"\ntasks = [\"check-strict\"]\nartifacts_required = true\nartifacts = [\"target/evidence.json\"]\n\n[[check_profile]]\nid = \"consumer\"\n{consumer_runner}schedule = \"15 7 * * 1\"\ntasks = [\"test\"]\nneeds = [\"strict\"]\n\n[[declare]]\nprimitive = \"scheduled-checks\"\nfile = \"ci-scheduled.yml\"\n"
-    );
-    if runner == "velnor" {
-        generation_config.push_str(
-            "\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"velnor-target-mvp\"]\n",
-        );
-    }
-    write(&root.join(GENERATION_CONFIG), &generation_config);
-    write(
-        &root.join(crate::visibility::VISIBILITY_EVIDENCE_PATH),
-        &format!(
-            "repository = \"example/consumer\"\nvisibility = \"{}\"\n",
-            if runner == "velnor" {
-                "private"
-            } else {
-                "public"
-            }
-        ),
-    );
-    write(
-        &root.join("mise.toml"),
-        "[tasks.check-strict]\nrun = \"mkdir -p target && printf evidence > target/evidence.json\"\n\n[tasks.test]\nrun = \"true\"\n\n[tasks.prepare]\nrun = \"true\"\n",
-    );
-    write_trusted_scheduled_checks(&root);
-    root
-}
-
-fn write_trusted_scheduled_checks(root: &Path) {
-    let (files, _, _) = must(
-        super::trusted_check_profile_render(root),
-        "render trusted scheduled-check fixture",
-    );
-    let relative = Path::new(".github/workflows/ci-scheduled.yml");
-    let content = files
-        .get(relative)
-        .unwrap_or_else(|| panic!("trusted renderer emitted {}", relative.display()));
-    write(&root.join(relative), content);
-}
-
-fn required_artifact_policy_tree_with_prep_dependency(name: &str) -> PathBuf {
-    required_artifact_policy_tree_with_prep_dependency_for_runner(name, "github")
-}
-
-fn required_artifact_policy_tree_with_prep_dependency_for_runner(
-    name: &str,
-    runner: &str,
-) -> PathBuf {
-    let root = required_artifact_policy_tree_for_runner(name, runner);
-    let config_path = root.join(GENERATION_CONFIG);
-    let config = must(fs::read_to_string(&config_path), "read artifact config");
-    let prep_runner = if runner == "velnor" {
-        "runner = \"velnor\"\n"
-    } else {
-        ""
-    };
-    let config = config
-        .replace(
-            "tasks = [\"check-strict\"]\nartifacts_required = true",
-            "tasks = [\"check-strict\"]\nneeds = [\"prep\"]\nartifacts_required = true",
-        )
-        .replace(
-            "\n[[check_profile]]\nid = \"consumer\"",
-            &format!(
-                "\n[[check_profile]]\nid = \"prep\"\n{prep_runner}schedule = \"15 7 * * 1\"\ntasks = [\"prepare\"]\nartifacts = [\"target/prep.log\"]\n\n[[check_profile]]\nid = \"consumer\""
-            ),
-        );
-    assert!(
-        config.contains("needs = [\"prep\"]") && config.contains("id = \"prep\""),
-        "prep dependency fixture config was updated"
-    );
-    write(&config_path, &config);
-    write_trusted_scheduled_checks(&root);
-    root
-}
-
-fn required_artifact_policy_tree_with_bridge_consumer(name: &str) -> PathBuf {
-    let root = required_artifact_policy_tree(name);
-    let config_path = root.join(GENERATION_CONFIG);
-    let config = must(
-        fs::read_to_string(&config_path),
-        "read bridge consumer config",
-    );
-    let config = config.replace(
-        "[[check_profile]]\nid = \"consumer\"\nschedule = \"15 7 * * 1\"\ntasks = [\"test\"]\nneeds = [\"strict\"]",
-        "[[check_profile]]\nid = \"bridge\"\nschedule = \"15 7 * * 1\"\ntasks = [\"prepare\"]\nneeds = [\"strict\"]\n\n[[check_profile]]\nid = \"consumer\"\nschedule = \"15 7 * * 1\"\ntasks = [\"test\"]\nneeds = [\"bridge\"]",
-    );
-    assert!(
-        config.contains("id = \"bridge\"")
-            && config.contains("id = \"consumer\"\nschedule = \"15 7 * * 1\"\ntasks = [\"test\"]\nneeds = [\"bridge\"]"),
-        "bridge fixture config contains producer → bridge → consumer dependency chain"
-    );
-    write(&config_path, &config);
-    write_trusted_scheduled_checks(&root);
-    root
-}
-
-fn required_artifact_policy_tree_with_advisory_prep_dependency(name: &str) -> PathBuf {
-    let root = required_artifact_policy_tree_with_prep_dependency(name);
-    let config_path = root.join(GENERATION_CONFIG);
-    let config = must(
-        fs::read_to_string(&config_path),
-        "read advisory prep config",
-    );
-    let config = config.replace(
-        "id = \"prep\"\nschedule =",
-        "id = \"prep\"\nstatus = \"advisory\"\nschedule =",
-    );
-    assert!(config.contains("id = \"prep\"\nstatus = \"advisory\""));
-    write(&config_path, &config);
-    write_trusted_scheduled_checks(&root);
-    root
-}
-
-fn required_artifact_policy_tree_with_velnor_prep_dependency(name: &str) -> PathBuf {
-    required_artifact_policy_tree_with_prep_dependency_for_runner(name, "velnor")
-}
-
-fn required_artifact_policy_tree_with_velnor_consumer(name: &str) -> PathBuf {
-    required_artifact_policy_tree_for_runner(name, "velnor")
-}
-
-fn simple_check_job() -> Value {
-    let mut job = Mapping::new();
-    insert_yaml(&mut job, "runs-on", yaml_string("ubuntu-latest"));
-    insert_yaml(
-        &mut job,
-        "steps",
-        Value::Sequence(vec![simple_run_step("echo check\n")]),
-    );
-    Value::Mapping(job)
-}
-
-fn simple_run_step(run: &str) -> Value {
-    let mut step = Mapping::new();
-    insert_yaml(&mut step, "run", yaml_string(run));
-    Value::Mapping(step)
-}
-
-fn mutated_required_artifact_policy_tree(name: &str, mutation: &str) -> PathBuf {
-    let root = required_artifact_mutation_fixture(name, mutation);
-    let workflow_path = root.join(".github/workflows/ci-scheduled.yml");
-    let content = must(fs::read_to_string(&workflow_path), "read test workflow");
-    let mut workflow: Value = must(serde_yaml::from_str(&content), "parse test workflow");
-    let mut jobs = workflow
-        .as_mapping()
-        .and_then(|workflow| workflow.get("jobs"))
-        .and_then(Value::as_mapping)
-        .cloned()
-        .unwrap_or_else(|| panic!("workflow jobs mapping exists"));
-
-    mutate_required_artifact_policy(&root, &mut workflow, &mut jobs, mutation);
-    *test_mapping_value_mut(test_as_mapping_mut(&mut workflow), "jobs")
-        .unwrap_or_else(|| panic!("workflow jobs mapping exists")) = Value::Mapping(jobs);
-    let content = must(
-        serde_yaml::to_string(&workflow),
-        "serialize mutated test workflow",
-    );
-    write(&workflow_path, &content);
-    root
-}
-
-fn required_artifact_mutation_fixture(name: &str, mutation: &str) -> PathBuf {
-    match mutation {
-        value if value.starts_with("consumer-if-") => {
-            required_artifact_policy_tree_with_velnor_consumer(name)
-        }
-        "velnor-producer-if-always" | "velnor-producer-wrong-selector" => {
-            required_artifact_policy_tree_for_runner(name, "velnor")
-        }
-        "transitive-consumer-if-always" => required_artifact_policy_tree_with_bridge_consumer(name),
-        "producer-transitive-skipped-prep"
-        | "producer-ancestor-runs-on"
-        | "producer-ancestor-continue-on-error"
-        | "producer-ancestor-task-continue-on-error"
-        | "producer-ancestor-task-command"
-        | "producer-ancestor-extra-step"
-        | "producer-ancestor-optional-artifact-tail" => {
-            required_artifact_policy_tree_with_prep_dependency(name)
-        }
-        "macos-producer-runs-on" => required_artifact_policy_tree_for_runner(name, "macos"),
-        _ => required_artifact_policy_tree(name),
-    }
-}
-
-fn mutate_required_artifact_policy(
-    root: &Path,
-    workflow: &mut Value,
-    jobs: &mut Mapping,
-    mutation: &str,
-) {
-    match mutation {
-        "missing-verifier" | "renamed-verifier" => mutate_verifier_presence(jobs, mutation),
-        "extra-checkout" | "extra-action" | "extra-run" => {
-            mutate_verifier_extra_steps(jobs, mutation);
-        }
-        "permission-widening"
-        | "container"
-        | "service"
-        | "continue-on-error"
-        | "altered-runner"
-        | "verifier-if-always" => {
-            mutate_verifier_settings(jobs, mutation);
-        }
-        "altered-artifact-id" | "altered-guard" => {
-            mutate_verifier_step_semantics(jobs, mutation);
-        }
-        "unsafe-config-path" | "windows-trailing-dot-path" => {
-            mutate_artifact_config_path(root, workflow, mutation);
-        }
-        "unconfigured-output-consumer" => mutate_unconfigured_output_consumer(jobs),
-        "producer-output-redirect"
-        | "producer-forged-dependency"
-        | "producer-forged-dependency-output"
-        | "producer-skipped-dependency" => mutate_producer_dependencies(jobs, mutation),
-        "producer-continue-on-error"
-        | "producer-forged-mise-setup"
-        | "producer-job-bash-env"
-        | "producer-job-container"
-        | "producer-job-defaults"
-        | "producer-job-strategy" => mutate_producer_job_controls(jobs, mutation),
-        "producer-upload-id"
-        | "producer-upload-action"
-        | "producer-upload-name"
-        | "producer-upload-path"
-        | "producer-upload-error-policy"
-        | "producer-upload-if"
-        | "producer-ancestor-optional-artifact-tail" => mutate_producer_upload(jobs, mutation),
-        "workflow-inherited-env"
-        | "workflow-inherited-permissions"
-        | "workflow-inherited-defaults" => {
-            mutate_workflow_inherited_controls(workflow, mutation);
-        }
-        "consumer-skips-verifier"
-        | "consumer-extra-need"
-        | "consumer-task-noop"
-        | "consumer-job-continue-on-error"
-        | "consumer-step-continue-on-error"
-        | "consumer-if-always"
-        | "transitive-consumer-if-always"
-        | "consumer-if-failure"
-        | "consumer-if-cancelled"
-        | "consumer-if-not-cancelled"
-        | "hosted-consumer-if" => mutate_consumer_policy(jobs, mutation),
-        "producer-if-false"
-        | "producer-transitive-skipped-prep"
-        | "producer-ancestor-runs-on"
-        | "producer-ancestor-continue-on-error"
-        | "producer-ancestor-task-continue-on-error"
-        | "producer-runs-on-hosted"
-        | "producer-runs-on-other-provider"
-        | "velnor-producer-wrong-selector"
-        | "macos-producer-runs-on"
-        | "consumer-runs-on"
-        | "velnor-producer-if-always" => {
-            mutate_producer_and_ancestor_runners(jobs, mutation);
-        }
-        "producer-task-continue-on-error"
-        | "producer-task-command"
-        | "producer-task-if-false"
-        | "producer-extra-task-step"
-        | "producer-ancestor-task-command"
-        | "producer-ancestor-extra-step" => mutate_producer_tasks(jobs, mutation),
-        _ => panic!("unknown test mutation: {mutation}"),
-    }
-}
-
-fn mutate_verifier_presence(jobs: &mut Mapping, mutation: &str) {
-    match mutation {
-        "missing-verifier" => {
-            let removed = jobs.remove("verify-strict-artifacts");
-            assert!(removed.is_some(), "canonical verifier exists");
-        }
-        "renamed-verifier" => {
-            let verifier = jobs
-                .remove("verify-strict-artifacts")
-                .unwrap_or_else(|| panic!("canonical verifier exists"));
-            jobs.insert("verify-renamed-artifacts".to_owned(), verifier);
-        }
-        mutation => panic!("unknown verifier presence mutation: {mutation}"),
-    }
-}
-
-fn mutate_verifier_extra_steps(jobs: &mut Mapping, mutation: &str) {
-    let verifier = test_mapping_value_mut(
-        jobs.get_mut("verify-strict-artifacts")
-            .and_then(Value::as_mapping_mut)
-            .unwrap_or_else(|| panic!("canonical verifier job exists")),
-        "steps",
-    )
-    .and_then(Value::as_sequence_mut)
-    .unwrap_or_else(|| panic!("verifier steps exist"));
-    if matches!(mutation, "extra-checkout" | "extra-action") {
-        let mut checkout = Mapping::new();
-        insert_yaml(
-            &mut checkout,
-            "uses",
-            yaml_string(if mutation == "extra-checkout" {
-                crate::s2::ActionPin::Checkout.reference()
-            } else {
-                crate::s2::ActionPin::DownloadArtifact.reference()
-            }),
-        );
-        verifier.push(Value::Mapping(checkout));
-    } else {
-        verifier.push(simple_run_step("echo untrusted\n"));
-    }
-}
-
-fn mutate_verifier_settings(jobs: &mut Mapping, mutation: &str) {
-    let verifier = jobs
-        .get_mut("verify-strict-artifacts")
-        .and_then(Value::as_mapping_mut)
-        .unwrap_or_else(|| panic!("canonical verifier job exists"));
-    match mutation {
-        "permission-widening" => {
-            let permissions = test_mapping_value_mut(verifier, "permissions")
-                .and_then(Value::as_mapping_mut)
-                .unwrap_or_else(|| panic!("verifier permissions exist"));
-            insert_yaml(permissions, "contents", yaml_string("read"));
-        }
-        "container" => insert_yaml(verifier, "container", yaml_string("node:latest")),
-        "service" => {
-            let mut services = Mapping::new();
-            let mut service = Mapping::new();
-            insert_yaml(&mut service, "image", yaml_string("node:latest"));
-            insert_yaml(&mut services, "service", Value::Mapping(service));
-            insert_yaml(verifier, "services", Value::Mapping(services));
-        }
-        "continue-on-error" => {
-            insert_yaml(verifier, "continue-on-error", Value::Bool(true));
-        }
-        "altered-runner" => insert_yaml(verifier, "runs-on", yaml_string("windows-latest")),
-        "verifier-if-always" => insert_yaml(verifier, "if", yaml_string("${{ always() }}")),
-        mutation => panic!("unknown verifier setting mutation: {mutation}"),
-    }
-}
-
-fn mutate_verifier_step_semantics(jobs: &mut Mapping, mutation: &str) {
-    let verifier = jobs
-        .get_mut("verify-strict-artifacts")
-        .and_then(Value::as_mapping_mut)
-        .unwrap_or_else(|| panic!("canonical verifier job exists"));
-    let steps = test_mapping_value_mut(verifier, "steps")
-        .and_then(Value::as_sequence_mut)
-        .unwrap_or_else(|| panic!("verifier steps exist"));
-    match mutation {
-        "altered-artifact-id" => {
-            let download = steps[2]
-                .as_mapping_mut()
-                .unwrap_or_else(|| panic!("download step mapping exists"));
-            let inputs = test_mapping_value_mut(download, "with")
-                .and_then(Value::as_mapping_mut)
-                .unwrap_or_else(|| panic!("download inputs exist"));
-            insert_yaml(
-                inputs,
-                "artifact-ids",
-                yaml_string("${{ needs.other.outputs.artifact_id }}"),
-            );
-        }
-        "altered-guard" => {
-            let guard = steps[0]
-                .as_mapping_mut()
-                .unwrap_or_else(|| panic!("runner guard mapping exists"));
-            insert_yaml(guard, "run", yaml_string("echo guard skipped\n"));
-        }
-        mutation => panic!("unknown verifier step mutation: {mutation}"),
-    }
-}
-
-fn mutate_artifact_config_path(root: &Path, workflow: &mut Value, mutation: &str) {
-    let config_path = root.join(GENERATION_CONFIG);
-    let config = must(fs::read_to_string(&config_path), "read artifact config");
-    match mutation {
-        "unsafe-config-path" => {
-            write(
-                &config_path,
-                &config.replace("target/evidence.json", "../outside.json"),
-            );
-        }
-        "windows-trailing-dot-path" => {
-            write(
-                &config_path,
-                &config.replace("target/evidence.json", "target/report."),
-            );
-            replace_yaml_strings(workflow, "target/evidence.json", "target/report.");
-        }
-        mutation => panic!("unknown artifact path mutation: {mutation}"),
-    }
-}
-
-fn mutate_unconfigured_output_consumer(jobs: &mut Mapping) {
-    let mut job = simple_check_job()
-        .as_mapping()
-        .cloned()
-        .unwrap_or_else(|| panic!("extra job mapping exists"));
-    insert_yaml(
-        &mut job,
-        "needs",
-        Value::Sequence(vec![yaml_string("strict")]),
-    );
-    let mut step = Mapping::new();
-    insert_yaml(
-        &mut step,
-        "run",
-        yaml_string("echo '${{ needs.strict.outputs.artifact_id }}'"),
-    );
-    insert_yaml(
-        &mut job,
-        "steps",
-        Value::Sequence(vec![Value::Mapping(step)]),
-    );
-    insert_yaml(jobs, "unconfigured-exporter", Value::Mapping(job));
-}
-
-fn mutate_producer_dependencies(jobs: &mut Mapping, mutation: &str) {
-    match mutation {
-        "producer-output-redirect" => {
-            set_producer_output(jobs, "${{ needs.evil.outputs.artifact_id }}");
-        }
-        "producer-forged-dependency" => {
-            set_producer_needs(jobs, vec![yaml_string("evil")]);
-        }
-        "producer-forged-dependency-output" => {
-            set_producer_needs(jobs, vec![yaml_string("evil")]);
-            set_producer_output(jobs, "${{ needs.evil.outputs.artifact_id }}");
-        }
-        "producer-skipped-dependency" => {
-            let mut optional = simple_check_job();
-            insert_yaml(
-                optional
-                    .as_mapping_mut()
-                    .unwrap_or_else(|| panic!("optional job mapping exists")),
-                "if",
-                yaml_string("${{ false }}"),
-            );
-            insert_yaml(jobs, "optional", optional);
-            set_producer_needs(jobs, vec![yaml_string("optional")]);
-        }
-        mutation => panic!("unknown producer dependency mutation: {mutation}"),
-    }
-}
-
-fn mutate_producer_job_controls(jobs: &mut Mapping, mutation: &str) {
-    match mutation {
-        "producer-continue-on-error" => {
-            let producer = jobs
-                .get_mut("strict")
-                .and_then(Value::as_mapping_mut)
-                .unwrap_or_else(|| panic!("required-artifact producer job exists"));
-            insert_yaml(producer, "continue-on-error", Value::Bool(true));
-        }
-        "producer-forged-mise-setup" => {
-            let producer = jobs
-                .get_mut("strict")
-                .and_then(Value::as_mapping_mut)
-                .unwrap_or_else(|| panic!("producer job exists"));
-            let steps = test_mapping_value_mut(producer, "steps")
-                .and_then(Value::as_sequence_mut)
-                .unwrap_or_else(|| panic!("producer steps exist"));
-            let mut forged = Mapping::new();
-            insert_yaml(&mut forged, "name", yaml_string("Set up Mise"));
-            insert_yaml(
-                &mut forged,
-                "run",
-                yaml_string(
-                    "mkdir -p /tmp/fake-bin && printf '#!/bin/sh\\nexit 0\\n' > /tmp/fake-bin/mise",
-                ),
-            );
-            steps[1] = Value::Mapping(forged);
-        }
-        "producer-job-bash-env" => {
-            let mut env = Mapping::new();
-            insert_yaml(&mut env, "BASH_ENV", yaml_string("/tmp/attacker.sh"));
-            set_job_field(jobs, "strict", "env", Value::Mapping(env));
-        }
-        "producer-job-container" => {
-            set_job_field(jobs, "strict", "container", yaml_string("node:latest"));
-        }
-        "producer-job-defaults" => {
-            let mut run = Mapping::new();
-            insert_yaml(&mut run, "shell", yaml_string("bash"));
-            let mut defaults = Mapping::new();
-            insert_yaml(&mut defaults, "run", Value::Mapping(run));
-            set_job_field(jobs, "strict", "defaults", Value::Mapping(defaults));
-        }
-        "producer-job-strategy" => {
-            let mut strategy = Mapping::new();
-            insert_yaml(&mut strategy, "fail-fast", Value::Bool(false));
-            set_job_field(jobs, "strict", "strategy", Value::Mapping(strategy));
-        }
-        mutation => panic!("unknown producer job control mutation: {mutation}"),
-    }
-}
-
-fn mutate_producer_upload(jobs: &mut Mapping, mutation: &str) {
-    match mutation {
-        "producer-upload-id" => {
-            insert_yaml(
-                producer_upload_step(jobs),
-                "id",
-                yaml_string("other_upload"),
-            );
-        }
-        "producer-upload-action" => {
-            insert_yaml(
-                producer_upload_step(jobs),
-                "uses",
-                yaml_string("actions/upload-artifact@v4"),
-            );
-        }
-        "producer-upload-name" => {
-            let upload = producer_upload_step(jobs);
-            let with = test_mapping_value_mut(upload, "with")
-                .and_then(Value::as_mapping_mut)
-                .unwrap_or_else(|| panic!("producer upload inputs exist"));
-            insert_yaml(with, "name", yaml_string("evil"));
-        }
-        "producer-upload-path" => {
-            let upload = producer_upload_step(jobs);
-            let with = test_mapping_value_mut(upload, "with")
-                .and_then(Value::as_mapping_mut)
-                .unwrap_or_else(|| panic!("producer upload inputs exist"));
-            insert_yaml(with, "path", yaml_string("."));
-        }
-        "producer-upload-error-policy" => {
-            let upload = producer_upload_step(jobs);
-            let with = test_mapping_value_mut(upload, "with")
-                .and_then(Value::as_mapping_mut)
-                .unwrap_or_else(|| panic!("producer upload inputs exist"));
-            insert_yaml(with, "if-no-files-found", yaml_string("warn"));
-        }
-        "producer-upload-if" => {
-            insert_yaml(producer_upload_step(jobs), "if", yaml_string("always()"));
-        }
-        "producer-ancestor-optional-artifact-tail" => {
-            let upload = profile_upload_step(jobs, "prep");
-            let with = test_mapping_value_mut(upload, "with")
-                .and_then(Value::as_mapping_mut)
-                .unwrap_or_else(|| panic!("optional ancestor upload inputs exist"));
-            insert_yaml(with, "path", yaml_string("."));
-        }
-        mutation => panic!("unknown artifact upload mutation: {mutation}"),
-    }
-}
-
-fn mutate_workflow_inherited_controls(workflow: &mut Value, mutation: &str) {
-    match mutation {
-        "workflow-inherited-env" => {
-            let mut env = Mapping::new();
-            insert_yaml(&mut env, "BASH_ENV", yaml_string("/tmp/attacker.sh"));
-            insert_yaml(test_as_mapping_mut(workflow), "env", Value::Mapping(env));
-        }
-        "workflow-inherited-permissions" => {
-            let mut permissions = Mapping::new();
-            insert_yaml(&mut permissions, "contents", yaml_string("write"));
-            insert_yaml(
-                test_as_mapping_mut(workflow),
-                "permissions",
-                Value::Mapping(permissions),
-            );
-        }
-        "workflow-inherited-defaults" => {
-            let mut run = Mapping::new();
-            insert_yaml(&mut run, "working-directory", yaml_string("/tmp"));
-            let mut defaults = Mapping::new();
-            insert_yaml(&mut defaults, "run", Value::Mapping(run));
-            insert_yaml(
-                test_as_mapping_mut(workflow),
-                "defaults",
-                Value::Mapping(defaults),
-            );
-        }
-        mutation => panic!("unknown workflow control mutation: {mutation}"),
-    }
-}
-
-fn mutate_consumer_policy(jobs: &mut Mapping, mutation: &str) {
-    let verifier_id = "verify-strict-artifacts";
-    match mutation {
-        "consumer-skips-verifier" => {
-            let consumer = jobs
-                .get_mut("consumer")
-                .and_then(Value::as_mapping_mut)
-                .unwrap_or_else(|| panic!("consumer job exists"));
-            insert_yaml(
-                consumer,
-                "needs",
-                Value::Sequence(vec![yaml_string("strict")]),
-            );
-        }
-        "consumer-extra-need" => {
-            let consumer = jobs
-                .get_mut("consumer")
-                .and_then(Value::as_mapping_mut)
-                .unwrap_or_else(|| panic!("consumer job exists"));
-            insert_yaml(
-                consumer,
-                "needs",
-                Value::Sequence(vec![yaml_string(verifier_id), yaml_string("unrelated")]),
-            );
-        }
-        "consumer-task-noop" => {
-            insert_yaml(
-                profile_task_step(jobs, "consumer"),
-                "run",
-                yaml_string("echo noop"),
-            );
-        }
-        "consumer-job-continue-on-error" => {
-            set_job_field(jobs, "consumer", "continue-on-error", Value::Bool(true));
-        }
-        "consumer-step-continue-on-error" => {
-            insert_yaml(
-                profile_task_step(jobs, "consumer"),
-                "continue-on-error",
-                Value::Bool(true),
-            );
-        }
-        "consumer-if-always" | "transitive-consumer-if-always" | "hosted-consumer-if" => {
-            set_consumer_if(jobs, "${{ always() }}");
-        }
-        "consumer-if-failure" => set_consumer_if(jobs, "${{ failure() }}"),
-        "consumer-if-cancelled" => set_consumer_if(jobs, "${{ cancelled() }}"),
-        "consumer-if-not-cancelled" => set_consumer_if(jobs, "${{ !cancelled() }}"),
-        mutation => panic!("unknown consumer policy mutation: {mutation}"),
-    }
-}
-
-fn mutate_producer_and_ancestor_runners(jobs: &mut Mapping, mutation: &str) {
-    match mutation {
-        "producer-if-false" => set_producer_if(jobs, "${{ false }}"),
-        "producer-transitive-skipped-prep" => {
-            let prep = jobs
-                .get_mut("prep")
-                .and_then(Value::as_mapping_mut)
-                .unwrap_or_else(|| panic!("configured prep job exists"));
-            insert_yaml(prep, "if", yaml_string("${{ false }}"));
-        }
-        "producer-ancestor-runs-on" => {
-            set_job_field(jobs, "prep", "runs-on", yaml_string("windows-latest"));
-        }
-        "producer-ancestor-continue-on-error" => {
-            set_job_field(jobs, "prep", "continue-on-error", Value::Bool(true));
-        }
-        "producer-ancestor-task-continue-on-error" => {
-            let task = profile_task_step(jobs, "prep");
-            insert_yaml(task, "run", yaml_string("mkdir -p target && false"));
-            insert_yaml(task, "continue-on-error", Value::Bool(true));
-        }
-        "producer-runs-on-hosted" => set_producer_runs_on(jobs, "windows-latest"),
-        "producer-runs-on-other-provider" | "velnor-producer-wrong-selector" => {
-            set_producer_runs_on(jobs, "velnor-native");
-        }
-        "macos-producer-runs-on" => set_producer_runs_on(jobs, "ubuntu-24.04"),
-        "consumer-runs-on" => {
-            set_job_field(jobs, "consumer", "runs-on", yaml_string("windows-latest"));
-        }
-        "velnor-producer-if-always" => set_producer_if(
-            jobs,
-            &format!(
-                "${{{{ always() && ({}) }}}}",
-                super::super::TRUSTED_EVENT_EXPRESSION
-            ),
-        ),
-        mutation => panic!("unknown runner or ancestor mutation: {mutation}"),
-    }
-}
-
-fn mutate_producer_tasks(jobs: &mut Mapping, mutation: &str) {
-    match mutation {
-        "producer-task-continue-on-error" => {
-            let task = producer_task_step(jobs);
-            insert_yaml(
-                task,
-                "run",
-                yaml_string("mkdir -p target && printf partial > target/evidence.json && false"),
-            );
-            insert_yaml(task, "continue-on-error", Value::Bool(true));
-        }
-        "producer-task-command" => {
-            let task = producer_task_step(jobs);
-            insert_yaml(task, "run", yaml_string("mise run unrelated"));
-        }
-        "producer-task-if-false" => {
-            let task = producer_task_step(jobs);
-            insert_yaml(task, "if", yaml_string("false"));
-        }
-        "producer-extra-task-step" => {
-            let producer = jobs
-                .get_mut("strict")
-                .and_then(Value::as_mapping_mut)
-                .unwrap_or_else(|| panic!("producer job exists"));
-            let steps = test_mapping_value_mut(producer, "steps")
-                .and_then(Value::as_sequence_mut)
-                .unwrap_or_else(|| panic!("producer steps exist"));
-            let insertion = steps.len() - 3;
-            steps.insert(
-                insertion,
-                super::canonical_profile_task_step("unconfigured"),
-            );
-        }
-        "producer-ancestor-task-command" => {
-            let task = profile_task_step(jobs, "prep");
-            insert_yaml(task, "run", yaml_string("mise run unrelated"));
-        }
-        "producer-ancestor-extra-step" => {
-            let prep = jobs
-                .get_mut("prep")
-                .and_then(Value::as_mapping_mut)
-                .unwrap_or_else(|| panic!("prep job exists"));
-            let steps = test_mapping_value_mut(prep, "steps")
-                .and_then(Value::as_sequence_mut)
-                .unwrap_or_else(|| panic!("prep steps exist"));
-            steps.push(super::canonical_profile_task_step("unconfigured"));
-        }
-        mutation => panic!("unknown producer task mutation: {mutation}"),
-    }
-}
-
-fn set_consumer_if(jobs: &mut Mapping, condition: &str) {
-    let consumer = jobs
-        .get_mut("consumer")
-        .and_then(Value::as_mapping_mut)
-        .unwrap_or_else(|| panic!("consumer job exists"));
-    insert_yaml(consumer, "if", yaml_string(condition));
-}
-
-fn set_producer_if(jobs: &mut Mapping, condition: &str) {
-    let producer = jobs
-        .get_mut("strict")
-        .and_then(Value::as_mapping_mut)
-        .unwrap_or_else(|| panic!("required-artifact producer job exists"));
-    insert_yaml(producer, "if", yaml_string(condition));
-}
-
-fn set_job_field(jobs: &mut Mapping, job_id: &str, field: &str, value: Value) {
-    let job = jobs
-        .get_mut(job_id)
-        .and_then(Value::as_mapping_mut)
-        .unwrap_or_else(|| panic!("job `{job_id}` exists"));
-    insert_yaml(job, field, value);
-}
-
-fn set_producer_runs_on(jobs: &mut Mapping, runner: &str) {
-    set_job_field(jobs, "strict", "runs-on", yaml_string(runner));
-}
-
-fn set_producer_output(jobs: &mut Mapping, expression: &str) {
-    let producer = jobs
-        .get_mut("strict")
-        .and_then(Value::as_mapping_mut)
-        .unwrap_or_else(|| panic!("required-artifact producer job exists"));
-    let outputs = test_mapping_value_mut(producer, "outputs")
-        .and_then(Value::as_mapping_mut)
-        .unwrap_or_else(|| panic!("producer outputs exist"));
-    insert_yaml(outputs, "artifact_id", yaml_string(expression));
-}
-
-fn set_producer_needs(jobs: &mut Mapping, needs: Vec<Value>) {
-    let producer = jobs
-        .get_mut("strict")
-        .and_then(Value::as_mapping_mut)
-        .unwrap_or_else(|| panic!("required-artifact producer job exists"));
-    insert_yaml(producer, "needs", Value::Sequence(needs));
-}
-
-fn producer_upload_step(jobs: &mut Mapping) -> &mut Mapping {
-    profile_upload_step(jobs, "strict")
-}
-
-fn profile_upload_step<'a>(jobs: &'a mut Mapping, job_id: &str) -> &'a mut Mapping {
-    let profile = jobs
-        .get_mut(job_id)
-        .and_then(Value::as_mapping_mut)
-        .unwrap_or_else(|| panic!("profile job `{job_id}` exists"));
-    let steps = test_mapping_value_mut(profile, "steps")
-        .and_then(Value::as_sequence_mut)
-        .unwrap_or_else(|| panic!("profile steps exist"));
-    steps
-        .last_mut()
-        .and_then(Value::as_mapping_mut)
-        .unwrap_or_else(|| panic!("profile artifact upload step exists"))
-}
-
-fn producer_task_step(jobs: &mut Mapping) -> &mut Mapping {
-    profile_task_step(jobs, "strict")
-}
-
-fn profile_task_step<'a>(jobs: &'a mut Mapping, job_id: &str) -> &'a mut Mapping {
-    let producer = jobs
-        .get_mut(job_id)
-        .and_then(Value::as_mapping_mut)
-        .unwrap_or_else(|| panic!("profile job `{job_id}` exists"));
-    let steps = test_mapping_value_mut(producer, "steps")
-        .and_then(Value::as_sequence_mut)
-        .unwrap_or_else(|| panic!("profile steps exist"));
-    steps
-        .iter_mut()
-        .find(|step| {
-            step.as_mapping()
-                .and_then(|step| test_mapping_value(step, "name"))
-                .and_then(Value::as_str)
-                .is_some_and(|name| name.starts_with("Run "))
-        })
-        .and_then(Value::as_mapping_mut)
-        .unwrap_or_else(|| panic!("profile task step exists"))
-}
-
-fn replace_yaml_strings(value: &mut Value, from: &str, to: &str) {
-    match value {
-        Value::String(string) => *string = string.replace(from, to),
-        Value::Sequence(sequence) => {
-            for child in sequence {
-                replace_yaml_strings(child, from, to);
-            }
-        }
-        Value::Mapping(mapping) => {
-            for child in mapping.values_mut() {
-                replace_yaml_strings(child, from, to);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn test_mapping_value_mut<'a>(mapping: &'a mut Mapping, name: &str) -> Option<&'a mut Value> {
-    mapping.get_mut(name)
-}
-
-fn test_mapping_value<'a>(mapping: &'a Mapping, name: &str) -> Option<&'a Value> {
-    mapping.get(name)
-}
-
-fn test_as_mapping_mut(value: &mut Value) -> &mut Mapping {
-    value
-        .as_mapping_mut()
-        .unwrap_or_else(|| panic!("YAML value is a mapping"))
-}
-
-const REQUIRED_ARTIFACT_POLICY_MUTATIONS: &[&str] = &[
-    "missing-verifier",
-    "renamed-verifier",
-    "extra-checkout",
-    "extra-action",
-    "extra-run",
-    "permission-widening",
-    "container",
-    "service",
-    "continue-on-error",
-    "altered-artifact-id",
-    "altered-runner",
-    "verifier-if-always",
-    "altered-guard",
-    "unsafe-config-path",
-    "windows-trailing-dot-path",
-    "consumer-skips-verifier",
-    "consumer-task-noop",
-    "consumer-job-continue-on-error",
-    "consumer-step-continue-on-error",
-    "consumer-extra-need",
-    "consumer-if-always",
-    "consumer-if-failure",
-    "consumer-if-cancelled",
-    "consumer-if-not-cancelled",
-    "hosted-consumer-if",
-    "producer-if-false",
-    "velnor-producer-if-always",
-    "producer-runs-on-hosted",
-    "producer-runs-on-other-provider",
-    "velnor-producer-wrong-selector",
-    "macos-producer-runs-on",
-    "consumer-runs-on",
-    "producer-task-continue-on-error",
-    "producer-forged-mise-setup",
-    "producer-job-bash-env",
-    "producer-job-container",
-    "producer-job-defaults",
-    "producer-job-strategy",
-    "producer-task-command",
-    "producer-task-if-false",
-    "producer-extra-task-step",
-    "producer-output-redirect",
-    "producer-forged-dependency",
-    "producer-forged-dependency-output",
-    "producer-skipped-dependency",
-    "producer-transitive-skipped-prep",
-    "producer-ancestor-runs-on",
-    "producer-ancestor-continue-on-error",
-    "producer-ancestor-task-continue-on-error",
-    "producer-ancestor-task-command",
-    "producer-ancestor-extra-step",
-    "producer-ancestor-optional-artifact-tail",
-    "producer-continue-on-error",
-    "producer-upload-id",
-    "producer-upload-action",
-    "producer-upload-name",
-    "producer-upload-path",
-    "producer-upload-error-policy",
-    "producer-upload-if",
-];
-
-fn assert_clean_required_artifact_fixture(root: PathBuf, context: &str, message: &str) {
-    let audit = must(audit_workflows(&root), context);
-    let failure = if message.is_empty() {
-        format!("{:?}", audit.required_artifacts)
-    } else {
-        format!("{message}: {:?}", audit.required_artifacts)
-    };
-    assert!(audit.required_artifacts.is_empty(), "{failure}");
-    let _ = fs::remove_dir_all(root);
-}
-
-fn assert_consumer_mutation_finding(mutation: &str, findings: &[String]) {
-    if mutation.starts_with("consumer-if-")
-        || mutation == "hosted-consumer-if"
-        || mutation == "consumer-skips-verifier"
-        || mutation == "consumer-task-noop"
-        || mutation == "consumer-job-continue-on-error"
-        || mutation == "consumer-step-continue-on-error"
-        || mutation == "consumer-runs-on"
-    {
-        assert!(
-            findings.iter().any(|finding| {
-                finding.contains("consumer") && finding.contains("complete scheduled-check job")
-            }),
-            "consumer mutation should name its renderer mismatch: {findings:?}"
-        );
-    }
-}
-
-fn assert_verifier_mutation_finding(mutation: &str, findings: &[String]) {
-    if mutation == "verifier-if-always"
-        || mutation == "altered-guard"
-        || mutation == "altered-artifact-id"
-        || mutation == "altered-runner"
-        || mutation == "permission-widening"
-        || mutation == "container"
-        || mutation == "service"
-        || mutation == "continue-on-error"
-        || mutation == "extra-checkout"
-        || mutation == "extra-action"
-        || mutation == "extra-run"
-    {
-        assert!(
-            findings.iter().any(|finding| {
-                finding.contains("verifier")
-                    && finding.contains("complete fail-closed artifact-verifier job")
-            }),
-            "verifier mutation should name its renderer mismatch: {findings:?}"
-        );
-    }
-}
-
-fn assert_producer_mutation_finding(mutation: &str, findings: &[String]) {
-    if mutation.starts_with("producer-if-")
-        || mutation == "velnor-producer-if-always"
-        || mutation.starts_with("producer-runs-on")
-        || mutation == "velnor-producer-wrong-selector"
-        || mutation == "macos-producer-runs-on"
-        || mutation.starts_with("producer-task-")
-        || mutation.starts_with("producer-forged-")
-        || mutation.starts_with("producer-upload-")
-        || mutation == "producer-output-redirect"
-        || mutation == "producer-skipped-dependency"
-        || mutation == "producer-continue-on-error"
-        || mutation == "producer-forged-mise-setup"
-        || mutation == "producer-job-bash-env"
-        || mutation == "producer-job-container"
-        || mutation == "producer-job-defaults"
-        || mutation == "producer-job-strategy"
-    {
-        assert!(
-            findings.iter().any(|finding| {
-                finding.contains("producer profile `strict`")
-                    && finding.contains("complete scheduled-check job")
-            }),
-            "producer mutation should name its renderer mismatch: {findings:?}"
-        );
-    }
-}
-
-fn assert_ancestor_mutation_finding(mutation: &str, findings: &[String]) {
-    if mutation.starts_with("producer-ancestor-") || mutation == "producer-transitive-skipped-prep"
-    {
-        let finding_matches = findings.iter().any(|finding| {
-            finding.contains("ancestor profile `prep`")
-                && finding.contains("complete scheduled-check job")
-        });
-        if mutation == "producer-transitive-skipped-prep" {
-            assert!(
-                finding_matches,
-                "skipped configured ancestor should name its failure: {findings:?}"
-            );
-        } else {
-            assert!(
-                finding_matches,
-                "ancestor mutation should name its renderer mismatch: {findings:?}"
-            );
-        }
-    }
-}
-
-fn assert_trailing_dot_path_finding(mutation: &str, findings: &[String]) {
-    if mutation == "windows-trailing-dot-path" {
-        assert!(
-            findings
-                .iter()
-                .any(|finding| { finding.contains("unsafe path `target/report.`") }),
-            "trailing-dot path must match config's rejection: {findings:?}"
-        );
-    }
-}
-
-fn assert_mutated_required_artifact_policy_rejected(mutation: &str) {
-    let root = mutated_required_artifact_policy_tree(
-        &format!("required-artifact-policy-{mutation}"),
-        mutation,
-    );
-    let audit = must(audit_workflows(&root), "audit mutated artifact workflow");
-    assert!(
-        !audit.required_artifacts.is_empty(),
-        "mutation `{mutation}` passed artifact policy"
-    );
-    let findings = &audit.required_artifacts;
-    assert_consumer_mutation_finding(mutation, findings);
-    assert_verifier_mutation_finding(mutation, findings);
-    assert_producer_mutation_finding(mutation, findings);
-    assert_ancestor_mutation_finding(mutation, findings);
-    assert_trailing_dot_path_finding(mutation, findings);
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn required_artifact_verifiers_are_canonical_and_consumers_wait() {
-    assert_clean_required_artifact_fixture(
-        required_artifact_policy_tree("required-artifact-policy-canonical"),
-        "audit canonical artifact workflow",
-        "",
-    );
-    assert_clean_required_artifact_fixture(
-        required_artifact_policy_tree_with_prep_dependency(
-            "required-artifact-policy-canonical-prep-dependency",
-        ),
-        "audit canonical prep dependency",
-        "renderer-generated prep gate and needs are admitted",
-    );
-    assert_clean_required_artifact_fixture(
-        required_artifact_policy_tree_with_advisory_prep_dependency(
-            "required-artifact-policy-advisory-prep-dependency",
-        ),
-        "audit advisory prep dependency",
-        "renderer-generated advisory ancestor keeps its job-level continue-on-error",
-    );
-    assert_clean_required_artifact_fixture(
-        required_artifact_policy_tree_with_velnor_prep_dependency(
-            "required-artifact-policy-canonical-velnor-prep-dependency",
-        ),
-        "audit canonical Velnor prep dependency",
-        "renderer-generated Velnor prep admission is admitted",
-    );
-    assert_clean_required_artifact_fixture(
-        required_artifact_policy_tree_for_runner(
-            "required-artifact-policy-renderer-velnor-producer",
-            "velnor",
-        ),
-        "audit renderer Velnor producer",
-        "renderer-generated Velnor admission is admitted",
-    );
-
-    for &mutation in REQUIRED_ARTIFACT_POLICY_MUTATIONS {
-        assert_mutated_required_artifact_policy_rejected(mutation);
-    }
-}
-
-#[test]
-fn required_artifact_gate_covers_transitive_consumers() {
-    let root = required_artifact_policy_tree_with_bridge_consumer(
-        "required-artifact-policy-transitive-consumer-canonical",
-    );
-    let audit = must(
-        audit_workflows(&root),
-        "audit canonical producer-bridge-consumer chain",
-    );
-    assert!(
-        audit.required_artifacts.is_empty(),
-        "renderer-generated transitive consumers preserve verifier gating: {:?}",
-        audit.required_artifacts
-    );
-    let _ = fs::remove_dir_all(root);
-
-    let root = mutated_required_artifact_policy_tree(
-        "required-artifact-policy-transitive-consumer-always",
-        "transitive-consumer-if-always",
-    );
-    let audit = must(
-        audit_workflows(&root),
-        "audit consumer bypass beyond direct verifier consumer",
-    );
-    assert!(
-        audit.required_artifacts.iter().any(|finding| {
-            finding.contains("downstream consumer `consumer`")
-                && finding.contains("complete scheduled-check job")
-        }),
-        "transitive `if: always()` must fail renderer matching: {:?}",
-        audit.required_artifacts
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn required_artifact_job_lookup_ignores_same_ids_in_other_workflows() {
-    let root = required_artifact_policy_tree("required-artifact-policy-reused-job-id");
-    write(
-        &root.join(".github/workflows/ci-unrelated.yml"),
-        "name: Unrelated\non:\n  workflow_dispatch:\njobs:\n  strict:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo unrelated\n",
-    );
-    let audit = must(
-        audit_workflows(&root),
-        "audit unrelated workflow reusing producer job id",
-    );
-    assert!(
-        audit.required_artifacts.is_empty(),
-        "only the renderer-declared workflow may supply the required producer: {:?}",
-        audit.required_artifacts
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn required_artifact_workflow_binds_job_set_and_inherited_controls() {
-    for mutation in [
-        "unconfigured-output-consumer",
-        "workflow-inherited-env",
-        "workflow-inherited-permissions",
-        "workflow-inherited-defaults",
-    ] {
-        let root = mutated_required_artifact_policy_tree(
-            &format!("required-artifact-policy-{mutation}"),
-            mutation,
-        );
-        let audit = must(
-            audit_workflows(&root),
-            "audit modified scheduled-check workflow document",
-        );
-        assert!(
-            audit
-                .required_artifacts
-                .iter()
-                .any(|finding| { finding.contains("complete workflow document") }),
-            "mutation `{mutation}` must violate complete rendered workflow equality: {:?}",
-            audit.required_artifacts
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-}
-
-#[test]
-fn velnor_artifact_consumer_keeps_canonical_admission_and_implicit_success() {
-    let root = required_artifact_policy_tree_with_velnor_consumer(
-        "required-artifact-velnor-consumer-canonical",
-    );
-    let audit = must(audit_workflows(&root), "audit Velnor artifact consumer");
-    assert!(
-        audit.required_artifacts.is_empty(),
-        "canonical Velnor admission retains implicit success gating: {:?}",
-        audit.required_artifacts
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn macos_artifact_producer_omits_explicit_admission_condition() {
-    let root = required_artifact_policy_tree_for_runner("required-artifact-macos", "macos");
-    let audit = must(audit_workflows(&root), "audit macOS artifact producer");
-    assert!(
-        audit.required_artifacts.is_empty(),
-        "canonical macOS producer omits `if:` and retains implicit success: {:?}",
-        audit.required_artifacts
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn velnor_artifact_verifier_keeps_the_producer_admission_gate() {
-    let root = required_artifact_policy_tree_for_runner("required-artifact-velnor", "velnor");
-    let audit = must(audit_workflows(&root), "audit Velnor artifact verifier");
-    assert!(
-        audit.required_artifacts.is_empty(),
-        "{:?}",
-        audit.required_artifacts
-    );
-
-    // The base verifier policy follows generation-time visibility. Runtime
-    // provider fields are outputs and cannot change the admission predicate
-    // the renderer emits.
-    let runtime_path = root.join(RUNTIME_CONFIG);
-    let runtime = must(
-        fs::read_to_string(&runtime_path),
-        "read Velnor runtime config",
-    );
-    write(
-        &runtime_path,
-        &runtime
-            .replace(
-                "providers = [\"github-hosted\", \"velnor\"]",
-                "providers = [\"github-hosted\"]",
-            )
-            .replace(
-                "automatic_providers = [\"github-hosted\", \"velnor\"]",
-                "automatic_providers = [\"github-hosted\"]",
-            ),
-    );
-    let audit = must(audit_workflows(&root), "audit runtime-provider drift");
-    assert!(
-        audit.required_artifacts.is_empty(),
-        "runtime provider drift must not change the visibility-derived Velnor admission: {:?}",
-        audit.required_artifacts
-    );
-
-    let workflow_path = root.join(".github/workflows/ci-scheduled.yml");
-    let content = must(fs::read_to_string(&workflow_path), "read Velnor workflow");
-    let mut workflow: Value = must(serde_yaml::from_str(&content), "parse Velnor workflow");
-    let jobs = test_mapping_value_mut(test_as_mapping_mut(&mut workflow), "jobs")
-        .and_then(Value::as_mapping_mut)
-        .unwrap_or_else(|| panic!("workflow jobs mapping exists"));
-    let verifier = jobs
-        .get_mut("verify-strict-artifacts")
-        .and_then(Value::as_mapping_mut)
-        .unwrap_or_else(|| panic!("Velnor verifier job exists"));
-    insert_yaml(
-        verifier,
-        "if",
-        yaml_string(&format!(
-            "${{{{ (needs.strict.result == 'success') && (github.event_name == 'workflow_dispatch') && ({}) }}}}",
-            super::super::TRUSTED_EVENT_EXPRESSION
-        )),
-    );
-    let content = must(
-        serde_yaml::to_string(&workflow),
-        "serialize altered Velnor workflow",
-    );
-    write(&workflow_path, &content);
-    let audit = must(audit_workflows(&root), "audit altered Velnor verifier");
-    assert!(audit.required_artifacts.iter().any(|finding| {
-        finding.contains("complete fail-closed artifact-verifier job")
-    }), "the verifier must follow visibility-derived automatic admission rather than runtime drift: {:?}", audit.required_artifacts);
-    let _ = fs::remove_dir_all(root);
-}
-
-#[cfg(unix)]
-#[test]
-fn workflow_audit_rejects_symlinked_roots_and_files() {
-    use std::os::unix::fs::symlink;
-
-    let root = velnor_tree("workflow-audit-symlink-github-s2", &gated_trusted_job());
-    let target = temporary_directory("workflow-audit-symlink-github-target-s2");
-    must(
-        fs::create_dir_all(target.join("workflows")),
-        "create symlinked workflow target",
-    );
-    must(
-        fs::remove_dir_all(root.join(".github")),
-        "remove workflow root",
-    );
-    must(
-        symlink(&target, root.join(".github")),
-        "create symlinked workflow root",
-    );
-    let error = must_fail(
-        audit_workflows(&root),
-        "audit must reject a symlinked .github root",
-    )
-    .to_string();
-    assert!(error.contains("symlinked workflow root"), "{error}");
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(target);
-
-    let root = velnor_tree("workflow-audit-symlink-workflows-s2", &gated_trusted_job());
-    let target = temporary_directory("workflow-audit-symlink-workflows-target-s2");
-    must(
-        fs::remove_dir_all(root.join(".github/workflows")),
-        "remove workflow directory",
-    );
-    must(
-        symlink(&target, root.join(".github/workflows")),
-        "create symlinked workflow directory",
-    );
-    let error = must_fail(
-        audit_workflows(&root),
-        "audit must reject a symlinked workflows directory",
-    )
-    .to_string();
-    assert!(error.contains("symlinked workflow directory"), "{error}");
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(target);
-
-    let root = velnor_tree("workflow-audit-symlink-file-s2", &gated_trusted_job());
-    let target = temporary_directory("workflow-audit-symlink-file-target-s2");
-    write(
-        &target.join("external.yml"),
-        "name: External\non:\n  workflow_dispatch:\n",
-    );
-    must(
-        symlink(
-            target.join("external.yml"),
-            root.join(".github/workflows/aaa-external.yml"),
-        ),
-        "create symlinked workflow file",
-    );
-    let error = must_fail(
-        audit_workflows(&root),
-        "audit must reject a symlinked workflow file",
-    )
-    .to_string();
-    assert!(error.contains("escapes the repository"), "{error}");
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(target);
-}
-
-#[cfg(unix)]
-#[test]
-fn declared_pin_rejects_a_symlinked_policy_entrypoint() {
-    use std::os::unix::fs::symlink;
-
-    let root = velnor_tree("declared-pin-symlink-entrypoint-s2", &gated_trusted_job());
-    let target = temporary_directory("declared-pin-symlink-entrypoint-target-s2");
-    write(&target.join("ci-policy.yml"), &hosted_entrypoint(PIN_B));
-    must(
-        fs::remove_file(root.join(POLICY_ENTRYPOINT)),
-        "remove policy entrypoint",
-    );
-    must(
-        symlink(target.join("ci-policy.yml"), root.join(POLICY_ENTRYPOINT)),
-        "create symlinked policy entrypoint",
-    );
-    let error = must_fail(
-        DeclaredTree::read(&root),
-        "declared pin must reject a symlinked policy entrypoint",
-    )
-    .to_string();
-    assert!(error.contains("escapes the repository"), "{error}");
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(target);
-}
-
-#[test]
-fn policy_preflight_rejects_a_missing_policy_entrypoint() {
-    let root = velnor_tree("policy-entrypoint-preflight-s2", &gated_trusted_job());
-    let config_path = root.join(GENERATION_CONFIG);
-    let base = must(
-        fs::read_to_string(&config_path),
-        "read generation config for policy preflight",
-    );
-
-    write(
-        &config_path,
-        &base.replace("[workflow]\n", "[workflow]\nfiles = [\"ci-custom.yml\"]\n"),
-    );
-    let error = must_fail(
-        DeclaredTree::read(&root),
-        "policy preflight must reject an omitted entrypoint",
-    )
-    .to_string();
-    assert!(error.contains("must include `ci-policy.yml`"), "{error}");
-
-    write(
-        &config_path,
-        &format!(
-            "{base}\n[[static_files]]\nfile = \".github/workflowſ/ci-policy.yml\"\nsource = \".github-gen/policy.yml\"\n"
-        ),
-    );
-    let error = must_fail(
-        DeclaredTree::read(&root),
-        "policy preflight must reject a static alias of its entrypoint",
-    )
-    .to_string();
-    assert!(error.contains("generator owns this path"), "{error}");
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn policy_preflight_rejects_static_replacements_of_ci_pr_and_runtime_products() {
-    let root = velnor_tree(
-        "policy-owned-workflow-static-overrides-s2",
-        &gated_trusted_job(),
-    );
-    let config_path = root.join(GENERATION_CONFIG);
-    let base = must(
-        fs::read_to_string(&config_path),
-        "read generation config for owned workflow policy preflight",
-    );
-    let base = base.replace(
-        "repository = \"example/consumer\"",
-        &format!(
-            "repository = \"{}\"",
-            crate::s2::workflow_setup_action_repository()
-        ),
-    );
-
-    for path in [crate::CI_PR_WORKFLOW, crate::CI_RUNTIME_PRODUCTS_WORKFLOW] {
-        write(
-            &config_path,
-            &format!(
-                "{base}\n[[static_files]]\nfile = \"{path}\"\nsource = \".github-gen/static.yml\"\n"
-            ),
-        );
-        let error = must_fail(
-            DeclaredTree::read(&root),
-            "policy preflight must reject a static replacement of an owned workflow",
-        )
-        .to_string();
-        assert!(error.contains("generator owns this path"), "{error}");
-        assert!(error.contains(path), "{error}");
-    }
-
-    let _ = fs::remove_dir_all(root);
 }
 
 /// The generated provider gate is the bare trusted-event conjunct for an
@@ -2977,70 +1046,22 @@ fn cli_requires_the_base_validator_revision() {
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
-fn fake_candidate_renderer(directory: &Path, closure: &str, revision: &str) -> PathBuf {
+fn fake_candidate_renderer(directory: &Path, closure: &str) -> PathBuf {
     let binary = directory.join("candidate");
     must(
         fs::write(
             &binary,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = --revision ]; then echo {revision}; exit 0; fi\nif [ \"$1\" = --closure ]; then echo {closure}; exit 0; fi\ncp -r \"$1/.\" \"$3/\"\n"
+                "#!/bin/sh\nif [ \"$1\" = --closure ]; then echo {closure}; exit 0; fi\ncp -r \"$1/.\" \"$3/\"\n"
             ),
         ),
         "write fake candidate renderer",
     );
     {
-        must(
-            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
-            "mark fake candidate renderer executable",
-        );
-    }
-    binary
-}
-
-#[cfg(unix)]
-fn fake_mutating_candidate_renderer(directory: &Path, closure: &str, revision: &str) -> PathBuf {
-    let binary = directory.join("candidate-mutating");
-    must(
-        fs::write(
-            &binary,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = --revision ]; then echo {revision}; exit 0; fi\nif [ \"$1\" = --closure ]; then echo {closure}; exit 0; fi\ncp -r \"$1/.\" \"$3/\"\nprintf 'tampered\\n' > \"$1/crates/velnor-workflow/src/lib.rs\" 2>/dev/null || true\n"
-            ),
-        ),
-        "write mutating fake candidate renderer",
-    );
-    {
         use std::os::unix::fs::PermissionsExt as _;
         must(
             fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
-            "mark mutating fake candidate renderer executable",
-        );
-    }
-    binary
-}
-
-#[cfg(unix)]
-fn fake_environment_observing_candidate_renderer(
-    directory: &Path,
-    closure: &str,
-    revision: &str,
-    sentinel: &Path,
-) -> PathBuf {
-    let binary = directory.join("candidate-env");
-    must(
-        fs::write(
-            &binary,
-            format!(
-                "#!/bin/sh\nsafe_env() {{ [ \"${{HOME-}}\" = /tmp ] && [ \"${{ACTIONS_RUNTIME_TOKEN+x}}\" != x ]; }}\nif [ \"$1\" = --revision ]; then safe_env || echo invalid; safe_env && echo {revision}; exit 0; fi\nif [ \"$1\" = --closure ]; then safe_env || echo invalid; safe_env && echo {closure}; exit 0; fi\nsafe_env || {{ touch \"{}\"; exit 17; }}\ncp -R \"$1/.github\" \"$3/\"\n",
-                sentinel.display(),
-            ),
-        ),
-        "write environment-observing candidate renderer",
-    );
-    {
-        must(
-            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
-            "mark environment-observing candidate renderer executable",
+            "mark fake candidate renderer executable",
         );
     }
     binary
@@ -3054,49 +1075,11 @@ fn closure_fixture(name: &str) -> (PathBuf, String) {
         &root.join("crates/velnor-workflow/src/lib.rs"),
         "pub fn f() {}\n",
     );
-    write(
-        &root.join("crates/velnor-workflow/Cargo.toml"),
-        "[package]\nname = \"velnor-workflow\"\n[dependencies]\n",
-    );
     write(&root.join("Cargo.toml"), "[workspace]\n");
     write(&root.join("Cargo.lock"), "# lock\n");
     write(&root.join(".github/workflows/ci-pr.yml"), "tree\n");
     let head = commit(&root, "fixture");
     (root, head)
-}
-
-#[cfg(unix)]
-fn squash_fixture(name: &str, main_touches_closure: bool) -> (PathBuf, String, String) {
-    let root = temporary_directory(name);
-    git_ok(&root, &["init", "-q", "-b", "main"]);
-    write(
-        &root.join("crates/velnor-workflow/src/lib.rs"),
-        "pub fn f() {}\n",
-    );
-    write(
-        &root.join("crates/velnor-workflow/Cargo.toml"),
-        "[package]\nname = \"velnor-workflow\"\n[dependencies]\n",
-    );
-    write(&root.join("Cargo.toml"), "[workspace]\n");
-    write(&root.join("Cargo.lock"), "# base-lock\n");
-    write(&root.join(".github/workflows/ci-pr.yml"), "tree\n");
-    commit(&root, "base");
-    git_ok(&root, &["checkout", "-q", "-b", "pr"]);
-    write(
-        &root.join("crates/velnor-workflow/src/lib.rs"),
-        "pub fn f() { println!(\"pr\"); }\n",
-    );
-    let pr_head = commit(&root, "pr generator change");
-    git_ok(&root, &["checkout", "-q", "main"]);
-    if main_touches_closure {
-        write(&root.join("Cargo.lock"), "# main-lock\n");
-    } else {
-        write(&root.join("main-only.txt"), "main change\n");
-    }
-    commit(&root, "main change");
-    git_ok(&root, &["merge", "--squash", "--no-commit", "pr"]);
-    let merge = commit(&root, "squash merge");
-    (root, pr_head, merge)
 }
 
 // NOTE: `candidate_render_is_accepted_only_from_a_head_authentic_binary` was
@@ -3119,18 +1102,6 @@ fn candidate_manifest_for(
     closure: &str,
     revision: &str,
 ) -> PathBuf {
-    candidate_manifest_for_with_build_revision(directory, name, binary, closure, revision, revision)
-}
-
-#[cfg(unix)]
-fn candidate_manifest_for_with_build_revision(
-    directory: &Path,
-    name: &str,
-    binary: &Path,
-    closure: &str,
-    revision: &str,
-    build_revision: &str,
-) -> PathBuf {
     use sha2::Digest as _;
     let bytes = must(fs::read(binary), "read fake binary bytes");
     let mut digest = String::with_capacity(64);
@@ -3148,7 +1119,6 @@ fn candidate_manifest_for_with_build_revision(
                 "run_id": "123",
                 "revision": revision,
                 "closure": closure,
-                "build_revision": build_revision,
                 "binary_sha256": digest,
             })
             .to_string(),
@@ -3158,149 +1128,29 @@ fn candidate_manifest_for_with_build_revision(
     manifest
 }
 
-/// A fake candidate renderer whose matching closure and tree output would be
-/// accepted if the digest or manifest gate mistakenly allowed execution.
+/// A fake candidate renderer that records every `--closure` probe in
+/// `sentinel`, so tests can prove the binary was never executed at all.
 #[cfg(unix)]
 fn fake_probed_candidate_renderer(directory: &Path, closure: &str, sentinel: &Path) -> PathBuf {
     let binary = directory.join("candidate");
-    let sentinel = sentinel.display();
     must(
         fs::write(
             &binary,
             format!(
-                "#!/bin/sh\ntouch '{sentinel}'\nif [ \"$1\" = --revision ]; then echo {}; exit 0; fi\nif [ \"$1\" = --closure ]; then echo {closure}; exit 0; fi\ncp -R \"$1/.\" \"$3/\"\n",
-                crate::s2::GENERATOR_REVISION
+                "#!/bin/sh\nif [ \"$1\" = --closure ]; then touch \"{}\"; echo {closure}; exit 0; fi\ncp -r \"$1/.\" \"$3/\"\n",
+                sentinel.display()
             ),
         ),
         "write fake probed candidate renderer",
     );
     {
+        use std::os::unix::fs::PermissionsExt as _;
         must(
             fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
             "mark fake probed candidate renderer executable",
         );
     }
     binary
-}
-
-#[cfg(unix)]
-fn fake_absolute_path_probe_candidate(
-    directory: &Path,
-    revision: &str,
-    closure: &str,
-    protected_path: &Path,
-) -> PathBuf {
-    let binary = directory.join("candidate-absolute-path-probe");
-    let protected = protected_path.display();
-    must(
-        fs::write(
-            &binary,
-            format!(
-                "#!/bin/sh\n/bin/sleep 60 &\nprotected='{protected}'\npipe_probe() {{\n  dd if=/dev/zero of=\"/proc/$PPID/fd/1\" bs=1M count=16 status=none 2>/dev/null || true\n  dd if=/dev/zero of=\"/proc/$PPID/fd/2\" bs=1M count=16 status=none 2>/dev/null || true\n}}\nprobe() {{\n  if [ -r \"$protected\" ]; then cat \"$protected\"; else printf '%s\\n' \"$2\"; fi\n  mkdir -p \"$(dirname \"$protected\")\" 2>/dev/null || true\n  printf '%s\\n' 'candidate mutation' > \"$protected\" 2>/dev/null || true\n}}\nif [ \"$1\" = --revision ]; then pipe_probe; probe unused {revision}; exit 0; fi\nif [ \"$1\" = --closure ]; then pipe_probe; probe unused {closure}; exit 0; fi\nroot=\"$1\"; shift\n[ \"$1\" = --output ] || exit 3\noutput=\"$2\"\npipe_probe\nmkdir -p \"$output\"\nif [ -r \"$protected\" ]; then cat \"$protected\" > \"$output/leaked-secret.txt\"; fi\nmkdir -p \"$(dirname \"$protected\")\" 2>/dev/null || true\nprintf '%s\\n' 'candidate mutation' > \"$protected\" 2>/dev/null || true\ncp -R \"$root/.github\" \"$output/\"\n"
-            ),
-        ),
-        "write absolute-path probing candidate",
-    );
-    must(
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
-        "mark absolute-path candidate executable",
-    );
-    binary
-}
-
-#[cfg(unix)]
-fn fake_candidate_with_late_mutating_descendant(
-    directory: &Path,
-    revision: &str,
-    closure: &str,
-) -> PathBuf {
-    let binary = directory.join("candidate-late-descendant");
-    must(
-        fs::write(
-            &binary,
-            format!(
-                r#"#!/bin/sh
-if [ "$1" = --revision ]; then echo {revision}; exit 0; fi
-if [ "$1" = --closure ]; then echo {closure}; exit 0; fi
-root="$1"; shift
-[ "$1" = --output ] || exit 3
-output="$2"
-mkdir -p "$output"
-/usr/bin/setsid /bin/sh -c 'parent=$1; output=$2; while kill -0 "$parent" 2>/dev/null; do /bin/sleep 0.01; done; /bin/sleep 0.25; count=0; while :; do count=$((count + 1)); printf "late-%s" "$count" > "$output/late-file"; done' candidate-descendant "$$" "$output" >/dev/null 2>&1 &
-cp -R "$root/.github" "$output/"
-"#
-            ),
-        ),
-        "write candidate with a late-mutating descendant",
-    );
-    must(
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
-        "mark late-mutating candidate executable",
-    );
-    binary
-}
-
-#[cfg(unix)]
-#[test]
-fn candidate_descendant_cannot_mutate_render_after_parent_exits() {
-    let (root, head) = closure_fixture("candidate-late-descendant-s2");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let scratch = temporary_directory("candidate-late-descendant-s2-scratch");
-    let binary = fake_candidate_with_late_mutating_descendant(&root, &head, &wanted);
-    let manifest =
-        candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
-    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let rendered = must(
-        render_with_candidate(&root, &root, &scratch, "main", &lookup),
-        "candidate with a late descendant renders",
-    );
-    let late_file = scratch.join("late-file");
-    let late_file_at_return = fs::read(&late_file).ok();
-    match (rendered.as_deref(), late_file_at_return.as_deref()) {
-        (Some(closure), None) => assert_eq!(closure, wanted),
-        (None, Some(_)) => {
-            // The candidate was rejected only if the frozen archive proves
-            // the writer changed output before the container pause.
-            let differences = must(
-                compare_rendered_tree(&scratch, &root),
-                "compare the candidate output changed before pause",
-            );
-            assert_eq!(differences.len(), 1);
-            assert_eq!(
-                differences[0], "late-file: missing from the tree",
-                "the archived late write must be the reason candidate output is rejected"
-            );
-        }
-        (Some(_), Some(_)) => panic!("candidate output containing a late write was accepted"),
-        (None, None) => panic!("candidate rejection had no captured late write to explain it"),
-    }
-
-    // Candidate descendants write only inside the container's output volume;
-    // `scratch` is the extracted archive and cleanup removes the container
-    // before render returns. Poll beyond the deliberate delay to prove the
-    // copied output and checkout stay stable after return.
-    let root_late_file = root.join("late-file");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
-    loop {
-        assert_eq!(
-            fs::read(&late_file).ok(),
-            late_file_at_return,
-            "candidate descendant changed copied output after render returned"
-        );
-        assert!(
-            fs::symlink_metadata(&root_late_file).is_err(),
-            "candidate descendant changed the read-only checkout after render returned"
-        );
-        if std::time::Instant::now() >= deadline {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
 }
 
 #[cfg(unix)]
@@ -3312,671 +1162,21 @@ fn bound_candidate_matching_head_tree_is_accepted() {
         "candidate closure of the fixture",
     );
     let scratch = temporary_directory("candidate-bound-scratch");
-    let binary = fake_candidate_renderer(&root, &wanted, &head);
+    let binary = fake_candidate_renderer(&root, &wanted);
     let manifest =
         candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
+    let excludes = std::collections::BTreeSet::new();
     assert_eq!(
         must(
-            render_with_candidate(&root, &root, &scratch, "main", &lookup),
+            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
             "bound candidate reproduces the tree",
         )
         .as_deref(),
         Some(wanted.as_str())
     );
-    let candidate_snapshot = scratch.with_file_name(format!(
-        "{}-candidate-source",
-        scratch
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("policy-render")
-    ));
-    assert!(
-        !candidate_snapshot.exists(),
-        "sealed candidate source must be removed after a successful render"
-    );
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(scratch);
-}
-
-#[cfg(unix)]
-#[test]
-fn candidate_render_cannot_mutate_authoritative_checkout() {
-    let (root, head) = closure_fixture("candidate-immutable-source");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of fixture",
-    );
-    let original = must(
-        fs::read(root.join("crates/velnor-workflow/src/lib.rs")),
-        "read authoritative source before candidate",
-    );
-    let artifacts = temporary_directory("candidate-immutable-source-artifacts");
-    let binary = fake_mutating_candidate_renderer(&artifacts, &wanted, &head);
-    let manifest = candidate_manifest_for(
-        &artifacts,
-        "candidate-manifest.json",
-        &binary,
-        &wanted,
-        &head,
-    );
-    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let scratch = temporary_directory("candidate-immutable-source-scratch");
-    assert_eq!(
-        must(
-            render_with_candidate(&root, &root, &scratch, "main", &lookup),
-            "candidate mutation is isolated from authoritative checkout",
-        )
-        .as_deref(),
-        Some(wanted.as_str())
-    );
-    assert_eq!(
-        must(
-            fs::read(root.join("crates/velnor-workflow/src/lib.rs")),
-            "read authoritative source after candidate",
-        ),
-        original,
-        "candidate writes stay inside the immutable source snapshot"
-    );
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(artifacts);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[cfg(unix)]
-#[test]
-fn squash_merge_with_closure_clean_main_accepts_pr_candidate() {
-    let (root, pr_head, merge) = squash_fixture("candidate-squash-clean", false);
-    let head_closure = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &pr_head),
-        "PR head candidate closure",
-    );
-    let merge_closure = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &merge),
-        "squash merge candidate closure",
-    );
-    assert_eq!(head_closure, merge_closure);
-    let scratch = temporary_directory("candidate-squash-clean-scratch");
-    let binary = fake_candidate_renderer(&root, &head_closure, &merge);
-    let manifest = candidate_manifest_for_with_build_revision(
-        &root,
-        "candidate-manifest.json",
-        &binary,
-        &head_closure,
-        &pr_head,
-        &merge,
-    );
-    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    assert_eq!(
-        must(
-            render_with_candidate(&root, &root, &scratch, "main", &lookup),
-            "bound squash candidate renders the merge tree",
-        )
-        .as_deref(),
-        Some(head_closure.as_str())
-    );
-    assert!(scratch.join("main-only.txt").is_file());
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[cfg(unix)]
-#[test]
-fn shallow_squash_merge_fetches_pr_head_before_candidate_closure() {
-    let (origin, pr_head, merge) = squash_fixture("candidate-squash-shallow", false);
-    let shallow = temporary_directory("candidate-squash-shallow-checkout");
-    let _ = fs::remove_dir_all(&shallow);
-    let origin_url = format!("file://{}", origin.display());
-    git_ok(
-        &origin,
-        &[
-            "clone",
-            "-q",
-            "--depth",
-            "1",
-            "--single-branch",
-            "--branch",
-            "main",
-            &origin_url,
-            &shallow.display().to_string(),
-        ],
-    );
-    assert_eq!(git_ok(&shallow, &["rev-parse", "HEAD"]), merge);
-    assert!(
-        !commit_exists(&shallow, &pr_head),
-        "a depth-1 merge checkout starts without the PR head object"
-    );
-
-    // This is the exact fetch the trusted acquire step performs before it
-    // derives the candidate artifact name. The policy consumer then has the
-    // PR-head object needed to recompute the manifest's bound closure.
-    git_ok(&shallow, &["fetch", "--no-tags", &origin_url, &pr_head]);
-    assert!(
-        commit_exists(&shallow, &pr_head),
-        "fetching the resolved PR head makes its commit object available"
-    );
-
-    let closure = must(
-        crate::s2::closure::candidate_closure_of_tree(&origin, &pr_head),
-        "PR head candidate closure",
-    );
-    let artifacts = temporary_directory("candidate-squash-shallow-artifacts");
-    let binary = fake_candidate_renderer(&artifacts, &closure, &merge);
-    let manifest = candidate_manifest_for_with_build_revision(
-        &artifacts,
-        "candidate-manifest.json",
-        &binary,
-        &closure,
-        &pr_head,
-        &merge,
-    );
-    let lookup = lookup_with_manifest(Some(binary), None, artifacts.join("install"), manifest);
-    let scratch = temporary_directory("candidate-squash-shallow-scratch");
-    assert_eq!(
-        must(
-            render_with_candidate(&shallow, &shallow, &scratch, "main", &lookup,),
-            "fetched PR-head candidate renders the shallow merge checkout",
-        )
-        .as_deref(),
-        Some(closure.as_str())
-    );
-    assert!(scratch.join("main-only.txt").is_file());
-
-    let _ = fs::remove_dir_all(origin);
-    let _ = fs::remove_dir_all(shallow);
-    let _ = fs::remove_dir_all(artifacts);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[cfg(unix)]
-#[test]
-fn squash_merge_with_closure_changed_main_fails_before_candidate_execution() {
-    let (root, pr_head, merge) = squash_fixture("candidate-squash-lock", true);
-    let head_closure = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &pr_head),
-        "PR head candidate closure",
-    );
-    let merge_closure = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &merge),
-        "squash merge candidate closure",
-    );
-    assert_ne!(head_closure, merge_closure);
-    let scratch = temporary_directory("candidate-squash-lock-scratch");
-    let sentinel = root.join("candidate-executed");
-    let binary = fake_probed_candidate_renderer(&root, &head_closure, &sentinel);
-    let manifest = candidate_manifest_for(
-        &root,
-        "candidate-manifest.json",
-        &binary,
-        &head_closure,
-        &pr_head,
-    );
-    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let error = must_fail(
-        render_with_candidate(&root, &root, &scratch, "main", &lookup),
-        "a PR-head candidate cannot render a merge with changed closure inputs",
-    )
-    .to_string();
-    assert!(
-        error.contains("differs from audited render revision"),
-        "{error}"
-    );
-    assert!(
-        error.contains("update the PR branch/rebuild the candidate"),
-        "{error}"
-    );
-    assert!(
-        !sentinel.exists(),
-        "closure mismatch fails before candidate execution"
-    );
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[cfg(unix)]
-#[test]
-fn candidate_binary_revision_must_match_manifest_build_revision() {
-    let (root, head) = closure_fixture("candidate-build-revision");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let scratch = temporary_directory("candidate-build-revision-scratch");
-    let binary = fake_candidate_renderer(&root, &wanted, &head);
-    let manifest = candidate_manifest_for_with_build_revision(
-        &root,
-        "candidate-manifest.json",
-        &binary,
-        &wanted,
-        &head,
-        PIN_A,
-    );
-    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    assert!(must(
-        render_with_candidate(&root, &root, &scratch, "main", &lookup),
-        "build revision mismatch does not prove a candidate",
-    )
-    .is_none());
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[cfg(unix)]
-#[test]
-fn candidate_renderer_receives_no_ambient_environment() {
-    assert!(
-        env::var_os("HOME").is_some(),
-        "Unix test environment must provide HOME to detect ambient inheritance"
-    );
-    let (root, head) = closure_fixture("candidate-hermetic-env");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let scratch = temporary_directory("candidate-hermetic-env-scratch");
-    let sentinel = root.join("ambient-environment-observed");
-    let binary = fake_environment_observing_candidate_renderer(&root, &wanted, &head, &sentinel);
-    let manifest =
-        candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
-    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    assert_eq!(
-        must(
-            render_with_candidate(&root, &root, &scratch, "main", &lookup),
-            "hermetic candidate reproduces the tree",
-        )
-        .as_deref(),
-        Some(wanted.as_str())
-    );
-    assert!(
-        !sentinel.exists(),
-        "candidate render must not inherit ambient HOME or Actions credentials"
-    );
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[cfg(unix)]
-#[test]
-fn candidate_probe_and_render_cannot_read_or_mutate_absolute_checkout_paths() {
-    let (root, head) = closure_fixture("candidate-absolute-path-sandbox");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let protected = root.join("validator-only-secret.txt");
-    let secret = b"validator-only-secret\n";
-    must(
-        fs::write(&protected, secret),
-        "write privileged checkout marker",
-    );
-    let scratch = temporary_directory("candidate-absolute-path-scratch");
-    let binary = fake_absolute_path_probe_candidate(&root, &head, &wanted, &protected);
-    assert_eq!(
-        must(
-            binary_revision(&binary),
-            "isolated candidate revision probe"
-        ),
-        head
-    );
-    assert_eq!(
-        must(binary_closure(&binary), "isolated candidate closure probe"),
-        wanted
-    );
-    let manifest =
-        candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
-    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    assert_eq!(
-        must(
-            render_with_candidate(&root, &root, &scratch, "main", &lookup),
-            "isolated candidate reproduces the tree",
-        )
-        .as_deref(),
-        Some(wanted.as_str()),
-        "candidate metadata probes cannot read the host secret"
-    );
-    assert_eq!(
-        must(fs::read(&protected), "read privileged checkout marker"),
-        secret,
-        "candidate metadata and render cannot mutate an absolute checkout path"
-    );
-    assert!(
-        !scratch.join("leaked-secret.txt").exists(),
-        "candidate render cannot read the host secret through an absolute path"
-    );
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[cfg(unix)]
-#[test]
-fn evaluate_rejects_a_symlinked_checkout_before_policy_reads() {
-    use std::os::unix::fs::symlink;
-
-    let target = velnor_tree("evaluate-symlinked-root-target-s2", &gated_trusted_job());
-    let link = temporary_directory("evaluate-symlinked-root-link-s2");
-    must(fs::remove_dir_all(&link), "remove link placeholder");
-    must(symlink(&target, &link), "create symlinked checkout root");
-    let options = PolicyOptions {
-        root: link.clone(),
-        head_sha: None,
-        base_sha: None,
-        base_revision: PIN_A.to_owned(),
-        ruleset_contexts: None,
-        build_pin: false,
-        candidate_manifest: None,
-    };
-    let error = must_fail(
-        evaluate(&options),
-        "policy must reject a symlinked checkout before config discovery",
-    )
-    .to_string();
-    assert!(error.contains("symlinked repository root"), "{error}");
-    must(fs::remove_file(&link), "remove symlinked checkout root");
-    let _ = fs::remove_dir_all(target);
-}
-
-#[cfg(unix)]
-#[test]
-fn immutable_snapshot_is_bound_to_the_requested_revision() {
-    let (root, first) = closure_fixture("snapshot-revision-binding-s2");
-    write(
-        &root.join("crates/velnor-workflow/src/lib.rs"),
-        "pub fn f() { println!(\"new\"); }\n",
-    );
-    write(&root.join("new-at-head.txt"), "new\n");
-    let second = commit(&root, "second fixture revision");
-    assert_ne!(first, second);
-
-    let (snapshot_workspace, snapshot) =
-        private_snapshot_destination("snapshot-revision-binding-s2-output");
-    must(
-        immutable_git_snapshot(&root, &first, &snapshot),
-        "materialize the requested historical revision",
-    );
-    assert_eq!(
-        must(
-            fs::read_to_string(snapshot.join("crates/velnor-workflow/src/lib.rs")),
-            "read historical source",
-        ),
-        "pub fn f() {}\n"
-    );
-    assert!(
-        !snapshot.join("new-at-head.txt").exists(),
-        "snapshot must not silently archive the mutable checkout HEAD"
-    );
-    restore_writable_tree(&snapshot);
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(snapshot_workspace);
-}
-
-#[cfg(unix)]
-#[test]
-fn immutable_snapshot_rejects_a_symlink_destination() {
-    use std::os::unix::fs::symlink;
-
-    let (root, head) = closure_fixture("snapshot-symlink-destination-s2");
-    let target = temporary_directory("snapshot-symlink-destination-target-s2");
-    let (destination_workspace, destination) =
-        private_snapshot_destination("snapshot-symlink-destination-link-s2");
-    must(symlink(&target, &destination), "create symlink destination");
-    let error = must_fail(
-        immutable_git_snapshot(&root, &head, &destination),
-        "snapshot must reject a symlink destination",
-    )
-    .to_string();
-    assert!(error.contains("destination already exists"), "{error}");
-    assert!(
-        fs::read_dir(&target).is_ok_and(|mut entries| entries.next().is_none()),
-        "a rejected symlink destination must not receive archive contents"
-    );
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_file(destination);
-    let _ = fs::remove_dir_all(target);
-    let _ = fs::remove_dir_all(destination_workspace);
-}
-
-#[cfg(unix)]
-#[test]
-fn immutable_snapshot_publishes_nothing_when_preflight_fails() {
-    use std::os::unix::fs::symlink;
-
-    let (root, _) = closure_fixture("snapshot-atomic-failure-s2");
-    let outside = temporary_directory("snapshot-atomic-failure-outside-s2");
-    write(&outside.join("secret.txt"), "outside\n");
-    must(
-        symlink(outside.join("secret.txt"), root.join("external-link.txt")),
-        "create external tracked symlink",
-    );
-    let head = commit(&root, "external symlink fixture");
-    let (destination_workspace, destination) =
-        private_snapshot_destination("snapshot-atomic-failure-output-s2");
-    let error = must_fail(
-        immutable_git_snapshot(&root, &head, &destination),
-        "snapshot preflight must reject the external symlink",
-    )
-    .to_string();
-    assert!(error.contains("escapes the immutable snapshot"), "{error}");
-    assert!(
-        !destination.exists(),
-        "failed preflight must not publish the final snapshot"
-    );
-    let destination_name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("snapshot");
-    let staging_prefix = format!(".{destination_name}-staging-");
-    assert!(
-        !must(
-            fs::read_dir(destination.parent().unwrap_or_else(|| Path::new("."))),
-            "inspect snapshot parent after failure",
-        )
-        .any(|entry| {
-            entry
-                .ok()
-                .and_then(|entry| entry.file_name().into_string().ok())
-                .is_some_and(|name| name.starts_with(&staging_prefix))
-        }),
-        "failed preflight must clean its private staging directory"
-    );
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(outside);
-    let _ = fs::remove_dir_all(destination_workspace);
-}
-
-#[cfg(unix)]
-#[test]
-fn candidate_snapshot_preflight_rejects_external_dangling_and_looping_links() {
-    use std::os::unix::fs::symlink;
-
-    let outside = temporary_directory("snapshot-link-outside");
-    write(&outside.join("secret.txt"), "secret\n");
-    let external_root = temporary_directory("snapshot-link-external");
-    must(
-        symlink(outside.join("secret.txt"), external_root.join("leak")),
-        "create external symlink",
-    );
-    let error = must_fail(
-        validate_and_seal_snapshot(&external_root),
-        "external absolute symlink must fail",
-    )
-    .to_string();
-    assert!(error.contains("escapes the immutable snapshot"), "{error}");
-
-    let dangling_root = temporary_directory("snapshot-link-dangling");
-    must(
-        symlink("missing.txt", dangling_root.join("dangling")),
-        "create dangling symlink",
-    );
-    let error = must_fail(
-        validate_and_seal_snapshot(&dangling_root),
-        "dangling symlink must fail",
-    )
-    .to_string();
-    assert!(
-        error.contains("resolve candidate source symlink"),
-        "{error}"
-    );
-
-    let loop_root = temporary_directory("snapshot-link-loop");
-    must(
-        symlink("second", loop_root.join("first")),
-        "create first loop symlink",
-    );
-    must(
-        symlink("first", loop_root.join("second")),
-        "create second loop symlink",
-    );
-    let error = must_fail(
-        validate_and_seal_snapshot(&loop_root),
-        "looping symlink must fail",
-    )
-    .to_string();
-    assert!(
-        error.contains("resolve candidate source symlink"),
-        "{error}"
-    );
-
-    for root in [external_root, dangling_root, loop_root, outside] {
-        let _ = fs::remove_dir_all(root);
-    }
-}
-
-#[cfg(unix)]
-#[test]
-fn candidate_snapshot_preflight_allows_confined_directory_links_and_seals_tree() {
-    use std::os::unix::fs::symlink;
-
-    let root = temporary_directory("snapshot-confined-directory-link");
-    write(&root.join("target/config.toml"), "key = true\n");
-    must(
-        symlink("target", root.join("alias")),
-        "create confined directory symlink",
-    );
-    must(
-        validate_and_seal_snapshot(&root),
-        "confined directory symlink is safe",
-    );
-    assert!(must(fs::metadata(&root), "inspect sealed test root")
-        .permissions()
-        .readonly());
-    assert!(must(
-        fs::metadata(root.join("target/config.toml")),
-        "inspect sealed test file",
-    )
-    .permissions()
-    .readonly());
-    must(
-        fs::set_permissions(root.join("target"), fs::Permissions::from_mode(0o755)),
-        "reopen test directory for cleanup",
-    );
-    must(
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)),
-        "reopen test root for cleanup",
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[cfg(unix)]
-#[test]
-fn candidate_sandbox_uid_can_read_sealed_workflow_config_but_cannot_write_it() {
-    use std::ffi::OsString;
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let root = temporary_directory("snapshot-sandbox-uid");
-    let config = root.join(".github-gen/velnor-workflow.toml");
-    write(&config, "schema = 1\n");
-    must(
-        validate_and_seal_snapshot(&root),
-        "seal workflow config snapshot",
-    );
-
-    let artifacts = temporary_directory("snapshot-sandbox-uid-artifacts");
-    let candidate = artifacts.join("candidate.sh");
-    write(
-        &candidate,
-        "#!/bin/sh\nset -eu\ntest \"$(id -u)\" = 65534\nconfig=/workspace/.github-gen/velnor-workflow.toml\ntest \"$(cat \"$config\")\" = 'schema = 1'\nif printf 'tampered\\n' > \"$config\" 2>/dev/null; then exit 71; fi\ncat \"$config\"\n",
-    );
-    must(
-        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755)),
-        "make candidate executable",
-    );
-    let output = temporary_directory("snapshot-sandbox-uid-output");
-    let result = must(
-        crate::candidate_sandbox::run(
-            &candidate,
-            Some(&root),
-            Some(&output),
-            &[OsString::from("--unused")],
-        ),
-        "run candidate in uid-dropped sandbox",
-    );
-    assert_eq!(
-        result.status,
-        0,
-        "candidate stderr: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert_eq!(result.stdout, b"schema = 1\n");
-    assert_eq!(
-        must(fs::read(&config), "read source config after candidate"),
-        b"schema = 1\n",
-        "candidate write attempt must leave sealed config unchanged"
-    );
-
-    remove_snapshot_tree(&root);
-    assert!(
-        !root.exists(),
-        "cleanup must reopen and remove sealed snapshot"
-    );
-    let _ = fs::remove_dir_all(artifacts);
-    let _ = fs::remove_dir_all(output);
-}
-
-#[cfg(unix)]
-#[test]
-fn candidate_snapshot_preflight_rejects_special_files() {
-    use std::os::unix::net::UnixListener;
-
-    let root = PathBuf::from("/tmp").join(format!(
-        "vw-s2-special-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or_default()
-    ));
-    must(
-        fs::create_dir_all(&root),
-        "create short-path special-file root",
-    );
-    let listener = must(
-        UnixListener::bind(root.join("socket")),
-        "create socket special file",
-    );
-    let error = must_fail(validate_and_seal_snapshot(&root), "special files must fail").to_string();
-    assert!(error.contains("non-regular entry"), "{error}");
-    drop(listener);
-    let _ = fs::remove_dir_all(root);
-}
-
-#[cfg(unix)]
-#[test]
-fn candidate_snapshot_preflight_rejects_symlinked_policy_roots() {
-    use std::os::unix::fs::symlink;
-
-    let root = temporary_directory("snapshot-policy-root-link");
-    write(&root.join("source/ci.yml"), "name: policy\n");
-    must(
-        symlink("source", root.join(".github")),
-        "create linked GitHub root",
-    );
-    let error = must_fail(
-        validate_and_seal_snapshot(&root),
-        "symlinked policy root must fail",
-    )
-    .to_string();
-    assert!(error.contains("symlinked policy path: .github"), "{error}");
-    let _ = fs::remove_dir_all(root);
 }
 
 #[cfg(unix)]
@@ -3988,7 +1188,7 @@ fn lying_binary_whose_digest_misses_the_manifest_is_rejected() {
         "candidate closure of the fixture",
     );
     let scratch = temporary_directory("candidate-lying-scratch");
-    let sentinel = root.join("candidate-executed");
+    let sentinel = root.join("closure-probed");
     let binary = fake_probed_candidate_renderer(&root, &wanted, &sentinel);
     // Bind the manifest to *other* bytes, so the binary echoes the wanted
     // closure but its digest misses.
@@ -3996,9 +1196,10 @@ fn lying_binary_whose_digest_misses_the_manifest_is_rejected() {
     must(fs::write(&other, "different bytes"), "write decoy bytes");
     let manifest = candidate_manifest_for(&root, "candidate-manifest.json", &other, &wanted, &head);
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
+    let excludes = std::collections::BTreeSet::new();
     assert!(
         must(
-            render_with_candidate(&root, &root, &scratch, "main", &lookup),
+            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
             "digest mismatch never errors, it simply does not prove",
         )
         .is_none(),
@@ -4006,7 +1207,7 @@ fn lying_binary_whose_digest_misses_the_manifest_is_rejected() {
     );
     assert!(
         !sentinel.exists(),
-        "digest mismatch must precede candidate probes"
+        "the digest gate fires before any execution, not even `--closure`"
     );
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(scratch);
@@ -4023,12 +1224,13 @@ fn candidate_manifest_for_another_tree_is_rejected() {
     let scratch = temporary_directory("candidate-other-tree-scratch");
     // Self-consistent but for another tree: the binary echoes CLOSURE_A and
     // the manifest binds CLOSURE_A with a matching digest.
-    let binary = fake_candidate_renderer(&root, CLOSURE_A, &head);
+    let binary = fake_candidate_renderer(&root, CLOSURE_A);
     let manifest =
         candidate_manifest_for(&root, "candidate-manifest.json", &binary, CLOSURE_A, &head);
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
+    let excludes = std::collections::BTreeSet::new();
     let error = must_fail(
-        render_with_candidate(&root, &root, &scratch, "main", &lookup),
+        render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
         "manifest for another tree",
     )
     .to_string();
@@ -4050,10 +1252,11 @@ fn unbound_env_candidate_is_rejected_without_manifest() {
     let scratch = temporary_directory("candidate-unbound-scratch");
     let sentinel = root.join("closure-probed");
     let binary = fake_probed_candidate_renderer(&root, &wanted, &sentinel);
-    let lookup = candidate_lookup(Some(binary), None, root.join("install"));
+    let lookup = lookup(Some(binary), None, root.join("install"));
+    let excludes = std::collections::BTreeSet::new();
     assert!(
         must(
-            render_with_candidate(&root, &root, &scratch, "main", &lookup),
+            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
             "missing manifest never errors, it disables the env slot",
         )
         .is_none(),
@@ -4076,7 +1279,7 @@ fn malformed_candidate_manifest_is_rejected() {
         "candidate closure of the fixture",
     );
     let scratch = temporary_directory("candidate-malformed-scratch");
-    let binary = fake_candidate_renderer(&root, &wanted, &head);
+    let binary = fake_candidate_renderer(&root, &wanted);
     let digest = {
         use sha2::Digest as _;
         let bytes = must(fs::read(&binary), "read fake binary bytes");
@@ -4109,8 +1312,9 @@ fn malformed_candidate_manifest_is_rejected() {
         must(fs::write(&manifest, body), "write malformed manifest");
         let lookup =
             lookup_with_manifest(Some(binary.clone()), None, root.join("install"), manifest);
+        let excludes = std::collections::BTreeSet::new();
         let error = must_fail(
-            render_with_candidate(&root, &root, &scratch, "main", &lookup),
+            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
             &format!("malformed manifest {name}"),
         )
         .to_string();
@@ -4188,21 +1392,6 @@ fn from_env_consent_mapping_is_fail_closed() {
         manifest_env.candidate_manifest,
         Some(PathBuf::from("/env/manifest.json"))
     );
-    let env_slots = PinnedBinaryLookup::from_env_with(PIN_A, false, None, &|name| match name {
-        VELNOR_WORKFLOW_PINNED_BINARY_ENV => Some(std::ffi::OsString::from("/pin/binary")),
-        VELNOR_WORKFLOW_CANDIDATE_BINARY_ENV => Some(std::ffi::OsString::from("/candidate/binary")),
-        _ => None,
-    });
-    assert_eq!(
-        env_slots.pinned_binary,
-        Some(PathBuf::from("/pin/binary")),
-        "the trusted pin slot remains separate from the candidate slot"
-    );
-    assert_eq!(
-        env_slots.candidate_binary,
-        Some(PathBuf::from("/candidate/binary")),
-        "the candidate uses its dedicated env slot"
-    );
     // `CARGO_NET_OFFLINE=true` forbids the build even with `--pin-build`
     // (also pinned end to end by the `--check` CLI subprocess test in
     // `velnor_first_ci.rs`, which owns the child's environment).
@@ -4228,13 +1417,14 @@ fn candidate_render_rejects_a_binary_claiming_another_closure() {
     // Valid binding for the audited tree (manifest closure plus the real
     // digest of the binary bytes), but the binary echoes CLOSURE_A: the
     // `--closure` self-report stays as the final tripwire.
-    let binary = fake_candidate_renderer(&root, CLOSURE_A, &head);
+    let binary = fake_candidate_renderer(&root, CLOSURE_A);
     let manifest =
         candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
     let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
+    let excludes = std::collections::BTreeSet::new();
     assert!(
         must(
-            render_with_candidate(&root, &root, &scratch, "main", &lookup),
+            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
             "foreign closure never errors, it simply does not prove",
         )
         .is_none(),
@@ -4250,8 +1440,9 @@ fn candidate_render_is_unavailable_without_git_history() {
     let scratch = temporary_directory("candidate-nogit-scratch");
     let binary = root.join("missing");
     let lookup = lookup(Some(binary), None, root.join("install"));
+    let excludes = std::collections::BTreeSet::new();
     assert!(must(
-        render_with_candidate(&root, &root, &scratch, "main", &lookup),
+        render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
         "no checkout, no candidate",
     )
     .is_none());
@@ -4303,7 +1494,6 @@ fn rendered_entrypoints_pass_the_legacy_space_marker_scan() {
         "example/consumer",
     ] {
         let job = crate::s2::policy_job(&PolicyJobSpec {
-            candidate_artifact_wiring: true,
             name: "Policy",
             revision: PIN_A,
             runner: "ubuntu-24.04",
@@ -4462,25 +1652,29 @@ fn tree_comparison_names_every_drift_class() {
     );
 }
 
-#[cfg(unix)]
 #[test]
-fn removed_static_row_with_retired_exclusion_field_is_rejected_before_render() {
-    let root = removed_static_row_fixture("removed-static-row-s2");
-    let candidate_config = must(
-        fs::read_to_string(root.join(GENERATION_CONFIG)),
-        "read candidate config",
+fn exclude_hatch_covers_top_level_workflows_only() {
+    let excludes = BTreeSet::from(["hand.yml".to_owned()]);
+    assert!(
+        is_excluded_workflow(Path::new(".github/workflows/hand.yml"), &excludes),
+        "a named top-level workflow is excluded"
     );
-    assert!(!candidate_config.contains("[[static_files]]"));
-    assert!(candidate_config.contains("exclude_workflows = [\"ci-ſtatic.yml\"]"));
-    assert!(root.join(".github/workflows/ci-static.yml").is_file());
-    let error = must_fail(
-        DeclaredTree::read(&root),
-        "reject the retired policy exclusion before any renderer runs",
+    assert!(
+        !is_excluded_workflow(Path::new(".github/workflows/other.yml"), &excludes),
+        "an unnamed workflow is not excluded"
     );
-    let message = error.to_string();
-    assert!(message.contains("unknown field"), "{message}");
-    assert!(message.contains("exclude_workflows"), "{message}");
-    let _ = fs::remove_dir_all(root);
+    assert!(
+        !is_excluded_workflow(Path::new(".github/workflows/nested/hand.yml"), &excludes),
+        "a nested path never matches the hatch"
+    );
+    assert!(
+        !is_excluded_workflow(Path::new(".github/notes.txt"), &excludes),
+        "a non-workflow path never matches the hatch"
+    );
+    assert!(
+        !is_excluded_workflow(Path::new(".github/workflows/hand.yml"), &BTreeSet::new()),
+        "no excludes means no hatch"
+    );
 }
 
 #[cfg(unix)]
@@ -4540,27 +1734,6 @@ fn actual_tree_collection_never_follows_symlinks() {
 }
 
 #[cfg(unix)]
-#[test]
-fn stat_rejects_a_symlinked_parent_before_reading_the_child() {
-    let root = temporary_directory("tree-parent-symlink");
-    let outside = temporary_directory("tree-parent-symlink-outside");
-    write(&outside.join("child.txt"), "external bytes\n");
-    link(&outside, &root.join("link"));
-
-    assert_eq!(
-        must(
-            stat_tree_entry(&root.join("link/child.txt")),
-            "stat a child below a symlink"
-        ),
-        None,
-        "a symlinked parent is treated as absent; its target bytes never enter the comparison"
-    );
-
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(outside);
-}
-
-#[cfg(unix)]
 fn link(target: &Path, link: &Path) {
     must(
         std::os::unix::fs::symlink(target, link),
@@ -4575,10 +1748,11 @@ fn confined_render_symlink_compares_clean() {
     let tree = temporary_directory("render-symlink-confined-tree");
     write(&rendered.join(".github/AGENTS.md"), "agents\n");
     write(&tree.join(".github/AGENTS.md"), "agents\n");
-    link(Path::new("AGENTS.md"), &rendered.join(".github/link.txt"));
-    link(Path::new("AGENTS.md"), &tree.join(".github/link.txt"));
+    link(Path::new("AGENTS.md"), &rendered.join(".github/CLAUDE.md"));
+    link(Path::new("AGENTS.md"), &tree.join(".github/CLAUDE.md"));
+    let excludes = std::collections::BTreeSet::new();
     let differences = must(
-        compare_rendered_tree(&rendered, &tree),
+        compare_rendered_tree(&rendered, &tree, &excludes),
         "a confined in-render symlink compares by target",
     );
     assert!(
@@ -4597,10 +1771,11 @@ fn render_symlink_escaping_its_root_is_an_error() {
     let secret = outside.join("secret.txt");
     write(&secret, "outside\n");
     write(&rendered.join(".github/AGENTS.md"), "agents\n");
-    link(&secret, &rendered.join(".github/link.txt"));
+    link(&secret, &rendered.join(".github/CLAUDE.md"));
     let tree = temporary_directory("render-symlink-escape-tree");
+    let excludes = std::collections::BTreeSet::new();
     let error = must_fail(
-        compare_rendered_tree(&rendered, &tree),
+        compare_rendered_tree(&rendered, &tree, &excludes),
         "a render symlink outside its root",
     )
     .to_string();
@@ -4615,10 +1790,11 @@ fn render_symlink_escaping_its_root_is_an_error() {
 fn dangling_render_symlink_is_an_error() {
     let rendered = temporary_directory("render-symlink-dangling");
     write(&rendered.join(".github/AGENTS.md"), "agents\n");
-    link(Path::new("MISSING.md"), &rendered.join(".github/link.txt"));
+    link(Path::new("MISSING.md"), &rendered.join(".github/CLAUDE.md"));
     let tree = temporary_directory("render-symlink-dangling-tree");
+    let excludes = std::collections::BTreeSet::new();
     let error = must_fail(
-        compare_rendered_tree(&rendered, &tree),
+        compare_rendered_tree(&rendered, &tree, &excludes),
         "a dangling render symlink",
     )
     .to_string();
@@ -4632,6 +1808,7 @@ fn declared_tree(required_checks: &[&str]) -> DeclaredTree {
         pin: None,
         repository: None,
         default_branch: "main".to_owned(),
+        excludes: BTreeSet::new(),
         velnor_policy: VelnorPolicyContract::default(),
         required_checks: required_checks
             .iter()

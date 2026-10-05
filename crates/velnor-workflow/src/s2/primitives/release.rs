@@ -1242,60 +1242,6 @@ fn deb_arch_matrix(config: &ProjectConfig, targets: &[String], guest: bool) -> O
     Some(matrix)
 }
 
-/// Give each cargo-deb invocation an empty output boundary. Mr. Boxington
-/// transports Cargo workspace state, including prior `.deb` files; those
-/// files are not inputs to the current package and must not enter collection.
-fn debian_output_reset_step() -> &'static str {
-    r#"      - name: Reset cached Debian package outputs
-        run: |
-          set -euo pipefail
-          target="${TARGET:-}"
-          case "$target" in
-            '' ) ;;
-            *[!A-Za-z0-9_-]* )
-              echo "::error::invalid Debian target: $target" >&2
-              exit 1
-              ;;
-          esac
-          canonical="target/debian"
-          target_root=""
-          if [[ -n "$target" ]]; then
-            target_root="target/$target"
-          fi
-          reject_output_root() {
-            local root="$1"
-            if [[ -L "$root" ]]; then
-              echo "::error::refusing symlink Debian output root: $root" >&2
-              exit 1
-            fi
-            if [[ -e "$root" && ! -d "$root" ]]; then
-              echo "::error::Debian output root is not a directory: $root" >&2
-              exit 1
-            fi
-          }
-          reject_output_root target
-          reject_output_root "$canonical"
-          reject_output_root dist
-          if [[ -n "$target_root" ]]; then
-            reject_output_root "$target_root"
-            reject_output_root "$target_root/debian"
-          fi
-          clean_output_root() {
-            local root="$1"
-            if [[ -d "$root" ]]; then
-              find -P "$root" -maxdepth 1 \
-                \( -type f -o -type l \) \
-                \( -name '*.deb' -o -name '*.deb.sha256' \) -delete
-            fi
-          }
-          clean_output_root "$canonical"
-          if [[ -n "$target_root" ]]; then
-            clean_output_root "$target_root/debian"
-          fi
-          clean_output_root dist
-"#
-}
-
 /// Step-level env exporting the cross C toolchain to Cargo and the C build
 /// scripts (`cc` et al.) for matrix jobs that compile `AArch64` Linux on
 /// the x64 builder. The toolchain install alone leaves Cargo on the host
@@ -1610,22 +1556,18 @@ fn render_debian_job(config: &ProjectConfig, release: &ReleaseSpec, guest: bool)
         package_cmd.push_str(" --guest dist/microvm --target \"${{ matrix.target }}\"");
     }
     let header = if guest {
-        let target_env =
-            "    env:\n      TARGET: ${{ matrix.target }}\n      MBX_TARGET_VIEWS: \"0\"\n";
         format!(
-            "  debian:\n    name: Package Debian artifacts\n    needs: [{needs}]\n    runs-on: {runner}\n    timeout-minutes: 45\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{}{target_env}    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n",
+            "  debian:\n    name: Package Debian artifacts\n    needs: [{needs}]\n    runs-on: {runner}\n    timeout-minutes: 45\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{}    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n",
             guest_arch_matrix(config),
             needs = needs,
             runner = selected_runner(config),
-            target_env = target_env,
         )
     } else {
         format!(
-            "  debian:\n    name: Package Debian artifacts\n    needs: [{needs}]\n    runs-on: {}\n    timeout-minutes: 45\n    env:\n      MBX_TARGET_VIEWS: \"0\"\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n",
+            "  debian:\n    name: Package Debian artifacts\n    needs: [{needs}]\n    runs-on: {}\n    timeout-minutes: 45\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n",
             selected_runner(config),
         )
     };
-    steps.push_str(debian_output_reset_step());
     format!(
         "{header}{steps}      - name: Build Debian packages\n        env:\n          VERSION: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n{package_cmd}\n      - name: Attest Debian packages\n        uses: {attest}\n        with:\n          subject-path: dist/*.deb\n      - name: Upload Debian packages\n        uses: {upload}\n        with:\n          name: debian-packages\n          path: dist/*.deb\n          if-no-files-found: error\n          retention-days: 2\n"
     )
@@ -1828,12 +1770,10 @@ fn render_undebianable_job(config: &ProjectConfig, release: &ReleaseSpec, needs:
 fn identity_debian_lane_env(preview: bool, version: &str) -> String {
     if preview {
         format!(
-            "      VERSION: {version}\n      CRATE_VERSION: ${{{{ needs.identity.outputs.crate_version }}}}\n      SOURCE_COMMIT: ${{{{ needs.identity.outputs.commit }}}}\n      VELNOR_RELEASE_BUILD: \"1\"\n      VELNOR_PREVIEW_SOURCE_SHA: ${{{{ needs.identity.outputs.commit }}}}\n      MBX_TARGET_VIEWS: \"0\"\n"
+            "      VERSION: {version}\n      CRATE_VERSION: ${{{{ needs.identity.outputs.crate_version }}}}\n      SOURCE_COMMIT: ${{{{ needs.identity.outputs.commit }}}}\n      VELNOR_RELEASE_BUILD: \"1\"\n      VELNOR_PREVIEW_SOURCE_SHA: ${{{{ needs.identity.outputs.commit }}}}\n"
         )
     } else {
-        format!(
-            "      VERSION: {version}\n      VELNOR_RELEASE_BUILD: \"1\"\n      MBX_TARGET_VIEWS: \"0\"\n"
-        )
+        format!("      VERSION: {version}\n      VELNOR_RELEASE_BUILD: \"1\"\n")
     }
 }
 
@@ -1937,7 +1877,6 @@ fn render_identity_debian_job(
     if guest {
         steps.push_str(&debian_guest_steps(config, release, cargo_cmd));
     }
-    steps.push_str(debian_output_reset_step());
     let versioned_stem = format!("{stem}-{version}");
     let asset_name = format!("{versioned_stem}-${{{{ matrix.arch }}}}.deb");
     let _ = writeln!(
@@ -6930,11 +6869,11 @@ cp "$record" "$out"
             // Carried across the b56 action-pin refresh (#1047).
             (
                 "release.yml",
-                "6f536378af5a91a22337f74b466bae84f4716d55031398798c8c81757a107ac6",
+                "d41173c905e9d6b2627f21da8f3f9a7e1fed164720b5c928e76030b39dd2b2a2",
             ),
             (
                 "preview.yml",
-                "c773a1e811b5b4de7f6a91eafa4646312387b758f6a699bd8cc6e3cb3525bb6e",
+                "b462ebf6c21ec929e45a99b108689011f2ae079dbcac21d45cc9f0c8df043a27",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -7576,7 +7515,7 @@ cp "$record" "$out"
         );
         let config_text = |universe: &str, selector: &str, verification: &str| {
             format!(
-                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [{universe}]\nfiles = [\"release.yml\", \"ci-policy.yml\"]\n{selector}\n[release]\nenabled = true\nkind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n{verification}"
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [{universe}]\nfiles = [\"release.yml\"]\n{selector}\n[release]\nenabled = true\nkind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n{verification}"
             )
         };
         // The singleton policy renders one universe per repository: an
@@ -8068,7 +8007,7 @@ verification_providers = ["github-hosted"]
         must(
             fs::write(
                 root.join(crate::s2::config::GENERATION_CONFIG_PATH),
-                "schema = 2\n\n[generator]\nrepository = \"example/declared\"\n\n[workflow]\nfiles = [\"release.yml\", \"ci-policy.yml\"]\n\n[release]\nenabled = true\nkind = \"tasks\"\nmodes = [\"validate\"]\ntag_pattern = \"v[0-9]*\"\n\n[[release.job]]\nid = \"build\"\ntasks = [\"desktop-build\"]\nrunner = \"github\"\n\n[[release.job]]\nid = \"sign\"\nname = \"Sign release\"\ntasks = [\"desktop-sign\"]\nneeds = [\"build\"]\nrunner = \"macos\"\nmodes = [\"publish\"]\nenvironment = \"release-macos\"\nattest_subjects = [\"dist/app.zip\"]\n\n[release.job.permissions]\nid-token = \"write\"\n\n[[release.job]]\nid = \"attest-defaults\"\ntasks = [\"desktop-sign\"]\nrunner = \"github\"\nattest_subjects = [\"dist/*.tar.gz\"]\n",
+                "schema = 2\n\n[generator]\nrepository = \"example/declared\"\n\n[workflow]\nfiles = [\"release.yml\"]\n\n[release]\nenabled = true\nkind = \"tasks\"\nmodes = [\"validate\"]\ntag_pattern = \"v[0-9]*\"\n\n[[release.job]]\nid = \"build\"\ntasks = [\"desktop-build\"]\nrunner = \"github\"\n\n[[release.job]]\nid = \"sign\"\nname = \"Sign release\"\ntasks = [\"desktop-sign\"]\nneeds = [\"build\"]\nrunner = \"macos\"\nmodes = [\"publish\"]\nenvironment = \"release-macos\"\nattest_subjects = [\"dist/app.zip\"]\n\n[release.job.permissions]\nid-token = \"write\"\n\n[[release.job]]\nid = \"attest-defaults\"\ntasks = [\"desktop-sign\"]\nrunner = \"github\"\nattest_subjects = [\"dist/*.tar.gz\"]\n",
             ),
             "write tasks release config",
         );
@@ -8156,7 +8095,7 @@ verification_providers = ["github-hosted"]
         must(
             fs::write(
                 root.join(crate::s2::config::GENERATION_CONFIG_PATH),
-                "schema = 2\n\n[generator]\nrepository = \"example/declared\"\n\n[workflow]\nfiles = [\"release.yml\", \"ci-policy.yml\"]\n\n[release]\nenabled = true\nkind = \"tasks\"\n\n[[release.job]]\nid = \"on\"\ntasks = [\"desktop-build\"]\n\n[[release.job]]\nid = \"publish\"\ntasks = [\"desktop-publish\"]\nneeds = [\"on\"]\n",
+                "schema = 2\n\n[generator]\nrepository = \"example/declared\"\n\n[workflow]\nfiles = [\"release.yml\"]\n\n[release]\nenabled = true\nkind = \"tasks\"\n\n[[release.job]]\nid = \"on\"\ntasks = [\"desktop-build\"]\n\n[[release.job]]\nid = \"publish\"\ntasks = [\"desktop-publish\"]\nneeds = [\"on\"]\n",
             ),
             "write reserved-id release config",
         );
@@ -8351,7 +8290,6 @@ verification_providers = ["github-hosted"]
             "{debian}"
         );
         assert!(debian.contains("VELNOR_RELEASE_BUILD: \"1\""), "{debian}");
-        assert!(debian.contains("MBX_TARGET_VIEWS: \"0\""), "{debian}");
         assert!(debian.contains("--features release-build"), "{debian}");
         assert!(debian.contains("cargo install cargo-deb"), "{debian}");
         assert!(debian.contains("release emit"), "{debian}");
@@ -9635,52 +9573,10 @@ verification_providers = ["github-hosted"]
             debian.contains("VERSION: ${{ needs.identity.outputs.version }}"),
             "{debian}"
         );
-        assert!(debian.contains("MBX_TARGET_VIEWS: \"0\""), "{debian}");
         assert!(
             debian.contains("--asset-name \"example-preview-${{ needs.identity.outputs.version }}-${{ matrix.arch }}.deb\""),
             "{debian}"
         );
-        let reset = debian.find("name: Reset cached Debian package outputs");
-        let package = debian.find("name: Build Debian packages");
-        assert!(
-            reset.is_some(),
-            "preview debian lane resets cached package outputs"
-        );
-        assert!(
-            package.is_some(),
-            "preview debian lane packages after reset"
-        );
-        assert!(
-            reset < package,
-            "cached output reset must precede packaging"
-        );
-        let reset_script = yaml_run_step(&preview, "debian", "Reset cached Debian package outputs");
-        assert!(
-            reset_script.contains("target=\"${TARGET:-}\""),
-            "{reset_script}"
-        );
-        assert!(
-            reset_script.contains("canonical=\"target/debian\""),
-            "{reset_script}"
-        );
-        assert!(
-            reset_script.contains("target_root=\"target/$target\""),
-            "{reset_script}"
-        );
-        assert!(
-            reset_script.contains("reject_output_root target"),
-            "{reset_script}"
-        );
-        assert!(
-            reset_script.contains("reject_output_root \"$target_root/debian\""),
-            "{reset_script}"
-        );
-        assert!(
-            reset_script.contains("find -P \"$root\" -maxdepth 1"),
-            "{reset_script}"
-        );
-        assert!(!reset_script.contains("target/*/debian"), "{reset_script}");
-        assert!(!reset_script.contains("rm -f target/"), "{reset_script}");
         // The rolling release is replaced under its Preview title, never
         // moved backward, and its published shape is verified.
         let publish = yaml_job(&preview, "publish");
@@ -9705,194 +9601,6 @@ verification_providers = ["github-hosted"]
             "{publish}"
         );
         assert!(!preview.contains("Rolling preview"), "{preview}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rendered_debian_reset_cleans_exact_roots_and_keeps_unrelated_outputs() {
-        use std::os::unix::fs::symlink;
-
-        let config = native_identity_config(&["release.yml", "preview.yml"]);
-        let Some(release) = config.release.as_ref() else {
-            panic!("identity fixture must carry a release contract")
-        };
-        let preview = super::render_preview(&config, Some(release));
-        let script = yaml_run_step(&preview, "debian", "Reset cached Debian package outputs");
-        let root =
-            std::env::temp_dir().join(format!("velnor debian reset {}", crate::unique_suffix()));
-        let checkout = root.join("checkout");
-        let canonical = checkout.join("target/debian");
-        let target_debian = checkout.join("target/aarch64-unknown-linux-gnu/debian");
-        let unrelated = checkout.join("target/unrelated/debian");
-        let dist = checkout.join("dist");
-        let external = root.join("external-sentinel.deb");
-        must(
-            fs::create_dir_all(&canonical),
-            "create canonical debian root",
-        );
-        must(
-            fs::create_dir_all(&target_debian),
-            "create target debian root",
-        );
-        must(
-            fs::create_dir_all(&unrelated),
-            "create unrelated target root",
-        );
-        must(fs::create_dir_all(&dist), "create dist root");
-        must(
-            fs::write(&external, b"external sentinel"),
-            "write external sentinel",
-        );
-        for path in [
-            canonical.join("stale.deb"),
-            canonical.join("stale.deb.sha256"),
-            target_debian.join("stale.deb"),
-            target_debian.join("stale.deb.sha256"),
-            dist.join("stale.deb"),
-            dist.join("stale.deb.sha256"),
-        ] {
-            must(fs::write(path, b"stale"), "write stale debian output");
-        }
-        must(
-            fs::write(unrelated.join("keep.deb"), b"unrelated"),
-            "write unrelated debian output",
-        );
-        must(
-            symlink(&external, canonical.join("stale-link.deb")),
-            "write canonical debian symlink",
-        );
-        must(
-            symlink(&external, target_debian.join("stale-link.deb.sha256")),
-            "write target debian symlink",
-        );
-        let status = must(
-            Command::new("bash")
-                .args(["-euo", "pipefail", "-c", script.as_str()])
-                .current_dir(&checkout)
-                .env("TARGET", "aarch64-unknown-linux-gnu")
-                .status(),
-            "execute rendered Debian reset",
-        );
-        assert!(status.success(), "exact-root reset failed: {status}");
-        for path in [
-            canonical.join("stale.deb"),
-            canonical.join("stale.deb.sha256"),
-            canonical.join("stale-link.deb"),
-            target_debian.join("stale.deb"),
-            target_debian.join("stale.deb.sha256"),
-            target_debian.join("stale-link.deb.sha256"),
-            dist.join("stale.deb"),
-            dist.join("stale.deb.sha256"),
-        ] {
-            assert!(
-                !path.exists(),
-                "reset left output behind: {}",
-                path.display()
-            );
-        }
-        assert!(
-            unrelated.join("keep.deb").is_file(),
-            "unrelated target output was removed"
-        );
-        assert!(external.is_file(), "reset followed a final output symlink");
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rendered_debian_reset_fails_closed_on_symlink_roots() {
-        use std::os::unix::fs::symlink;
-
-        let config = native_identity_config(&["release.yml", "preview.yml"]);
-        let Some(release) = config.release.as_ref() else {
-            panic!("identity fixture must carry a release contract")
-        };
-        let preview = super::render_preview(&config, Some(release));
-        let script = yaml_run_step(&preview, "debian", "Reset cached Debian package outputs");
-        for kind in [
-            "target",
-            "target-root",
-            "canonical",
-            "target-debian",
-            "dist",
-        ] {
-            let root = std::env::temp_dir().join(format!(
-                "velnor debian reset symlink {kind} {}",
-                crate::unique_suffix()
-            ));
-            let checkout = root.join("checkout");
-            let outside = root.join("outside");
-            let keep = outside.join("keep.deb");
-            must(
-                fs::create_dir_all(&checkout),
-                "create symlink fixture checkout",
-            );
-            must(
-                fs::create_dir_all(&outside),
-                "create symlink fixture outside",
-            );
-            must(fs::write(&keep, b"must survive"), "write symlink sentinel");
-            match kind {
-                "target" => {
-                    must(
-                        symlink(&outside, checkout.join("target")),
-                        "link target root",
-                    );
-                }
-                "target-root" => {
-                    must(
-                        fs::create_dir_all(checkout.join("target")),
-                        "create target root",
-                    );
-                    must(
-                        symlink(&outside, checkout.join("target/aarch64-unknown-linux-gnu")),
-                        "link exact target root",
-                    );
-                }
-                "canonical" => {
-                    must(
-                        fs::create_dir_all(checkout.join("target")),
-                        "create target root",
-                    );
-                    must(
-                        symlink(&outside, checkout.join("target/debian")),
-                        "link canonical root",
-                    );
-                }
-                "target-debian" => {
-                    must(
-                        fs::create_dir_all(checkout.join("target/aarch64-unknown-linux-gnu")),
-                        "create target-specific parent",
-                    );
-                    must(
-                        symlink(
-                            &outside,
-                            checkout.join("target/aarch64-unknown-linux-gnu/debian"),
-                        ),
-                        "link target-specific Debian root",
-                    );
-                }
-                "dist" => {
-                    must(
-                        fs::create_dir_all(checkout.join("target/debian")),
-                        "create canonical root",
-                    );
-                    must(symlink(&outside, checkout.join("dist")), "link dist root");
-                }
-                _ => panic!("unknown symlink root kind: {kind}"),
-            }
-            let status = must(
-                Command::new("bash")
-                    .args(["-euo", "pipefail", "-c", script.as_str()])
-                    .current_dir(&checkout)
-                    .env("TARGET", "aarch64-unknown-linux-gnu")
-                    .status(),
-                "execute symlink-root reset",
-            );
-            assert!(!status.success(), "reset followed {kind} symlink root");
-            assert!(keep.is_file(), "reset removed {kind} symlink target");
-            let _ = fs::remove_dir_all(root);
-        }
     }
 
     #[test]
@@ -9924,8 +9632,6 @@ verification_providers = ["github-hosted"]
         );
         assert!(!workflow.contains("sign-deb"), "{workflow}");
         assert!(workflow.contains("Package Debian artifacts"), "{workflow}");
-        let debian = yaml_job(&workflow, "debian");
-        assert!(debian.contains("MBX_TARGET_VIEWS: \"0\""), "{debian}");
         let preview = super::render_preview(&config, Some(release));
         assert!(!preview.contains("VELNOR_RELEASE_BUILD"), "{preview}");
         assert!(!preview.contains("Resolve preview identity"), "{preview}");

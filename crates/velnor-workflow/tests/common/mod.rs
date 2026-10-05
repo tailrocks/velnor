@@ -16,10 +16,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-mod git_fixture;
-
-pub use git_fixture::{commit_fixture, initialize_git_fixture};
-
 /// Which pipeline a test drives: schema-1 (`--runners`) or schema-2
 /// (`--providers` via config).
 #[derive(Clone, Copy)]
@@ -67,7 +63,6 @@ pub fn minimal_root(name: &str) -> PathBuf {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/minimal-rust");
     let root = unique_dir(name).join("fixture");
     copy_tree(&source, &root);
-    initialize_git_fixture(&root);
     root
 }
 
@@ -125,7 +120,6 @@ pub fn write_config(pipeline: Pipeline, root: &Path) {
 /// Run generation of `root` into `output`, returning the raw outcome so
 /// tests can assert both success and failure without panicking.
 pub fn run_generate(root: &Path, output: &Path, force: bool) -> Output {
-    commit_fixture(root);
     let mut args = vec!["--plain", "--default-branch", "main", "--output"];
     args.push(output.to_str().unwrap());
     if force {
@@ -154,7 +148,6 @@ pub fn generate_ok(root: &Path, output: &Path, force: bool) {
 /// every installed file carries deterministic permissions.
 #[cfg(unix)]
 pub fn run_generate_with_umask(root: &Path, output: &Path, force: bool, mask: &str) -> Output {
-    commit_fixture(root);
     let mut args = vec![
         "--plain".to_owned(),
         "--default-branch".to_owned(),
@@ -189,7 +182,6 @@ pub fn generate_ok_with_umask(root: &Path, output: &Path, force: bool, mask: &st
 
 /// Run `--check` of `root` against `output`, returning the raw outcome.
 pub fn run_check(root: &Path, output: &Path) -> Output {
-    commit_fixture(root);
     Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
         .args([
             "--plain",

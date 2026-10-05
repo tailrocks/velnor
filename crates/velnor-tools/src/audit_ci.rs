@@ -100,7 +100,7 @@ pub struct AuditCiArgs {
     /// Clone and audit each estate repository's live remote default head.
     #[arg(long, requires = "estate")]
     pub remote_defaults: bool,
-    /// Root containing local estate checkouts at `<owner>/<repository>`.
+    /// Root containing local estate checkouts at <owner>/<repository>.
     #[arg(long, requires = "estate", conflicts_with = "remote_defaults")]
     pub estate_root: Option<PathBuf>,
     /// Skip latest-release lookups; floating refs remain errors.

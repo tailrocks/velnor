@@ -227,12 +227,8 @@ fn assert_gate_open(gate: Option<&str>, inputs: &BTreeMap<String, String>, conte
 }
 
 #[test]
-fn parameterized_callees_resolve_to_the_pre_parameterization_cache_keys(
-) -> Result<(), Box<dyn std::error::Error>> {
-    let path = repository_root().join(".github/workflows/ci-pr.yml");
-    let Ok(aggregate) = std::fs::read_to_string(path) else {
-        return Ok(());
-    };
+fn parameterized_callees_resolve_to_the_pre_parameterization_cache_keys() {
+    let aggregate = read_workflow("ci-pr.yml");
     let mut callees: BTreeMap<String, String> = BTreeMap::new();
     for expected in PRE_PARAMETERIZATION_KEYS {
         let (uses, inputs) = caller_inputs(&aggregate, expected.caller_job);
@@ -282,7 +278,6 @@ fn parameterized_callees_resolve_to_the_pre_parameterization_cache_keys(
             }
         }
     }
-    Ok(())
 }
 
 /// The kind reusables hold exactly one step block per lane job: no step is

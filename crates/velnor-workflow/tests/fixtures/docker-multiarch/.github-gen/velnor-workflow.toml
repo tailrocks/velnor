@@ -4,7 +4,7 @@ schema = 1
 repository = "example/app"
 
 [workflow]
-files = ["release.yml", "ci-policy.yml"]
+files = ["release.yml"]
 
 [release]
 enabled = true
