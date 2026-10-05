@@ -214,6 +214,10 @@ pub(crate) fn builder_trust_tier(
 pub(crate) struct PersistentBuildKitDomain {
     pub(crate) token: String,
     pub(crate) engine_id: String,
+    /// The endpoint selected when this domain was created. Every operation
+    /// uses this retained value after re-attestation; it never re-resolves
+    /// ambient Docker context for a later inspection or mutation.
+    pub(crate) endpoint: crate::docker::DockerEndpoint,
     /// Durable, process-shared root derived from the selected StorageLayout.
     /// Domain ledgers live below `root`; Engine-wide volume locks live below
     /// this path and deliberately omit the storage UUID from their key.
@@ -226,6 +230,17 @@ impl PersistentBuildKitDomain {
         identity_root: &Path,
         storage_id: &str,
         engine_id: &str,
+    ) -> Result<Self> {
+        let endpoint = crate::docker::engine::resolve_docker_endpoint()
+            .context("resolve Docker endpoint for BuildKit domain fixture")?;
+        Self::from_identities_at_endpoint(identity_root, storage_id, engine_id, endpoint)
+    }
+
+    fn from_identities_at_endpoint(
+        identity_root: &Path,
+        storage_id: &str,
+        engine_id: &str,
+        endpoint: crate::docker::DockerEndpoint,
     ) -> Result<Self> {
         if storage_id.trim().is_empty() || engine_id.trim().is_empty() {
             anyhow::bail!("BuildKit storage and Docker Engine identities must be nonempty");
@@ -273,6 +288,7 @@ impl PersistentBuildKitDomain {
         Ok(Self {
             token,
             engine_id: engine_id.to_string(),
+            endpoint,
             identity_root: identity_root.to_path_buf(),
             root,
         })
@@ -303,7 +319,7 @@ impl PersistentBuildKitDomain {
             .map(|identity| identity.id)
             .filter(|identity| !identity.trim().is_empty())
             .context("Docker Engine /info.ID is unavailable; persistent BuildKit is disabled")?;
-        Self::from_identities(&identity_root, &storage_id, &engine_id)
+        Self::from_identities_at_endpoint(&identity_root, &storage_id, &engine_id, endpoint)
     }
 
     /// Confirm that the selected storage root, its durable UUID, its opened
@@ -329,7 +345,10 @@ impl PersistentBuildKitDomain {
             .context("revalidate physical BuildKit storage-root identity")?;
         let endpoint = crate::docker::engine::resolve_docker_endpoint()
             .context("re-resolve Docker endpoint before BuildKit mutation")?;
-        let engine_id = crate::docker::engine::daemon_identity_blocking(&endpoint.socket)
+        if endpoint != self.endpoint {
+            anyhow::bail!("Docker endpoint changed after BuildKit domain setup");
+        }
+        let engine_id = crate::docker::engine::daemon_identity_blocking(&self.endpoint.socket)
             .map(|identity| identity.id)
             .filter(|identity| !identity.trim().is_empty())
             .context("re-attest Docker Engine /info.ID before BuildKit mutation")?;
@@ -338,6 +357,10 @@ impl PersistentBuildKitDomain {
             anyhow::bail!("BuildKit storage or Engine identity changed after job setup");
         }
         Ok(())
+    }
+
+    pub(crate) fn docker(&self) -> crate::docker::Docker<'static> {
+        crate::docker::Docker::host_at_endpoint(self.endpoint.clone())
     }
 }
 
@@ -1939,9 +1962,9 @@ fn stop_builder_under_volume_lock(
         container_id,
         |id| {
             domain.validate_current()?;
-            stop_attested_builder_confirmed(id)
+            stop_attested_builder_confirmed(id, &domain.endpoint)
         },
-        |id| crate::docker::Docker::host().inspect_exit(id),
+        |id| domain.docker().inspect_exit(id),
     )
 }
 
@@ -2047,11 +2070,10 @@ pub(crate) fn persist_builder_readiness_after_start(
         expected_container_id,
         config_fingerprint,
         expected_epoch,
-        || wait_for_attested_buildkit_ready(expected_container_id),
+        || wait_for_attested_buildkit_ready(expected_container_id, &domain.endpoint),
     )?;
-    let host_socket = crate::docker::engine::resolve_docker_endpoint()
-        .context("resolve Docker endpoint for BuildKit readiness attestation")?
-        .socket;
+    domain.validate_current()?;
+    let host_socket = domain.endpoint.socket.clone();
     with_attested_domain_builder_with(
         domain,
         builder,
@@ -2080,7 +2102,8 @@ pub(crate) fn persist_builder_readiness_after_start(
             if container_id != expected_container_id {
                 anyhow::bail!("BuildKit daemon {daemon} changed immutable ID after start");
             }
-            let state = crate::docker::Docker::host()
+            let state = domain
+                .docker()
                 .inspect_exit(container_id)
                 .with_context(|| {
                     format!("inspect BuildKit daemon {daemon} after readiness probe")
@@ -3547,12 +3570,10 @@ fn start_builder_container_in_domain_matching_id_with_lock<G>(
                 container_id,
                 &proof.config_fingerprint,
                 proof.epoch,
-                |id| crate::docker::Docker::host().inspect_exit(id),
+                |id| domain.docker().inspect_exit(id),
                 |id| {
                     domain.validate_current()?;
-                    crate::docker::Docker::host()
-                        .container_start(id)
-                        .map(|_| ())
+                    domain.docker().container_start(id).map(|_| ())
                 },
             )?;
             if let Some(start_epoch) = start_epoch {
@@ -3649,7 +3670,7 @@ pub(crate) fn ensure_conflicting_builder_ready_in_domain(
         },
         Duration::from_secs(30),
         |delay| std::thread::sleep(delay),
-        |id, timeout| crate::docker::Docker::host().inspect_exit_bounded(id, timeout),
+        |id, timeout| domain.docker().inspect_exit_bounded(id, timeout),
         |id| {
             let started = start_builder_container_in_domain_matching_id_with_pending_create(
                 domain,
@@ -3669,7 +3690,7 @@ pub(crate) fn ensure_conflicting_builder_ready_in_domain(
             )?;
             Ok(true)
         },
-        wait_for_attested_buildkit_ready,
+        |id| wait_for_attested_buildkit_ready(id, &domain.endpoint),
     )
 }
 
@@ -3949,8 +3970,9 @@ fn ensure_pressure_builder_ready(
             if proof.config_fingerprint.is_empty() {
                 anyhow::bail!("pressure candidate {daemon} has an empty config fingerprint");
             }
-            let projection = crate::docker::client::host_call(
+            let projection = crate::docker::client::host_call_at_endpoint(
                 &crate::docker_lease::inspect_persistent_buildkit_volume_pressure_args(volume),
+                &domain.endpoint,
             )
             .with_context(|| format!("inspect BuildKit pressure volume {volume}"))?;
             let mountpoint = crate::docker_lease::attest_persistent_buildkit_volume_mountpoint(
@@ -3980,7 +4002,8 @@ fn ensure_pressure_builder_ready(
             if !pressure_predicate(&pressure) {
                 return Ok(None);
             }
-            let state = crate::docker::Docker::host()
+            let state = domain
+                .docker()
                 .inspect_exit(container_id)
                 .context("inspect pressure candidate before restart")?;
             if state.status == Some(crate::docker::client::ContainerState::Running) {
@@ -4016,7 +4039,7 @@ fn ensure_pressure_builder_ready(
                 &proof.config_fingerprint,
                 proof.epoch,
             )?;
-            if !start_attested_builder_confirmed(container_id)? {
+            if !start_attested_builder_confirmed(container_id, &domain.endpoint)? {
                 anyhow::bail!("attested BuildKit daemon disappeared during pressure restart");
             }
             Ok(Some((proof.config_fingerprint, Some(epoch))))
@@ -4034,27 +4057,33 @@ fn ensure_pressure_builder_ready(
             start_epoch,
         )?;
     } else {
-        wait_for_attested_buildkit_ready(expected_container_id)?;
+        wait_for_attested_buildkit_ready(expected_container_id, &domain.endpoint)?;
     }
     Ok(true)
 }
 
-pub(crate) fn wait_for_attested_buildkit_ready(container_id: &str) -> Result<()> {
+pub(crate) fn wait_for_attested_buildkit_ready(
+    container_id: &str,
+    endpoint: &crate::docker::DockerEndpoint,
+) -> Result<()> {
     let args = buildctl_ready_args(container_id);
     retry_until_buildkit_ready(Duration::from_secs(30), |timeout| {
-        crate::docker::client::host_call_bounded(&args, timeout).map(|_| ())
+        crate::docker::client::host_call_bounded_at_endpoint(&args, timeout, endpoint).map(|_| ())
     })
 }
 
-fn stop_attested_builder_confirmed(container_id: &str) -> Result<bool> {
+fn stop_attested_builder_confirmed(
+    container_id: &str,
+    endpoint: &crate::docker::DockerEndpoint,
+) -> Result<bool> {
     stop_attested_builder_confirmed_with(
         container_id,
         |id| {
-            crate::docker::Docker::host()
+            crate::docker::Docker::host_at_endpoint(endpoint.clone())
                 .container_stop(id, None)
                 .map(|_| ())
         },
-        |id| crate::docker::Docker::host().inspect_exit(id),
+        |id| crate::docker::Docker::host_at_endpoint(endpoint.clone()).inspect_exit(id),
     )
 }
 
@@ -4090,12 +4119,15 @@ fn stop_attested_builder_confirmed_with(
     }
 }
 
-fn start_attested_builder_confirmed(container_id: &str) -> Result<bool> {
+fn start_attested_builder_confirmed(
+    container_id: &str,
+    endpoint: &crate::docker::DockerEndpoint,
+) -> Result<bool> {
     start_attested_builder_confirmed_with(
         container_id,
-        |id| crate::docker::Docker::host().inspect_exit(id),
+        |id| crate::docker::Docker::host_at_endpoint(endpoint.clone()).inspect_exit(id),
         |id| {
-            crate::docker::Docker::host()
+            crate::docker::Docker::host_at_endpoint(endpoint.clone())
                 .container_start(id)
                 .map(|_| ())
         },
@@ -4198,7 +4230,8 @@ fn inspect_domain_builder_exit(
         let Some(id) = id else {
             return Ok(None);
         };
-        crate::docker::Docker::host()
+        domain
+            .docker()
             .inspect_exit(id)
             .map(Some)
             .with_context(|| format!("inspect BuildKit daemon {daemon} after stop"))
@@ -4285,8 +4318,7 @@ pub(crate) fn remove_builder(domain: &PersistentBuildKitDomain, builder: &str) -
         attest_buildkit_removal_container,
         |container_id, daemon| {
             domain.validate_current()?;
-            if let Err(error) =
-                crate::docker::Docker::host().container_remove(container_id, true, false)
+            if let Err(error) = domain.docker().container_remove(container_id, true, false)
                 && !crate::docker::client::is_not_found(&error)
             {
                 return Err(error).with_context(|| format!("remove BuildKit daemon {daemon}"));
@@ -4302,7 +4334,7 @@ pub(crate) fn remove_builder(domain: &PersistentBuildKitDomain, builder: &str) -
                 "--".to_string(),
                 volume.to_string(),
             ];
-            match crate::docker::client::host_call(&args) {
+            match crate::docker::client::host_call_at_endpoint(&args, &domain.endpoint) {
                 Ok(_) => Ok(()),
                 Err(error) if crate::docker::client::is_not_found(&error) => Ok(()),
                 Err(error) => {
@@ -4378,7 +4410,8 @@ fn remove_builder_with<G>(
 
 fn attest_buildkit_removal_volume(domain: &PersistentBuildKitDomain, volume: &str) -> Result<bool> {
     let args = crate::docker_lease::inspect_persistent_buildkit_volume_args(volume);
-    let output = match crate::docker::client::host_call(&args) {
+    domain.validate_current()?;
+    let output = match crate::docker::client::host_call_at_endpoint(&args, &domain.endpoint) {
         Ok(output) => output,
         Err(error) if crate::docker::client::is_not_found(&error) => return Ok(false),
         Err(error) => {
@@ -4400,7 +4433,8 @@ fn attest_buildkit_removal_container(
     volume: &str,
 ) -> Result<Option<String>> {
     let args = crate::docker_lease::inspect_persistent_buildkit_container_args(daemon);
-    let output = match crate::docker::client::host_call(&args) {
+    domain.validate_current()?;
+    let output = match crate::docker::client::host_call_at_endpoint(&args, &domain.endpoint) {
         Ok(output) => output,
         Err(error) if crate::docker::client::is_not_found(&error) => return Ok(None),
         Err(error) => {
@@ -4469,7 +4503,7 @@ pub(crate) fn reclaim_domain_buildkit_for_device(
     if builders.is_empty() {
         return Ok(report);
     }
-    let present = running_container_names()
+    let present = running_container_names(&domain.endpoint)
         .context("list Engine containers before device-bound BuildKit pressure reclaim")?;
     for builder in builders {
         let current = pressure_sample_matches_pin(expected_pressure, &expected_volume_uuid)?;
@@ -4563,8 +4597,9 @@ fn prune_domain_builder_on_device(
             );
         }
         let volume = daemon_state_volume(builder);
-        let projection = crate::docker::client::host_call(
+        let projection = crate::docker::client::host_call_at_endpoint(
             &crate::docker_lease::inspect_persistent_buildkit_volume_pressure_args(&volume),
+            &domain.endpoint,
         )
         .with_context(|| format!("inspect BuildKit pressure volume {volume}"))?;
         let mountpoint = crate::docker_lease::attest_persistent_buildkit_volume_mountpoint(
@@ -4595,11 +4630,9 @@ fn prune_domain_builder_on_device(
                 if !pressure_predicate(&before) {
                     return Ok(0);
                 }
-                let state = crate::docker::Docker::host()
-                    .inspect_exit(id)
-                    .with_context(|| {
-                        format!("inspect BuildKit daemon {daemon} before pressure prune")
-                    })?;
+                let state = domain.docker().inspect_exit(id).with_context(|| {
+                    format!("inspect BuildKit daemon {daemon} before pressure prune")
+                })?;
                 if state.status != Some(crate::docker::client::ContainerState::Running) {
                     anyhow::bail!("BuildKit daemon {daemon} stopped before pressure prune");
                 }
@@ -4623,9 +4656,12 @@ fn prune_domain_builder_on_device(
                         }
                         let buildctl_result = (|| {
                             domain.validate_current()?;
-                            crate::docker::client::host_call(&buildctl_prune_args(id))
-                                .with_context(|| format!("prune BuildKit cache in {daemon}"))
-                                .map(|_| ())
+                            crate::docker::client::host_call_at_endpoint(
+                                &buildctl_prune_args(id),
+                                &domain.endpoint,
+                            )
+                            .with_context(|| format!("prune BuildKit cache in {daemon}"))
+                            .map(|_| ())
                         })();
                         let docker_root_after = docker_root_pin.revalidate();
                         let mountpoint_after = pressure_mountpoint_matches_pin(
@@ -4760,8 +4796,8 @@ fn pressure_mountpoint_matches_device(
 fn trusted_host_docker_root_for_pressure(domain: &PersistentBuildKitDomain) -> Result<PathBuf> {
     #[cfg(target_os = "linux")]
     {
-        let endpoint = crate::docker::engine::resolve_docker_endpoint()
-            .context("resolve local Docker Engine for pressure reclaim")?;
+        domain.validate_current()?;
+        let endpoint = &domain.endpoint;
         let identity = crate::docker::engine::daemon_identity_blocking(&endpoint.socket)
             .context("read local Docker Engine identity for pressure reclaim")?;
         if identity.id != domain.engine_id {
@@ -4827,11 +4863,14 @@ fn trusted_host_docker_root_for_pressure(domain: &PersistentBuildKitDomain) -> R
         }
         drop(stream);
 
-        let info = crate::docker::client::host_call(&[
-            "info".to_owned(),
-            "--format".to_owned(),
-            "{{.ID}}\n{{json .DockerRootDir}}".to_owned(),
-        ])
+        let info = crate::docker::client::host_call_at_endpoint(
+            &[
+                "info".to_owned(),
+                "--format".to_owned(),
+                "{{.ID}}\n{{json .DockerRootDir}}".to_owned(),
+            ],
+            &domain.endpoint,
+        )
         .context("read Docker Engine root for pressure reclaim")?;
         let mut lines = info.lines();
         let engine_id = lines.next().context("Docker info omitted Engine ID")?;
@@ -5172,7 +5211,7 @@ pub(crate) fn reap_idle_builders(
         Some(&domain.token),
         now,
         || registered_domain_builders(&registry_root, &domain.token),
-        running_container_names,
+        || running_container_names(&domain.endpoint),
         |builder| {
             let _lock = crate::docker_lease::lock_host_volume_name_for_domain(
                 domain,
@@ -5180,7 +5219,7 @@ pub(crate) fn reap_idle_builders(
             )?;
             Ok(())
         },
-        |daemon| crate::docker::Docker::host().inspect_exit(daemon),
+        |daemon| domain.docker().inspect_exit(daemon),
         |builder| stop_builder_in_domain(domain, builder),
         |builder| start_builder_in_domain(domain, builder),
         |builder| remove_builder(domain, builder),
@@ -5683,9 +5722,9 @@ fn container_list_args() -> Vec<String> {
 /// successful empty listing legitimately repairs everything (no containers,
 /// no live jobs). Stopped corpses are absent by design and release their
 /// cross-slot holds here.
-fn running_container_names() -> Result<BTreeSet<String>> {
+fn running_container_names(endpoint: &crate::docker::DockerEndpoint) -> Result<BTreeSet<String>> {
     let args = container_list_args();
-    let listed = crate::docker::client::host_call(&args)?;
+    let listed = crate::docker::client::host_call_at_endpoint(&args, endpoint)?;
     Ok(listed
         .lines()
         .map(str::trim)

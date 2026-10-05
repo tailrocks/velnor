@@ -6496,7 +6496,10 @@ fn recover_pending_buildkit_create_for_setup_with_volume_lock(
         &crate::buildkit::PendingBuildKitCreateAccess,
     ) -> Result<VolumeOperationLocks>,
 ) -> Result<Option<String>> {
-    let mut transport = HostPendingBuildKitRecoveryTransport { host_socket };
+    let mut transport = HostPendingBuildKitRecoveryTransport {
+        host_socket,
+        endpoint: domain.endpoint.clone(),
+    };
     recover_pending_buildkit_create_for_setup_with_volume_lock_and_transport(
         policy,
         domain,
@@ -6595,7 +6598,10 @@ fn recover_pending_buildkit_create_under_gate(
     config_fingerprint: &str,
     recovery: PersistentBuilderRecoveryAdmission,
 ) -> Result<Option<String>> {
-    let mut transport = HostPendingBuildKitRecoveryTransport { host_socket };
+    let mut transport = HostPendingBuildKitRecoveryTransport {
+        host_socket,
+        endpoint: domain.endpoint.clone(),
+    };
     recover_pending_buildkit_create_under_gate_with_volume_lock(
         policy,
         domain,
@@ -6627,6 +6633,7 @@ trait PendingBuildKitRecoveryTransport {
 #[cfg(unix)]
 struct HostPendingBuildKitRecoveryTransport<'a> {
     host_socket: &'a Path,
+    endpoint: crate::docker::DockerEndpoint,
 }
 
 #[cfg(unix)]
@@ -6644,7 +6651,7 @@ impl PendingBuildKitRecoveryTransport for HostPendingBuildKitRecoveryTransport<'
     }
 
     fn start_container(&mut self, container_id: &str) -> Result<()> {
-        crate::docker::Docker::host()
+        crate::docker::Docker::host_at_endpoint(self.endpoint.clone())
             .container_start(container_id)
             .map(|_| ())
     }
@@ -9696,23 +9703,26 @@ impl DockerLeaseGuard {
             &config_fingerprint,
             |volume| lock_host_volume_name_for_domain(domain, volume),
             || {
+                domain.validate_current()?;
                 let endpoint = crate::docker::engine::resolve_docker_endpoint()
                     .context("resolve Docker Engine for readiness migration")?;
-                if endpoint.socket != self.host_socket {
+                if endpoint != domain.endpoint || endpoint.socket != self.host_socket {
                     bail!("Docker endpoint changed during BuildKit readiness migration");
                 }
-                let engine_id = crate::docker::engine::daemon_identity_blocking(&self.host_socket)
-                    .map(|identity| identity.id)
-                    .filter(|identity| !identity.trim().is_empty())
-                    .context("Docker Engine ID is unavailable during readiness migration")?;
+                let engine_id =
+                    crate::docker::engine::daemon_identity_blocking(&domain.endpoint.socket)
+                        .map(|identity| identity.id)
+                        .filter(|identity| !identity.trim().is_empty())
+                        .context("Docker Engine ID is unavailable during readiness migration")?;
                 if engine_id != domain.engine_id {
                     bail!("Docker Engine changed during BuildKit readiness migration");
                 }
                 Ok(())
             },
             |builder, volume, container_id| {
-                let volume_output = crate::docker::client::host_call(
+                let volume_output = crate::docker::client::host_call_at_endpoint(
                     &inspect_persistent_buildkit_volume_args(volume),
+                    &domain.endpoint,
                 )
                 .with_context(|| format!("inspect legacy BuildKit state volume {volume}"))?;
                 attest_persistent_buildkit_volume_identity(&volume_output, volume, &domain.token)?;
@@ -9737,7 +9747,8 @@ impl DockerLeaseGuard {
                 {
                     bail!("legacy BuildKit container does not match its exact domain/config");
                 }
-                let state = crate::docker::Docker::host()
+                let state = domain
+                    .docker()
                     .inspect_exit(container_id)
                     .context("inspect legacy BuildKit container state")?;
                 if state.status != Some(crate::docker::client::ContainerState::Running) {
@@ -9745,7 +9756,7 @@ impl DockerLeaseGuard {
                 }
                 Ok(())
             },
-            crate::buildkit::wait_for_attested_buildkit_ready,
+            |id| crate::buildkit::wait_for_attested_buildkit_ready(id, &domain.endpoint),
         )?;
         crate::buildkit::recover_starting_builder_in_domain(domain, builder, &config_fingerprint)?;
         let volume = crate::buildkit::daemon_state_volume(builder);
@@ -11564,7 +11575,7 @@ fn observe_persistent_bootstrap_response_fenced(
     status: u16,
     body: &[u8],
     request_fence: Option<(&str, u64)>,
-    mut inspect: impl FnMut(&str) -> Result<(u16, Vec<u8>)>,
+    inspect: impl FnMut(&str) -> Result<(u16, Vec<u8>)>,
     mut start_conflict: impl FnMut(&DockerLeasePolicy, &str, Option<(&str, u64)>) -> Result<()>,
 ) -> Result<()> {
     observe_persistent_bootstrap_response_fenced_with_binding(

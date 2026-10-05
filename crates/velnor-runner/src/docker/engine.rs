@@ -502,6 +502,31 @@ pub(crate) fn configure_host_docker_command(
     Ok(())
 }
 
+/// Configure a command for an operation whose Engine was already selected by
+/// a durable owner. Domain-bound work must never resolve ambient Docker
+/// configuration again between validation and dispatch: the selected context
+/// can change while the operation is in flight. Global endpoint overrides
+/// are rejected here, and the retained local Unix endpoint is copied into the
+/// child environment so a later context switch cannot redirect this command.
+pub(crate) fn configure_host_docker_command_at_endpoint(
+    command: &mut std::process::Command,
+    args: &[String],
+    endpoint: &DockerEndpoint,
+) -> Result<()> {
+    let options = parse_global_options(args)?;
+    if options.host.is_some() || options.context.is_some() || options.config.is_some() {
+        bail!("domain-bound Docker commands may not override their retained endpoint");
+    }
+    command
+        .env("DOCKER_HOST", endpoint.host.clone())
+        .env_remove("DOCKER_CONTEXT")
+        .env_remove("DOCKER_CONFIG")
+        .env_remove("DOCKER_TLS")
+        .env_remove("DOCKER_TLS_VERIFY")
+        .env_remove("DOCKER_CERT_PATH");
+    Ok(())
+}
+
 pub(crate) fn socket_path() -> Result<PathBuf> {
     #[cfg(test)]
     #[allow(
@@ -2746,6 +2771,64 @@ mod tests {
         .unwrap();
         assert_eq!(endpoint.source, DockerEndpointSource::Context);
         assert_ne!(endpoint.socket, PathBuf::from("/tmp/environment.sock"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_host_command_cannot_follow_a_later_ambient_context_switch() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-pinned-docker-command-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let capture = root.join("effective-endpoint.txt");
+        let docker = root.join("docker");
+        std::fs::write(
+            &docker,
+            "#!/bin/sh\nprintf '%s\\n' \"${DOCKER_HOST-<unset>}\" \"${DOCKER_CONTEXT-<unset>}\" \"${DOCKER_CONFIG-<unset>}\" \"${DOCKER_TLS-<unset>}\" \"${DOCKER_TLS_VERIFY-<unset>}\" \"${DOCKER_CERT_PATH-<unset>}\" > \"$CAPTURE\"\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&docker).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&docker, permissions).unwrap();
+
+        let endpoint_a =
+            DockerEndpoint::from_host("unix:///tmp/engine-a.sock", DockerEndpointSource::Default)
+                .unwrap();
+        // Model a process whose ambient context moved to B after domain
+        // selection. The retained command must replace all endpoint-routing
+        // inputs with the already selected local endpoint A.
+        let mut command = std::process::Command::new(&docker);
+        command
+            .env("CAPTURE", &capture)
+            .env("DOCKER_HOST", "unix:///tmp/engine-b.sock")
+            .env("DOCKER_CONTEXT", "engine-b-context")
+            .env("DOCKER_CONFIG", "/tmp/engine-b-config")
+            .env("DOCKER_TLS", "1")
+            .env("DOCKER_TLS_VERIFY", "1")
+            .env("DOCKER_CERT_PATH", "/tmp/engine-b-certs");
+        configure_host_docker_command_at_endpoint(&mut command, &[], &endpoint_a).unwrap();
+        let status = command.status().unwrap();
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read_to_string(&capture).unwrap(),
+            "unix:///tmp/engine-a.sock\n<unset>\n<unset>\n<unset>\n<unset>\n<unset>\n"
+        );
+
+        let mut override_command = std::process::Command::new(&docker);
+        assert!(configure_host_docker_command_at_endpoint(
+            &mut override_command,
+            &["--context".to_owned(), "engine-b-context".to_owned()],
+            &endpoint_a,
+        )
+        .is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn inspect_body() -> &'static str {
