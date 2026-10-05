@@ -9184,30 +9184,124 @@ pub fn force_remove_job_owned_containers(
     Ok(())
 }
 
-pub fn reclaim_orphan_jobs(mut docker: impl FnMut(&[String]) -> Result<String>) -> Result<()> {
-    #[cfg(unix)]
-    let host_socket = crate::docker::engine::resolve_docker_endpoint()
-        .context("resolve Docker endpoint for orphan-volume lock")?
-        .socket;
-    #[cfg(unix)]
-    let mut volume_locks = BTreeMap::new();
-    let mut call = |args: &[String]| {
-        #[cfg(unix)]
-        if let Some(volume) = host_volume_mutation_target(args)
-            && !volume_locks.contains_key(volume)
-        {
-            volume_locks.insert(
-                volume.to_owned(),
-                lock_host_volume_name(&host_socket, volume)?,
-            );
-        }
-        docker(args)
-    };
-    let formatted = call(&list_owned_job_format_args())?;
-    for job_id in docker_client::orphan_job_ids(&formatted) {
-        reclaim_stale_job_owned(&job_id, &mut call)?;
+trait OrphanJobCleanupTransport {
+    fn endpoint(&self) -> &crate::docker::DockerEndpoint;
+    fn call(&mut self, args: &[String]) -> Result<String>;
+    fn lock_volume(&mut self, volume: &str) -> Result<VolumeOperationLocks>;
+}
+
+/// One endpoint-bound host transport for the entire orphan cleanup pass.
+/// Inventory, revalidation, inspect, removal, and the volume-name lock all
+/// derive from this retained endpoint; a later context/environment switch
+/// cannot split the proof and mutation across daemons.
+struct PinnedOrphanJobCleanupTransport {
+    endpoint: crate::docker::DockerEndpoint,
+}
+
+impl PinnedOrphanJobCleanupTransport {
+    fn resolve() -> Result<Self> {
+        let endpoint = crate::docker::engine::resolve_docker_endpoint()
+            .context("resolve Docker endpoint for orphan-job cleanup")?;
+        Ok(Self { endpoint })
     }
-    reclaim_orphan_job_buildkit(&formatted, None, &mut call)
+}
+
+impl OrphanJobCleanupTransport for PinnedOrphanJobCleanupTransport {
+    fn endpoint(&self) -> &crate::docker::DockerEndpoint {
+        &self.endpoint
+    }
+
+    fn call(&mut self, args: &[String]) -> Result<String> {
+        crate::docker::client::host_call_at_endpoint(args, &self.endpoint)
+    }
+
+    fn lock_volume(&mut self, volume: &str) -> Result<VolumeOperationLocks> {
+        #[cfg(unix)]
+        {
+            lock_host_volume_name(&self.endpoint.socket, volume)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = volume;
+            Ok(VolumeOperationLocks::default())
+        }
+    }
+}
+
+#[cfg(test)]
+struct TestOrphanJobCleanupTransport<F> {
+    endpoint: crate::docker::DockerEndpoint,
+    docker: F,
+}
+
+#[cfg(test)]
+impl<F> OrphanJobCleanupTransport for TestOrphanJobCleanupTransport<F>
+where
+    F: FnMut(&[String]) -> Result<String>,
+{
+    fn endpoint(&self) -> &crate::docker::DockerEndpoint {
+        &self.endpoint
+    }
+
+    fn call(&mut self, args: &[String]) -> Result<String> {
+        (self.docker)(args)
+    }
+
+    fn lock_volume(&mut self, _volume: &str) -> Result<VolumeOperationLocks> {
+        Ok(VolumeOperationLocks::default())
+    }
+}
+
+pub fn reclaim_orphan_jobs() -> Result<()> {
+    let mut transport = PinnedOrphanJobCleanupTransport::resolve()?;
+    reclaim_orphan_jobs_with_transport(&mut transport, None)
+}
+
+#[cfg(test)]
+pub(crate) fn test_orphan_cleanup_endpoint() -> crate::docker::DockerEndpoint {
+    crate::docker::DockerEndpoint {
+        host: "unix:///tmp/velnor-orphan-cleanup-test.sock".into(),
+        socket: PathBuf::from("/tmp/velnor-orphan-cleanup-test.sock"),
+        source: crate::docker::DockerEndpointSource::Default,
+        context: None,
+    }
+}
+
+#[cfg(test)]
+struct ContextSwitchingOrphanCleanupTransport {
+    endpoint: crate::docker::DockerEndpoint,
+    ambient_engine: &'static str,
+    dispatched: Vec<(&'static str, String, Vec<String>)>,
+}
+
+#[cfg(test)]
+impl OrphanJobCleanupTransport for ContextSwitchingOrphanCleanupTransport {
+    fn endpoint(&self) -> &crate::docker::DockerEndpoint {
+        &self.endpoint
+    }
+
+    fn call(&mut self, args: &[String]) -> Result<String> {
+        self.dispatched.push((
+            self.ambient_engine,
+            self.endpoint.host.clone(),
+            args.to_vec(),
+        ));
+        Ok(String::new())
+    }
+
+    fn lock_volume(&mut self, _volume: &str) -> Result<VolumeOperationLocks> {
+        self.ambient_engine = "engine-b";
+        Ok(VolumeOperationLocks::default())
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reclaim_orphan_jobs_with(
+    endpoint: crate::docker::DockerEndpoint,
+    docker: impl FnMut(&[String]) -> Result<String>,
+) -> Result<()> {
+    let mut transport = TestOrphanJobCleanupTransport { endpoint, docker };
+    reclaim_orphan_jobs_with_transport(&mut transport, None)
 }
 
 /// Daemon-scoped variant of [`reclaim_orphan_jobs`] for daemon startup: only
@@ -9216,34 +9310,76 @@ pub fn reclaim_orphan_jobs(mut docker: impl FnMut(&[String]) -> Result<String>) 
 /// boot to reclaim precreated job-environment containers (and their guest
 /// siblings) orphaned by a drain/restart — previously only manual `doctor`
 /// runs reclaimed them (tailrocks/velnor#311).
-pub fn reclaim_daemon_orphan_jobs(
+pub fn reclaim_daemon_orphan_jobs(daemon_id: &str) -> Result<()> {
+    let mut transport = PinnedOrphanJobCleanupTransport::resolve()?;
+    reclaim_orphan_jobs_with_transport(&mut transport, Some(daemon_id))
+}
+
+#[cfg(test)]
+pub(crate) fn reclaim_daemon_orphan_jobs_with(
     daemon_id: &str,
-    mut docker: impl FnMut(&[String]) -> Result<String>,
+    endpoint: crate::docker::DockerEndpoint,
+    docker: impl FnMut(&[String]) -> Result<String>,
 ) -> Result<()> {
-    #[cfg(unix)]
-    let host_socket = crate::docker::engine::resolve_docker_endpoint()
-        .context("resolve Docker endpoint for daemon-orphan volume lock")?
-        .socket;
-    #[cfg(unix)]
+    let mut transport = TestOrphanJobCleanupTransport { endpoint, docker };
+    reclaim_orphan_jobs_with_transport(&mut transport, Some(daemon_id))
+}
+
+fn reclaim_orphan_jobs_with_transport(
+    transport: &mut impl OrphanJobCleanupTransport,
+    daemon_id: Option<&str>,
+) -> Result<()> {
+    let endpoint = transport.endpoint().clone();
     let mut volume_locks = BTreeMap::new();
     let mut call = |args: &[String]| {
-        #[cfg(unix)]
-        if let Some(volume) = host_volume_mutation_target(args)
-            && !volume_locks.contains_key(volume)
-        {
-            volume_locks.insert(
-                volume.to_owned(),
-                lock_host_volume_name(&host_socket, volume)?,
-            );
-        }
-        docker(args)
+        call_orphan_job_cleanup_transport(transport, &endpoint, &mut volume_locks, args)
     };
-    let formatted = call(&list_daemon_owned_job_format_args())?;
-    for job_id in docker_client::daemon_orphan_job_ids(&formatted, daemon_id) {
-        reclaim_stale_job_owned(&job_id, &mut call)?;
+    let job_inventory = match daemon_id {
+        Some(_) => list_daemon_owned_job_format_args(),
+        None => list_owned_job_format_args(),
+    };
+    let formatted = call(&job_inventory)?;
+    match daemon_id {
+        Some(daemon_id) => {
+            for job_id in docker_client::daemon_orphan_job_ids(&formatted, daemon_id) {
+                reclaim_stale_job_owned(&job_id, &mut call)?;
+            }
+            let live = docker_client::live_daemon_job_ids(&formatted, daemon_id);
+            reclaim_orphan_job_buildkit_with_live(&live, Some(daemon_id), &mut call)
+        }
+        None => {
+            for job_id in docker_client::orphan_job_ids(&formatted) {
+                reclaim_stale_job_owned(&job_id, &mut call)?;
+            }
+            reclaim_orphan_job_buildkit(&formatted, None, &mut call)
+        }
     }
-    let live = docker_client::live_daemon_job_ids(&formatted, daemon_id);
-    reclaim_orphan_job_buildkit_with_live(&live, Some(daemon_id), &mut call)
+}
+
+fn call_orphan_job_cleanup_transport(
+    transport: &mut impl OrphanJobCleanupTransport,
+    endpoint: &crate::docker::DockerEndpoint,
+    volume_locks: &mut BTreeMap<String, VolumeOperationLocks>,
+    args: &[String],
+) -> Result<String> {
+    if transport.endpoint() != endpoint {
+        bail!("Docker endpoint changed during orphan cleanup; refusing dispatch");
+    }
+    #[cfg(unix)]
+    if let Some(volume) = host_volume_mutation_target(args)
+        && !volume_locks.contains_key(volume)
+    {
+        volume_locks.insert(volume.to_owned(), transport.lock_volume(volume)?);
+    }
+    // Lock acquisition is a meaningful boundary: refuse to dispatch if a
+    // transport implementation changed its selected endpoint while taking
+    // the name lock. The production transport is immutable, and its call
+    // method always uses the retained endpoint rather than ambient Docker
+    // context/environment.
+    if transport.endpoint() != endpoint {
+        bail!("Docker endpoint changed while acquiring orphan cleanup lock; refusing dispatch");
+    }
+    transport.call(args)
 }
 
 pub fn reclaim_unlabeled_testcontainers(
@@ -13501,6 +13637,36 @@ fn normalize_chunked_request_header(header: &[u8], body_len: usize) -> Result<Ve
 mod tests {
     use super::*;
     use anyhow::anyhow;
+
+    #[cfg(unix)]
+    #[test]
+    fn orphan_cleanup_dispatch_stays_on_retained_endpoint_after_context_switch_at_lock() {
+        let endpoint = test_orphan_cleanup_endpoint();
+        let mut transport = ContextSwitchingOrphanCleanupTransport {
+            endpoint: endpoint.clone(),
+            ambient_engine: "engine-a",
+            dispatched: Vec::new(),
+        };
+        let mut volume_locks = BTreeMap::new();
+
+        call_orphan_job_cleanup_transport(
+            &mut transport,
+            &endpoint,
+            &mut volume_locks,
+            &remove_volume_args(&["buildx_buildkit_velnor-builder-dead0_state".into()]),
+        )
+        .unwrap();
+
+        assert_eq!(transport.ambient_engine, "engine-b");
+        assert_eq!(
+            transport.dispatched,
+            vec![(
+                "engine-b",
+                endpoint.host.clone(),
+                remove_volume_args(&["buildx_buildkit_velnor-builder-dead0_state".into()]),
+            )]
+        );
+    }
 
     #[test]
     fn job_network_guard_defused_drop_is_noop() {
@@ -19573,7 +19739,7 @@ velnor-job-dead\tvelnor-job-dead\texited
             String::new(),
             String::new(),
         ];
-        reclaim_orphan_jobs(|args| {
+        reclaim_orphan_jobs_with(test_orphan_cleanup_endpoint(), |args| {
             calls.push(args.to_vec());
             if outputs.is_empty() {
                 return Err(anyhow!("unexpected docker call {args:?}"));
@@ -19815,7 +19981,7 @@ unlabeled\tbuildx_buildkit_velnor-builder-unlabeled0\tvelnor-job-unlabeled\t\tcr
             "velnor-job-live\tvelnor-job-live\trunning\nvelnor-job-dead\tvelnor-job-dead\texited\n"
                 .to_string(),
         ];
-        reclaim_orphan_jobs(|args| {
+        reclaim_orphan_jobs_with(test_orphan_cleanup_endpoint(), |args| {
             calls.push(args.to_vec());
             if outputs.is_empty() {
                 return Err(anyhow!("unexpected docker call {args:?}"));
@@ -20121,7 +20287,7 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
             String::new(),
             String::new(),
         ];
-        reclaim_daemon_orphan_jobs(daemon, |args| {
+        reclaim_daemon_orphan_jobs_with(daemon, test_orphan_cleanup_endpoint(), |args| {
             calls.push(args.to_vec());
             if outputs.is_empty() {
                 return Err(anyhow!("unexpected docker call {args:?}"));
