@@ -104,6 +104,8 @@ pub(crate) struct RepoGenerationConfig {
     #[serde(default)]
     renovate: RenovateSection,
     #[serde(default)]
+    docs: DocsSection,
+    #[serde(default)]
     units: Vec<UnitSection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     static_files: Vec<StaticFileSection>,
@@ -292,6 +294,37 @@ pub(crate) struct ReleaseSection {
     artifact_path: Option<String>,
     description: Option<String>,
     manifest_schema: Option<String>,
+}
+
+/// The documentation-site contract a repository declares for itself. Every
+/// value is consumer-owned: the site address, the built output directory, the
+/// path filters that feed the reuse digest, and the commands that build and
+/// check the site. The generator renders only the pipeline structure — the
+/// event-split gates, the artifact-reuse lookups, the bounded deploy retry,
+/// and the failure reporting — never an address, mapping, or content rule.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DocsSection {
+    enabled: Option<bool>,
+    reason: Option<String>,
+    site_url: Option<String>,
+    site_dir: Option<String>,
+    sitemap_path: Option<String>,
+    schedule: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    build_commands: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_link_commands: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    site_link_commands: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spell_commands: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verify_commands: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    external_link_commands: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    docs_paths: Option<Vec<String>>,
 }
 
 /// One verification unit the repository adds to, or overrides in, the scanned
@@ -495,6 +528,60 @@ impl ReleaseSection {
 
     pub(crate) fn manifest_schema(&self) -> Option<&str> {
         self.manifest_schema.as_deref()
+    }
+}
+
+impl DocsSection {
+    pub(crate) fn enabled(&self) -> Option<bool> {
+        self.enabled
+    }
+
+    pub(crate) fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
+    }
+
+    pub(crate) fn site_url(&self) -> Option<&str> {
+        self.site_url.as_deref()
+    }
+
+    pub(crate) fn site_dir(&self) -> Option<&str> {
+        self.site_dir.as_deref()
+    }
+
+    pub(crate) fn sitemap_path(&self) -> Option<&str> {
+        self.sitemap_path.as_deref()
+    }
+
+    pub(crate) fn schedule(&self) -> Option<&str> {
+        self.schedule.as_deref()
+    }
+
+    pub(crate) fn build_commands(&self) -> &[String] {
+        self.build_commands.as_deref().unwrap_or(&[])
+    }
+
+    pub(crate) fn source_link_commands(&self) -> &[String] {
+        self.source_link_commands.as_deref().unwrap_or(&[])
+    }
+
+    pub(crate) fn site_link_commands(&self) -> &[String] {
+        self.site_link_commands.as_deref().unwrap_or(&[])
+    }
+
+    pub(crate) fn spell_commands(&self) -> &[String] {
+        self.spell_commands.as_deref().unwrap_or(&[])
+    }
+
+    pub(crate) fn verify_commands(&self) -> &[String] {
+        self.verify_commands.as_deref().unwrap_or(&[])
+    }
+
+    pub(crate) fn external_link_commands(&self) -> &[String] {
+        self.external_link_commands.as_deref().unwrap_or(&[])
+    }
+
+    pub(crate) fn docs_paths(&self) -> Option<&[String]> {
+        self.docs_paths.as_deref()
     }
 }
 
@@ -803,6 +890,11 @@ impl RepoGenerationConfig {
         &self.renovate
     }
 
+    /// The declared documentation-site contract.
+    pub(crate) fn docs(&self) -> &DocsSection {
+        &self.docs
+    }
+
     /// The declared unit rows, in the order the config declares them.
     pub(crate) fn units(&self) -> &[UnitSection] {
         &self.units
@@ -942,6 +1034,7 @@ impl RepoGenerationConfig {
         validate_static_files(&self.static_files)?;
         self.validate_release()?;
         self.validate_renovate()?;
+        self.validate_docs()?;
         Ok(())
     }
 
@@ -1616,6 +1709,105 @@ pub(crate) fn validate_renovate_config_path(config: &str) -> Result<(), Generato
     Ok(())
 }
 
+/// A `[docs]` schedule is a 5-field cron expression, like the Renovate writer.
+pub(crate) fn validate_docs_cron(schedule: &str) -> Result<(), GeneratorError> {
+    let fields = schedule.split_whitespace().collect::<Vec<_>>();
+    if fields.len() != 5 {
+        return Err(GeneratorError::usage(format!(
+            "[docs] schedule must be a 5-field cron expression, found `{schedule}`"
+        )));
+    }
+    Ok(())
+}
+
+/// A `[docs]` site URL is the consumer-owned deployed address: an `https://`
+/// URL without whitespace or control characters.
+pub(crate) fn validate_docs_site_url(site_url: &str) -> Result<(), GeneratorError> {
+    let valid = site_url.starts_with("https://")
+        && site_url.len() > "https://".len()
+        && !site_url
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control());
+    if !valid {
+        return Err(GeneratorError::usage(format!(
+            "[docs] site_url must be an `https://` URL without whitespace, found `{site_url}`"
+        )));
+    }
+    Ok(())
+}
+
+/// A `[docs]` command renders verbatim into one workflow `run:` block, so it
+/// must be a single non-empty line without control characters.
+pub(crate) fn validate_docs_command(command: &str, field: &str) -> Result<(), GeneratorError> {
+    if command.is_empty()
+        || command.contains(['\n', '\r'])
+        || command
+            .chars()
+            .any(|character| character.is_control() && !character.is_whitespace())
+        || command.trim().is_empty()
+    {
+        return Err(GeneratorError::usage(format!(
+            "[docs] {field} must hold single-line shell commands, found an empty or multi-line entry"
+        )));
+    }
+    Ok(())
+}
+
+/// A `[docs]` repository path (output directory, sitemap) stays inside the
+/// repository: relative, no traversal, no separators that escape it.
+pub(crate) fn validate_docs_path(path: &str, field: &str) -> Result<(), GeneratorError> {
+    if !is_contained_repository_path(path) {
+        return Err(GeneratorError::usage(format!(
+            "[docs] {field} must be a repository-relative path without traversal, found `{path}`"
+        )));
+    }
+    Ok(())
+}
+
+/// Every `[docs]` command table holds single-line shell commands. The table
+/// shape is one loop so a new stage cannot forget its own validation.
+fn validate_docs_command_table(docs: &DocsSection) -> Result<(), GeneratorError> {
+    for (field, commands) in [
+        ("build_commands", docs.build_commands()),
+        ("source_link_commands", docs.source_link_commands()),
+        ("site_link_commands", docs.site_link_commands()),
+        ("spell_commands", docs.spell_commands()),
+        ("verify_commands", docs.verify_commands()),
+        ("external_link_commands", docs.external_link_commands()),
+    ] {
+        for command in commands {
+            validate_docs_command(command, field)?;
+        }
+    }
+    Ok(())
+}
+
+/// The `[docs]` stage rules: at least one local check, and the schedule and
+/// the scheduled-external check come together or not at all.
+fn validate_docs_stages(docs: &DocsSection) -> Result<(), GeneratorError> {
+    let checks = docs.source_link_commands().len()
+        + docs.site_link_commands().len()
+        + docs.spell_commands().len();
+    if checks == 0 {
+        return Err(GeneratorError::usage(
+            "[docs] enabled = true requires at least one local check: `source_link_commands`, `site_link_commands`, or `spell_commands`",
+        ));
+    }
+    match (
+        !docs.external_link_commands().is_empty(),
+        docs.schedule(),
+    ) {
+        (true, Some(schedule)) => validate_docs_cron(schedule),
+        (true, None) => Err(GeneratorError::usage(
+            "[docs] external_link_commands requires `schedule`, the cron that runs the scheduled-external live-link check",
+        )),
+        (false, Some(_)) => Err(GeneratorError::usage(
+            "[docs] schedule without external_link_commands runs nothing; declare the scheduled-external check or drop the schedule",
+        )),
+        (false, None) => Ok(()),
+    }
+}
+
 /// A `kind` the renderer does not implement has no rendered `release.yml`: it
 /// is accepted only from a repository that renders its own publisher verbatim
 /// as a `static-workflow` row, and is a configuration error anywhere else.
@@ -1758,6 +1950,61 @@ impl RepoGenerationConfig {
             RELEASE_KINDS.join(", "),
             crate::RELEASE_WORKFLOW
         )))
+    }
+
+    fn validate_docs(&self) -> Result<(), GeneratorError> {
+        let docs = &self.docs;
+        if docs.enabled != Some(true) {
+            return Ok(());
+        }
+        if docs.reason.as_deref().unwrap_or_default().is_empty() {
+            return Err(GeneratorError::usage(
+                "[docs] enabled = true requires `reason` documenting why this repository publishes a documentation site",
+            ));
+        }
+        if !self.declare.iter().any(|row| {
+            row.primitive() == crate::primitives::DOCS_SITE
+                && row.file.as_deref() == Some(crate::primitives::docs_site::DOCS_SITE_FILE)
+        }) {
+            return Err(GeneratorError::usage(
+                "[docs] enabled = true requires `[[declare]] primitive = \"docs-site\" file = \"docs.yml\"`",
+            ));
+        }
+        let site_url = docs.site_url.as_deref().unwrap_or_default();
+        validate_docs_site_url(site_url)?;
+        let site_dir = docs.site_dir.as_deref().unwrap_or_default();
+        if site_dir.is_empty() {
+            return Err(GeneratorError::usage(
+                "[docs] enabled = true requires `site_dir`, the built site directory the pipeline uploads to Pages",
+            ));
+        }
+        validate_docs_path(site_dir, "site_dir")?;
+        if let Some(sitemap) = docs.sitemap_path.as_deref() {
+            validate_docs_path(sitemap, "sitemap_path")?;
+        }
+        let build = docs.build_commands.as_deref().unwrap_or(&[]);
+        if build.is_empty() {
+            return Err(GeneratorError::usage(
+                "[docs] enabled = true requires `build_commands`, the consumer-owned site build",
+            ));
+        }
+        validate_docs_command_table(docs)?;
+        validate_docs_stages(docs)?;
+        if let Some(paths) = docs.docs_paths.as_deref() {
+            for pattern in paths {
+                if pattern.is_empty() {
+                    return Err(GeneratorError::usage(
+                        "[docs] docs_paths must not contain an empty pattern",
+                    ));
+                }
+                if globset::Glob::new(pattern).is_err() {
+                    return Err(GeneratorError::usage(format!(
+                        "[docs] docs_paths is not a valid glob: {pattern}"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2767,6 +3014,140 @@ mod tests {
             )
             .err(),
             "unknown renovate field must fail",
+        );
+        assert!(error.contains("unknown field"), "{error}");
+    }
+
+    const DOCS_DECLARE: &str = "[[declare]]\nprimitive = \"docs-site\"\nfile = \"docs.yml\"\n";
+
+    fn docs_config_text(body: &str) -> String {
+        format!(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[docs]\nenabled = true\n{body}\n{DOCS_DECLARE}",
+        )
+    }
+
+    fn validate_docs_text(body: &str) -> Result<(), crate::GeneratorError> {
+        let root = scanned_root("docs-validate-config");
+        let shape = shape_for(&root);
+        let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
+        let outcome =
+            config_for(&docs_config_text(body)).validate(&unit_ids, &[], &BTreeSet::new());
+        let _ = fs::remove_dir_all(root);
+        outcome
+    }
+
+    #[test]
+    fn docs_enabled_requires_declare_row() {
+        let root = scanned_root("docs-declare-config");
+        let shape = shape_for(&root);
+        let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
+        let error = must_fail(
+            config_for(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [docs]\nenabled = true\nreason = \"test\"\nsite_url = \"https://docs.example.com\"\n\
+                 site_dir = \"site\"\nbuild_commands = [\"mise run docs:build\"]\n\
+                 spell_commands = [\"mise run docs:spell\"]\n",
+            )
+            .validate(&unit_ids, &[], &BTreeSet::new()),
+            "enabled docs without declare must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("[[declare]] primitive = \"docs-site\""),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn docs_enabled_requires_reason_address_build_and_a_check() {
+        let without_reason = must_fail(
+            validate_docs_text(
+                "site_url = \"https://docs.example.com\"\nsite_dir = \"site\"\n\
+                 build_commands = [\"mise run docs:build\"]\nspell_commands = [\"mise run docs:spell\"]\n",
+            ),
+            "enabled docs without reason must fail",
+        );
+        assert!(
+            without_reason.to_string().contains("reason"),
+            "{without_reason}"
+        );
+        let without_check = must_fail(
+            validate_docs_text(
+                "reason = \"test\"\nsite_url = \"https://docs.example.com\"\nsite_dir = \"site\"\n\
+                 build_commands = [\"mise run docs:build\"]\n",
+            ),
+            "enabled docs without a local check must fail",
+        );
+        assert!(
+            without_check
+                .to_string()
+                .contains("at least one local check"),
+            "{without_check}"
+        );
+        let bad_url = must_fail(
+            validate_docs_text(
+                "reason = \"test\"\nsite_url = \"http://docs.example.com\"\nsite_dir = \"site\"\n\
+                 build_commands = [\"mise run docs:build\"]\nspell_commands = [\"mise run docs:spell\"]\n",
+            ),
+            "enabled docs with a non-https site_url must fail",
+        );
+        assert!(bad_url.to_string().contains("site_url"), "{bad_url}");
+    }
+
+    #[test]
+    fn docs_schedule_and_external_check_come_together() {
+        let external_without_schedule = must_fail(
+            validate_docs_text(
+                "reason = \"test\"\nsite_url = \"https://docs.example.com\"\nsite_dir = \"site\"\n\
+                 build_commands = [\"mise run docs:build\"]\nspell_commands = [\"mise run docs:spell\"]\n\
+                 external_link_commands = [\"mise run docs:check-live\"]\n",
+            ),
+            "external links without a schedule must fail",
+        );
+        assert!(
+            external_without_schedule.to_string().contains("schedule"),
+            "{external_without_schedule}"
+        );
+        let schedule_without_external = must_fail(
+            validate_docs_text(
+                "reason = \"test\"\nsite_url = \"https://docs.example.com\"\nsite_dir = \"site\"\n\
+                 schedule = \"17 4 * * *\"\nbuild_commands = [\"mise run docs:build\"]\n\
+                 spell_commands = [\"mise run docs:spell\"]\n",
+            ),
+            "a schedule without external links must fail",
+        );
+        assert!(
+            schedule_without_external
+                .to_string()
+                .contains("without external_link_commands"),
+            "{schedule_without_external}"
+        );
+    }
+
+    #[test]
+    fn docs_complete_contract_validates() {
+        must(
+            validate_docs_text(
+                "reason = \"test\"\nsite_url = \"https://docs.example.com\"\nsite_dir = \"site\"\n\
+                 schedule = \"17 4 * * *\"\nbuild_commands = [\"mise run docs:build\"]\n\
+                 spell_commands = [\"mise run docs:spell\"]\n\
+                 external_link_commands = [\"mise run docs:check-live\"]\n",
+            ),
+            "a complete docs contract validates",
+        );
+    }
+
+    #[test]
+    fn docs_unknown_field_fails_closed() {
+        let error = must_some_error(
+            toml::from_str::<RepoGenerationConfig>(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [docs]\nenabled = true\nreason = \"test\"\nunknown = true\n",
+            )
+            .err(),
+            "unknown docs field must fail",
         );
         assert!(error.contains("unknown field"), "{error}");
     }

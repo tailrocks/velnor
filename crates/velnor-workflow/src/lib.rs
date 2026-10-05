@@ -791,6 +791,27 @@ struct ReleaseSpec {
     pub(crate) manifest_schema: String,
 }
 
+/// The documentation-site contract the `docs-site` primitive renders. Every
+/// field is consumer-owned configuration: the deployed address, the built
+/// output directory, the reuse-digest path filters, and the commands that
+/// build and check the site. Generation-time only, like the Renovate spec:
+/// it never enters the runtime `project.toml`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct DocsSpec {
+    pub(crate) reason: String,
+    pub(crate) site_url: String,
+    pub(crate) site_dir: String,
+    pub(crate) sitemap_path: String,
+    pub(crate) schedule: Option<String>,
+    pub(crate) build_commands: Vec<String>,
+    pub(crate) source_link_commands: Vec<String>,
+    pub(crate) site_link_commands: Vec<String>,
+    pub(crate) spell_commands: Vec<String>,
+    pub(crate) verify_commands: Vec<String>,
+    pub(crate) external_link_commands: Vec<String>,
+    pub(crate) docs_paths: Vec<String>,
+}
+
 /// Evidence produced by the read-only repository analysis pass.
 ///
 /// This deliberately records both detected capabilities and the boundary of
@@ -844,6 +865,9 @@ pub struct ProjectConfig {
     pub(crate) renovate_enabled: bool,
     pub(crate) renovate_reason: String,
     pub(crate) renovate: Option<RenovateSpec>,
+    pub(crate) docs_enabled: bool,
+    pub(crate) docs_reason: String,
+    pub(crate) docs: Option<DocsSpec>,
     pub(crate) units: Vec<Unit>,
     pub(crate) workflow_templates: BTreeMap<String, String>,
     pub(crate) adopted_workflow_surface: bool,
@@ -1789,6 +1813,7 @@ fn apply_generation_config(
     }
     apply_release(config, generation.release());
     apply_renovate(config, generation.renovate(), root)?;
+    apply_docs(config, generation.docs())?;
     apply_unit_rows(config, generation.units());
     materialize_capability_commands(config, root)?;
     read_static_files(config, generation.static_files(), root)?;
@@ -1896,6 +1921,85 @@ fn apply_renovate(
         cache: renovate.cache().unwrap_or(true),
     });
     Ok(())
+}
+
+/// The documentation-site contract a repository declares. `enabled` and
+/// `reason` are the recorded decision; the rest is the contract the
+/// `docs-site` primitive renders from. Like Renovate, the spec exists only
+/// when enabled: disabled repositories render no `docs.yml`.
+fn apply_docs(
+    config: &mut ProjectConfig,
+    docs: &config::DocsSection,
+) -> Result<(), GeneratorError> {
+    if let Some(enabled) = docs.enabled() {
+        config.docs_enabled = enabled;
+    }
+    if let Some(reason) = docs.reason() {
+        reason.clone_into(&mut config.docs_reason);
+    }
+    if docs.enabled() != Some(true) {
+        return Ok(());
+    }
+    let site_url = docs.site_url().unwrap_or_default().to_owned();
+    config::validate_docs_site_url(&site_url)?;
+    let site_dir = docs.site_dir().unwrap_or_default().to_owned();
+    config::validate_docs_path(&site_dir, "site_dir")?;
+    let sitemap_path = docs.sitemap_path().unwrap_or("sitemap.xml").to_owned();
+    config::validate_docs_path(&sitemap_path, "sitemap_path")?;
+    for (field, commands) in [
+        ("build_commands", docs.build_commands()),
+        ("source_link_commands", docs.source_link_commands()),
+        ("site_link_commands", docs.site_link_commands()),
+        ("spell_commands", docs.spell_commands()),
+        ("verify_commands", docs.verify_commands()),
+        ("external_link_commands", docs.external_link_commands()),
+    ] {
+        for command in commands {
+            config::validate_docs_command(command, field)?;
+        }
+    }
+    if docs.build_commands().is_empty() {
+        return Err(GeneratorError::usage(
+            "[docs] enabled = true requires `build_commands`, the consumer-owned site build",
+        ));
+    }
+    let schedule = match docs.schedule() {
+        Some(schedule) => {
+            config::validate_docs_cron(schedule)?;
+            Some(schedule.to_owned())
+        }
+        None => None,
+    };
+    let docs_paths = match docs.docs_paths() {
+        Some(paths) if !paths.is_empty() => paths.to_vec(),
+        _ => default_docs_paths(),
+    };
+    config.docs = Some(DocsSpec {
+        reason: config.docs_reason.clone(),
+        site_url,
+        site_dir,
+        sitemap_path,
+        schedule,
+        build_commands: docs.build_commands().to_vec(),
+        source_link_commands: docs.source_link_commands().to_vec(),
+        site_link_commands: docs.site_link_commands().to_vec(),
+        spell_commands: docs.spell_commands().to_vec(),
+        verify_commands: docs.verify_commands().to_vec(),
+        external_link_commands: docs.external_link_commands().to_vec(),
+        docs_paths,
+    });
+    Ok(())
+}
+
+/// The generic reuse-digest path filters: Markdown sources plus the
+/// conventional docs inputs. A repository that keeps its prose elsewhere
+/// declares `[docs] docs_paths` instead.
+fn default_docs_paths() -> Vec<String> {
+    vec![
+        "**/*.md".to_owned(),
+        "mkdocs.yml".to_owned(),
+        "docs/**".to_owned(),
+    ]
 }
 
 /// The release contract a repository declares. `enabled` and `reason` are the
@@ -2285,7 +2389,8 @@ fn package_update_owner_blocks(config: &ProjectConfig) -> Vec<String> {
 /// runner can ever match: labels are a declared input, never a generator
 /// default.
 fn validate_runner_labels(config: &ProjectConfig) -> Result<(), GeneratorError> {
-    let self_hosted = config.runners != RunnerMode::Github && !config.units.is_empty();
+    let self_hosted =
+        config.runners != RunnerMode::Github && (!config.units.is_empty() || config.docs.is_some());
     if self_hosted && config.velnor_labels.is_empty() {
         return Err(GeneratorError::usage("the generated surface renders a self-hosted lane with no runner labels; declare `velnor_labels` under `[workflow]` in .github-gen/velnor-workflow.toml".to_string()));
     }
@@ -4911,6 +5016,7 @@ fn generated_files_with_surface(
                     "renovate-validate.yml" => {
                         primitives::renovate::renovate_validate_content(&config)
                     }
+                    "docs.yml" => generated_docs_site(&config),
                     "ci-runtime-products.yml" => generated_runtime_products(&config),
                     _ => None,
                 }
@@ -5031,6 +5137,10 @@ fn generated_release(config: &ProjectConfig) -> Option<String> {
 
 fn generated_runtime_products(config: &ProjectConfig) -> Option<String> {
     primitives::runtime_products::runtime_products_content(config)
+}
+
+fn generated_docs_site(config: &ProjectConfig) -> Option<String> {
+    primitives::docs_site::docs_site_content(config)
 }
 
 fn render_actionlint_config(config: &ProjectConfig) -> String {
@@ -7958,6 +8068,9 @@ mod tests {
             renovate_enabled: false,
             renovate_reason: String::new(),
             renovate: None,
+            docs_enabled: false,
+            docs_reason: String::new(),
+            docs: None,
             units: Vec::new(),
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: true,
@@ -13194,6 +13307,9 @@ channel = "stable"
             renovate_enabled: false,
             renovate_reason: String::new(),
             renovate: None,
+            docs_enabled: false,
+            docs_reason: String::new(),
+            docs: None,
             units: vec![
                 unit("a", format!("sleep 0.2; printf a >> {marker}"), Vec::new()),
                 unit("b", format!("printf b >> {marker}"), Vec::new()),
