@@ -677,6 +677,7 @@ mod tests {
             renovate_enabled: false,
             renovate_reason: String::new(),
             renovate: None,
+            maintenance: crate::MaintenanceSpec::default(),
             units: vec![unit()],
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
