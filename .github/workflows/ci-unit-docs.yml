@@ -106,6 +106,10 @@ on:
         required: false
         type: boolean
         default: false
+      candidate_publish:
+        required: false
+        type: boolean
+        default: false
       apple_executor:
         required: false
         type: boolean
@@ -126,14 +130,6 @@ on:
         required: false
         type: string
         default: ""
-      source_sha:
-        required: false
-        type: string
-        default: ""
-      command_digest:
-        required: false
-        type: string
-        default: ""
 
 jobs:
   verify-github-hosted:
@@ -141,14 +137,6 @@ jobs:
     if: ${{ inputs.provider == 'github-hosted' && contains(inputs.selected_units, format('"unit_id":"{0}"', inputs.unit)) && (true) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    env:
-          CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ inputs.base_sha }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'push' && github.event.after || github.event_name == 'workflow_dispatch' && github.sha || github.event_name == 'schedule' && github.sha }}
-          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
     steps:
       - name: Mark CI job start
         if: always()
@@ -167,13 +155,58 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.head_sha }}
-      - name: Set up Velnor workflow runtime
-        id: runtime
-        uses: ./.github/actions/setup-velnor-workflow
+      - name: Record unit dependencies
+        env:
+          UNIT_ID: ${{ inputs.unit }}
+          UNIT_DEPENDENCIES: ${{ inputs.unit_dependencies }}
+          UNIT_ADMISSION: ${{ inputs.unit_admission }}
+          UNIT_PROVIDER: ${{ inputs.provider }}
+        run: |
+          {
+            echo '## Unit dependencies'
+            echo
+            echo "- Unit: $UNIT_ID"
+            echo "- Provider: $UNIT_PROVIDER"
+            echo "- Admission: $UNIT_ADMISSION"
+            if [[ -z "$UNIT_DEPENDENCIES" ]]; then
+              echo '- Dependencies: none'
+            else
+              echo "- Dependencies: $UNIT_DEPENDENCIES"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Download Velnor workflow runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          rev: 45ba3841fe9fbbfa0cbdfcfd81d1667a9ab3e7b2
-      - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=45ba3841fe9fbbfa0cbdfcfd81d1667a9ab3e7b2" >> "$GITHUB_ENV"
+          name: velnor-workflow-runtime-45ba3841fe9fbbfa0cbdfcfd81d1667a9ab3e7b2-${{ runner.os }}-${{ runner.arch }}
+          path: .velnor-workflow-runtime
+      - name: Verify Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: 45ba3841fe9fbbfa0cbdfcfd81d1667a9ab3e7b2
+        run: |
+          set -euo pipefail
+          manifest=.velnor-workflow-runtime/manifest.json
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$")) and (.policy_binary_sha256 | test("^[0-9a-f]{64}$")) and (.closure | test("^[0-9a-f]{64}$")) and (.policy_closure | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          expected="$(jq -er '.binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+          expected="$(jq -er '.policy_binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow-policy | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::policy runtime digest mismatch" >&2; exit 1; }
+      - name: Add Velnor workflow runtime to PATH
+        shell: bash
+        env:
+          EXPECTED_REVISION: 45ba3841fe9fbbfa0cbdfcfd81d1667a9ab3e7b2
+        run: |
+          set -euo pipefail
+          home="$RUNNER_TEMP/velnor-workflow-runtime-artifact"
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$home/bin/velnor-workflow"
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy "$home/bin/velnor-workflow-policy"
+          expected_closure="$(jq -er '.policy_closure' .velnor-workflow-runtime/manifest.json)"
+          reported="$("$home/bin/velnor-workflow-policy" --closure)"
+          [[ "$reported" == "$expected_closure" ]] || { echo "::error::policy runtime reports closure $reported, expected $expected_closure" >&2; exit 1; }
+          echo "$home/bin" >> "$GITHUB_PATH"
+          echo "VELNOR_WORKFLOW_PINNED_BINARY=$home/bin/velnor-workflow-policy" >> "$GITHUB_ENV"
       - name: Mark runner setup end
         if: always()
         run: |
@@ -267,6 +300,12 @@ jobs:
           fi
       - name: Run unit checks
         env:
+          CI_SCOPE: ${{ inputs.scope }}
+          CI_UNIT_ID: ${{ inputs.unit }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
@@ -327,11 +366,6 @@ jobs:
         env:
           VELNOR_RESULT_UNIT: ${{ inputs.unit }}
           VELNOR_RESULT_LANE: github-hosted
-          VELNOR_RESULT_SOURCE_SHA: ${{ inputs.source_sha }}
-          VELNOR_RESULT_PLAN_DIGEST: ${{ inputs.plan_digest }}
-          VELNOR_RESULT_PLATFORM: ${{ inputs.unit_platform }}
-          VELNOR_RESULT_TRUST: ${{ inputs.unit_trust }}
-          VELNOR_RESULT_COMMAND_DIGEST: ${{ inputs.command_digest }}
           VELNOR_RESULT_OUTCOME: ${{ job.status }}
         shell: bash
         run: |
@@ -341,24 +375,8 @@ jobs:
             cancelled) outcome=cancelled ;;
             *) outcome=failure ;;
           esac
-          test "$VELNOR_RESULT_COMMAND_DIGEST" != "" || { echo "::error::missing command identity for $VELNOR_RESULT_UNIT" >&2; exit 1; }
           mkdir -p .velnor-ci-results
-          jq -n \
-            --arg repository_id "$GITHUB_REPOSITORY" \
-            --arg source_sha "$VELNOR_RESULT_SOURCE_SHA" \
-            --arg audited_sha "$HEAD_SHA" \
-            --arg base_sha "$BASE_SHA" \
-            --arg run_id "$GITHUB_RUN_ID" \
-            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
-            --arg plan_digest "$VELNOR_RESULT_PLAN_DIGEST" \
-            --arg unit_id "$VELNOR_RESULT_UNIT" \
-            --arg provider "$VELNOR_RESULT_LANE" \
-            --arg platform "$VELNOR_RESULT_PLATFORM" \
-            --arg trust "$VELNOR_RESULT_TRUST" \
-            --arg command_digest "$VELNOR_RESULT_COMMAND_DIGEST" \
-            --arg outcome "$outcome" \
-            '{results: [{identity: {repository_id: $repository_id, source_sha: $source_sha, audited_sha: $audited_sha, base_sha: $base_sha, run_id: $run_id, run_attempt: $run_attempt, plan_digest: $plan_digest, unit_id: $unit_id, provider: $provider, platform: $platform, trust: $trust, command_digest: $command_digest}, outcome: $outcome}]}' \
-            > ".velnor-ci-results/result-$VELNOR_RESULT_UNIT-$VELNOR_RESULT_LANE.json"
+          jq -n --arg unit "$VELNOR_RESULT_UNIT" --arg lane "$VELNOR_RESULT_LANE" --arg outcome "$outcome" '{results: [{unit: $unit, lane: $lane, outcome: $outcome}]}' > ".velnor-ci-results/result-$VELNOR_RESULT_UNIT-$VELNOR_RESULT_LANE.json"
       - name: Upload unit result
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
