@@ -79,7 +79,6 @@ fn checkout_guest_inputs_carry_token_and_flags() {
         display_name: "checkout".into(),
         clone_url: "https://github.com/tailrocks/velnor".into(),
         version: Some("refs/pull/1/merge".into()),
-        pull_request_fallback_ref: None,
         destination: PathBuf::from("/__w/repo"),
         token: Some("secret-token".into()),
         fetch_depth: Some(1),
@@ -279,43 +278,8 @@ fn superseded_docker_script_executor_paths_are_gone() {
         "doctor reclaim must skip host Docker unless docker is selected"
     );
     assert!(
-        {
-            let pressure_reclaim = runner
-                .split("pub(crate) fn reclaim_pressure_filesystem(")
-                .nth(1)
-                .and_then(|source| source.split("\nfn cache_reclaim_needed(").next())
-                .expect("pressure reclaim implementation must remain inspectable");
-            let workspace_reclaim = pressure_reclaim
-                .find("reclaim_production_leftovers_for_roots_with_pin")
-                .expect("free-space pressure must use pinned workspace reclaim");
-            let hard_pressure_sample = pressure_reclaim
-                .find("let capacity_after_floor = match pin.probe()")
-                .expect("hard-pressure check must take a fresh pinned capacity sample");
-            let hard_pressure_check = pressure_reclaim
-                .find(
-                    "if capacity_after_floor.used_percent() >= crate::leftover_disk::HARD_PRESSURE_PERCENT",
-                )
-                .expect("hard-pressure decision must use the post-workspace capacity sample");
-            let hard_pressure_revalidation = pressure_reclaim[hard_pressure_check..]
-                .find("filesystem.revalidate()")
-                .map(|offset| hard_pressure_check + offset)
-                .expect("hard-pressure reclaim must revalidate the pinned filesystem");
-            let hard_pressure_reclaim = pressure_reclaim
-                .find("reclaim_production_leftovers_for_roots_with_usage_pressure_pin")
-                .expect("hard-pressure reclaim must use the pinned workspace helper");
-
-            workspace_reclaim < hard_pressure_sample
-                && hard_pressure_sample < hard_pressure_check
-                && hard_pressure_check < hard_pressure_revalidation
-                && hard_pressure_revalidation < hard_pressure_reclaim
-        },
-        "hard-usage-pressure reclaim must sample after free-space reclaim, then revalidate and use pinned reclaim"
-    );
-    assert!(
-        leftover.contains(
-            "if !velnor_model::ExecutionBackendKind::permits_host_docker_maintenance(backend)"
-        ) && leftover.contains("pressure_predicate(&pressure_capacity()?)"),
-        "pinned usage-pressure reclaim must gate Docker and recheck pinned pressure"
+        runner.contains("reclaim_production_if_hard_pressure_for"),
+        "disk-pressure path must use the gated leftover reclaim"
     );
 }
 

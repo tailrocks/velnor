@@ -135,7 +135,8 @@ fn full_lifecycle_holds_one_permit_until_confirmed_cleanup() {
     let mut ledger = PermitLedger::open(&ledger_path).unwrap();
     ledger.set_max_jobs(1).unwrap();
     ledger.begin_epoch().unwrap();
-    ledger.reconcile(&[]).unwrap();
+    assert_eq!(ledger.occupied().unwrap(), 0);
+    ledger.reconcile_attempts(&[]).unwrap();
 
     let allocator = ScaleSetAllocator::open(&ledger_path);
     let holder = permit_holder(7, 4242);
@@ -275,7 +276,7 @@ fn full_lifecycle_holds_one_permit_until_confirmed_cleanup() {
     worker
         .transition(&mut sink, ScaleSetWorkerState::PermitReleased)
         .unwrap();
-    guard.release();
+    guard.release().unwrap();
     // The permit is gone: the state dir (raw job logs) is deleted with it.
     supervision.release_state().unwrap();
     assert!(!state_dir.exists());
@@ -297,7 +298,8 @@ fn cleanup_failure_retains_permit_uncertain() {
     let mut ledger = PermitLedger::open(&ledger_path).unwrap();
     ledger.set_max_jobs(1).unwrap();
     ledger.begin_epoch().unwrap();
-    ledger.reconcile(&[]).unwrap();
+    assert_eq!(ledger.occupied().unwrap(), 0);
+    ledger.reconcile_attempts(&[]).unwrap();
 
     let allocator = ScaleSetAllocator::open(&ledger_path);
     let holder = permit_holder(7, 4242);

@@ -20,26 +20,55 @@ use crate::{
 /// stays reachable and survives any future `git gc` in the mirror.
 const WANTED_REF_PREFIX: &str = "refs/velnor";
 
-pub fn store_root(legacy_work_root: &Path, trust_scope: &str) -> PathBuf {
-    store_root_with_layout(
-        legacy_work_root,
-        trust_scope,
-        crate::storage::selected_or_resolved_layout().as_ref(),
+pub fn store_root(trust_scope: &str) -> Result<PathBuf> {
+    store_root_with_layout(trust_scope, None)
+}
+
+pub(crate) fn store_root_for_repository(
+    trust_scope: &str,
+    repository_key: &str,
+) -> Result<PathBuf> {
+    let layout = crate::storage::resolve_required_layout()?;
+    Ok(
+        crate::store_catalog::StoreCatalog::git_mirror_repository_root(
+            &layout,
+            trust_scope,
+            repository_key,
+        ),
+    )
+}
+
+#[cfg(test)]
+fn store_root_for_repository_with_layout(
+    trust_scope: &str,
+    repository_key: &str,
+    layout: &crate::storage::StorageLayout,
+) -> Result<PathBuf> {
+    Ok(
+        crate::store_catalog::StoreCatalog::git_mirror_repository_root(
+            layout,
+            trust_scope,
+            repository_key,
+        ),
     )
 }
 
 fn store_root_with_layout(
-    legacy_work_root: &Path,
     trust_scope: &str,
     layout: Option<&crate::storage::StorageLayout>,
-) -> PathBuf {
-    if let Some(layout) = layout {
-        layout.cache_class(trust_scope, "git-mirrors")
-    } else {
-        crate::storage::legacy_store_root(legacy_work_root, "_velnor_git")
-            .join(crate::trust_scope::filesystem_key(trust_scope))
-            .join("git-mirrors")
-    }
+) -> Result<PathBuf> {
+    let resolved;
+    let layout = match layout {
+        Some(layout) => layout,
+        None => {
+            resolved = crate::storage::resolve_required_layout()?;
+            &resolved
+        }
+    };
+    Ok(crate::store_catalog::StoreCatalog::git_mirrors_root(
+        layout,
+        trust_scope,
+    ))
 }
 
 /// Exactly what one job needs out of the mirror.
@@ -57,6 +86,10 @@ pub struct MirrorWant {
     pub full_history: bool,
     /// `fetch-tags: true`.
     pub tags: bool,
+    /// The validated original self-repository PR ref, when the caller asked
+    /// for its immutable commit SHA. If the server rejects that SHA, fetch
+    /// only this exact ref and still pin the requested SHA.
+    pub pull_request_fallback_ref: Option<String>,
 }
 
 impl MirrorWant {
@@ -88,14 +121,61 @@ impl MirrorWant {
     }
 
     /// Refspecs for servers that refuse a bare object id in a fetch request
-    /// (`uploadpack.allowAnySHA1InWant` off). Branches and tags carry the
-    /// commit instead.
-    fn fallback_refspecs(&self) -> Vec<String> {
-        vec![
-            "+refs/heads/*:refs/heads/*".to_string(),
-            "+refs/tags/*:refs/tags/*".to_string(),
-        ]
+    /// (`uploadpack.allowAnySHA1InWant` off). A PR commit falls back to that
+    /// exact self-repository PR ref; it must not broaden to all branches,
+    /// tags, or PR refs. Other commits retain the branch/tag fallback.
+    fn fallback_refspecs(&self) -> Result<Vec<String>> {
+        let mut refspecs = Vec::new();
+        if let Some(pull_ref) = self.pull_request_fallback_ref.as_deref() {
+            let (number, kind) = validated_pull_request_ref(pull_ref)?;
+            refspecs.push(format!(
+                "+{pull_ref}:refs/velnor/fallback/pull/{number}/{kind}"
+            ));
+        } else {
+            // Without a PR ref, a commit may only be reachable through a
+            // branch or tag. Keep that fallback for ordinary SHA checkouts.
+            refspecs.push("+refs/heads/*:refs/heads/*".to_string());
+            refspecs.push("+refs/tags/*:refs/tags/*".to_string());
+            return Ok(refspecs);
+        }
+        // A PR fallback must stay scoped to its exact ref unless the caller
+        // explicitly asked for the complete branch/tag set. Those requests
+        // are independent of the ref used to make the immutable SHA reachable.
+        if self.full_history {
+            refspecs.push("+refs/heads/*:refs/heads/*".to_string());
+        }
+        if self.full_history || self.tags {
+            refspecs.push("+refs/tags/*:refs/tags/*".to_string());
+        }
+        Ok(refspecs)
     }
+}
+
+pub(crate) fn validated_pull_request_ref(pull_ref: &str) -> Result<(u64, &'static str)> {
+    let mut parts = pull_ref.split('/');
+    let (Some("refs"), Some("pull"), Some(number), Some(kind), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        bail!("invalid self pull-request fallback ref {pull_ref:?}");
+    };
+    if !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        bail!("invalid self pull-request fallback ref {pull_ref:?}");
+    }
+    let number = number
+        .parse::<u64>()
+        .ok()
+        .filter(|number| *number > 0)
+        .context("pull-request fallback ref has an invalid number")?;
+    let kind = match kind {
+        "merge" => "merge",
+        "head" => "head",
+        _ => bail!("invalid self pull-request fallback ref {pull_ref:?}"),
+    };
+    Ok((number, kind))
 }
 
 /// A mirror that is known-good and known to contain the wanted commit.
@@ -498,12 +578,21 @@ fn fetch_want<R: CommandRunner>(
     }
     // The server refused a bare object id in the want list. Fetch the ref
     // universe the commit is reachable from instead, then pin it locally.
+    let fallback_refspecs = want.fallback_refspecs()?;
     let fallback = runner.run_with_env(
         "git",
-        &fetch_args(mirror, clone_url, &want.fallback_refspecs()),
+        &fetch_args(mirror, clone_url, &fallback_refspecs),
         &env,
     )?;
     ensure_success(fallback.code, "git mirror fetch", &fallback.stderr)?;
+    if want.pull_request_fallback_ref.is_some() && !object_exists(runner, mirror, &want.git_ref) {
+        bail!(
+            "exact pull-request ref did not provide requested commit {}",
+            want.git_ref
+        );
+    }
+    // `git_ref` remains the immutable run-service version. The fetched PR ref
+    // is only evidence that made its object reachable; never pin the PR tip.
     pin_wanted_ref(runner, mirror, want, &want.git_ref)
 }
 
@@ -555,50 +644,105 @@ fn is_object_id(value: &str) -> bool {
     (length == 40 || length == 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-/// Mirror identity. The host is part of the key: without it the same
-/// `owner/repo` on github.com and on a GHES instance shared one mirror and
-/// force-updated each other's refs.
+/// Collision-resistant identity for a checkout target. Persistent mirror roots
+/// are already partitioned by the job's canonical server-origin/repository-ID
+/// key; this second component distinguishes external checkout targets within
+/// that root. Only known GitHub URL aliases are normalized; generic transports,
+/// SSH users, and exact repository paths remain part of the identity.
 fn repository_store_name(clone_url: &str) -> Result<String> {
-    let (host, path) = clone_url_host_and_path(clone_url);
-    let components = path
-        .trim_end_matches('/')
-        .trim_end_matches(".git")
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    if components.len() < 2 {
+    let (origin, path) = clone_url_origin_and_path(clone_url)?;
+    // GitHub repository paths are case-insensitive. Preserve path case for
+    // other remotes: Git servers and local file paths may be case-sensitive.
+    // Only github.com has known transport and `.git` aliases, so generic
+    // remotes retain their exact transport, authority, and path spelling.
+    let github_origin = origin == "github.com";
+    let repository_path = if github_origin {
+        // HTTPS/SSH URL paths are absolute while GitHub's scp form is relative;
+        // collapse only that known alias boundary and trailing slash.
+        let normalized = path
+            .strip_prefix('/')
+            .unwrap_or(&path)
+            .trim_end_matches('/');
+        let mut components = normalized
+            .split('/')
+            .map(str::to_ascii_lowercase)
+            .collect::<Vec<_>>();
+        if components.iter().filter(|part| !part.is_empty()).count() < 2 {
+            bail!("cannot derive owner/repository identity from clone URL")
+        }
+        if let Some(last) = components.last_mut() {
+            *last = last.strip_suffix(".git").unwrap_or(last).to_string();
+        }
+        components.join("/")
+    } else {
+        if path.split('/').filter(|part| !part.is_empty()).count() < 2 {
+            bail!("cannot derive owner/repository identity from clone URL")
+        }
+        path
+    };
+    if repository_path.is_empty() {
         bail!("cannot derive owner/repository identity from clone URL")
     }
-    Ok(format!(
-        "{}__{}__{}",
-        sanitize_store_key(&host),
-        sanitize_store_key(components[components.len() - 2]),
-        sanitize_store_key(components[components.len() - 1])
-    ))
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"velnor-git-mirror-url-v2\0");
+    hasher.update(origin.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(repository_path.as_bytes());
+    Ok(format!("git-mirror-url-v2-{}", hasher.finalize().to_hex()))
 }
 
-/// Split a clone URL into its host and its repository path. `git@host:owner/repo.git`
-/// is not a URL, so it is split on the scp-style colon instead.
-fn clone_url_host_and_path(clone_url: &str) -> (String, String) {
-    if let Ok(url) = Url::parse(clone_url)
-        && let Some(host) = url.host_str()
-    {
-        let host = match url.port() {
-            Some(port) => format!("{host}_{port}"),
-            None => host.to_string(),
-        };
-        return (host, url.path().to_string());
+/// Split a clone URL into an identity origin and path. Known GitHub aliases
+/// share an origin; generic remotes retain their transport and SSH user.
+fn clone_url_origin_and_path(clone_url: &str) -> Result<(String, String)> {
+    if let Ok(url) = Url::parse(clone_url) {
+        if url.scheme() == "file" {
+            // A local file URL has no host (`file:///path`). Keep its scheme
+            // in the identity, and retain a UNC host when one is present.
+            let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+            return Ok((format!("file://{host}"), url.path().to_string()));
+        }
+        if let Some(host) = url.host_str().map(str::to_ascii_lowercase) {
+            let standard_github_ssh_port = url.scheme() == "ssh" && url.port() == Some(22);
+            if host == "github.com" && (url.port().is_none() || standard_github_ssh_port) {
+                return Ok(("github.com".to_string(), url.path().to_string()));
+            }
+            let host = if host.contains(':') {
+                format!("[{host}]")
+            } else {
+                host
+            };
+            let username = if url.scheme() == "ssh" && !url.username().is_empty() {
+                format!("{}@", url.username())
+            } else {
+                String::new()
+            };
+            let port = url
+                .port()
+                .map_or_else(String::new, |port| format!(":{port}"));
+            let origin = format!("{}://{username}{host}{port}", url.scheme());
+            return Ok((origin, url.path().to_string()));
+        }
     }
     if let Some((authority, path)) = clone_url.split_once(':')
         && !authority.contains('/')
         && !path.is_empty()
     {
-        let host = authority.rsplit('@').next().unwrap_or(authority);
+        let (username, host) = match authority.rsplit_once('@') {
+            Some((username, host)) => (Some(username), host),
+            None => (None, authority),
+        };
+        let host = host.to_ascii_lowercase();
         if !host.is_empty() {
-            return (host.to_string(), path.to_string());
+            let origin = if host == "github.com" {
+                "github.com".to_string()
+            } else {
+                let username = username.map_or_else(String::new, |username| format!("{username}@"));
+                format!("ssh://{username}{host}")
+            };
+            return Ok((origin, path.to_string()));
         }
     }
-    ("local".to_string(), clone_url.to_string())
+    bail!("cannot derive origin and repository path from clone URL")
 }
 
 fn path_arg(path: &Path) -> String {
@@ -645,16 +789,16 @@ mod tests {
             git_ref: git_ref.to_string(),
             full_history: false,
             tags: false,
+            pull_request_fallback_ref: None,
         }
     }
 
     #[test]
     fn mirror_roots_use_collision_resistant_trust_keys() {
-        let root = Path::new("/work");
         let layout = crate::storage::StorageLayout::from_prefix(Path::new("/storage"));
-        for layout in [None, Some(&layout)] {
-            let left = store_root_with_layout(root, "public/forks", layout);
-            let right = store_root_with_layout(root, "public_forks", layout);
+        {
+            let left = store_root_with_layout("public/forks", Some(&layout)).unwrap();
+            let right = store_root_with_layout("public_forks", Some(&layout)).unwrap();
             let left_key = crate::trust_scope::filesystem_key("public/forks");
             let right_key = crate::trust_scope::filesystem_key("public_forks");
             assert_ne!(left, right);
@@ -668,8 +812,69 @@ mod tests {
     }
 
     #[test]
+    fn repository_mirror_roots_use_the_shared_origin_and_id_key() {
+        let layout = crate::storage::StorageLayout::from_prefix(Path::new("/storage"));
+        // Display names and checkout path casing are absent from persistent
+        // root identity: a rename keeps one repo root, while the URL-hash leaf
+        // below it still attests each remote.
+        let renamed_or_case_alias =
+            crate::store_catalog::repository_store_key("HTTPS://GITHUB.COM:443/", "00042").unwrap();
+        let canonical =
+            crate::store_catalog::repository_store_key("https://github.com", "42").unwrap();
+        assert_eq!(renamed_or_case_alias, canonical);
+        let github = store_root_for_repository_with_layout("trusted", &canonical, &layout).unwrap();
+        let ghe_key =
+            crate::store_catalog::repository_store_key("https://ghe.acme.test", "42").unwrap();
+        let ghe = store_root_for_repository_with_layout("trusted", &ghe_key, &layout).unwrap();
+        assert_ne!(
+            github, ghe,
+            "equal repository IDs on different origins must separate"
+        );
+        assert!(github.ends_with(&canonical));
+    }
+
+    #[test]
+    fn pull_request_ref_number_must_contain_ascii_digits_only() {
+        assert_eq!(
+            validated_pull_request_ref("refs/pull/408/merge").unwrap(),
+            (408, "merge")
+        );
+        assert!(validated_pull_request_ref("refs/pull/+408/merge").is_err());
+        assert!(validated_pull_request_ref("refs/pull/-408/merge").is_err());
+        assert!(validated_pull_request_ref("refs/pull/４０８/merge").is_err());
+    }
+
+    #[test]
+    fn pull_request_fallback_preserves_only_requested_history_and_tags() {
+        let pull_ref = "+refs/pull/408/merge:refs/velnor/fallback/pull/408/merge";
+        let refspecs = |full_history, tags| {
+            MirrorWant {
+                git_ref: "a".repeat(40),
+                full_history,
+                tags,
+                pull_request_fallback_ref: Some("refs/pull/408/merge".to_string()),
+            }
+            .fallback_refspecs()
+            .unwrap()
+        };
+
+        assert_eq!(refspecs(false, false), vec![pull_ref.to_string()]);
+        assert_eq!(
+            refspecs(true, false),
+            vec![
+                pull_ref.to_string(),
+                "+refs/heads/*:refs/heads/*".to_string(),
+                "+refs/tags/*:refs/tags/*".to_string()
+            ]
+        );
+        assert_eq!(
+            refspecs(false, true),
+            vec![pull_ref.to_string(), "+refs/tags/*:refs/tags/*".to_string()]
+        );
+    }
+
+    #[test]
     fn encoded_scope_cannot_alias_an_old_mirror_directory() {
-        let work_root = Path::new("/work");
         let cache_root = Path::new("/cache/velnor/v1");
         let layout = crate::storage::StorageLayout {
             cache_root: cache_root.to_path_buf(),
@@ -679,28 +884,17 @@ mod tests {
             mode: "test",
         };
         let encoded_scope = crate::trust_scope::filesystem_key("trusted");
-        for current in [
-            store_root_with_layout(work_root, "trusted", None),
-            store_root_with_layout(work_root, "trusted", Some(&layout)),
-        ] {
-            let old_alias = if current.starts_with(work_root) {
-                work_root
-                    .join("_velnor_git")
-                    .join(crate::container::sanitize_store_key(&encoded_scope))
-                    .join("git-mirrors")
-            } else {
-                cache_root
-                    .join(crate::container::sanitize_store_key(&encoded_scope))
-                    .join("git-mirrors")
-            };
-            assert_eq!(
-                crate::container::sanitize_store_key(&encoded_scope),
-                encoded_scope
-            );
-            assert_ne!(current, old_alias);
-            assert!(!current.starts_with(&old_alias));
-            assert!(!old_alias.starts_with(&current));
-        }
+        let current = store_root_with_layout("trusted", Some(&layout)).unwrap();
+        let old_alias = cache_root
+            .join(crate::container::sanitize_store_key(&encoded_scope))
+            .join("git-mirrors");
+        assert_eq!(
+            crate::container::sanitize_store_key(&encoded_scope),
+            encoded_scope
+        );
+        assert_ne!(current, old_alias);
+        assert!(!current.starts_with(&old_alias));
+        assert!(!old_alias.starts_with(&current));
     }
 
     struct Fixture {
@@ -1002,6 +1196,178 @@ mod tests {
         );
     }
 
+    struct RejectBareShaFetch {
+        inner: ProcessCommandRunner,
+        fetches: Vec<Vec<String>>,
+    }
+
+    impl CommandRunner for RejectBareShaFetch {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            self.inner.run(program, args)
+        }
+
+        fn run_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+        ) -> Result<CommandResult> {
+            if program == "git" && args.iter().any(|arg| arg == "fetch") {
+                self.fetches.push(args.to_vec());
+                if self.fetches.len() == 1 {
+                    return Ok(CommandResult {
+                        code: 128,
+                        stdout: String::new(),
+                        stderr: "server refused direct object-id fetch".to_owned(),
+                    });
+                }
+            }
+            self.inner.run_with_env(program, args, env)
+        }
+    }
+
+    #[test]
+    fn rejected_pr_commit_fetch_retries_only_exact_original_ref_and_pins_requested_sha() {
+        let fixture = Fixture::new();
+        let requested_sha = fixture.commit("requested");
+        let mut seed_runner = ProcessCommandRunner;
+        assert_eq!(
+            seed_runner
+                .run(
+                    "git",
+                    &[
+                        "-C".into(),
+                        path_arg(&fixture.origin),
+                        "update-ref".into(),
+                        "refs/pull/408/merge".into(),
+                        requested_sha.clone(),
+                    ],
+                )
+                .unwrap()
+                .code,
+            0
+        );
+
+        let mut runner = RejectBareShaFetch {
+            inner: ProcessCommandRunner,
+            fetches: Vec::new(),
+        };
+        let mirror = ensure_mirror(
+            &mut runner,
+            &fixture.store,
+            &fixture.clone_url(),
+            None,
+            &MirrorWant {
+                git_ref: requested_sha.clone(),
+                full_history: false,
+                tags: false,
+                pull_request_fallback_ref: Some("refs/pull/408/merge".to_owned()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(mirror.sha, requested_sha);
+        assert_eq!(runner.fetches.len(), 2);
+        assert!(runner.fetches[0].iter().any(|arg| arg == &requested_sha));
+        let fallback = &runner.fetches[1];
+        assert!(fallback
+            .iter()
+            .any(|arg| { arg == "+refs/pull/408/merge:refs/velnor/fallback/pull/408/merge" }));
+        assert!(!fallback.iter().any(|arg| arg.contains("refs/heads/")
+            || arg.contains("refs/tags/")
+            || arg == "refs/pull/*"));
+        assert_eq!(
+            rev_parse(
+                &mut runner.inner,
+                &mirror.path,
+                &format!("refs/velnor/commits/{}", requested_sha)
+            ),
+            requested_sha,
+            "the mutable PR ref may provide reachability, but the requested SHA remains pinned"
+        );
+    }
+
+    #[test]
+    fn rejected_pr_commit_fetch_keeps_requested_full_history_and_tags() {
+        let fixture = Fixture::new();
+        let requested_sha = fixture.commit("requested");
+        let mut seed_runner = ProcessCommandRunner;
+        for args in [
+            vec![
+                "-C".into(),
+                path_arg(&fixture.work),
+                "tag".into(),
+                "v1".into(),
+            ],
+            vec![
+                "-C".into(),
+                path_arg(&fixture.work),
+                "push".into(),
+                path_arg(&fixture.origin),
+                "refs/tags/v1".into(),
+            ],
+            vec![
+                "-C".into(),
+                path_arg(&fixture.origin),
+                "update-ref".into(),
+                "refs/pull/408/merge".into(),
+                requested_sha.clone(),
+            ],
+        ] {
+            let result = seed_runner.run("git", &args).unwrap();
+            assert_eq!(result.code, 0, "{}", result.stderr);
+        }
+
+        let mut runner = RejectBareShaFetch {
+            inner: ProcessCommandRunner,
+            fetches: Vec::new(),
+        };
+        let mirror = ensure_mirror(
+            &mut runner,
+            &fixture.store,
+            &fixture.clone_url(),
+            None,
+            &MirrorWant {
+                git_ref: requested_sha.clone(),
+                full_history: true,
+                tags: false,
+                pull_request_fallback_ref: Some("refs/pull/408/merge".to_owned()),
+            },
+        )
+        .unwrap();
+
+        let fallback = &runner.fetches[1];
+        assert!(fallback
+            .iter()
+            .any(|arg| arg == "+refs/pull/408/merge:refs/velnor/fallback/pull/408/merge"));
+        assert!(fallback
+            .iter()
+            .any(|arg| arg == "+refs/heads/*:refs/heads/*"));
+        assert!(fallback.iter().any(|arg| arg == "+refs/tags/*:refs/tags/*"));
+        let refs = runner
+            .inner
+            .run(
+                "git",
+                &[
+                    "-C".into(),
+                    path_arg(&mirror.path),
+                    "for-each-ref".into(),
+                    "--format=%(refname)".into(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(refs.code, 0, "{}", refs.stderr);
+        assert!(refs
+            .stdout
+            .lines()
+            .any(|reference| reference == "refs/heads/master"));
+        assert!(refs
+            .stdout
+            .lines()
+            .any(|reference| reference == "refs/tags/v1"));
+        assert_eq!(mirror.sha, requested_sha);
+    }
+
     #[test]
     fn mirror_rebuilds_a_corrupt_object_store() {
         let fixture = Fixture::new();
@@ -1066,15 +1432,81 @@ mod tests {
     }
 
     #[test]
-    fn store_name_is_host_owner_and_repository_scoped() {
-        assert_eq!(
-            repository_store_name("https://github.com/Owner/Repo.git").unwrap(),
-            "github.com__Owner__Repo"
+    fn store_name_is_case_safe_for_the_same_origin_and_repository() {
+        let https = repository_store_name("https://github.com/Owner/Repo.git").unwrap();
+        let scp = repository_store_name("git@github.com:owner/repo.git").unwrap();
+        let renamed_case = repository_store_name("https://GITHUB.com/OWNER/REPO").unwrap();
+        assert_eq!(https, scp);
+        assert_eq!(https, renamed_case);
+        assert!(https.starts_with("git-mirror-url-v2-"));
+        assert_ne!(
+            https,
+            repository_store_name("https://github.com/other/repo.git").unwrap()
+        );
+        assert_ne!(
+            repository_store_name("file:///tmp/Owner/Repo.git").unwrap(),
+            repository_store_name("file:///tmp/owner/repo.git").unwrap(),
+            "local file paths can be case-sensitive"
+        );
+        assert_ne!(
+            repository_store_name("https://ghe.acme.test/Owner/Repo.git").unwrap(),
+            repository_store_name("https://ghe.acme.test/owner/repo.git").unwrap(),
+            "non-GitHub remotes may have case-sensitive repository paths"
+        );
+        assert_ne!(
+            repository_store_name("file:///tmp/acme/repo.git").unwrap(),
+            repository_store_name("file:///tmp/acme/repo").unwrap(),
+            "distinct local paths that differ by .git must not share a mirror"
+        );
+        assert_ne!(
+            repository_store_name("https://ghe.acme.test/acme/repo.git").unwrap(),
+            repository_store_name("https://ghe.acme.test/acme/repo").unwrap(),
+            "non-GitHub remotes may treat .git as part of the path"
         );
         assert_eq!(
-            repository_store_name("git@github.com:Owner/Repo.git").unwrap(),
-            "github.com__Owner__Repo"
+            repository_store_name("https://github.com/acme/repo.git").unwrap(),
+            repository_store_name("https://github.com/acme/repo").unwrap(),
+            "GitHub .git URLs and their aliases must share a mirror"
         );
+        assert_eq!(
+            repository_store_name("https://github.com/acme/repo.git").unwrap(),
+            repository_store_name("ssh://git@github.com/acme/repo.git").unwrap(),
+            "known GitHub HTTPS and SSH forms must share a mirror"
+        );
+        assert_eq!(
+            repository_store_name("https://github.com/acme/repo.git").unwrap(),
+            repository_store_name("git@github.com:acme/repo.git").unwrap(),
+            "known GitHub scp and URL forms must share a mirror"
+        );
+        assert_ne!(
+            repository_store_name("https://example.test/owner/repo.git").unwrap(),
+            repository_store_name("ssh://git@example.test/owner/repo.git").unwrap(),
+            "generic HTTPS and SSH remotes can address different repositories"
+        );
+        assert_ne!(
+            repository_store_name("git@example.test:owner/repo.git").unwrap(),
+            repository_store_name("other@example.test:owner/repo.git").unwrap(),
+            "generic SSH usernames can select different accounts or paths"
+        );
+        assert_ne!(
+            repository_store_name("git@example.test:owner/repo.git").unwrap(),
+            repository_store_name("git@example.test:/owner/repo.git").unwrap(),
+            "relative and absolute scp-style paths can resolve differently"
+        );
+        assert_ne!(
+            repository_store_name("git@example.test:owner/repo.git").unwrap(),
+            repository_store_name("git@example.test:owner//repo.git").unwrap(),
+            "empty path components must remain part of generic identities"
+        );
+    }
+
+    #[test]
+    fn repository_identity_accepts_hostless_local_file_urls() {
+        assert_eq!(
+            clone_url_origin_and_path("file:///tmp/acme/repo.git").unwrap(),
+            ("file://".to_string(), "/tmp/acme/repo.git".to_string())
+        );
+        assert!(repository_store_name("file:///tmp/acme/repo.git").is_ok());
     }
 
     #[test]

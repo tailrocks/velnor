@@ -7166,7 +7166,69 @@ mod tests {
 
         let lock_namespace = temp_root("buildkit-created-conflict-lock");
         std::fs::create_dir_all(&lock_namespace).unwrap();
-        let volume = "buildx_buildkit_builder0_state";
+        let domain = PersistentBuildKitDomain::from_identities(
+            &lock_namespace,
+            "conflict-wait-storage",
+            "conflict-wait-engine",
+        )
+        .unwrap();
+        let builder = persistent_builder_name_for_domain(
+            &domain.token,
+            "",
+            "conflict-wait",
+            TRUST_TIER_BRANCH,
+            Some("org/repo"),
+        );
+        let volume = daemon_state_volume(&builder);
+        let container_name = daemon_container_name(&builder);
+        let generation = 7;
+        let config_fingerprint = "no-config-v1";
+        let creator = begin_persistent_builder_creator_lease(
+            &domain,
+            &builder,
+            config_fingerprint,
+            generation,
+        )
+        .unwrap();
+        let expected_image_id = format!("sha256:{}", "a".repeat(64));
+        let expected_create_shape = serde_json::json!({
+            "name": container_name.clone(),
+            "volume": volume.clone(),
+            "image_id": expected_image_id.clone(),
+            "create": {},
+        });
+        let shape_digest = Sha256::digest(serde_json::to_vec(&expected_create_shape).unwrap())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        begin_pending_buildkit_create_transaction(
+            &domain,
+            PendingBuildKitCreateTransaction {
+                version: BUILDER_CREATE_TRANSACTION_VERSION,
+                transaction_id: uuid::Uuid::new_v4().to_string(),
+                engine_id: domain.engine_id.clone(),
+                domain_token: domain.token.clone(),
+                builder: builder.clone(),
+                generation,
+                config_fingerprint: config_fingerprint.to_owned(),
+                state_volume: volume.clone(),
+                container_name,
+                request_sha256: "0".repeat(64),
+                normalized_shape_sha256: shape_digest,
+                expected_create_shape,
+                expected_image_id,
+                expects_config: false,
+                phase: PendingBuildKitCreatePhase::Dispatched,
+                container_id: None,
+                attested_shape_sha256: None,
+                archived_config_fingerprint: None,
+            },
+        )
+        .unwrap();
+        let create_access =
+            pending_buildkit_create_access(&domain, &builder, config_fingerprint, generation)
+                .unwrap()
+                .unwrap();
         let policy = crate::docker_lease::DockerLeasePolicy::new_with_volume_lock_root(
             "conflict-wait-test",
             Some(lock_namespace.clone()),
@@ -7177,7 +7239,13 @@ mod tests {
         let ready = std::cell::Cell::new(0);
         let report = ensure_conflicting_builder_ready_with_attestation(
             "immutable-container-id",
-            || policy.lock_volume_names(&BTreeSet::from([volume.to_owned()])),
+            || {
+                policy.lock_volume_names_with_create_access(
+                    &BTreeSet::from([volume.clone()]),
+                    Some(&domain),
+                    Some(&create_access),
+                )
+            },
             || Ok(true),
             || Ok(Some("immutable-container-id".to_owned())),
             Duration::from_secs(1),
@@ -7185,7 +7253,7 @@ mod tests {
                 // This is the same Engine/volume flock that the winner's
                 // Docker POST /start must take before reaching dockerd.
                 let acquired =
-                    crate::docker_lease::try_lock_volume_name_at_for_test(&lock_namespace, volume)
+                    crate::docker_lease::try_lock_volume_name_at_for_test(&lock_namespace, &volume)
                         .unwrap();
                 assert!(
                     acquired.is_some(),
@@ -7219,6 +7287,7 @@ mod tests {
         assert_eq!(inspections.get(), 2);
         assert_eq!(starts.get(), 0, "the creator's start request wins");
         assert_eq!(ready.get(), 1);
+        drop(creator);
         std::fs::remove_dir_all(lock_namespace).unwrap();
     }
 

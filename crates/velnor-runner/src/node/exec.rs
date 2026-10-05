@@ -32,7 +32,7 @@ pub fn write_exec_config(
 }
 
 /// Load execution config. A serialized token is a bug; GITHUB_TOKEN comes from
-/// the process environment (job unit EnvironmentFile), never this file.
+/// the process environment, never this file.
 pub fn load_exec_config(dir: &Path) -> anyhow::Result<DaemonArgs> {
     let bytes = std::fs::read(dir.join(EXEC_FILE))?;
     if std::str::from_utf8(&bytes).is_ok_and(|text| text.contains("\"pat\"")) {

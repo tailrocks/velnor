@@ -8,9 +8,9 @@
 
 use std::{num::NonZeroU32, path::PathBuf};
 
-/// Default host location of the atomically activated release identity. Both the
-/// package scripts and the daemon `.service` units read from here, so the units
-/// can invoke `release verify-installed` with no arguments.
+/// Default host location of the atomically activated release identity. Package
+/// scripts, the service-entrypoint verifier, and `release verify-installed`
+/// share these paths so all package readers validate the same tuple.
 pub const ACTIVE_RELEASE_DIR: &str = "/var/lib/velnor/release";
 pub const ACTIVE_RECORD_PATH: &str = "/var/lib/velnor/release/active/record.json";
 pub const ACTIVE_DEPLOYED_PATH: &str = "/var/lib/velnor/release/active/deployed.json";
@@ -333,9 +333,10 @@ pub struct DaemonArgs {
     /// next to the operational state db.
     #[serde(default)]
     pub permit_ledger: Option<PathBuf>,
-    /// Scale-set lane config file (TOML). This must be paired with an
-    /// explicit `HostMode::Both` or `HostMode::ScaleSetOnly`; `None` disables
-    /// the lane and preserves the native-only default.
+    /// Scale-set lane config file (TOML). HostMode::Both or
+    /// HostMode::ScaleSetOnly starts the lane; in NativeOnly, the config
+    /// is read only to attest existing scale-set permit holders at startup.
+    /// None disables both the lane and that attestation.
     #[serde(default)]
     pub scale_set_config: Option<PathBuf>,
     pub trust_scope: String,

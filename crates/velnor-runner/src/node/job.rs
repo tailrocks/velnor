@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use anyhow::Context;
 use clap::Args;
 use velnor_control::journal::{Event, FleetState, Journal};
 use velnor_model::{Generation, JobId, SlotId, SlotPhase2};
@@ -20,6 +21,9 @@ pub struct JobArgs {
     /// Slot identity reserved by the controller for this worker generation.
     #[arg(long)]
     pub slot_id: Option<String>,
+    /// Per-process launch lease issued by the controller for this slot.
+    #[arg(long)]
+    pub pressure_launch_nonce: String,
     #[arg(long, default_value_t = 1)]
     pub generation: u64,
     #[arg(long)]
@@ -109,34 +113,69 @@ fn validate_slot_identity(
 }
 
 pub async fn run(args: JobArgs) -> anyhow::Result<()> {
-    std::fs::create_dir_all(&args.state_dir)?;
-    let mut journal = Journal::open(args.state_dir.join("journal.db"))?;
+    let package_guard = crate::release::package_execution_guard()?;
+    run_with_package_guard(args, package_guard).await
+}
+
+pub(crate) async fn run_with_package_guard(
+    args: JobArgs,
+    _package_guard: crate::release::PackageExecutionGuard,
+) -> anyhow::Result<()> {
+    let journal_path = args.state_dir.join("journal.db");
+    if !journal_path.is_file() {
+        anyhow::bail!("worker journal is missing at {}", journal_path.display());
+    }
     let job_id = JobId(args.job_id.clone());
     let generation = Generation(args.generation);
-    let state = journal.materialized_state()?;
     let slot_id = args
         .slot_id
         .as_deref()
         .map(|slot_id| SlotId(slot_id.to_owned()))
-        .or_else(|| {
-            state
-                .jobs
-                .iter()
-                .find(|job| job.job_id == job_id && job.generation == generation)
-                .map(|job| job.slot_id.clone())
-        })
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "worker {} has no generation-owned slot identity",
-                args.job_id
+            anyhow::anyhow!("worker {} has no launch-bound slot identity", args.job_id)
+        })?;
+    let service_instance = std::fs::canonicalize(&args.state_dir)
+        .with_context(|| {
+            format!(
+                "canonicalize worker service instance {}",
+                args.state_dir.display()
             )
-        })?;
+        })?
+        .to_string_lossy()
+        .into_owned();
+    let mut journal = Journal::open_for_launch(
+        &journal_path,
+        &service_instance,
+        &slot_id,
+        generation,
+        &args.pressure_launch_nonce,
+    )?;
+    let state = journal.materialized_state()?;
+    journal.validate_disk_pressure_launch(
+        &service_instance,
+        &slot_id,
+        generation,
+        &args.pressure_launch_nonce,
+    )?;
     let role = validate_slot_identity(&state, &job_id, &slot_id, generation)?;
+    crate::node::cleanup::write_owned_pid(
+        &args.state_dir,
+        &args.job_id,
+        generation.0,
+        std::process::id(),
+    )
+    .context("publish worker-owned process marker after lease validation")?;
     if role == WorkerRole::OwnedJob {
-        let started = journal.apply(Event::JobStarted {
-            job_id: job_id.clone(),
+        let started = journal.apply_with_disk_pressure_launch(
+            &service_instance,
+            &slot_id,
             generation,
-        })?;
+            &args.pressure_launch_nonce,
+            Event::JobStarted {
+                job_id: job_id.clone(),
+                generation,
+            },
+        )?;
         if started.rejected {
             anyhow::bail!(
                 "job {} start rejected at generation {}",
@@ -215,6 +254,22 @@ mod tests {
         ))
     }
 
+    fn test_service_instance(state_dir: &std::path::Path) -> String {
+        std::fs::canonicalize(state_dir)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn open_controller_test_journal(
+        state_dir: &std::path::Path,
+    ) -> velnor_control::store::StoreResult<Journal> {
+        Journal::open_for_service_instance(
+            state_dir.join("journal.db"),
+            &test_service_instance(state_dir),
+        )
+    }
+
     fn prime_ready_slots(journal: &mut Journal, scope: &str, count: u32) {
         for event in [
             Event::ControlLive,
@@ -264,14 +319,20 @@ mod tests {
     async fn pre_assignment_waiter_uses_ready_slot_without_job_record() {
         let dir = state_dir("waiter");
         std::fs::create_dir_all(&dir).unwrap();
-        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let mut journal = open_controller_test_journal(&dir).unwrap();
         prime_ready_slots(&mut journal, "waiter", 1);
+        let waiter = SlotId("waiter-1".to_owned());
+        let service_instance = test_service_instance(&dir);
+        let pressure_launch_nonce = journal
+            .issue_disk_pressure_launch(&service_instance, &waiter, Generation::INITIAL, 1)
+            .unwrap();
         drop(journal);
 
         run(JobArgs {
             state_dir: dir.clone(),
             job_id: "wait-waiter-1".to_owned(),
-            slot_id: Some("waiter-1".to_owned()),
+            slot_id: Some(waiter.0),
+            pressure_launch_nonce,
             generation: Generation::INITIAL.0,
             slot_index: None,
             scope: None,
@@ -293,7 +354,7 @@ mod tests {
     async fn stale_or_mismatched_slot_identity_is_rejected_before_start() {
         let dir = state_dir("reject");
         std::fs::create_dir_all(&dir).unwrap();
-        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let mut journal = open_controller_test_journal(&dir).unwrap();
         prime_ready_slots(&mut journal, "reject", 2);
         let job_id = JobId("job-1".to_owned());
         assert!(
@@ -322,12 +383,22 @@ mod tests {
                 .unwrap()
                 .rejected
         );
+        let service_instance = test_service_instance(&dir);
+        let valid_pressure_nonce = journal
+            .issue_disk_pressure_launch(
+                &service_instance,
+                &SlotId("reject-1".to_owned()),
+                Generation::INITIAL,
+                1,
+            )
+            .unwrap();
         drop(journal);
 
         let stale = run(JobArgs {
             state_dir: dir.clone(),
             job_id: job_id.0.clone(),
             slot_id: Some("reject-1".to_owned()),
+            pressure_launch_nonce: valid_pressure_nonce.clone(),
             generation: 2,
             slot_index: None,
             scope: None,
@@ -340,6 +411,7 @@ mod tests {
             state_dir: dir.clone(),
             job_id: job_id.0,
             slot_id: Some("reject-2".to_owned()),
+            pressure_launch_nonce: valid_pressure_nonce,
             generation: Generation::INITIAL.0,
             slot_index: None,
             scope: None,
@@ -347,6 +419,70 @@ mod tests {
         })
         .await;
         assert!(mismatch.is_err());
+
+        let state = Journal::open(dir.join("journal.db"))
+            .unwrap()
+            .load_state()
+            .unwrap();
+        assert_eq!(state.jobs[0].phase, JobPhase2::Assigned);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn stale_same_generation_launch_is_rejected_before_worker_side_effects() {
+        let dir = state_dir("stale-launch-nonce");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut journal = open_controller_test_journal(&dir).unwrap();
+        prime_ready_slots(&mut journal, "nonce", 1);
+        let service_instance = test_service_instance(&dir);
+        let slot_id = SlotId("nonce-1".to_owned());
+        let stale_nonce = journal
+            .issue_disk_pressure_launch(&service_instance, &slot_id, Generation::INITIAL, 1)
+            .unwrap();
+        let _current_nonce = journal
+            .issue_disk_pressure_launch(&service_instance, &slot_id, Generation::INITIAL, 2)
+            .unwrap();
+        let job_id = JobId("job-nonce-1".to_owned());
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntended {
+                    slot_id: slot_id.clone(),
+                    job_id: job_id.clone(),
+                    generation: Generation::INITIAL,
+                    message_id: "message-nonce-1".into(),
+                    run_service_url: "https://run.example/run".into(),
+                    intended_unix: 1,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobOwned {
+                    job_id: job_id.clone(),
+                    slot_id: slot_id.clone(),
+                    attempt: 1,
+                    generation: Generation::INITIAL,
+                    worker: "worker-nonce-1".to_owned(),
+                    accepted_unix: 1,
+                })
+                .unwrap()
+                .rejected
+        );
+        drop(journal);
+
+        let result = run(JobArgs {
+            state_dir: dir.clone(),
+            job_id: job_id.0,
+            slot_id: Some(slot_id.0),
+            pressure_launch_nonce: stale_nonce,
+            generation: Generation::INITIAL.0,
+            slot_index: None,
+            scope: None,
+            once: true,
+        })
+        .await;
+        assert!(result.is_err());
 
         let state = Journal::open(dir.join("journal.db"))
             .unwrap()
