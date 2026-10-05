@@ -3015,6 +3015,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     env:
       GHCR_IMAGE: ghcr.io/tailrocks/velnor-job-ubuntu
       VERSION: ${{ needs.verify.outputs.version }}
@@ -3128,6 +3130,8 @@ jobs:
           file: docker/job-ubuntu.Dockerfile
           platforms: ${{ matrix.platform }}
           push: true
+          provenance: true
+          sbom: true
           cache-from: |
             type=registry,ref=${{ env.GHCR_IMAGE }}:buildcache-${{ matrix.arch }}
             type=gha,scope=velnor-job-ubuntu-${{ matrix.arch }}
@@ -3244,6 +3248,10 @@ jobs:
               any(.manifest.manifests[]; .digest == $arm and .platform.architecture == "arm64")
             ' image-digests.json >/dev/null || {
               echo "::error::version tag does not reference both newly built platform digests" >&2
+              exit 1
+            }
+            [ "$(jq -r '[.manifest.manifests[] | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest")] | length' image-digests.json)" = "2" ] || {
+              echo "::error::version tag carries an unexpected platform set" >&2
               exit 1
             }
           fi

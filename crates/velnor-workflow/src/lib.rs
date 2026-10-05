@@ -789,6 +789,17 @@ struct ReleaseSpec {
     /// `release-manifest.json`. A consumer-contract value the repository
     /// declares; the generic renderer never invents one.
     pub(crate) manifest_schema: String,
+    /// The consumer-owned Dockerfile the `docker` publisher builds, relative
+    /// to the repository root. Empty selects the `Dockerfile` convention.
+    /// Generation-time only: pinned runtimes never consume it.
+    pub(crate) dockerfile: String,
+    /// The build context the `docker` publisher builds from, relative to the
+    /// repository root. Empty selects `.`. Generation-time only.
+    pub(crate) context: String,
+    /// The OCI platforms the `docker` publisher publishes, as
+    /// `os/architecture` pairs. Empty selects both Linux architectures.
+    /// Generation-time only.
+    pub(crate) platforms: Vec<String>,
 }
 
 /// Evidence produced by the read-only repository analysis pass.
@@ -1006,7 +1017,10 @@ impl ProjectConfig {
             }
             // `manifest_schema` is generation-time only. The config-to-spec
             // path carries it to the release renderer; pinned runtimes reject
-            // it as an unknown field before Planning can start.
+            // it as an unknown field before Planning can start. The `docker`
+            // publisher's `dockerfile`, `context`, and `platforms` stay
+            // generation-time only for the same reason: no runtime command
+            // consumes them.
         }
         for unit in &self.units {
             output.push_str("\n[[unit]]\n");
@@ -1917,7 +1931,10 @@ fn apply_release(config: &mut ProjectConfig, release: &config::ReleaseSection) {
         || release.consumer_repository().is_some()
         || release.artifact_path().is_some()
         || release.description().is_some()
-        || release.manifest_schema().is_some();
+        || release.manifest_schema().is_some()
+        || release.dockerfile().is_some()
+        || release.context().is_some()
+        || !release.platforms().is_empty();
     if !declared {
         return;
     }
@@ -1954,6 +1971,15 @@ fn apply_release(config: &mut ProjectConfig, release: &config::ReleaseSection) {
     }
     if let Some(schema) = release.manifest_schema() {
         schema.clone_into(&mut spec.manifest_schema);
+    }
+    if let Some(dockerfile) = release.dockerfile() {
+        dockerfile.clone_into(&mut spec.dockerfile);
+    }
+    if let Some(context) = release.context() {
+        context.clone_into(&mut spec.context);
+    }
+    if !release.platforms().is_empty() {
+        spec.platforms = release.platforms().to_vec();
     }
     config.release = Some(spec);
 }

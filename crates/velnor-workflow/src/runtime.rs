@@ -2108,7 +2108,7 @@ fn collect_manifests(
 fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
         return Err(GeneratorError::usage(
-            "usage: release verify-tag | release package-binary | release package-deb | release package-guest | release verify-feed | release update-feed",
+            "usage: release verify-tag | release package-binary | release package-deb | release package-guest | release verify-feed | release update-feed | release verify-digests",
         ));
     };
     match command {
@@ -2118,6 +2118,7 @@ fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
         "package-guest" => package_guest(&arguments[1..]),
         "verify-feed" => verify_feed(&arguments[1..]),
         "update-feed" => update_feed(&arguments[1..]),
+        "verify-digests" => verify_digests(&arguments[1..]),
         _ => Err(GeneratorError::usage(format!(
             "unsupported release command: {command}"
         ))),
@@ -2529,6 +2530,114 @@ echo "$sha  linux.tar.xz" | sha256sum -c -
     Ok(())
 }
 
+/// `release verify-digests --dir <dir> --archs <csv>`: validate the complete
+/// platform digest set a manifest job assembles. Every declared arch must
+/// carry exactly one `image-<arch>.digest` file holding a single `sha256:`
+/// digest, and no extra digest file may ride along: a partial matrix can
+/// never publish a partial tag. Prints `<arch> <digest>` per verified row.
+fn verify_digests(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["dir", "archs"])?;
+    let dir = required_option(&options, "dir")?;
+    let archs = required_option(&options, "archs")?;
+    let archs: Vec<&str> = archs
+        .split(',')
+        .map(str::trim)
+        .filter(|arch| !arch.is_empty())
+        .collect();
+    if archs.is_empty() {
+        return Err(GeneratorError::usage("--archs names no architecture"));
+    }
+    for arch in &archs {
+        if !valid_arch(arch) {
+            return Err(GeneratorError::usage(format!(
+                "invalid digest architecture: {arch}"
+            )));
+        }
+    }
+    let dir = Path::new(dir);
+    let mut found = BTreeSet::new();
+    let entries = fs::read_dir(dir)
+        .map_err(|error| GeneratorError::io("read digest directory", dir, &error))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| GeneratorError::io("read digest entry", dir, &error))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".digest") {
+            found.insert(name);
+        }
+    }
+    for arch in &archs {
+        let expected = format!("image-{arch}.digest");
+        if !found.contains(&expected) {
+            return Err(GeneratorError::usage(format!(
+                "platform digest is missing: {expected}"
+            )));
+        }
+    }
+    for name in &found {
+        let expected = archs
+            .iter()
+            .any(|arch| name == &format!("image-{arch}.digest"));
+        if !expected {
+            return Err(GeneratorError::usage(format!(
+                "unexpected platform digest file: {name}"
+            )));
+        }
+    }
+    for arch in &archs {
+        let path = dir.join(format!("image-{arch}.digest"));
+        let digest = read_digest_file(&path)?;
+        println!("{arch} {digest}");
+    }
+    Ok(())
+}
+
+/// Read one platform digest file: it must fit in 4 KiB and hold exactly one
+/// `sha256:` digest with 64 lowercase hex digits.
+fn read_digest_file(path: &Path) -> Result<String, GeneratorError> {
+    let bytes =
+        fs::read(path).map_err(|error| GeneratorError::io("read platform digest", path, &error))?;
+    if bytes.len() > 4096 {
+        return Err(GeneratorError::usage(format!(
+            "platform digest exceeds 4096 bytes: {}",
+            path.display()
+        )));
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| {
+        GeneratorError::usage(format!("platform digest is not UTF-8: {}", path.display()))
+    })?;
+    let mut tokens = text.split_whitespace();
+    let (Some(token), None) = (tokens.next(), tokens.next()) else {
+        return Err(GeneratorError::usage(format!(
+            "platform digest must contain one token: {}",
+            path.display()
+        )));
+    };
+    let Some(hex) = token.strip_prefix("sha256:") else {
+        return Err(GeneratorError::usage(format!(
+            "platform digest is not a sha256 digest: {}",
+            path.display()
+        )));
+    };
+    let canonical = hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'));
+    if !canonical {
+        return Err(GeneratorError::usage(format!(
+            "platform digest is not 64 lowercase hex digits: {}",
+            path.display()
+        )));
+    }
+    Ok(token.to_owned())
+}
+
+fn valid_arch(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+}
+
 fn verify_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let options = parse_options(arguments, &["kind", "package", "coordinate"])?;
     let kind = required_option(&options, "kind")?;
@@ -2743,6 +2852,147 @@ mod tests {
             Ok(_) => panic!("{context}: expected a failure, got success"),
             Err(error) => error,
         }
+    }
+
+    /// A throwaway digest directory: the only way to feed `verify-digests`
+    /// a real artifact set.
+    fn digest_fixture(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-digests-{name}-{}",
+            crate::unique_suffix()
+        ));
+        must(std::fs::create_dir_all(&root), "create digest fixture");
+        root
+    }
+
+    fn write_digest(dir: &Path, arch: &str, digest: &str) {
+        must(
+            std::fs::write(dir.join(format!("image-{arch}.digest")), digest),
+            "write platform digest",
+        );
+    }
+
+    #[test]
+    fn verify_digests_accepts_the_complete_multi_arch_set() {
+        let dir = digest_fixture("complete");
+        let amd64 = format!("sha256:{}", "a".repeat(64));
+        let arm64 = format!("sha256:{}", "b".repeat(64));
+        write_digest(&dir, "amd64", &format!("{amd64}\n"));
+        write_digest(&dir, "arm64", &format!("{arm64}\n"));
+        let args = |options: &[&str]| options.iter().map(OsString::from).collect::<Vec<_>>();
+        must(
+            verify_digests(&args(&[
+                "--dir",
+                dir.to_str().unwrap_or_default(),
+                "--archs",
+                "amd64,arm64",
+            ])),
+            "a complete digest set must verify",
+        );
+        assert_eq!(
+            must(
+                read_digest_file(&dir.join("image-amd64.digest")),
+                "read amd64 digest"
+            ),
+            amd64
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_digests_rejects_missing_extra_and_malformed_rows() {
+        let args = |options: &[&str]| options.iter().map(OsString::from).collect::<Vec<_>>();
+        // A missing arch fails: a partial matrix can never publish.
+        let dir = digest_fixture("missing");
+        write_digest(&dir, "amd64", &format!("sha256:{}\n", "a".repeat(64)));
+        let error = must_fail(
+            verify_digests(&args(&[
+                "--dir",
+                dir.to_str().unwrap_or_default(),
+                "--archs",
+                "amd64,arm64",
+            ])),
+            "a missing arch must fail",
+        );
+        assert!(
+            error.to_string().contains("platform digest is missing"),
+            "unexpected error: {error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        // An extra digest file fails: only the declared set assembles.
+        let dir = digest_fixture("extra");
+        write_digest(&dir, "amd64", &format!("sha256:{}\n", "a".repeat(64)));
+        write_digest(&dir, "arm64", &format!("sha256:{}\n", "b".repeat(64)));
+        write_digest(&dir, "riscv64", &format!("sha256:{}\n", "c".repeat(64)));
+        let error = must_fail(
+            verify_digests(&args(&[
+                "--dir",
+                dir.to_str().unwrap_or_default(),
+                "--archs",
+                "amd64,arm64",
+            ])),
+            "an extra digest must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("unexpected platform digest file"),
+            "unexpected error: {error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        // Malformed rows fail: not a digest, two tokens, short hex.
+        for (name, body, marker) in [
+            ("scheme", "md5:abc\n".to_owned(), "not a sha256 digest"),
+            (
+                "tokens",
+                "sha256:aaa sha256:bbb\n".to_owned(),
+                "must contain one token",
+            ),
+            (
+                "length",
+                format!("sha256:{}\n", "a".repeat(63)),
+                "not 64 lowercase hex digits",
+            ),
+            (
+                "case",
+                format!("sha256:{}\n", "A".repeat(64)),
+                "not 64 lowercase hex digits",
+            ),
+        ] {
+            let dir = digest_fixture(name);
+            write_digest(&dir, "amd64", &body);
+            let error = must_fail(
+                verify_digests(&args(&[
+                    "--dir",
+                    dir.to_str().unwrap_or_default(),
+                    "--archs",
+                    "amd64",
+                ])),
+                "a malformed digest must fail",
+            );
+            assert!(
+                error.to_string().contains(marker),
+                "unexpected error for {name}: {error}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        // Empty and hostile arch lists fail before any read.
+        let error = must_fail(
+            verify_digests(&args(&["--dir", "image-artifacts", "--archs", " , "])),
+            "an empty arch list must fail",
+        );
+        assert!(
+            error.to_string().contains("--archs names no architecture"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            verify_digests(&args(&["--dir", "image-artifacts", "--archs", "../x"])),
+            "a hostile arch must fail",
+        );
+        assert!(
+            error.to_string().contains("invalid digest architecture"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
