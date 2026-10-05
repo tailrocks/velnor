@@ -11,9 +11,175 @@ use std::{
     path::{Component, PathBuf},
 };
 
+#[cfg(target_os = "macos")]
+use std::{ffi::c_void, os::fd::AsRawFd};
+
+#[cfg(windows)]
+use std::{
+    ffi::c_void,
+    mem::{self, offset_of},
+    os::windows::{
+        ffi::{OsStrExt, OsStringExt},
+        io::{AsRawHandle, FromRawHandle, RawHandle},
+    },
+    path::{Component, PathBuf, Prefix},
+    sync::{Arc, Mutex},
+};
+
+#[cfg(windows)]
+use windows_sys::{
+    Wdk::{
+        Foundation::OBJECT_ATTRIBUTES,
+        Storage::FileSystem::{
+            FileBothDirectoryInformation, NtCreateFile, NtQueryDirectoryFile,
+            FILE_BOTH_DIR_INFORMATION, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
+            FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+        },
+    },
+    Win32::{
+        Foundation::{
+            HANDLE, INVALID_HANDLE_VALUE, OBJ_CASE_INSENSITIVE, STATUS_NO_MORE_FILES,
+            STATUS_NO_SUCH_FILE, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND,
+            STATUS_SUCCESS, UNICODE_STRING,
+        },
+        Storage::FileSystem::{
+            CreateFileW, FileAttributeTagInfo, GetDriveTypeW, GetFileInformationByHandleEx,
+            GetFileType, FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY,
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+            FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
+            OPEN_EXISTING, SYNCHRONIZE,
+        },
+        System::{
+            WindowsProgramming::{DRIVE_CDROM, DRIVE_FIXED, DRIVE_RAMDISK, DRIVE_REMOVABLE},
+            IO::IO_STATUS_BLOCK,
+        },
+    },
+};
+
 use anyhow::{bail, Context, Result};
 
 const MAX_SECURE_CLEANUP_DEPTH: usize = 256;
+
+#[cfg(target_os = "macos")]
+#[link(name = "System")]
+unsafe extern "C" {
+    fn acl_get_fd_np(fd: libc::c_int, acl_type: libc::c_int) -> *mut c_void;
+    fn acl_free(object: *mut c_void) -> libc::c_int;
+    fn acl_get_entry(
+        acl: *mut c_void,
+        entry_id: libc::c_int,
+        entry: *mut *mut c_void,
+    ) -> libc::c_int;
+    fn acl_get_tag_type(entry: *mut c_void, tag_type: *mut libc::c_uint) -> libc::c_int;
+    fn acl_get_permset_mask_np(entry: *mut c_void, mask: *mut u64) -> libc::c_int;
+}
+
+/// Reject extended ACL grants that can mutate a directory or its entries.
+///
+/// macOS ACLs are independent of the POSIX mode bits checked by callers, so
+/// an `everyone allow add_file,...` ACE can make a 0755 directory writable
+/// without changing `st_mode`. Query the ACL from the already-open descriptor
+/// so this check stays bound to the object being validated. Treat every write
+/// grant as untrusted: interpreting account and group membership would weaken
+/// this guard and is unnecessary for a private bind source.
+#[cfg(target_os = "macos")]
+fn verify_no_directory_write_acl(file: &fs::File, display_path: &Path) -> Result<()> {
+    const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
+    const ACL_FIRST_ENTRY: libc::c_int = 0;
+    const ACL_NEXT_ENTRY: libc::c_int = -1;
+    const ACL_EXTENDED_ALLOW: libc::c_uint = 1;
+    const ACL_EXTENDED_DENY: libc::c_uint = 2;
+    const DIRECTORY_WRITE_PERMISSIONS: u64 = (1 << 2) // ACL_WRITE_DATA / ACL_ADD_FILE
+        | (1 << 4) // ACL_DELETE
+        | (1 << 5) // ACL_APPEND_DATA / ACL_ADD_SUBDIRECTORY
+        | (1 << 6) // ACL_DELETE_CHILD
+        | (1 << 8) // ACL_WRITE_ATTRIBUTES
+        | (1 << 10) // ACL_WRITE_EXTATTRIBUTES
+        | (1 << 12) // ACL_WRITE_SECURITY
+        | (1 << 13); // ACL_CHANGE_OWNER
+
+    let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        let error = std::io::Error::last_os_error();
+        // Darwin reports ENOENT when an object has no extended ACL.
+        if error.raw_os_error() == Some(libc::ENOENT) {
+            return Ok(());
+        }
+        return Err(error).with_context(|| {
+            format!(
+                "inspect extended ACL for secured directory {}",
+                display_path.display()
+            )
+        });
+    }
+
+    let result = (|| {
+        let mut entry_id = ACL_FIRST_ENTRY;
+        loop {
+            let mut entry = std::ptr::null_mut();
+            let status = unsafe { acl_get_entry(acl, entry_id, &mut entry) };
+            if status != 0 {
+                let error = std::io::Error::last_os_error();
+                // Darwin's acl_get_entry uses EINVAL to signal end-of-list.
+                if error.raw_os_error() == Some(libc::EINVAL) {
+                    break;
+                }
+                return Err(error).with_context(|| {
+                    format!(
+                        "inspect extended ACL entries for secured directory {}",
+                        display_path.display()
+                    )
+                });
+            }
+            if entry.is_null() {
+                bail!(
+                    "extended ACL returned an empty entry for secured directory {}",
+                    display_path.display()
+                );
+            }
+            entry_id = ACL_NEXT_ENTRY;
+
+            let mut tag_type = 0;
+            if unsafe { acl_get_tag_type(entry, &mut tag_type) } != 0 {
+                return Err(std::io::Error::last_os_error()).with_context(|| {
+                    format!(
+                        "inspect extended ACL entry type for secured directory {}",
+                        display_path.display()
+                    )
+                });
+            }
+            match tag_type {
+                ACL_EXTENDED_DENY => continue,
+                ACL_EXTENDED_ALLOW => {}
+                _ => bail!(
+                    "extended ACL has an unknown entry type for secured directory {}",
+                    display_path.display()
+                ),
+            }
+
+            let mut permissions = 0;
+            if unsafe { acl_get_permset_mask_np(entry, &mut permissions) } != 0 {
+                return Err(std::io::Error::last_os_error()).with_context(|| {
+                    format!(
+                        "inspect extended ACL permissions for secured directory {}",
+                        display_path.display()
+                    )
+                });
+            }
+            if permissions & DIRECTORY_WRITE_PERMISSIONS != 0 {
+                bail!(
+                    "secured directory has an ACL write grant: {}",
+                    display_path.display()
+                );
+            }
+        }
+        Ok(())
+    })();
+
+    unsafe { acl_free(acl) };
+    result
+}
 
 #[cfg(unix)]
 const TEMPORARY_FILE_IN_STAGING_DIRECTORY: &str = "payload";
@@ -37,7 +203,15 @@ pub(crate) struct NoFollowDir {
     display_path: PathBuf,
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[derive(Debug)]
+pub(crate) struct NoFollowDir {
+    file: fs::File,
+    display_path: PathBuf,
+    enumeration_lock: Arc<Mutex<()>>,
+}
+
+#[cfg(not(any(unix, windows)))]
 #[derive(Debug)]
 pub(crate) struct NoFollowDir;
 
@@ -246,6 +420,36 @@ impl NoFollowDir {
         Ok(())
     }
 
+    pub fn visit_entry_names_until(
+        &self,
+        mut visit: impl FnMut(OsString) -> Result<bool>,
+    ) -> Result<()> {
+        let entries = rustix::fs::Dir::read_from(&self.file)
+            .map_err(std::io::Error::from)
+            .with_context(|| {
+                format!(
+                    "read artifact source directory {}",
+                    self.display_path.display()
+                )
+            })?;
+        for entry in entries {
+            let entry = entry.map_err(std::io::Error::from).with_context(|| {
+                format!(
+                    "read artifact source directory {}",
+                    self.display_path.display()
+                )
+            })?;
+            let name = OsString::from_vec(entry.file_name().to_bytes().to_vec());
+            if name == "." || name == ".." {
+                continue;
+            }
+            if !visit(name)? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     pub fn try_clone(&self) -> Result<Self> {
         Ok(Self {
             file: self.file.try_clone().with_context(|| {
@@ -345,8 +549,468 @@ impl NoFollowDir {
     }
 }
 
+#[cfg(windows)]
+impl NoFollowDir {
+    pub fn open_absolute(path: &Path) -> Result<Self> {
+        let drive = local_drive_letter(path)?;
+        let volume_root = PathBuf::from(format!("{drive}:\\"));
+        let mut root_wide: Vec<u16> = volume_root
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        // A drive letter can name a mapped network share. Reject remote and
+        // unknown roots before any path traversal begins.
+        // SAFETY: `root_wide` is NUL-terminated and alive for the call.
+        let drive_type = unsafe { GetDriveTypeW(root_wide.as_ptr()) };
+        if !matches!(
+            drive_type,
+            DRIVE_FIXED | DRIVE_REMOVABLE | DRIVE_CDROM | DRIVE_RAMDISK
+        ) {
+            bail!(
+                "secure artifact source copying requires a local Windows drive: {}",
+                path.display()
+            );
+        }
+
+        // SAFETY: the path is the validated local drive root only; reparse
+        // points are opened as entries and rejected by handle verification.
+        let handle = unsafe {
+            CreateFileW(
+                root_wide.as_mut_ptr(),
+                FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error())
+                .context("open local Windows volume root for artifact source")?;
+        }
+        // SAFETY: CreateFileW returned a new owned handle.
+        let root_file = unsafe { fs::File::from_raw_handle(handle as RawHandle) };
+        verify_windows_handle(&root_file, Some(true))
+            .context("verify local Windows volume root for artifact source")?;
+        let mut current = Self {
+            file: root_file,
+            display_path: volume_root,
+            enumeration_lock: Arc::new(Mutex::new(())),
+        };
+
+        for component in path.components() {
+            match component {
+                Component::Prefix(_) | Component::RootDir | Component::CurDir => {}
+                Component::Normal(name) => {
+                    let display_path = current.display_path.join(name);
+                    current = match current.open_entry(name)? {
+                        Some(NoFollowSource::Directory(directory)) => directory,
+                        Some(NoFollowSource::File(_)) => bail!(
+                            "approved artifact source root has a non-directory ancestor: {}",
+                            display_path.display()
+                        ),
+                        None => bail!(
+                            "approved artifact source root does not exist: {}",
+                            display_path.display()
+                        ),
+                    };
+                }
+                Component::ParentDir => bail!(
+                    "approved artifact source root is not normalized: {}",
+                    path.display()
+                ),
+            }
+        }
+        Ok(current)
+    }
+
+    /// Opens an operator-selected root after resolving its configured alias.
+    /// Generated descendants remain handle-relative and never follow reparse
+    /// points.
+    pub fn open_trusted_configured_root(configured_root: &Path) -> Result<Self> {
+        if !configured_root.is_absolute() {
+            bail!(
+                "trusted configured artifact source root must be absolute: {}",
+                configured_root.display()
+            );
+        }
+        let canonical_root = fs::canonicalize(configured_root).with_context(|| {
+            format!(
+                "canonicalize trusted configured artifact source root {}",
+                configured_root.display()
+            )
+        })?;
+        Self::open_absolute(&canonical_root).with_context(|| {
+            format!(
+                "securely open canonical trusted configured artifact source root {}",
+                canonical_root.display()
+            )
+        })
+    }
+
+    pub fn open_source(&self, relative: &Path) -> Result<Option<NoFollowSource>> {
+        let mut components = relative
+            .components()
+            .filter(|component| !matches!(component, Component::CurDir))
+            .peekable();
+        if components.peek().is_none() {
+            return self
+                .try_clone()
+                .map(|directory| Some(NoFollowSource::Directory(directory)));
+        }
+
+        let mut current = self.try_clone()?;
+        while let Some(component) = components.next() {
+            let Component::Normal(name) = component else {
+                bail!(
+                    "artifact source path is not a normalized relative path: {}",
+                    relative.display()
+                );
+            };
+            let source = current.open_entry(name)?;
+            if components.peek().is_none() {
+                return Ok(source);
+            }
+            current = match source {
+                Some(NoFollowSource::Directory(directory)) => directory,
+                Some(NoFollowSource::File(_)) => bail!(
+                    "artifact source path has a non-directory ancestor: {}",
+                    current.display_path.join(name).display()
+                ),
+                None => return Ok(None),
+            };
+        }
+        Ok(None)
+    }
+
+    pub fn for_each_entry_filtered(
+        &self,
+        mut include: impl FnMut(&OsStr) -> bool,
+        mut visit: impl FnMut(NoFollowDirEntry) -> Result<()>,
+    ) -> Result<()> {
+        let _guard = self.enumeration_lock.lock().map_err(|_| {
+            anyhow::anyhow!(
+                "artifact source directory enumeration lock is poisoned: {}",
+                self.display_path.display()
+            )
+        })?;
+        let mut restart_scan = true;
+        while let Some(name) = next_windows_directory_entry(&self.file, &mut restart_scan)? {
+            if name == "." || name == ".." || !include(&name) {
+                continue;
+            }
+            let source = self.open_entry(&name)?.with_context(|| {
+                format!(
+                    "artifact source disappeared during secure enumeration: {}",
+                    self.display_path.join(&name).display()
+                )
+            })?;
+            visit(NoFollowDirEntry { name, source })?;
+        }
+        Ok(())
+    }
+
+    pub fn for_each_entry_name(&self, mut visit: impl FnMut(OsString) -> Result<()>) -> Result<()> {
+        let _guard = self.enumeration_lock.lock().map_err(|_| {
+            anyhow::anyhow!(
+                "artifact source directory enumeration lock is poisoned: {}",
+                self.display_path.display()
+            )
+        })?;
+        let mut restart_scan = true;
+        while let Some(name) = next_windows_directory_entry(&self.file, &mut restart_scan)? {
+            if name != "." && name != ".." {
+                visit(name)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn try_clone(&self) -> Result<Self> {
+        Ok(Self {
+            file: self.file.try_clone().with_context(|| {
+                format!(
+                    "duplicate artifact source directory {}",
+                    self.display_path.display()
+                )
+            })?,
+            display_path: self.display_path.clone(),
+            enumeration_lock: Arc::clone(&self.enumeration_lock),
+        })
+    }
+
+    fn open_entry(&self, name: &OsStr) -> Result<Option<NoFollowSource>> {
+        let display_path = self.display_path.join(name);
+        let Some(probe) = open_windows_child(&self.file, name, None)? else {
+            return Ok(None);
+        };
+        let is_directory = verify_windows_handle(&probe, None)
+            .with_context(|| format!("verify opened artifact source {}", display_path.display()))?;
+        drop(probe);
+
+        let opened =
+            open_windows_child(&self.file, name, Some(is_directory))?.with_context(|| {
+                format!(
+                    "artifact source disappeared during secure open: {}",
+                    display_path.display()
+                )
+            })?;
+        let opened_is_directory = verify_windows_handle(&opened, Some(is_directory))
+            .with_context(|| format!("verify opened artifact source {}", display_path.display()))?;
+        if opened_is_directory {
+            Ok(Some(NoFollowSource::Directory(Self {
+                file: opened,
+                display_path,
+                enumeration_lock: Arc::new(Mutex::new(())),
+            })))
+        } else {
+            Ok(Some(NoFollowSource::File(opened)))
+        }
+    }
+}
+
+#[cfg(windows)]
+fn local_drive_letter(path: &Path) -> Result<char> {
+    if !path.is_absolute() {
+        bail!(
+            "approved artifact source root must be absolute: {}",
+            path.display()
+        );
+    }
+    let mut drive = None;
+    let mut has_root = false;
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => match prefix.kind() {
+                Prefix::Disk(drive_letter) | Prefix::VerbatimDisk(drive_letter) => {
+                    drive = Some(char::from(drive_letter));
+                }
+                Prefix::UNC(..)
+                | Prefix::VerbatimUNC(..)
+                | Prefix::Verbatim(..)
+                | Prefix::DeviceNS(..) => bail!(
+                    "secure artifact source copying does not support UNC or device paths: {}",
+                    path.display()
+                ),
+            },
+            Component::RootDir => has_root = true,
+            Component::ParentDir => bail!(
+                "approved artifact source root is not normalized: {}",
+                path.display()
+            ),
+            Component::CurDir | Component::Normal(_) => {}
+        }
+    }
+    match (drive, has_root) {
+        (Some(drive), true) => Ok(drive),
+        _ => bail!(
+            "secure artifact source copying requires an absolute local drive path: {}",
+            path.display()
+        ),
+    }
+}
+
+#[cfg(windows)]
+fn open_windows_child(
+    parent: &fs::File,
+    name: &OsStr,
+    directory: Option<bool>,
+) -> std::io::Result<Option<fs::File>> {
+    let mut name_wide: Vec<u16> = name.encode_wide().collect();
+    if name_wide.is_empty()
+        || name_wide
+            .iter()
+            .any(|unit| *unit == 0 || *unit == u16::from(b'\\') || *unit == u16::from(b'/'))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "artifact source name is not one Windows path component",
+        ));
+    }
+    let byte_length = u16::try_from(name_wide.len().saturating_mul(mem::size_of::<u16>()))
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "name is too long"))?;
+    let name_string = UNICODE_STRING {
+        Length: byte_length,
+        MaximumLength: byte_length,
+        Buffer: name_wide.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: parent.as_raw_handle() as HANDLE,
+        ObjectName: &name_string,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let (desired_access, type_option) = match directory {
+        Some(true) => (
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            FILE_DIRECTORY_FILE,
+        ),
+        Some(false) => (
+            FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            FILE_NON_DIRECTORY_FILE,
+        ),
+        None => (FILE_READ_ATTRIBUTES | SYNCHRONIZE, 0),
+    };
+    let mut io_status = IO_STATUS_BLOCK::default();
+    let mut handle: HANDLE = std::ptr::null_mut();
+    // SAFETY: structures and component buffer remain alive for the native call;
+    // RootDirectory is a pinned directory handle, and name has no separators.
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            desired_access,
+            &attributes,
+            &mut io_status,
+            std::ptr::null(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_OPEN,
+            type_option | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status == STATUS_OBJECT_NAME_NOT_FOUND
+        || status == STATUS_OBJECT_PATH_NOT_FOUND
+        || status == STATUS_NO_SUCH_FILE
+    {
+        if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+            // SAFETY: NtCreateFile returned a non-null owned output handle.
+            drop(unsafe { fs::File::from_raw_handle(handle as RawHandle) });
+        }
+        return Ok(None);
+    }
+    if status < STATUS_SUCCESS {
+        if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+            // SAFETY: NtCreateFile returned a non-null owned output handle.
+            drop(unsafe { fs::File::from_raw_handle(handle as RawHandle) });
+        }
+        return Err(nt_windows_error("NtCreateFile", status));
+    }
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "NtCreateFile succeeded without a source handle",
+        ));
+    }
+    // SAFETY: successful NtCreateFile returned a new owned handle.
+    Ok(Some(unsafe {
+        fs::File::from_raw_handle(handle as RawHandle)
+    }))
+}
+
+#[cfg(windows)]
+fn verify_windows_handle(
+    file: &fs::File,
+    expected_directory: Option<bool>,
+) -> std::io::Result<bool> {
+    let handle = file.as_raw_handle() as HANDLE;
+    let mut attributes = FILE_ATTRIBUTE_TAG_INFO::default();
+    // SAFETY: writable structure has the declared size and the handle is live.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileAttributeTagInfo,
+            (&mut attributes as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+            mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let is_directory = attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+    if attributes.FileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE) != 0
+        || expected_directory.is_some_and(|expected| expected != is_directory)
+        || unsafe { GetFileType(handle) } != FILE_TYPE_DISK
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "artifact source handle is a reparse point, device, or wrong file type",
+        ));
+    }
+    Ok(is_directory)
+}
+
+#[cfg(windows)]
+fn next_windows_directory_entry(
+    directory: &fs::File,
+    restart_scan: &mut bool,
+) -> std::io::Result<Option<OsString>> {
+    const DIRECTORY_BUFFER_WORDS: usize = 512;
+    const DIRECTORY_BUFFER_BYTES: usize = DIRECTORY_BUFFER_WORDS * mem::size_of::<u64>();
+
+    let mut buffer = [0_u64; DIRECTORY_BUFFER_WORDS];
+    let mut io_status = IO_STATUS_BLOCK::default();
+    // SAFETY: aligned writable output buffer is large enough for a maximum
+    // Windows path component; the handle is a pinned synchronous directory.
+    let status = unsafe {
+        NtQueryDirectoryFile(
+            directory.as_raw_handle() as HANDLE,
+            std::ptr::null_mut(),
+            None,
+            std::ptr::null(),
+            &mut io_status,
+            buffer.as_mut_ptr().cast::<c_void>(),
+            DIRECTORY_BUFFER_BYTES as u32,
+            FileBothDirectoryInformation,
+            true,
+            std::ptr::null(),
+            *restart_scan,
+        )
+    };
+    *restart_scan = false;
+    if status == STATUS_NO_MORE_FILES {
+        return Ok(None);
+    }
+    if status < STATUS_SUCCESS {
+        return Err(nt_windows_error("NtQueryDirectoryFile", status));
+    }
+
+    // SAFETY: a successful single-entry query initialized its first record.
+    let info = unsafe { &*buffer.as_ptr().cast::<FILE_BOTH_DIR_INFORMATION>() };
+    let name_byte_len = usize::try_from(info.FileNameLength).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid directory name length",
+        )
+    })?;
+    let name_offset = offset_of!(FILE_BOTH_DIR_INFORMATION, FileName);
+    if name_byte_len == 0
+        || name_byte_len % mem::size_of::<u16>() != 0
+        || name_offset.saturating_add(name_byte_len) > DIRECTORY_BUFFER_BYTES
+        || io_status.Information < name_offset.saturating_add(name_byte_len)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "directory entry name exceeded the query buffer",
+        ));
+    }
+    let name_units = name_byte_len / mem::size_of::<u16>();
+    // SAFETY: bounds above keep the variable-length filename inside `buffer`.
+    let name = unsafe { std::slice::from_raw_parts(info.FileName.as_ptr(), name_units) };
+    Ok(Some(OsString::from_wide(name)))
+}
+
+#[cfg(windows)]
+fn nt_windows_error(operation: &str, status: i32) -> std::io::Error {
+    std::io::Error::other(format!(
+        "{operation} returned NTSTATUS 0x{:08x}",
+        status as u32
+    ))
+}
+
 #[cfg(unix)]
 impl NoFollowDestinationDir {
+    /// Return this already-open directory descriptor for narrowly scoped
+    /// descriptor-relative filesystem operations.
+    pub(crate) fn descriptor(&self) -> Result<&fs::File> {
+        Ok(&self.file)
+    }
+
     /// Stable physical identity for a secured directory descriptor. Unlike a
     /// path string this remains the same through mount aliases, while a copied
     /// storage root receives a different device/inode pair.
@@ -361,6 +1025,97 @@ impl NoFollowDestinationDir {
             bail!("secured artifact destination descriptor is not a directory");
         }
         Ok((metadata.dev(), metadata.ino()))
+    }
+
+    /// Require a directory to remain owned by the runner and unmodifiable by
+    /// group/other users before its pathname crosses into Docker's bind-mount
+    /// API. The descriptor is already no-follow pinned by construction.
+    pub(crate) fn verify_runner_owned_private_directory(&self) -> Result<()> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let metadata = self
+            .file
+            .metadata()
+            .context("inspect secured destination directory ownership")?;
+        if !metadata.is_dir()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o022 != 0
+        {
+            bail!(
+                "secured destination directory is not runner-owned and private: {}",
+                self.display_path.display()
+            );
+        }
+        #[cfg(target_os = "macos")]
+        verify_no_directory_write_acl(&self.file, &self.display_path)?;
+        Ok(())
+    }
+
+    /// Prove that the complete host pathname cannot be replaced by an
+    /// untrusted account before Docker resolves it as a bind-mount source.
+    /// The leaf descriptor is already pinned; walk parent descriptors with
+    /// `openat("..")` and reject writable non-sticky ancestors or directory
+    /// entries controlled by accounts outside root/the runner.
+    pub(crate) fn verify_runner_owned_private_ancestors(&self) -> Result<()> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        self.verify_runner_owned_private_directory()?;
+        let runner_uid = unsafe { libc::geteuid() };
+        let mut child_metadata = self.file.metadata()?;
+        let mut current = self
+            .file
+            .try_clone()
+            .context("duplicate MBX bind-source directory descriptor")?;
+
+        for _ in 0..=MAX_SECURE_CLEANUP_DEPTH {
+            let metadata = current
+                .metadata()
+                .context("inspect MBX bind-source path ancestor")?;
+            if !metadata.is_dir() || (metadata.uid() != 0 && metadata.uid() != runner_uid) {
+                bail!("MBX bind-source path ancestor is not runner/root controlled");
+            }
+
+            #[cfg(target_os = "macos")]
+            verify_no_directory_write_acl(&current, &self.display_path)?;
+
+            let mode = metadata.mode();
+            if mode & 0o022 != 0 {
+                let sticky = mode & (libc::S_ISVTX as u32) != 0;
+                let child_controlled =
+                    child_metadata.uid() == 0 || child_metadata.uid() == runner_uid;
+                if !sticky || !child_controlled {
+                    bail!("MBX bind-source path has a replaceable writable ancestor");
+                }
+            }
+
+            let parent = rustix::fs::openat(
+                &current,
+                Path::new(".."),
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .map_err(std::io::Error::from)
+            .context("open MBX bind-source path parent")?;
+            let parent: fs::File = parent.into();
+            let parent_metadata = parent
+                .metadata()
+                .context("inspect MBX bind-source path parent")?;
+            if same_file_identity(
+                metadata.dev(),
+                metadata.ino(),
+                parent_metadata.dev(),
+                parent_metadata.ino(),
+            ) {
+                return Ok(());
+            }
+            child_metadata = metadata;
+            current = parent;
+        }
+
+        bail!("MBX bind-source path exceeds the secure ancestor walk limit")
     }
 
     /// Open or create an absolute directory by walking from `/` with
@@ -430,6 +1185,135 @@ impl NoFollowDestinationDir {
             staging_parent,
             staging_parent_path: root.display_path,
         })
+    }
+
+    /// Enumerate direct entry names from the already-open destination
+    /// directory descriptor. No entry path is reopened or followed here.
+    pub(crate) fn for_each_entry_name(
+        &self,
+        mut visit: impl FnMut(OsString) -> Result<()>,
+    ) -> Result<()> {
+        let entries = rustix::fs::Dir::read_from(&self.file)
+            .map_err(std::io::Error::from)
+            .with_context(|| {
+                format!(
+                    "read secured destination directory {}",
+                    self.display_path.display()
+                )
+            })?;
+        for entry in entries {
+            let entry = entry.map_err(std::io::Error::from).with_context(|| {
+                format!(
+                    "read secured destination directory {}",
+                    self.display_path.display()
+                )
+            })?;
+            let name = OsString::from_vec(entry.file_name().to_bytes().to_vec());
+            if name == "." || name == ".." {
+                continue;
+            }
+            visit(name)?;
+        }
+        Ok(())
+    }
+
+    /// Open a direct child directory without following links. The entry is
+    /// checked before and after opening against the descriptor identity so a
+    /// replacement during the operation fails closed.
+    pub(crate) fn open_existing_child_directory(&self, name: &OsStr) -> Result<Option<Self>> {
+        validate_single_component(name, "directory child")?;
+        let before =
+            match rustix::fs::statat(&self.file, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => stat,
+                Err(rustix::io::Errno::NOENT) => return Ok(None),
+                Err(error) => {
+                    return Err(std::io::Error::from(error)).with_context(|| {
+                        format!(
+                            "inspect directory child {}",
+                            self.display_path.join(name).display()
+                        )
+                    });
+                }
+            };
+        if rustix::fs::FileType::from_raw_mode(before.st_mode) != rustix::fs::FileType::Directory {
+            bail!(
+                "directory child is not a real directory: {}",
+                self.display_path.join(name).display()
+            );
+        }
+        let child = self.open_existing_directory(name)?;
+        let opened = rustix::fs::fstat(&child.file)
+            .map_err(std::io::Error::from)
+            .context("inspect opened directory child")?;
+        let after = rustix::fs::statat(&self.file, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(std::io::Error::from)
+            .context("recheck directory child after secure open")?;
+        if rustix::fs::FileType::from_raw_mode(after.st_mode) != rustix::fs::FileType::Directory
+            || !same_file_identity(before.st_dev, before.st_ino, opened.st_dev, opened.st_ino)
+            || !same_file_identity(before.st_dev, before.st_ino, after.st_dev, after.st_ino)
+        {
+            bail!(
+                "directory child changed during secure open: {}",
+                self.display_path.join(name).display()
+            );
+        }
+        Ok(Some(child))
+    }
+
+    /// Atomically create a direct directory child. An entry that appeared
+    /// after the caller's absence check is an allocation race, so `EXIST` is
+    /// returned as an error instead of adopting that entry.
+    pub(crate) fn create_child_directory_no_replace(&self, name: &OsStr) -> Result<Self> {
+        validate_single_component(name, "directory child")?;
+        self.verify_runner_owned_private_directory()?;
+        rustix::fs::mkdirat(&self.file, name, rustix::fs::Mode::from_raw_mode(0o755))
+            .map_err(std::io::Error::from)
+            .with_context(|| {
+                format!(
+                    "create directory child without replacement {}",
+                    self.display_path.join(name).display()
+                )
+            })?;
+        self.open_existing_child_directory(name)?
+            .context("new directory child disappeared before it could be pinned")
+    }
+
+    /// Open an existing direct child or atomically create it. If another
+    /// actor fills the absent name between those operations, fail closed.
+    pub(crate) fn open_or_create_child_directory(&self, name: &OsStr) -> Result<Self> {
+        if let Some(child) = self.open_existing_child_directory(name)? {
+            return Ok(child);
+        }
+        self.create_child_directory_no_replace(name)
+    }
+
+    /// Prove that the named child still points at the descriptor retained by
+    /// the caller. This detects replacement after validation and before a
+    /// marker update.
+    pub(crate) fn verify_child_directory_identity(
+        &self,
+        name: &OsStr,
+        expected_child: &Self,
+    ) -> Result<()> {
+        let Some(named_child) = self.open_existing_child_directory(name)? else {
+            bail!(
+                "directory child disappeared before use: {}",
+                self.display_path.join(name).display()
+            );
+        };
+        let expected = rustix::fs::fstat(&expected_child.file)
+            .map_err(std::io::Error::from)
+            .context("inspect expected directory child descriptor")?;
+        let named = rustix::fs::fstat(&named_child.file)
+            .map_err(std::io::Error::from)
+            .context("inspect current directory child descriptor")?;
+        if !same_file_identity(expected.st_dev, expected.st_ino, named.st_dev, named.st_ino) {
+            bail!(
+                "directory child identity changed before use: {}",
+                self.display_path.join(name).display()
+            );
+        }
+        Ok(())
     }
 
     /// Opens a workflow-relative destination below a trusted configured root.
@@ -716,6 +1600,266 @@ impl NoFollowDestinationDir {
         remove_tree_at(&self.file, name).with_context(|| {
             format!(
                 "remove artifact tree entry {}",
+                self.display_path.join(name).display()
+            )
+        })
+    }
+
+    /// Remove one pinned directory child without reopening any ancestor by
+    /// pathname. The named entry is atomically moved to a unique quarantine
+    /// name, then checked against `expected_child` before its contents are
+    /// touched. If the name was replaced after validation, the moved
+    /// replacement is restored without overwriting a newly-created entry.
+    pub(crate) fn remove_tree_entry_if_identity(
+        &self,
+        name: &OsStr,
+        expected_child: &Self,
+        preflight: impl Fn(&Self, &OsStr) -> Result<()>,
+    ) -> Result<()> {
+        self.remove_tree_entry_if_identity_in_quarantine_parent_with_hook(
+            name,
+            expected_child,
+            self,
+            preflight,
+            || Ok(()),
+        )
+    }
+
+    pub(crate) fn remove_tree_entry_if_identity_with_hook(
+        &self,
+        name: &OsStr,
+        expected_child: &Self,
+        preflight: impl Fn(&Self, &OsStr) -> Result<()>,
+        before_quarantine: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        self.remove_tree_entry_if_identity_in_quarantine_parent_with_hook(
+            name,
+            expected_child,
+            self,
+            preflight,
+            before_quarantine,
+        )
+    }
+
+    /// Move the entry into a runner-protected directory before deleting it.
+    /// `quarantine_parent` must be outside every job bind mount and writable
+    /// only by the runner. The job receives the workspace directory itself as
+    /// its bind-mount root; its parent (the stable scope) is not exposed, so a
+    /// same-UID job cannot replace the quarantine name between identity check
+    /// and `unlinkat`.
+    pub(crate) fn remove_tree_entry_if_identity_in_quarantine_parent_with_hook(
+        &self,
+        name: &OsStr,
+        expected_child: &Self,
+        quarantine_parent: &Self,
+        preflight: impl Fn(&Self, &OsStr) -> Result<()>,
+        before_quarantine: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        self.remove_tree_entry_if_identity_in_quarantine_parent_with_hooks(
+            name,
+            expected_child,
+            quarantine_parent,
+            preflight,
+            before_quarantine,
+            |_, _, _| Ok(()),
+            |_, _, _| Ok(()),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remove_tree_entry_if_identity_in_quarantine_parent_with_race_hooks(
+        &self,
+        name: &OsStr,
+        expected_child: &Self,
+        quarantine_parent: &Self,
+        preflight: impl Fn(&Self, &OsStr) -> Result<()>,
+        before_quarantine: impl FnOnce() -> Result<()>,
+        after_quarantine: impl FnOnce(&Self, &OsStr, &OsStr) -> Result<()>,
+        after_authorization: impl FnOnce(&Self, &OsStr, &OsStr) -> Result<()>,
+    ) -> Result<()> {
+        self.remove_tree_entry_if_identity_in_quarantine_parent_with_hooks(
+            name,
+            expected_child,
+            quarantine_parent,
+            preflight,
+            before_quarantine,
+            after_quarantine,
+            after_authorization,
+        )
+    }
+
+    fn remove_tree_entry_if_identity_in_quarantine_parent_with_hooks(
+        &self,
+        name: &OsStr,
+        expected_child: &Self,
+        quarantine_parent: &Self,
+        preflight: impl Fn(&Self, &OsStr) -> Result<()>,
+        before_quarantine: impl FnOnce() -> Result<()>,
+        after_quarantine: impl FnOnce(&Self, &OsStr, &OsStr) -> Result<()>,
+        after_authorization: impl FnOnce(&Self, &OsStr, &OsStr) -> Result<()>,
+    ) -> Result<()> {
+        validate_single_component(name, "artifact tree entry")?;
+        quarantine_parent.verify_runner_owned_private_directory()?;
+        ensure_same_cleanup_mount(
+            cleanup_mount_id(&self.file)?,
+            cleanup_mount_id(&quarantine_parent.file)?,
+        )?;
+        self.verify_child_directory_identity(name, expected_child)?;
+        preflight(self, name)?;
+        before_quarantine()?;
+
+        let mut after_quarantine = Some(after_quarantine);
+        let mut after_authorization = Some(after_authorization);
+        for _ in 0..64 {
+            let quarantine_name =
+                std::ffi::OsString::from(format!(".velnor-remove-{}", uuid::Uuid::new_v4()));
+            match rustix::fs::renameat_with(
+                &self.file,
+                name,
+                &quarantine_parent.file,
+                &quarantine_name,
+                rustix::fs::RenameFlags::NOREPLACE,
+            ) {
+                Ok(()) => {
+                    let Some(after_quarantine) = after_quarantine.take() else {
+                        let error = anyhow::anyhow!("after-quarantine hook was already consumed");
+                        return Err(self.restore_quarantined_tree_entry(
+                            quarantine_parent,
+                            &quarantine_name,
+                            name,
+                            error,
+                        ));
+                    };
+                    if let Err(error) = after_quarantine(quarantine_parent, &quarantine_name, name)
+                    {
+                        return Err(self.restore_quarantined_tree_entry(
+                            quarantine_parent,
+                            &quarantine_name,
+                            name,
+                            error,
+                        ));
+                    }
+                    if let Err(error) = quarantine_parent
+                        .verify_child_directory_identity(&quarantine_name, expected_child)
+                    {
+                        return Err(self.restore_quarantined_tree_entry(
+                            quarantine_parent,
+                            &quarantine_name,
+                            name,
+                            error,
+                        ));
+                    }
+                    if let Err(error) = preflight(quarantine_parent, &quarantine_name) {
+                        return Err(self.restore_quarantined_tree_entry(
+                            quarantine_parent,
+                            &quarantine_name,
+                            name,
+                            error,
+                        ));
+                    }
+                    let Some(after_authorization) = after_authorization.take() else {
+                        let error =
+                            anyhow::anyhow!("after-authorization hook was already consumed");
+                        return Err(self.restore_quarantined_tree_entry(
+                            quarantine_parent,
+                            &quarantine_name,
+                            name,
+                            error,
+                        ));
+                    };
+                    if let Err(error) =
+                        after_authorization(quarantine_parent, &quarantine_name, name)
+                    {
+                        return Err(self.restore_quarantined_tree_entry(
+                            quarantine_parent,
+                            &quarantine_name,
+                            name,
+                            error,
+                        ));
+                    }
+                    if let Err(error) = remove_tree_at_pinned_root(
+                        &quarantine_parent.file,
+                        &quarantine_name,
+                        &expected_child.file,
+                    ) {
+                        let error = error.context(format!(
+                            "remove quarantined artifact tree {}",
+                            quarantine_parent
+                                .display_path
+                                .join(&quarantine_name)
+                                .display()
+                        ));
+                        return Err(self.restore_quarantined_tree_entry(
+                            quarantine_parent,
+                            &quarantine_name,
+                            name,
+                            error,
+                        ));
+                    }
+                    return Ok(());
+                }
+                Err(rustix::io::Errno::EXIST) => continue,
+                Err(rustix::io::Errno::NOENT) => return Ok(()),
+                Err(error) => {
+                    return Err(std::io::Error::from(error)).with_context(|| {
+                        format!(
+                            "quarantine artifact tree entry {} through its pinned parent",
+                            self.display_path.join(name).display()
+                        )
+                    });
+                }
+            }
+        }
+        bail!("could not allocate a unique artifact cleanup name")
+    }
+
+    fn restore_quarantined_tree_entry(
+        &self,
+        quarantine_parent: &Self,
+        quarantine_name: &OsStr,
+        original_name: &OsStr,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        match rustix::fs::renameat_with(
+            &quarantine_parent.file,
+            quarantine_name,
+            &self.file,
+            original_name,
+            rustix::fs::RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => error,
+            Err(restore_error) => error.context(format!(
+                "preserve quarantined artifact at {} because restoring {} failed: {}",
+                quarantine_parent
+                    .display_path
+                    .join(quarantine_name)
+                    .display(),
+                self.display_path.join(original_name).display(),
+                std::io::Error::from(restore_error)
+            )),
+        }
+    }
+
+    pub(crate) fn preflight_tree_entry_removal(&self, name: &OsStr) -> Result<()> {
+        validate_single_component(name, "artifact tree entry")?;
+        preflight_tree_removal(&self.file, name).with_context(|| {
+            format!(
+                "preflight artifact tree entry removal {}",
+                self.display_path.join(name).display()
+            )
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn preflight_tree_entry_removal_with_mount_id(
+        &self,
+        name: &OsStr,
+        mount_id_for: &impl Fn(&fs::File) -> Result<u64>,
+    ) -> Result<()> {
+        validate_single_component(name, "artifact tree entry")?;
+        preflight_tree_removal_with_mount_id(&self.file, name, mount_id_for).with_context(|| {
+            format!(
+                "preflight artifact tree entry removal {}",
                 self.display_path.join(name).display()
             )
         })
@@ -1637,7 +2781,7 @@ impl NoFollowDestinationDir {
         Ok((bytes, used_reflink))
     }
 
-    fn try_clone(&self) -> Result<Self> {
+    pub(crate) fn try_clone(&self) -> Result<Self> {
         Ok(Self {
             file: self.file.try_clone().with_context(|| {
                 format!(
@@ -1846,11 +2990,27 @@ fn destination_entry_is_symlink(parent: &fs::File, name: &OsStr) -> bool {
 /// invalidate this result; runtime rollback/quarantine handles that case.
 #[cfg(unix)]
 fn preflight_tree_removal(parent: &fs::File, name: &OsStr) -> Result<()> {
-    preflight_tree_removal_at(parent, name, 0)
+    preflight_tree_removal_with_mount_id(parent, name, &cleanup_mount_id)
 }
 
 #[cfg(unix)]
-fn preflight_tree_removal_at(parent: &fs::File, name: &OsStr, depth: usize) -> Result<()> {
+fn preflight_tree_removal_with_mount_id(
+    parent: &fs::File,
+    name: &OsStr,
+    mount_id_for: &impl Fn(&fs::File) -> Result<u64>,
+) -> Result<()> {
+    let mount_id = mount_id_for(parent)?;
+    preflight_tree_removal_at(parent, name, 0, mount_id, mount_id_for)
+}
+
+#[cfg(unix)]
+fn preflight_tree_removal_at(
+    parent: &fs::File,
+    name: &OsStr,
+    depth: usize,
+    mount_id: u64,
+    mount_id_for: &impl Fn(&fs::File) -> Result<u64>,
+) -> Result<()> {
     if depth > MAX_SECURE_CLEANUP_DEPTH {
         bail!(
             "artifact tree exceeds the {}-component secure cleanup depth",
@@ -1886,6 +3046,7 @@ fn preflight_tree_removal_at(parent: &fs::File, name: &OsStr, depth: usize) -> R
     .map_err(std::io::Error::from)
     .context("open artifact tree for removal preflight")?;
     let directory: fs::File = directory.into();
+    ensure_same_cleanup_mount(mount_id, mount_id_for(&directory)?)?;
     let entries = rustix::fs::Dir::read_from(&directory)
         .map_err(std::io::Error::from)
         .context("read artifact tree for removal preflight")?;
@@ -1895,18 +3056,25 @@ fn preflight_tree_removal_at(parent: &fs::File, name: &OsStr, depth: usize) -> R
         if entry_name == "." || entry_name == ".." {
             continue;
         }
-        preflight_tree_removal_at(&directory, &entry_name, depth + 1)?;
+        preflight_tree_removal_at(&directory, &entry_name, depth + 1, mount_id, mount_id_for)?;
     }
     Ok(())
 }
 
 #[cfg(unix)]
 fn remove_tree_at(parent: &fs::File, name: &OsStr) -> Result<()> {
-    remove_tree_at_depth(parent, name, 0)
+    let mount_id = cleanup_mount_id(parent)?;
+    remove_tree_at_depth(parent, name, 0, mount_id, &cleanup_mount_id)
 }
 
 #[cfg(unix)]
-fn remove_tree_at_depth(parent: &fs::File, name: &OsStr, depth: usize) -> Result<()> {
+fn remove_tree_at_depth(
+    parent: &fs::File,
+    name: &OsStr,
+    depth: usize,
+    mount_id: u64,
+    mount_id_for: &impl Fn(&fs::File) -> Result<u64>,
+) -> Result<()> {
     if depth > MAX_SECURE_CLEANUP_DEPTH {
         bail!(
             "artifact tree exceeds the {}-component secure cleanup depth",
@@ -1936,6 +3104,7 @@ fn remove_tree_at_depth(parent: &fs::File, name: &OsStr, depth: usize) -> Result
     )
     .map_err(std::io::Error::from)?;
     let directory: fs::File = directory.into();
+    ensure_same_cleanup_mount(mount_id, mount_id_for(&directory)?)?;
     let entries = rustix::fs::Dir::read_from(&directory)
         .map_err(std::io::Error::from)
         .context("read artifact tree for secure cleanup")?;
@@ -1945,12 +3114,124 @@ fn remove_tree_at_depth(parent: &fs::File, name: &OsStr, depth: usize) -> Result
         if entry_name == "." || entry_name == ".." {
             continue;
         }
-        remove_tree_at_depth(&directory, &entry_name, depth + 1)?;
+        remove_tree_at_depth(&directory, &entry_name, depth + 1, mount_id, mount_id_for)?;
     }
     match rustix::fs::unlinkat(parent, name, rustix::fs::AtFlags::REMOVEDIR) {
         Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
         Err(error) => Err(std::io::Error::from(error).into()),
     }
+}
+
+/// Delete the contents of an already-authorized directory entry, verifying
+/// the original retained descriptor both before walking and at the final
+/// unlink. The caller moves the entry into a quarantine directory that the
+/// untrusted job cannot reach through its workspace bind mount; this keeps the
+/// final name stable across the check and `unlinkat` calls.
+#[cfg(unix)]
+fn remove_tree_at_pinned_root(parent: &fs::File, name: &OsStr, expected: &fs::File) -> Result<()> {
+    use rustix::fs::FileType;
+
+    let stat = rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(std::io::Error::from)
+        .context("inspect quarantined artifact directory")?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
+        bail!("quarantined artifact entry is not a directory");
+    }
+    let root = rustix::fs::openat(
+        parent,
+        name,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(std::io::Error::from)
+    .context("open quarantined artifact directory without following links")?;
+    let root: fs::File = root.into();
+    let opened = rustix::fs::fstat(&root)
+        .map_err(std::io::Error::from)
+        .context("inspect opened quarantined artifact directory")?;
+    let expected_stat = rustix::fs::fstat(expected)
+        .map_err(std::io::Error::from)
+        .context("inspect pinned artifact directory before deletion")?;
+    if FileType::from_raw_mode(opened.st_mode) != FileType::Directory
+        || !same_file_identity(
+            opened.st_dev,
+            opened.st_ino,
+            expected_stat.st_dev,
+            expected_stat.st_ino,
+        )
+        || !same_file_identity(stat.st_dev, stat.st_ino, opened.st_dev, opened.st_ino)
+    {
+        bail!("quarantined artifact directory changed before deletion");
+    }
+
+    let mount_id = cleanup_mount_id(parent)?;
+    ensure_same_cleanup_mount(mount_id, cleanup_mount_id(&root)?)?;
+    let entries = rustix::fs::Dir::read_from(&root)
+        .map_err(std::io::Error::from)
+        .context("read quarantined artifact directory for secure cleanup")?;
+    for entry in entries {
+        let entry = entry.map_err(std::io::Error::from)?;
+        let entry_name = OsString::from_vec(entry.file_name().to_bytes().to_vec());
+        if entry_name == "." || entry_name == ".." {
+            continue;
+        }
+        remove_tree_at_depth(&root, &entry_name, 0, mount_id, &cleanup_mount_id)?;
+    }
+
+    let final_entry = rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(std::io::Error::from)
+        .context("recheck quarantined artifact directory before final unlink")?;
+    if FileType::from_raw_mode(final_entry.st_mode) != FileType::Directory
+        || !same_file_identity(
+            final_entry.st_dev,
+            final_entry.st_ino,
+            expected_stat.st_dev,
+            expected_stat.st_ino,
+        )
+    {
+        bail!("quarantined artifact directory changed before final unlink");
+    }
+    rustix::fs::unlinkat(parent, name, rustix::fs::AtFlags::REMOVEDIR)
+        .map_err(std::io::Error::from)
+        .context("remove quarantined artifact directory")
+}
+
+/// Identify the mount containing a pinned directory. Linux mount IDs also
+/// distinguish bind mounts, which share the same device number as their
+/// source. Other Unix targets use their filesystem device identity.
+#[cfg(target_os = "linux")]
+fn cleanup_mount_id(directory: &fs::File) -> Result<u64> {
+    let stat = rustix::fs::statx(
+        directory,
+        Path::new(""),
+        rustix::fs::AtFlags::EMPTY_PATH,
+        rustix::fs::StatxFlags::MNT_ID,
+    )
+    .map_err(std::io::Error::from)
+    .context("inspect pinned directory mount ID for secure cleanup")?;
+    if !stat.stx_mask.contains(rustix::fs::StatxFlags::MNT_ID) {
+        bail!("kernel did not provide a mount ID for secure tree cleanup");
+    }
+    Ok(stat.stx_mnt_id)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn cleanup_mount_id(directory: &fs::File) -> Result<u64> {
+    let stat = rustix::fs::fstat(directory)
+        .map_err(std::io::Error::from)
+        .context("inspect pinned directory filesystem for secure cleanup")?;
+    u64::try_from(stat.st_dev).context("convert pinned directory device ID for secure cleanup")
+}
+
+#[cfg(unix)]
+fn ensure_same_cleanup_mount(expected: u64, actual: u64) -> Result<()> {
+    if expected != actual {
+        bail!("secure tree cleanup refused to recurse across a mount boundary");
+    }
+    Ok(())
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -2097,7 +3378,7 @@ fn remove_temporary_file(parent: &fs::File, temporary_name: &OsStr) {
     let _ = rustix::fs::unlinkat(parent, temporary_name, rustix::fs::AtFlags::empty());
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl NoFollowDir {
     pub fn open_absolute(path: &Path) -> Result<Self> {
         bail!(
@@ -2252,12 +3533,28 @@ impl Write for StagedFile {
 
 #[cfg(not(unix))]
 impl NoFollowDestinationDir {
+    pub(crate) fn descriptor(&self) -> Result<&fs::File> {
+        bail!("secure artifact directory descriptors are unsupported on this platform")
+    }
+
     pub(crate) fn physical_identity(&self) -> Result<(u64, u64)> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "physical directory identity requires Unix no-follow filesystem support",
         )
         .into())
+    }
+
+    pub(crate) fn verify_runner_owned_private_directory(&self) -> Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "runner-owned directory verification requires Unix no-follow filesystem support",
+        )
+        .into())
+    }
+
+    pub(crate) fn verify_runner_owned_private_ancestors(&self) -> Result<()> {
+        self.verify_runner_owned_private_directory()
     }
 
     pub(crate) fn open_or_create_absolute_no_follow(path: &Path) -> Result<Self> {
@@ -2276,6 +3573,26 @@ impl NoFollowDestinationDir {
             "secure artifact destination copying is unsupported on this platform for {}",
             path.display()
         )
+    }
+
+    pub(crate) fn open_existing_child_directory(&self, _name: &OsStr) -> Result<Option<Self>> {
+        bail!("secure artifact directory traversal is unsupported on this platform")
+    }
+
+    pub(crate) fn create_child_directory_no_replace(&self, _name: &OsStr) -> Result<Self> {
+        bail!("secure artifact directory creation is unsupported on this platform")
+    }
+
+    pub(crate) fn open_or_create_child_directory(&self, _name: &OsStr) -> Result<Self> {
+        bail!("secure artifact directory creation is unsupported on this platform")
+    }
+
+    pub(crate) fn verify_child_directory_identity(
+        &self,
+        _name: &OsStr,
+        _expected_child: &Self,
+    ) -> Result<()> {
+        bail!("secure artifact directory validation is unsupported on this platform")
     }
 
     pub fn open_trusted_rooted_destination(trusted_root: &Path, relative: &Path) -> Result<Self> {
@@ -2541,6 +3858,39 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    #[test]
+    fn secure_tree_removal_refuses_injected_mount_boundary() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let root = std::env::temp_dir().join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
+        let nested_mount = root.join("workspace").join("nested-mount");
+        fs::create_dir_all(&nested_mount).unwrap();
+        fs::write(nested_mount.join("canary"), b"keep mounted contents").unwrap();
+        let nested_mount_inode = fs::metadata(&nested_mount).unwrap().ino();
+        let parent = fs::File::open(&root).unwrap();
+        let injected_mount_id = |directory: &fs::File| -> Result<u64> {
+            let inode = directory.metadata()?.ino();
+            Ok(if inode == nested_mount_inode { 2 } else { 1 })
+        };
+
+        let result = remove_tree_at_depth(
+            &parent,
+            std::ffi::OsStr::new("workspace"),
+            0,
+            1,
+            &injected_mount_id,
+        );
+
+        assert!(result.is_err(), "cleanup must reject the injected mount");
+        assert_eq!(
+            fs::read(nested_mount.join("canary")).unwrap(),
+            b"keep mounted contents"
+        );
+        assert!(root.join("workspace").is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
     fn open_regular_source(path: &Path) -> fs::File {
         let parent = NoFollowDir::open_trusted_configured_root(path.parent().unwrap()).unwrap();
         let Some(NoFollowSource::File(file)) = parent
@@ -2555,6 +3905,98 @@ mod tests {
     #[cfg(not(unix))]
     fn open_regular_source(path: &Path) -> fs::File {
         fs::File::open(path).unwrap()
+    }
+
+    #[cfg(windows)]
+    fn create_test_directory_symlink(target: &Path, link: &Path) -> bool {
+        match std::os::windows::fs::symlink_dir(target, link) {
+            Ok(()) => true,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    || error.raw_os_error() == Some(1314) =>
+            {
+                false
+            }
+            Err(error) => panic!("create test directory symlink: {error}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_nofollow_directory_walk_opens_and_enumerates_by_handle() {
+        let root = std::env::temp_dir().join(format!("velnor-nofollow-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("child")).unwrap();
+        fs::write(root.join("child").join("payload"), b"pinned payload").unwrap();
+        let directory = NoFollowDir::open_absolute(&root).unwrap();
+        let Some(NoFollowSource::Directory(child)) =
+            directory.open_source(Path::new("child")).unwrap()
+        else {
+            panic!("child should be a directory");
+        };
+        let Some(NoFollowSource::File(mut payload)) =
+            child.open_source(Path::new("payload")).unwrap()
+        else {
+            panic!("payload should be a file");
+        };
+        let mut contents = Vec::new();
+        payload.read_to_end(&mut contents).unwrap();
+        assert_eq!(contents, b"pinned payload");
+
+        let mut names = Vec::new();
+        directory
+            .for_each_entry_name(|name| {
+                names.push(name);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(names, [OsString::from("child")]);
+        assert!(directory.open_source(Path::new("../outside")).is_err());
+
+        drop(payload);
+        drop(child);
+        drop(directory);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_nofollow_directory_walk_rejects_reparse_roots_and_swapped_children() {
+        let root = std::env::temp_dir().join(format!("velnor-nofollow-{}", uuid::Uuid::new_v4()));
+        let outside = std::env::temp_dir().join(format!("velnor-outside-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("replace-me")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("canary"), b"outside canary").unwrap();
+
+        let directory = NoFollowDir::open_absolute(&root).unwrap();
+        fs::remove_dir(root.join("replace-me")).unwrap();
+        let link = root.join("replace-me");
+        if !create_test_directory_symlink(&outside, &link) {
+            drop(directory);
+            fs::remove_dir_all(&root).unwrap();
+            fs::remove_dir_all(&outside).unwrap();
+            return;
+        }
+
+        assert!(NoFollowDir::open_absolute(&link).is_err());
+        assert!(directory
+            .open_source(Path::new("replace-me/canary"))
+            .is_err());
+        assert_eq!(fs::read(outside.join("canary")).unwrap(), b"outside canary");
+
+        drop(directory);
+        fs::remove_dir_all(&root).unwrap();
+        fs::remove_dir_all(&outside).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_nofollow_directory_walk_rejects_unc_and_device_roots() {
+        assert!(NoFollowDir::open_absolute(Path::new(r"\\server\share\cache")).is_err());
+        assert!(NoFollowDir::open_absolute(Path::new(r"\\.\C:\cache")).is_err());
+        assert!(NoFollowDir::open_absolute(Path::new(
+            r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1"
+        ))
+        .is_err());
     }
 
     #[cfg(not(unix))]
@@ -2582,6 +4024,11 @@ mod tests {
             .unwrap_err(),
         );
         assert_unsupported(directory.physical_identity().unwrap_err());
+        assert_unsupported(
+            directory
+                .verify_runner_owned_private_ancestors()
+                .unwrap_err(),
+        );
         assert_unsupported(directory.create_staged_temporary_file("stage").unwrap_err());
         assert_unsupported(
             directory
@@ -2627,6 +4074,78 @@ mod tests {
 
         assert!(!root.join("would-create").exists());
         assert!(!root.join("artifact").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bind_source_rejects_writable_non_sticky_ancestors() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
+        let writable = root.join("writable");
+        let source = writable.join("slot");
+        fs::create_dir_all(&source).unwrap();
+        fs::set_permissions(&writable, fs::Permissions::from_mode(0o777)).unwrap();
+
+        let pinned = NoFollowDestinationDir::open_absolute_no_follow(&source).unwrap();
+        assert!(pinned.verify_runner_owned_private_ancestors().is_err());
+
+        fs::set_permissions(&writable, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(pinned.verify_runner_owned_private_ancestors().is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bind_source_rejects_extended_acl_write_grants_with_read_only_mode_bits() {
+        use std::{os::unix::fs::PermissionsExt as _, process::Command};
+
+        fn grant_everyone_directory_mutation_acl(path: &Path) {
+            let output = Command::new("/bin/chmod")
+                .arg("+a")
+                .arg("everyone allow add_file,add_subdirectory,delete_child")
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "install test ACL: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let root = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
+        let source = root.join("slot");
+        fs::create_dir_all(&source).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+        let pinned = NoFollowDestinationDir::open_absolute_no_follow(&source).unwrap();
+
+        grant_everyone_directory_mutation_acl(&root);
+        assert_eq!(
+            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::metadata(&source).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(pinned.verify_runner_owned_private_directory().is_ok());
+        assert!(pinned.verify_runner_owned_private_ancestors().is_err());
+
+        grant_everyone_directory_mutation_acl(&source);
+        assert_eq!(
+            fs::metadata(&source).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(pinned.verify_runner_owned_private_directory().is_err());
+        assert!(pinned.verify_runner_owned_private_ancestors().is_err());
+
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2805,7 +4324,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn source_leaf_replacement_changes_opened_identity() {
-        let root = std::env::temp_dir().join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
+        let temp_root = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let root = temp_root.join(format!("velnor-copy-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let source_path = root.join("source");
         let replacement_path = root.join("replacement");

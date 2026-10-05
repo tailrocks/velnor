@@ -11,8 +11,8 @@ use crate::job_summary::JobConclusion;
 
 /// Protocol version. Mismatch fails closed.
 ///
-/// Version 7 removes the retired compiler-cache descriptor from `GuestJobPlan`.
-pub const PROTOCOL_VERSION: u16 = 7;
+/// Version 8 carries tagged, lossless context values in `GuestJobPlan`.
+pub const PROTOCOL_VERSION: u16 = 8;
 /// Maximum payload bytes per frame (1 MiB).
 pub const MAX_PAYLOAD_BYTES: u32 = 1024 * 1024;
 /// stdout stream tag in [`VsockMessage::Stdio`].
@@ -686,6 +686,13 @@ mod tests {
             VsockMessage::decode(&ready),
             Err(VsockCodecError::VersionMismatch { version: 99 })
         ));
+        let mut version_seven = VsockMessage::Cancel.encode().unwrap();
+        version_seven[0] = 0;
+        version_seven[1] = 7;
+        assert_eq!(
+            VsockMessage::decode(&version_seven),
+            Err(VsockCodecError::VersionMismatch { version: 7 })
+        );
         let mut bad = VsockMessage::Cancel.encode().unwrap();
         let last = bad.len() - 1;
         bad[last] ^= 0xff;

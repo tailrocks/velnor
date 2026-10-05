@@ -12,15 +12,19 @@
 //! acquire may have reached the service, unexpected drop retains uncertain
 //! occupancy until the owning lifecycle confirms a terminal result, cleanup,
 //! or handoff. Cleanup failure therefore cannot release fictitious capacity.
-//! Startup may attest locally observed work, but never sweeps an unattested
-//! reservation using one daemon's local roots; recorded-job recovery releases
-//! a crashed attempt only after it completes and cleans the job.
+//! Startup may attest locally observed work, but retains every unattested
+//! reservation until recorded-job recovery proves terminal completion and
+//! cleanup for that exact attempt.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use velnor_control::permit_ledger::{
-    deferred_wait, unix_now, AcquireOutcome, AdoptOutcome, LedgerError, PermitLane, PermitLedger,
-    PermitState, DEFERRED_WAIT_BUDGET,
+    deferred_wait, unix_now, AcquireAttemptOutcome, AdoptOutcome, LedgerError,
+    OwnedReleaseOutcome as LedgerReleaseOutcome, PermitLane, PermitLedger, PermitState,
+    DEFERRED_WAIT_BUDGET,
 };
 
 /// Environment override for the host-wide ledger database.
@@ -28,6 +32,78 @@ pub const PERMIT_LEDGER_ENV: &str = "VELNOR_PERMIT_LEDGER";
 
 /// Ledger file name next to the operational state db.
 pub const PERMIT_LEDGER_FILE: &str = "permit-ledger.db";
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CleanupClaimKey {
+    ledger_path: PathBuf,
+    holder: String,
+    attempt_token: String,
+}
+
+#[derive(Debug)]
+struct ActiveCleanupClaim {
+    key: CleanupClaimKey,
+    active: AtomicBool,
+}
+
+static ACTIVE_CLEANUP_CLAIMS: OnceLock<Mutex<HashMap<CleanupClaimKey, Weak<ActiveCleanupClaim>>>> =
+    OnceLock::new();
+
+fn cleanup_claim_registry() -> &'static Mutex<HashMap<CleanupClaimKey, Weak<ActiveCleanupClaim>>> {
+    ACTIVE_CLEANUP_CLAIMS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lock_cleanup_claim_registry(
+) -> std::sync::MutexGuard<'static, HashMap<CleanupClaimKey, Weak<ActiveCleanupClaim>>> {
+    cleanup_claim_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn canonical_ledger_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn cleanup_claim_is_active_for_holder(
+    registry: &mut HashMap<CleanupClaimKey, Weak<ActiveCleanupClaim>>,
+    ledger_path: &Path,
+    holder: &str,
+) -> bool {
+    registry.retain(|_, claim| claim.strong_count() > 0);
+    let ledger_path = canonical_ledger_path(ledger_path);
+    registry.iter().any(|(key, claim)| {
+        key.ledger_path == ledger_path
+            && key.holder == holder
+            && claim
+                .upgrade()
+                .is_some_and(|claim| claim.active.load(Ordering::Acquire))
+    })
+}
+
+impl ActiveCleanupClaim {
+    fn new(ledger_path: &Path, holder: String, attempt_token: String) -> Arc<Self> {
+        Arc::new(Self {
+            key: CleanupClaimKey {
+                ledger_path: canonical_ledger_path(ledger_path),
+                holder,
+                attempt_token,
+            },
+            active: AtomicBool::new(false),
+        })
+    }
+
+    fn activate(self: &Arc<Self>) {
+        let mut registry = lock_cleanup_claim_registry();
+        registry.retain(|_, claim| claim.strong_count() > 0);
+        self.active.store(true, Ordering::Release);
+        registry.insert(self.key.clone(), Arc::downgrade(self));
+    }
+
+    fn deactivate(&self) {
+        self.active.store(false, Ordering::Release);
+        lock_cleanup_claim_registry().remove(&self.key);
+    }
+}
 
 /// Holder namespace for native acquisitions: `native/<broker request id>`.
 /// Broker request ids are unique per broker; redelivery of the same request
@@ -121,8 +197,8 @@ pub fn apply_max_jobs(
     }
 }
 
-/// Whether a host pid names a live process. Pid reuse reads as alive: the
-/// sweep's error direction is retention, never a double-spend.
+/// Whether a host pid names a live process. Pid reuse reads as alive, so
+/// recovery remains conservative when process ownership is ambiguous.
 pub fn pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
@@ -166,18 +242,28 @@ pub fn pid_alive(pid: u32) -> bool {
 pub struct NativePermitGuard {
     ledger_path: PathBuf,
     holder: String,
-    /// False when this attempt never spent a permit (duplicate delivery
-    /// onto a live hold): drop does nothing.
-    owns_permit: bool,
+    /// Unique token for the attempt that currently owns the permit.
+    attempt_token: String,
+    /// Same-process authority still held by an in-flight teardown worker.
+    /// PID liveness cannot distinguish that worker from a fresh redelivery.
+    cleanup_claim: Arc<ActiveCleanupClaim>,
     /// A run-service acquire may have committed or a job may be executing.
     /// Until cleanup/handoff is confirmed, unexpected drop retains the row.
     retain_on_drop: bool,
+    /// Local resource cleanup is confirmed, so a failed terminal release may
+    /// demote an exact-token Cleaning row for same-process redelivery.
+    cleanup_confirmed: bool,
     disarmed: bool,
 }
 
 impl NativePermitGuard {
     pub fn holder(&self) -> &str {
         &self.holder
+    }
+
+    /// Token fencing this guard's permit mutations.
+    pub fn attempt_token(&self) -> &str {
+        &self.attempt_token
     }
 
     pub fn ledger_path(&self) -> &Path {
@@ -188,18 +274,16 @@ impl NativePermitGuard {
     /// uncertain occupancy instead of exposing capacity before a terminal
     /// outcome, cleanup, or handoff is confirmed.
     pub fn retain_until_terminal(&mut self) {
-        if self.owns_permit {
-            self.retain_on_drop = true;
-        }
+        self.retain_on_drop = true;
     }
 
     /// Acquire the host-wide permit for one acquisition attempt.
     ///
-    /// Returns `Ok(None)` when the ledger is full (the caller skips the
-    /// acquisition; the broker redelivers). A duplicate delivery onto a
-    /// hold whose attempt died adopts the row (same holder, new pid);
-    /// onto a live hold it returns a guard that owns nothing: the attempt
-    /// proceeds and releases nothing.
+    /// Returns `Ok(None)` when admission is unavailable or the same request
+    /// already has a live owner. A duplicate delivery onto a hold whose
+    /// attempt died, or which this process retained as uncertain, adopts the
+    /// row (same holder, new pid). A live duplicate must wait for redelivery;
+    /// it cannot execute or write a marker without owning the permit.
     ///
     /// `scope` labels a first observation when ingress did not already
     /// persist the demand age.
@@ -221,8 +305,14 @@ impl NativePermitGuard {
         let mut deferred_attempts = 0u32;
         loop {
             let generation = ledger.generation().map_err(GuardError::Storage)?;
+            let mut claim_registry = lock_cleanup_claim_registry();
+            if cleanup_claim_is_active_for_holder(&mut claim_registry, ledger_path, &holder) {
+                drop(claim_registry);
+                park_departed(&mut ledger, &holder);
+                return Ok(None);
+            }
             match ledger
-                .acquire(
+                .acquire_attempt(
                     &holder,
                     PermitLane::Native,
                     PermitState::Acquiring,
@@ -231,10 +321,12 @@ impl NativePermitGuard {
                 )
                 .map_err(GuardError::Storage)?
             {
-                AcquireOutcome::Acquired => return Ok(Some(Self::owned(ledger_path, holder))),
-                AcquireOutcome::AlreadyHeld => {
-                    match ledger
-                        .adopt_if_pid_dead(
+                AcquireAttemptOutcome::Acquired { attempt_token } => {
+                    return Ok(Some(Self::owned(ledger_path, holder, attempt_token)));
+                }
+                AcquireAttemptOutcome::AlreadyHeld => {
+                    let adoption = ledger
+                        .adopt_for_redelivery(
                             &holder,
                             PermitLane::Native,
                             PermitState::Acquiring,
@@ -242,13 +334,15 @@ impl NativePermitGuard {
                             pid,
                             &pid_alive,
                         )
-                        .map_err(GuardError::Storage)?
-                    {
-                        AdoptOutcome::Adopted => {
-                            return Ok(Some(Self::owned(ledger_path, holder)));
+                        .map_err(GuardError::Storage)?;
+                    drop(claim_registry);
+                    match adoption {
+                        AdoptOutcome::Adopted { attempt_token } => {
+                            return Ok(Some(Self::owned(ledger_path, holder, attempt_token)));
                         }
                         AdoptOutcome::LiveHolder => {
-                            return Ok(Some(Self::unowned(ledger_path, holder)));
+                            park_departed(&mut ledger, &holder);
+                            return Ok(None);
                         }
                         AdoptOutcome::Missing | AdoptOutcome::StaleGeneration => {
                             if std::time::Instant::now() >= deadline {
@@ -258,11 +352,13 @@ impl NativePermitGuard {
                         }
                     }
                 }
-                AcquireOutcome::Full | AcquireOutcome::Closed => {
+                AcquireAttemptOutcome::Full | AcquireAttemptOutcome::Closed => {
+                    drop(claim_registry);
                     park_departed(&mut ledger, &holder);
                     return Ok(None);
                 }
-                AcquireOutcome::Deferred => {
+                AcquireAttemptOutcome::Deferred => {
+                    drop(claim_registry);
                     if std::time::Instant::now() >= deadline {
                         park_departed(&mut ledger, &holder);
                         return Ok(None);
@@ -270,59 +366,61 @@ impl NativePermitGuard {
                     std::thread::sleep(deferred_wait(deferred_attempts));
                     deferred_attempts = deferred_attempts.saturating_add(1);
                 }
-                AcquireOutcome::StaleGeneration => {
+                AcquireAttemptOutcome::StaleGeneration => {
+                    drop(claim_registry);
                     if std::time::Instant::now() >= deadline {
                         park_departed(&mut ledger, &holder);
                         return Ok(None);
                     }
                 }
-                AcquireOutcome::NotConfigured => {
+                AcquireAttemptOutcome::NotConfigured => {
                     return Err(GuardError::NotConfigured);
                 }
             }
         }
     }
 
-    fn owned(ledger_path: &Path, holder: String) -> Self {
+    fn owned(ledger_path: &Path, holder: String, attempt_token: String) -> Self {
         Self {
             ledger_path: ledger_path.to_path_buf(),
+            cleanup_claim: ActiveCleanupClaim::new(
+                ledger_path,
+                holder.clone(),
+                attempt_token.clone(),
+            ),
             holder,
-            owns_permit: true,
+            attempt_token,
             retain_on_drop: false,
-            disarmed: false,
-        }
-    }
-
-    fn unowned(ledger_path: &Path, holder: String) -> Self {
-        Self {
-            ledger_path: ledger_path.to_path_buf(),
-            holder,
-            owns_permit: false,
-            retain_on_drop: false,
+            cleanup_confirmed: false,
             disarmed: false,
         }
     }
 
     /// Release handle for the teardown thread: `Some` only when this
     /// attempt owns the permit. A duplicate delivery onto a live hold
-    /// must never release its winner's row.
+    /// always fences its release to the current attempt token.
     pub fn teardown_release(&self) -> Option<TeardownPermitRelease> {
-        if self.owns_permit {
-            Some(TeardownPermitRelease {
-                ledger_path: self.ledger_path.clone(),
-                holder: self.holder.clone(),
-            })
-        } else {
-            None
+        self.cleanup_claim.activate();
+        Some(TeardownPermitRelease {
+            ledger_path: self.ledger_path.clone(),
+            holder: self.holder.clone(),
+            attempt_token: self.attempt_token.clone(),
+            cleanup_claim: Arc::clone(&self.cleanup_claim),
+        })
+    }
+
+    /// Keep same-process redelivery blocked while a worker performs cleanup
+    /// but must preserve the permit for later service-response recovery.
+    pub fn teardown_cleanup_claim(&self) -> TeardownCleanupClaim {
+        self.cleanup_claim.activate();
+        TeardownCleanupClaim {
+            cleanup_claim: Arc::clone(&self.cleanup_claim),
         }
     }
 
     /// The job started executing: the acquiring permit is now running.
     /// Best-effort: occupancy never depended on the state spelling.
     pub fn transition_running(&mut self) {
-        if !self.owns_permit {
-            return;
-        }
         // Recording an in-flight job is the durable recovery boundary.
         // Any later unexpected exit must preserve occupancy until the
         // cleanup owner confirms teardown or handoff.
@@ -330,9 +428,12 @@ impl NativePermitGuard {
         match PermitLedger::open(&self.ledger_path) {
             Ok(mut ledger) => match ledger.generation() {
                 Ok(generation) => {
-                    if let Err(error) =
-                        ledger.transition(&self.holder, PermitState::Running, generation)
-                    {
+                    if let Err(error) = ledger.transition_owned(
+                        &self.holder,
+                        PermitState::Running,
+                        generation,
+                        &self.attempt_token,
+                    ) {
                         eprintln!(
                             "Warning: permit ledger transition to running failed for {}: {error}",
                             self.holder
@@ -355,16 +456,17 @@ impl NativePermitGuard {
     /// cleanup is beginning: transition the permit to cleaning.
     /// Best-effort: occupancy never depended on the state spelling.
     pub fn transition_cleaning(&mut self) {
-        if !self.owns_permit {
-            return;
-        }
         self.retain_on_drop = true;
+        self.cleanup_claim.activate();
         match PermitLedger::open(&self.ledger_path) {
             Ok(mut ledger) => match ledger.generation() {
                 Ok(generation) => {
-                    if let Err(error) =
-                        ledger.transition(&self.holder, PermitState::Cleaning, generation)
-                    {
+                    if let Err(error) = ledger.transition_owned(
+                        &self.holder,
+                        PermitState::Cleaning,
+                        generation,
+                        &self.attempt_token,
+                    ) {
                         eprintln!(
                             "Warning: permit ledger transition to cleaning failed for {}: {error}",
                             self.holder
@@ -384,18 +486,53 @@ impl NativePermitGuard {
     }
 
     /// Terminal success: owned cleanup is confirmed, atomically close the
-    /// demand and free the permit. Best-effort with a loud warning.
-    pub fn release(mut self) {
+    /// demand and free the permit. Callers can keep local recovery evidence
+    /// when release fails or a newer attempt owns the row.
+    pub fn release(mut self) -> Result<PermitReleaseOutcome, LedgerError> {
+        if self.disarmed {
+            return Ok(PermitReleaseOutcome::AlreadyAbsent);
+        }
+        // If the terminal write fails, retain uncertainty on Drop so a
+        // same-process redelivery can adopt the exact row after this guard
+        // exits. Disarming before the fallible write leaves an active-PID
+        // Acquiring/Cleaning row that no retry can safely adopt.
+        self.retain_on_drop = true;
+        self.cleanup_confirmed = true;
+        let outcome = release_permit_owned(&self.ledger_path, &self.holder, &self.attempt_token)?;
+        if outcome == PermitReleaseOutcome::StaleAttempt {
+            return Ok(outcome);
+        }
         self.disarmed = true;
-        if !self.owns_permit {
-            return;
+        self.cleanup_claim.deactivate();
+        Ok(outcome)
+    }
+
+    /// Release the exact attempt once, while a caller holds the in-flight
+    /// marker lock and will clear the matching marker afterward. Disarming
+    /// here prevents a later guard drop or completion path from issuing a
+    /// second absent-row terminal mutation against newer demand.
+    pub(crate) fn release_for_terminal_marker(
+        &mut self,
+    ) -> Result<PermitReleaseOutcome, LedgerError> {
+        if self.disarmed {
+            return Ok(PermitReleaseOutcome::AlreadyAbsent);
         }
-        if let Err(error) = release_permit(&self.ledger_path, &self.holder) {
-            eprintln!(
-                "Warning: permit ledger release failed for {}: {error}",
-                self.holder
-            );
+        self.retain_on_drop = true;
+        self.cleanup_confirmed = true;
+        let outcome = release_permit_owned(&self.ledger_path, &self.holder, &self.attempt_token)?;
+        if outcome != PermitReleaseOutcome::StaleAttempt {
+            self.disarmed = true;
+            self.cleanup_claim.deactivate();
         }
+        Ok(outcome)
+    }
+
+    /// Stop this handler-owned guard from mutating the ledger after a teardown
+    /// worker has already confirmed release of the same attempt.
+    pub(crate) fn disarm_after_confirmed_teardown(&mut self) {
+        self.disarmed = true;
+        self.cleanup_confirmed = true;
+        self.cleanup_claim.deactivate();
     }
 
     /// Terminal cleanup failure: retain a visible uncertain reservation
@@ -403,32 +540,37 @@ impl NativePermitGuard {
     /// permit state transition commit atomically.
     pub fn mark_uncertain_and_disarm(mut self) {
         self.disarmed = true;
-        if !self.owns_permit {
-            return;
+        if self.cleanup_confirmed {
+            self.retain_uncertain_after_cleanup_best_effort();
+        } else {
+            self.retain_uncertain_best_effort();
         }
-        self.retain_uncertain_best_effort();
     }
 
     /// Confirm the upstream request is no longer eligible; atomically
     /// release its hold and close demand so it cannot block the queue.
-    pub fn release_cancelled(mut self) {
+    pub fn release_cancelled(mut self) -> Result<PermitReleaseOutcome, LedgerError> {
+        // A failed cancellation release must not strand a live-PID
+        // Acquiring row. Let Drop retain it as Uncertain/Terminal so the
+        // next exact redelivery can adopt it after this attempt is gone.
+        self.retain_on_drop = true;
+        let outcome =
+            release_permit_cancelled_owned(&self.ledger_path, &self.holder, &self.attempt_token)?;
+        if outcome == PermitReleaseOutcome::StaleAttempt {
+            return Ok(outcome);
+        }
         self.disarmed = true;
-        if !self.owns_permit {
-            return;
-        }
-        if let Err(error) = release_permit_cancelled(&self.ledger_path, &self.holder) {
-            eprintln!(
-                "Warning: cancelled permit release failed for {}: {error}",
-                self.holder
-            );
-        }
+        self.cleanup_claim.deactivate();
+        Ok(outcome)
     }
 
     fn retain_uncertain_best_effort(&self) {
         match PermitLedger::open(&self.ledger_path) {
             Ok(mut ledger) => match ledger.generation() {
                 Ok(generation) => {
-                    if let Err(error) = ledger.retain_uncertain(&self.holder, generation) {
+                    if let Err(error) =
+                        ledger.retain_uncertain_owned(&self.holder, generation, &self.attempt_token)
+                    {
                         eprintln!(
                             "Warning: uncertain permit retention failed for {}: {error}",
                             self.holder
@@ -446,26 +588,59 @@ impl NativePermitGuard {
             ),
         }
     }
+
+    fn retain_uncertain_after_cleanup_best_effort(&self) {
+        match PermitLedger::open(&self.ledger_path) {
+            Ok(mut ledger) => {
+                if let Err(error) =
+                    ledger.retain_uncertain_after_cleanup_owned(&self.holder, &self.attempt_token)
+                {
+                    eprintln!(
+                        "Warning: cleaned permit retention failed for {}: {error}",
+                        self.holder
+                    );
+                }
+            }
+            Err(error) => eprintln!(
+                "Warning: permit ledger open failed for {}: {error}",
+                self.holder
+            ),
+        }
+    }
 }
 
 impl Drop for NativePermitGuard {
     fn drop(&mut self) {
-        if self.disarmed || !self.owns_permit {
+        if self.disarmed {
             return;
         }
         if self.retain_on_drop {
             // Run-service may have committed assignment, or this attempt
             // may have started workload. Keep the permit counted until the
             // owning lifecycle proves cleanup or handoff.
-            self.retain_uncertain_best_effort();
+            if self.cleanup_confirmed {
+                self.retain_uncertain_after_cleanup_best_effort();
+            } else {
+                self.retain_uncertain_best_effort();
+            }
         } else {
             // Before a job is acquired, a non-terminal return is safe to
             // redeliver; preserve its original position in the queue.
-            if let Err(error) = release_permit_to_eligible(&self.ledger_path, &self.holder) {
+            if let Err(error) = release_permit_to_eligible_owned(
+                &self.ledger_path,
+                &self.holder,
+                &self.attempt_token,
+            ) {
                 eprintln!(
                     "Warning: permit ledger release failed for {}: {error}",
                     self.holder
                 );
+                // A failed delete must not strand this live-PID Acquiring
+                // row: redelivery can adopt only an Uncertain/Terminal row
+                // from this process. Retain occupancy under the exact token
+                // so failed pre-acquire cleanup remains recoverable without
+                // letting an old guard mutate a newer attempt.
+                self.retain_uncertain_best_effort();
             }
         }
     }
@@ -481,35 +656,43 @@ fn park_departed(ledger: &mut PermitLedger, holder: &str) {
     }
 }
 
-fn release_permit(ledger_path: &Path, holder: &str) -> Result<bool, LedgerError> {
+pub fn release_permit_owned(
+    ledger_path: &Path,
+    holder: &str,
+    attempt_token: &str,
+) -> Result<PermitReleaseOutcome, LedgerError> {
     let mut ledger = PermitLedger::open(ledger_path)?;
-    ledger.release(holder)
+    Ok(
+        match ledger.release_native_terminal_owned(holder, attempt_token)? {
+            LedgerReleaseOutcome::Released => PermitReleaseOutcome::Released,
+            LedgerReleaseOutcome::AlreadyAbsent => PermitReleaseOutcome::AlreadyAbsent,
+            LedgerReleaseOutcome::StaleAttempt => PermitReleaseOutcome::StaleAttempt,
+        },
+    )
 }
 
-fn release_permit_to_eligible(ledger_path: &Path, holder: &str) -> Result<bool, LedgerError> {
+fn release_permit_to_eligible_owned(
+    ledger_path: &Path,
+    holder: &str,
+    attempt_token: &str,
+) -> Result<bool, LedgerError> {
     let mut ledger = PermitLedger::open(ledger_path)?;
-    ledger.release_to_eligible(holder)
+    ledger.release_to_eligible_owned(holder, attempt_token)
 }
 
-fn release_permit_cancelled(ledger_path: &Path, holder: &str) -> Result<bool, LedgerError> {
+fn release_permit_cancelled_owned(
+    ledger_path: &Path,
+    holder: &str,
+    attempt_token: &str,
+) -> Result<PermitReleaseOutcome, LedgerError> {
     let mut ledger = PermitLedger::open(ledger_path)?;
-    ledger.release_cancelled(holder)
-}
-
-/// Release one holder's permit from outside the attempt that acquired it
-/// (recorded-job recovery). Best-effort with a loud warning. Recovery runs
-/// after the job completed and cleaned, so permit release and demand
-/// terminalization commit together.
-pub fn release_permit_best_effort(ledger_path: &Path, holder: &str) {
-    match release_permit(ledger_path, holder) {
-        Ok(true) => {}
-        Ok(false) => {
-            eprintln!("permit ledger: holder {holder} already released; nothing to converge");
-        }
-        Err(error) => {
-            eprintln!("Warning: permit ledger release failed for {holder}: {error}");
-        }
-    }
+    Ok(
+        match ledger.release_native_cancelled_owned(holder, attempt_token)? {
+            LedgerReleaseOutcome::Released => PermitReleaseOutcome::Released,
+            LedgerReleaseOutcome::AlreadyAbsent => PermitReleaseOutcome::AlreadyAbsent,
+            LedgerReleaseOutcome::StaleAttempt => PermitReleaseOutcome::StaleAttempt,
+        },
+    )
 }
 
 /// Owned cleanup is confirmed inside the teardown thread: release the
@@ -520,14 +703,62 @@ pub fn release_permit_best_effort(ledger_path: &Path, holder: &str) {
 pub struct TeardownPermitRelease {
     ledger_path: PathBuf,
     holder: String,
+    attempt_token: String,
+    cleanup_claim: Arc<ActiveCleanupClaim>,
+}
+
+/// Same-process cleanup ownership without authority to release the permit.
+/// Use when local teardown can finish but the service result remains
+/// unacknowledged, so the durable marker and permit must stay for recovery.
+#[derive(Debug, Clone)]
+pub struct TeardownCleanupClaim {
+    cleanup_claim: Arc<ActiveCleanupClaim>,
+}
+
+impl TeardownCleanupClaim {
+    /// Keep the exact permit in uncertain occupancy after owned cleanup is
+    /// confirmed, then release in-process exclusion. The marker and permit
+    /// remain for a later service-response redelivery.
+    pub fn cleanup_confirmed(&self) -> Result<(), LedgerError> {
+        let mut ledger = PermitLedger::open(&self.cleanup_claim.key.ledger_path)?;
+        ledger.retain_uncertain_after_cleanup_owned(
+            &self.cleanup_claim.key.holder,
+            &self.cleanup_claim.key.attempt_token,
+        )?;
+        self.cleanup_claim.deactivate();
+        Ok(())
+    }
 }
 
 impl TeardownPermitRelease {
-    pub fn release_confirmed_cleanup(&self) {
+    pub fn holder(&self) -> &str {
+        &self.holder
+    }
+
+    pub fn attempt_token(&self) -> &str {
+        &self.attempt_token
+    }
+
+    pub fn release_confirmed_cleanup(&self) -> Result<PermitReleaseOutcome, LedgerError> {
         // The demand row exists (acquire upserts it); terminalization and
         // permit release share one transaction.
-        release_permit_best_effort(&self.ledger_path, &self.holder);
+        let outcome = release_permit_owned(&self.ledger_path, &self.holder, &self.attempt_token)?;
+        if outcome != PermitReleaseOutcome::StaleAttempt {
+            self.cleanup_claim.deactivate();
+        }
+        Ok(outcome)
     }
+}
+
+/// Outcome of releasing one token-owned permit. `AlreadyAbsent` supports an
+/// idempotent retry after permit release succeeded but marker clear failed;
+/// `StaleAttempt` means another token still occupies the holder and must be
+/// preserved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermitReleaseOutcome {
+    Released,
+    AlreadyAbsent,
+    StaleAttempt,
 }
 
 /// Why a guard acquisition failed. Every variant fails the acquisition
@@ -584,7 +815,7 @@ mod tests {
         let mut ledger = PermitLedger::open(path).unwrap();
         ledger.set_max_jobs(max_jobs).unwrap();
         ledger.begin_epoch().unwrap();
-        ledger.reconcile(&[]).unwrap();
+        ledger.reconcile_attempts(&[]).unwrap();
     }
 
     #[test]
@@ -608,21 +839,21 @@ mod tests {
         let guard = NativePermitGuard::acquire(&path, native_permit_holder("req-1"), "test-scope")
             .unwrap()
             .expect("first acquire grants");
-        assert!(guard.owns_permit);
+        assert!(guard.teardown_release().is_some());
         // Full: the second attempt is refused, not queued.
         assert!(
             NativePermitGuard::acquire(&path, native_permit_holder("req-2"), "test-scope")
                 .unwrap()
                 .is_none()
         );
-        // Duplicate delivery of the same request holds once and owns nothing.
-        let duplicate =
+        // A live duplicate is skipped; it cannot proceed without owning the
+        // permit or create a tokenless recovery marker.
+        assert!(
             NativePermitGuard::acquire(&path, native_permit_holder("req-1"), "test-scope")
                 .unwrap()
-                .expect("duplicate delivery proceeds");
-        assert!(!duplicate.owns_permit);
-        drop(duplicate);
-        // Dropping the duplicate released nothing: still full.
+                .is_none()
+        );
+        // The duplicate attempt changed nothing: still full.
         assert!(
             NativePermitGuard::acquire(&path, native_permit_holder("req-3"), "test-scope")
                 .unwrap()
@@ -635,7 +866,7 @@ mod tests {
             NativePermitGuard::acquire(&path, native_permit_holder("req-1"), "test-scope")
                 .unwrap()
                 .expect("older retry keeps its place");
-        reopened.release();
+        assert_eq!(reopened.release().unwrap(), PermitReleaseOutcome::Released);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -692,7 +923,7 @@ mod tests {
         assert_eq!(ledger.occupied().unwrap(), 1);
         drop(ledger);
 
-        guard.release();
+        assert_eq!(guard.release().unwrap(), PermitReleaseOutcome::Released);
         let ledger = PermitLedger::open(&path).unwrap();
         assert_eq!(
             ledger.holder_state(&native_permit_holder("req-1")).unwrap(),
@@ -735,6 +966,217 @@ mod tests {
     }
 
     #[test]
+    fn exact_redelivery_adopts_uncertain_same_process_hold_and_releases_it() {
+        use velnor_control::permit_ledger::DemandState;
+
+        for (case, cancelled) in [(200, false), (404, true)] {
+            let path = temp_ledger_path(&format!("redelivery-{case}"));
+            configure(&path, 2);
+
+            let mut ambiguous =
+                NativePermitGuard::acquire(&path, native_permit_holder("req-1"), "test-scope")
+                    .unwrap()
+                    .unwrap();
+            ambiguous.retain_until_terminal();
+            let previous_token = ambiguous.attempt_token().to_owned();
+            drop(ambiguous);
+
+            // Another request remains actively owned by this same process.
+            let mut unrelated =
+                NativePermitGuard::acquire(&path, native_permit_holder("req-live"), "test-scope")
+                    .unwrap()
+                    .unwrap();
+            unrelated.transition_running();
+
+            let redelivery =
+                NativePermitGuard::acquire(&path, native_permit_holder("req-1"), "test-scope")
+                    .unwrap()
+                    .expect("redelivery takes ownership of the uncertain row");
+            assert!(redelivery.teardown_release().is_some());
+
+            // A delayed cleanup from the original attempt carries its old
+            // token and cannot release the row after redelivery adopted it.
+            assert_eq!(
+                release_permit_owned(&path, &native_permit_holder("req-1"), &previous_token,)
+                    .unwrap(),
+                PermitReleaseOutcome::StaleAttempt
+            );
+            let ledger = PermitLedger::open(&path).unwrap();
+            assert_eq!(ledger.occupied().unwrap(), 2);
+            assert_eq!(
+                ledger.holder_state(&native_permit_holder("req-1")).unwrap(),
+                Some(PermitState::Acquiring)
+            );
+            drop(ledger);
+
+            if cancelled {
+                assert_eq!(
+                    redelivery.release_cancelled().unwrap(),
+                    PermitReleaseOutcome::Released
+                );
+            } else {
+                assert_eq!(
+                    redelivery.release().unwrap(),
+                    PermitReleaseOutcome::Released
+                );
+            }
+
+            let ledger = PermitLedger::open(&path).unwrap();
+            assert_eq!(ledger.occupied().unwrap(), 1);
+            assert_eq!(
+                ledger.holder_state(&native_permit_holder("req-1")).unwrap(),
+                None
+            );
+            assert_eq!(
+                ledger
+                    .holder_state(&native_permit_holder("req-live"))
+                    .unwrap(),
+                Some(PermitState::Running)
+            );
+            assert_eq!(
+                ledger
+                    .demand(&native_permit_holder("req-1"))
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                if cancelled {
+                    DemandState::Cancelled
+                } else {
+                    DemandState::Terminal
+                }
+            );
+            drop(ledger);
+            assert_eq!(unrelated.release().unwrap(), PermitReleaseOutcome::Released);
+            std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn live_timed_out_teardown_claim_blocks_same_process_redelivery() {
+        use std::sync::{Arc, Barrier};
+        use velnor_control::permit_ledger::DemandState;
+
+        let path = temp_ledger_path("live-teardown-claim");
+        configure(&path, 2);
+        let holder = native_permit_holder("req-1");
+        let mut ambiguous = NativePermitGuard::acquire(&path, holder.clone(), "test-scope")
+            .unwrap()
+            .unwrap();
+        ambiguous.retain_until_terminal();
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_cleaning_transition
+                 BEFORE UPDATE OF state ON permits
+                 WHEN NEW.state = 'cleaning'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced cleaning persistence failure');
+                 END;",
+            )
+            .unwrap();
+        // Transition remains best-effort, but it must publish a process-local
+        // cleanup claim before trying to write Cleaning.
+        ambiguous.transition_cleaning();
+        let teardown = ambiguous
+            .teardown_release()
+            .expect("the attempt owns its cleanup release");
+        let old_token = ambiguous.attempt_token().to_owned();
+        // The failed transition leaves the detached worker's attempt claim
+        // live while guard drop moves the row to Uncertain/Terminal.
+        drop(ambiguous);
+
+        let worker_started = Arc::new(Barrier::new(2));
+        let finish_cleanup = Arc::new(Barrier::new(2));
+        let started = Arc::clone(&worker_started);
+        let finish = Arc::clone(&finish_cleanup);
+        let worker = std::thread::spawn(move || {
+            started.wait();
+            finish.wait();
+            teardown.release_confirmed_cleanup().unwrap()
+        });
+
+        worker_started.wait();
+        let ledger = PermitLedger::open(&path).unwrap();
+        assert!(ledger.is_current_attempt(&holder, &old_token).unwrap());
+        assert_eq!(
+            ledger.holder_state(&holder).unwrap(),
+            Some(PermitState::Uncertain)
+        );
+        assert_eq!(
+            ledger.demand(&holder).unwrap().unwrap().state,
+            DemandState::Terminal
+        );
+        assert_eq!(ledger.occupied().unwrap(), 1);
+        drop(ledger);
+
+        // Same-PID liveness alone would allow this exact redelivery to steal
+        // an Uncertain/Terminal row. The worker's attempt claim blocks it.
+        assert!(
+            NativePermitGuard::acquire(&path, holder.clone(), "test-scope")
+                .unwrap()
+                .is_none()
+        );
+        let ledger = PermitLedger::open(&path).unwrap();
+        assert!(ledger.is_current_attempt(&holder, &old_token).unwrap());
+        assert_eq!(ledger.occupied().unwrap(), 1);
+        drop(ledger);
+
+        finish_cleanup.wait();
+        assert_eq!(worker.join().unwrap(), PermitReleaseOutcome::Released);
+        let ledger = PermitLedger::open(&path).unwrap();
+        assert!(!ledger.has_permit(&holder).unwrap());
+        assert_eq!(ledger.occupied().unwrap(), 0);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn preserve_recovery_worker_claim_blocks_until_cleanup_confirmation() {
+        use std::sync::{Arc, Barrier};
+
+        let path = temp_ledger_path("preserve-recovery-cleanup-claim");
+        configure(&path, 1);
+        let holder = native_permit_holder("req-1");
+        let mut ambiguous = NativePermitGuard::acquire(&path, holder.clone(), "test-scope")
+            .unwrap()
+            .unwrap();
+        ambiguous.retain_until_terminal();
+        let cleanup_claim = ambiguous.teardown_cleanup_claim();
+        drop(ambiguous);
+
+        let worker_started = Arc::new(Barrier::new(2));
+        let finish_cleanup = Arc::new(Barrier::new(2));
+        let started = Arc::clone(&worker_started);
+        let finish = Arc::clone(&finish_cleanup);
+        let worker = std::thread::spawn(move || {
+            started.wait();
+            finish.wait();
+            cleanup_claim.cleanup_confirmed().unwrap();
+        });
+
+        worker_started.wait();
+        assert!(
+            NativePermitGuard::acquire(&path, holder.clone(), "test-scope")
+                .unwrap()
+                .is_none()
+        );
+        finish_cleanup.wait();
+        worker.join().unwrap();
+
+        // The worker only confirmed local cleanup. The uncertain permit stays
+        // for exact redelivery to resolve the service result.
+        let redelivery = NativePermitGuard::acquire(&path, holder.clone(), "test-scope")
+            .unwrap()
+            .expect("redelivery adopts after the cleanup worker finishes");
+        assert_eq!(
+            redelivery.release().unwrap(),
+            PermitReleaseOutcome::Released
+        );
+        let ledger = PermitLedger::open(&path).unwrap();
+        assert!(!ledger.has_permit(&holder).unwrap());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
     fn confirmed_unavailable_request_cancels_demand_on_release() {
         use velnor_control::permit_ledger::DemandState;
 
@@ -743,7 +1185,10 @@ mod tests {
         let guard = NativePermitGuard::acquire(&path, native_permit_holder("req-1"), "test-scope")
             .unwrap()
             .unwrap();
-        guard.release_cancelled();
+        assert_eq!(
+            guard.release_cancelled().unwrap(),
+            PermitReleaseOutcome::Released
+        );
 
         let ledger = PermitLedger::open(&path).unwrap();
         assert_eq!(ledger.occupied().unwrap(), 0);
@@ -759,6 +1204,168 @@ mod tests {
     }
 
     #[test]
+    fn failed_cancelled_release_retains_adoptable_same_process_attempt() {
+        use velnor_control::permit_ledger::DemandState;
+
+        let path = temp_ledger_path("cancel-release-failure");
+        configure(&path, 1);
+        let holder = native_permit_holder("req-cancel-failure");
+        let guard = NativePermitGuard::acquire(&path, holder.clone(), "test-scope")
+            .unwrap()
+            .unwrap();
+        let old_token = guard.attempt_token().to_owned();
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_cancelled_release
+                 BEFORE DELETE ON permits
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced cancelled release failure');
+                 END;",
+            )
+            .unwrap();
+
+        let error = guard.release_cancelled().unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("forced cancelled release failure"));
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_cancelled_release;")
+            .unwrap();
+
+        let ledger = PermitLedger::open(&path).unwrap();
+        assert_eq!(ledger.occupied().unwrap(), 1);
+        assert!(ledger.is_current_attempt(&holder, &old_token).unwrap());
+        assert_eq!(
+            ledger.holder_state(&holder).unwrap(),
+            Some(PermitState::Uncertain)
+        );
+        assert_eq!(
+            ledger.demand(&holder).unwrap().unwrap().state,
+            DemandState::Terminal
+        );
+        drop(ledger);
+
+        let redelivery = NativePermitGuard::acquire(&path, holder.clone(), "test-scope")
+            .unwrap()
+            .expect("same-process redelivery adopts after failed release owner drops");
+        assert_ne!(redelivery.attempt_token(), old_token);
+        assert_eq!(
+            redelivery.release().unwrap(),
+            PermitReleaseOutcome::Released
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn failed_pre_acquire_drop_retains_adoptable_same_process_attempt() {
+        use velnor_control::permit_ledger::DemandState;
+
+        let path = temp_ledger_path("pre-acquire-drop-release-failure");
+        configure(&path, 1);
+        let holder = native_permit_holder("req-pre-acquire-drop-failure");
+        let guard = NativePermitGuard::acquire(&path, holder.clone(), "test-scope")
+            .unwrap()
+            .unwrap();
+        let old_token = guard.attempt_token().to_owned();
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_pre_acquire_drop_release
+                 BEFORE DELETE ON permits
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced pre-acquire drop release failure');
+                 END;",
+            )
+            .unwrap();
+
+        drop(guard);
+
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_pre_acquire_drop_release;")
+            .unwrap();
+        let ledger = PermitLedger::open(&path).unwrap();
+        assert_eq!(ledger.occupied().unwrap(), 1);
+        assert!(ledger.is_current_attempt(&holder, &old_token).unwrap());
+        assert_eq!(
+            ledger.holder_state(&holder).unwrap(),
+            Some(PermitState::Uncertain)
+        );
+        assert_eq!(
+            ledger.demand(&holder).unwrap().unwrap().state,
+            DemandState::Terminal
+        );
+        drop(ledger);
+
+        let redelivery = NativePermitGuard::acquire(&path, holder.clone(), "test-scope")
+            .unwrap()
+            .expect("same-process redelivery adopts the uncertain pre-acquire attempt");
+        assert_ne!(redelivery.attempt_token(), old_token);
+        assert_eq!(
+            redelivery.release().unwrap(),
+            PermitReleaseOutcome::Released
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn failed_cleaning_release_demotes_exact_row_for_same_process_redelivery() {
+        use velnor_control::permit_ledger::DemandState;
+
+        let path = temp_ledger_path("cleaning-release-failure");
+        configure(&path, 1);
+        let holder = native_permit_holder("req-cleaning-release-failure");
+        let mut guard = NativePermitGuard::acquire(&path, holder.clone(), "test-scope")
+            .unwrap()
+            .unwrap();
+        guard.retain_until_terminal();
+        guard.transition_cleaning();
+        let old_token = guard.attempt_token().to_owned();
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_cleaned_release
+                 BEFORE DELETE ON permits
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced cleaned release failure');
+                 END;",
+            )
+            .unwrap();
+
+        let error = guard.release().unwrap_err();
+        assert!(error.to_string().contains("forced cleaned release failure"));
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_cleaned_release;")
+            .unwrap();
+
+        let ledger = PermitLedger::open(&path).unwrap();
+        assert_eq!(ledger.occupied().unwrap(), 1);
+        assert!(ledger.is_current_attempt(&holder, &old_token).unwrap());
+        assert_eq!(
+            ledger.holder_state(&holder).unwrap(),
+            Some(PermitState::Uncertain)
+        );
+        assert_eq!(
+            ledger.demand(&holder).unwrap().unwrap().state,
+            DemandState::Terminal
+        );
+        drop(ledger);
+
+        let redelivery = NativePermitGuard::acquire(&path, holder.clone(), "test-scope")
+            .unwrap()
+            .expect("redelivery adopts the cleaned uncertain row");
+        assert_ne!(redelivery.attempt_token(), old_token);
+        assert_eq!(
+            redelivery.release().unwrap(),
+            PermitReleaseOutcome::Released
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
     fn redelivery_adopts_dead_attempts_and_not_live_ones() {
         use velnor_control::permit_ledger::PermitLedger;
         let path = temp_ledger_path("adopt");
@@ -768,51 +1375,51 @@ mod tests {
         {
             let mut ledger = PermitLedger::open(&path).unwrap();
             let generation = ledger.generation().unwrap();
-            ledger
-                .acquire(
-                    &native_permit_holder("crashed"),
-                    PermitLane::Native,
-                    PermitState::Running,
-                    generation,
-                    Some(u32::MAX),
-                )
-                .unwrap();
+            assert!(matches!(
+                ledger
+                    .acquire_attempt(
+                        &native_permit_holder("crashed"),
+                        PermitLane::Native,
+                        PermitState::Running,
+                        generation,
+                        Some(u32::MAX),
+                    )
+                    .unwrap(),
+                AcquireAttemptOutcome::Acquired { .. }
+            ));
         }
         let adopted =
             NativePermitGuard::acquire(&path, native_permit_holder("crashed"), "test-scope")
                 .unwrap()
                 .expect("redelivery proceeds");
-        assert!(adopted.owns_permit);
         assert!(adopted.teardown_release().is_some());
         // Occupancy unchanged: the same row, not a second permit.
         let ledger = PermitLedger::open(&path).unwrap();
         assert_eq!(ledger.occupied().unwrap(), 1);
         drop(ledger);
-        adopted.release();
+        assert_eq!(adopted.release().unwrap(), PermitReleaseOutcome::Released);
 
-        // A row held by this live test process: redelivery proceeds but
-        // owns nothing and releases nothing.
+        // A row held by this live test process: redelivery cannot steal it
+        // or proceed without ownership.
         let owner = NativePermitGuard::acquire(&path, native_permit_holder("live"), "test-scope")
             .unwrap()
             .unwrap();
-        let duplicate =
+        assert!(
             NativePermitGuard::acquire(&path, native_permit_holder("live"), "test-scope")
                 .unwrap()
-                .unwrap();
-        assert!(!duplicate.owns_permit);
-        assert!(duplicate.teardown_release().is_none());
-        drop(duplicate);
+                .is_none()
+        );
         let ledger = PermitLedger::open(&path).unwrap();
         assert_eq!(ledger.occupied().unwrap(), 1);
         drop(ledger);
-        owner.release();
+        assert_eq!(owner.release().unwrap(), PermitReleaseOutcome::Released);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn startup_reconcile_retains_uncertain_attempts_without_teardown_proof() {
-        let path = temp_ledger_path("sweep");
-        configure(&path, 4);
+        let path = temp_ledger_path("startup-retain");
+        configure(&path, 2);
         // A live attempt and a crashed attempt (impossible pid).
         let live = NativePermitGuard::acquire(&path, native_permit_holder("live"), "test-scope")
             .unwrap()
@@ -820,15 +1427,18 @@ mod tests {
         {
             let mut ledger = PermitLedger::open(&path).unwrap();
             let generation = ledger.generation().unwrap();
-            ledger
-                .acquire(
-                    &native_permit_holder("crashed"),
-                    PermitLane::Native,
-                    PermitState::Acquiring,
-                    generation,
-                    Some(u32::MAX),
-                )
-                .unwrap();
+            assert!(matches!(
+                ledger
+                    .acquire_attempt(
+                        &native_permit_holder("crashed"),
+                        PermitLane::Native,
+                        PermitState::Acquiring,
+                        generation,
+                        Some(u32::MAX),
+                    )
+                    .unwrap(),
+                AcquireAttemptOutcome::Acquired { .. }
+            ));
         }
         // New epoch (daemon restart): process death alone cannot attest
         // that owned cleanup or peer-daemon handoff completed.
@@ -839,24 +1449,40 @@ mod tests {
         // The one startup call site both lanes share (no scale-set
         // attestation on this native-only host).
         let live_holder = native_permit_holder("live");
-        let (report, swept) =
-            crate::scaleset::allocator::startup_reconcile(&path, &[], &[&live_holder], &pid_alive)
-                .unwrap();
+        let report = crate::scaleset::allocator::startup_reconcile(
+            &path,
+            &[],
+            &[(live_holder.as_str(), live.attempt_token())],
+        )
+        .unwrap();
         assert_eq!(report.confirmed, vec![native_permit_holder("live")]);
         assert_eq!(
             report.marked_uncertain,
             vec![native_permit_holder("crashed")]
         );
-        // Native uncertain with a recorded dead pid is the one startup sweep
-        // that deletes: the live attested row stays.
-        assert_eq!(swept, vec![native_permit_holder("crashed")]);
+        // Process death is not cleanup proof. Keep the exact native row until
+        // its owner completes terminal recovery and releases it.
         let ledger = PermitLedger::open(&path).unwrap();
+        assert_eq!(ledger.occupied().unwrap(), 2);
+        assert_eq!(
+            ledger
+                .holder_state(&native_permit_holder("crashed"))
+                .unwrap(),
+            Some(PermitState::Uncertain)
+        );
+        assert_eq!(
+            crate::scaleset::allocator::ScaleSetAllocator::open(&path)
+                .advertised_free()
+                .unwrap(),
+            Some(0)
+        );
+        assert!(
+            NativePermitGuard::acquire(&path, native_permit_holder("new"), "test-scope")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(live.release().unwrap(), PermitReleaseOutcome::Released);
         assert_eq!(ledger.occupied().unwrap(), 1);
-        assert!(ledger
-            .holder_state(&native_permit_holder("crashed"))
-            .unwrap()
-            .is_none());
-        live.release();
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -869,9 +1495,9 @@ mod tests {
         {
             let mut ledger = PermitLedger::open(&path).unwrap();
             let generation = ledger.generation().unwrap();
-            assert_eq!(
+            assert!(matches!(
                 ledger
-                    .acquire(
+                    .acquire_attempt(
                         &peer_holder,
                         PermitLane::Native,
                         PermitState::Running,
@@ -879,8 +1505,8 @@ mod tests {
                         Some(std::process::id()),
                     )
                     .unwrap(),
-                AcquireOutcome::Acquired
-            );
+                AcquireAttemptOutcome::Acquired { .. }
+            ));
         }
 
         // A second daemon starts with roots that cannot attest the peer's
@@ -890,12 +1516,9 @@ mod tests {
             let mut ledger = PermitLedger::open(&path).unwrap();
             ledger.begin_epoch().unwrap();
         }
-        let (report, swept) =
-            crate::scaleset::allocator::startup_reconcile(&path, &[], &[], &pid_alive).unwrap();
+        let report = crate::scaleset::allocator::startup_reconcile(&path, &[], &[]).unwrap();
         assert!(report.confirmed.is_empty());
-        assert!(report.adopted.is_empty());
         assert_eq!(report.marked_uncertain, vec![peer_holder.clone()]);
-        assert!(swept.is_empty());
 
         let ledger = PermitLedger::open(&path).unwrap();
         assert_eq!(ledger.occupied().unwrap(), 1);
@@ -1022,13 +1645,13 @@ mod tests {
         let retry = NativePermitGuard::acquire(&path, native_permit_holder("a"), "scope-a")
             .unwrap()
             .unwrap();
-        retry.release();
+        assert_eq!(retry.release().unwrap(), PermitReleaseOutcome::Released);
 
         // Terminal release serves the demand.
         let guard = NativePermitGuard::acquire(&path, native_permit_holder("b"), "scope-b")
             .unwrap()
             .unwrap();
-        guard.release();
+        assert_eq!(guard.release().unwrap(), PermitReleaseOutcome::Released);
         assert_eq!(demand_state("b"), Some(DemandState::Terminal));
 
         // Cleanup failure still served the demand; retention is ledger-side.
@@ -1048,10 +1671,9 @@ mod tests {
             .demand(&native_permit_holder("d"))
             .unwrap()
             .unwrap();
-        let duplicate = NativePermitGuard::acquire(&path, native_permit_holder("d"), "scope-a")
-            .unwrap()
-            .unwrap();
-        drop(duplicate);
+        let duplicate =
+            NativePermitGuard::acquire(&path, native_permit_holder("d"), "scope-a").unwrap();
+        assert!(duplicate.is_none());
         let after = PermitLedger::open(&path)
             .unwrap()
             .demand(&native_permit_holder("d"))
@@ -1060,7 +1682,7 @@ mod tests {
         assert_eq!(before.first_seen_unix, after.first_seen_unix);
         assert_eq!(before.sequence, after.sequence);
         assert_eq!(before.state, after.state);
-        owner.release();
+        assert_eq!(owner.release().unwrap(), PermitReleaseOutcome::Released);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -1070,14 +1692,22 @@ mod tests {
         let path = temp_ledger_path("demand-terminal");
         configure(&path, 4);
 
-        let guard = NativePermitGuard::acquire(&path, native_permit_holder("t"), "scope-a")
+        let mut guard = NativePermitGuard::acquire(&path, native_permit_holder("t"), "scope-a")
             .unwrap()
             .unwrap();
+        guard.retain_until_terminal();
         let teardown = guard.teardown_release().unwrap();
         // The teardown thread confirms cleanup after the guard was
         // disarmed by a join timeout: terminal either way.
-        std::mem::forget(guard);
-        teardown.release_confirmed_cleanup();
+        drop(guard);
+        assert_eq!(
+            teardown.release_confirmed_cleanup().unwrap(),
+            PermitReleaseOutcome::Released
+        );
+        assert_eq!(
+            teardown.release_confirmed_cleanup().unwrap(),
+            PermitReleaseOutcome::AlreadyAbsent
+        );
         let row = PermitLedger::open(&path)
             .unwrap()
             .demand(&native_permit_holder("t"))
@@ -1086,13 +1716,18 @@ mod tests {
         assert_eq!(row.state, DemandState::Terminal);
 
         // Recorded-job recovery completes and cleans, then releases.
-        let guard = NativePermitGuard::acquire(&path, native_permit_holder("r"), "scope-a")
+        let mut guard = NativePermitGuard::acquire(&path, native_permit_holder("r"), "scope-a")
             .unwrap()
             .unwrap();
+        guard.retain_until_terminal();
         let holder = guard.holder().to_owned();
         let ledger = guard.ledger_path().to_owned();
-        std::mem::forget(guard);
-        release_permit_best_effort(&ledger, &holder);
+        let attempt_token = guard.attempt_token().to_owned();
+        drop(guard);
+        assert_eq!(
+            release_permit_owned(&ledger, &holder, &attempt_token).unwrap(),
+            PermitReleaseOutcome::Released
+        );
         let row = PermitLedger::open(&path)
             .unwrap()
             .demand(&native_permit_holder("r"))

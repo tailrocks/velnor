@@ -35,7 +35,6 @@ use std::path::{Path, PathBuf};
 use clap::Args;
 
 const FILESYSTEM_KEY_PREFIX: &str = "trust-scope-v1-";
-pub(crate) const FILESYSTEM_KEY_PATH_NAMESPACE: &str = "trust-scope-v1";
 
 /// Boundary reported by a process that has not resolved one. Trust fails
 /// closed: no Docker socket, no privileged container options, no privileged
@@ -238,15 +237,7 @@ pub(crate) fn filesystem_key(raw: &str) -> String {
 /// `<cache-root>/<sanitized-scope>/<class>` grammar, even when a scope equals
 /// another scope's encoded key.
 pub(crate) fn filesystem_key_namespace(root: &Path) -> PathBuf {
-    // Keep the namespace outside `<cache-root>/<sanitized-scope>/<class>`.
-    // The sibling root makes even a raw scope equal to another scope's key
-    // unable to land on its old single-component scope directory.
-    let Some(name) = root.file_name() else {
-        return root.join(format!("{FILESYSTEM_KEY_PATH_NAMESPACE}__trust_scope_v1"));
-    };
-    let mut namespace = name.to_os_string();
-    namespace.push("__trust_scope_v1");
-    root.with_file_name(namespace)
+    velnor_storage_snapshot::filesystem_key_namespace(root)
 }
 
 /// Path namespace for one trust scope. `filesystem_key` remains a single
@@ -261,14 +252,7 @@ pub(crate) fn filesystem_key_path(root: &Path, raw: &str) -> PathBuf {
 /// by [`filesystem_key`]. This validates path enumeration only; it cannot
 /// recover the original trust scope from a key.
 pub(crate) fn is_filesystem_key(value: &str) -> bool {
-    value
-        .strip_prefix(FILESYSTEM_KEY_PREFIX)
-        .is_some_and(|digest| {
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
+    velnor_storage_snapshot::is_filesystem_key(value)
 }
 
 /// The boundary a daemon resolves from a `VELNOR_TRUST_SCOPE` value it was

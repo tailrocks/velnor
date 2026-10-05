@@ -189,7 +189,6 @@ impl StorageLayout {
     /// config-dir setting, or user default. Only that root may use a configured
     /// symlink alias; generated paths below it are opened one component at a
     /// time without following links.
-    #[cfg(unix)]
     fn configured_root_path(&self) -> Option<PathBuf> {
         if self.mode == "explicit-config" {
             return (self.cache_root == self.lib_root.join("cache")).then(|| self.lib_root.clone());
@@ -210,6 +209,11 @@ impl StorageLayout {
         } else {
             root
         })
+    }
+
+    /// Stable operator-selected anchor for local catalog diagnostics.
+    pub(crate) fn local_snapshot_trusted_root(&self) -> Option<PathBuf> {
+        self.configured_root_path()
     }
 
     pub fn resolve() -> Option<Self> {

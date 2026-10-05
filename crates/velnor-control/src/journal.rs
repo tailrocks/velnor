@@ -29,7 +29,9 @@ pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
 /// replay anchor from `meta` during their next state persist, and adds durable
 /// disk-pressure episodes, launch fences, and both bounded pressure deadlines.
 /// Version 11 binds each fleet journal to one service instance and fences old
-/// writers from changing or ignoring that identity.
+/// writers from changing or ignoring that identity. Version 12 adds the
+/// selected run-service endpoint to acquisition-resolution events and fences
+/// writers that cannot replay that event vocabulary.
 ///
 /// Every terminal-affecting event rides a bump here. `Journal::open` stamps
 /// the current version onto an older journal *before* any event may be
@@ -40,8 +42,8 @@ pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
 /// journal writer and restore a consistent pre-v9 SQLite backup as one set:
 /// the main database plus its `-wal` and `-shm` sidecars when present. Never
 /// lower `user_version`, drop the replay-baseline keys, or delete the fence on
-/// a live v11 database; those actions destroy the migration boundary.
-pub const JOURNAL_SCHEMA_VERSION: u32 = 11;
+/// a live v12 database; those actions destroy the migration boundary.
+pub const JOURNAL_SCHEMA_VERSION: u32 = 12;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const SETUP_RETRIES: u32 = 5;
@@ -606,8 +608,8 @@ pub struct JobRecord {
     /// refuses a provisional row, so no completion can ever be sent against
     /// one. `JobOwned` clears it.
     pub provisional: bool,
-    /// Run-service plan holding this job. Empty until `JobAcquisitionResolved`
-    /// retargets the row onto the identity the acquire reply carried: the
+    /// Run-service plan holding this job. Empty until an acquisition
+    /// resolution event retargets the row onto the identity the acquire reply carried: the
     /// broker message that opens the acquisition names no plan, and `renewjob`
     /// needs one, so a row without this cannot be probed.
     pub plan_id: String,
@@ -1004,9 +1006,9 @@ pub enum Event {
         /// `JobOwned` stamps `accepted_unix`.
         intended_unix: u64,
     },
-    /// The acquire reply came back and named the job. Retargets the provisional
-    /// row from the broker message identity onto the run-service identity, and
-    /// records the plan so `renewjob` becomes possible.
+    /// Original resolution record retained for replay of journals written
+    /// before the selected endpoint was recorded separately. New acquire
+    /// responses use `JobAcquisitionResolvedAtEndpoint`.
     ///
     /// One event, because the alternative is two: drop the message-keyed row
     /// and create the job-keyed one. That pair frees the slot in between, which
@@ -1021,6 +1023,17 @@ pub enum Event {
         acquired_job_id: JobId,
         plan_id: String,
         generation: Generation,
+    },
+    /// The acquire reply supplied the job's SystemVssConnection. Record that
+    /// endpoint with the acquired identity so every later renew and completion,
+    /// including after recovery, addresses the selected run service instead of
+    /// the broker URL that opened acquisition.
+    JobAcquisitionResolvedAtEndpoint {
+        provisional_job_id: JobId,
+        acquired_job_id: JobId,
+        plan_id: String,
+        generation: Generation,
+        run_service_url: String,
     },
     /// One recovery probe was spent without reaching a verdict. Charged to the
     /// row's durable budget so an unreachable run service cannot make this node
@@ -1450,6 +1463,31 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 Some(row) if !target_taken => {
                     row.job_id = acquired_job_id;
                     row.plan_id = plan_id;
+                }
+                _ => rejected = true,
+            }
+        }
+        Event::JobAcquisitionResolvedAtEndpoint {
+            provisional_job_id,
+            acquired_job_id,
+            plan_id,
+            generation,
+            run_service_url,
+        } => {
+            let target_taken = acquired_job_id != provisional_job_id
+                && state.jobs.iter().any(|job| job.job_id == acquired_job_id);
+            let row = state.jobs.iter_mut().find(|job| {
+                job.job_id == provisional_job_id && job.generation == generation && job.provisional
+            });
+            match row {
+                Some(row)
+                    if !target_taken
+                        && !plan_id.trim().is_empty()
+                        && !run_service_url.trim().is_empty() =>
+                {
+                    row.job_id = acquired_job_id;
+                    row.plan_id = plan_id;
+                    row.run_service_url = run_service_url;
                 }
                 _ => rejected = true,
             }
@@ -1956,6 +1994,27 @@ struct AcquisitionResponseFence {
     slot_id: SlotId,
     generation: i64,
     launch_nonce: String,
+    provisional_job_id: JobId,
+    message_id: String,
+    run_service_url: String,
+}
+
+#[derive(Debug, Clone)]
+struct AcquisitionResolutionFence {
+    slot_id: SlotId,
+    generation: i64,
+    provisional_job_id: JobId,
+    acquired_job_id: JobId,
+    plan_id: String,
+    message_id: String,
+    acquire_run_service_url: String,
+    job_run_service_url: String,
+}
+
+#[derive(Debug, Clone)]
+struct AcquisitionLossFence {
+    slot_id: SlotId,
+    generation: i64,
     provisional_job_id: JobId,
     message_id: String,
     run_service_url: String,
@@ -2537,6 +2596,8 @@ impl Journal {
             None,
             None,
             None,
+            None,
+            None,
         )?;
         #[allow(clippy::expect_used, reason = "one event always yields one outcome")]
         Ok(outcomes
@@ -2592,6 +2653,8 @@ impl Journal {
             None,
             None,
             None,
+            None,
+            None,
         )?;
         #[allow(clippy::expect_used, reason = "one event always yields one outcome")]
         Ok(outcomes
@@ -2613,7 +2676,8 @@ impl Journal {
         provisional_job_id: JobId,
         message_id: &str,
         acquired_job_id: JobId,
-        run_service_url: &str,
+        acquire_run_service_url: &str,
+        job_run_service_url: &str,
         plan_id: &str,
     ) -> StoreResult<ReduceOutcome> {
         validate_disk_pressure_key(service_instance, "service instance")?;
@@ -2622,7 +2686,8 @@ impl Journal {
         validate_disk_pressure_key(&provisional_job_id.0, "provisional job id")?;
         validate_disk_pressure_key(message_id, "acquisition message id")?;
         validate_disk_pressure_key(&acquired_job_id.0, "acquired job id")?;
-        validate_disk_pressure_key(run_service_url, "run service URL")?;
+        validate_disk_pressure_key(acquire_run_service_url, "acquire run service URL")?;
+        validate_disk_pressure_key(job_run_service_url, "job run service URL")?;
         validate_disk_pressure_key(plan_id, "run service plan id")?;
         self.validate_acquisition_handle(service_instance, &slot_id, generation, launch_nonce)?;
         let generation_sql = disk_pressure_sql_integer(generation.0, "launch generation")?;
@@ -2633,20 +2698,121 @@ impl Journal {
             launch_nonce: launch_nonce.to_owned(),
             provisional_job_id: provisional_job_id.clone(),
             message_id: message_id.to_owned(),
-            run_service_url: run_service_url.to_owned(),
+            run_service_url: acquire_run_service_url.to_owned(),
         };
         let mut outcomes = self.apply_many_inner(
-            std::iter::once(Event::JobAcquisitionResolved {
+            std::iter::once(Event::JobAcquisitionResolvedAtEndpoint {
                 provisional_job_id,
                 acquired_job_id,
                 plan_id: plan_id.to_owned(),
                 generation,
+                run_service_url: job_run_service_url.to_owned(),
             }),
             None,
             None,
             Some(response_fence),
             None,
             None,
+            None,
+            None,
+        )?;
+        #[allow(clippy::expect_used, reason = "one event always yields one outcome")]
+        Ok(outcomes
+            .pop()
+            .expect("one event must produce one reduction outcome"))
+    }
+
+    /// Resolve an unmanaged acquire reply only while its exact broker intent
+    /// still names the provisional row. The selected job URL is stored by the
+    /// same event that retargets the row.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_acquisition_response_at_endpoint(
+        &mut self,
+        slot_id: SlotId,
+        generation: Generation,
+        provisional_job_id: JobId,
+        message_id: &str,
+        acquired_job_id: JobId,
+        acquire_run_service_url: &str,
+        job_run_service_url: &str,
+        plan_id: &str,
+    ) -> StoreResult<ReduceOutcome> {
+        validate_disk_pressure_key(&slot_id.0, "slot id")?;
+        validate_disk_pressure_key(&provisional_job_id.0, "provisional job id")?;
+        validate_disk_pressure_key(message_id, "acquisition message id")?;
+        validate_disk_pressure_key(&acquired_job_id.0, "acquired job id")?;
+        validate_disk_pressure_key(acquire_run_service_url, "acquire run service URL")?;
+        validate_disk_pressure_key(job_run_service_url, "job run service URL")?;
+        validate_disk_pressure_key(plan_id, "run service plan id")?;
+        let fence = AcquisitionResolutionFence {
+            slot_id,
+            generation: disk_pressure_sql_integer(generation.0, "launch generation")?,
+            provisional_job_id: provisional_job_id.clone(),
+            acquired_job_id: acquired_job_id.clone(),
+            plan_id: plan_id.to_owned(),
+            message_id: message_id.to_owned(),
+            acquire_run_service_url: acquire_run_service_url.to_owned(),
+            job_run_service_url: job_run_service_url.to_owned(),
+        };
+        let mut outcomes = self.apply_many_inner(
+            std::iter::once(Event::JobAcquisitionResolvedAtEndpoint {
+                provisional_job_id,
+                acquired_job_id,
+                plan_id: plan_id.to_owned(),
+                generation,
+                run_service_url: job_run_service_url.to_owned(),
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(fence),
+            None,
+        )?;
+        #[allow(clippy::expect_used, reason = "one event always yields one outcome")]
+        Ok(outcomes
+            .pop()
+            .expect("one event must produce one reduction outcome"))
+    }
+
+    /// Abandon an unmanaged acquire reply only while its exact broker message
+    /// still owns the latest provisional intent. Validation and `JobAcquisitionLost`
+    /// share one immediate transaction, so a stale typed-404 cannot erase a
+    /// newer intent that reused the provisional request id.
+    pub fn abandon_acquisition_response_at_endpoint(
+        &mut self,
+        slot_id: SlotId,
+        generation: Generation,
+        provisional_job_id: JobId,
+        message_id: &str,
+        run_service_url: &str,
+        reason: String,
+    ) -> StoreResult<ReduceOutcome> {
+        validate_disk_pressure_key(&slot_id.0, "slot id")?;
+        validate_disk_pressure_key(&provisional_job_id.0, "provisional job id")?;
+        validate_disk_pressure_key(message_id, "acquisition message id")?;
+        validate_disk_pressure_key(run_service_url, "acquire run service URL")?;
+        let fence = AcquisitionLossFence {
+            slot_id,
+            generation: disk_pressure_sql_integer(generation.0, "launch generation")?,
+            provisional_job_id: provisional_job_id.clone(),
+            message_id: message_id.to_owned(),
+            run_service_url: run_service_url.to_owned(),
+        };
+        let mut outcomes = self.apply_many_inner(
+            std::iter::once(Event::JobAcquisitionLost {
+                job_id: provisional_job_id,
+                generation,
+                reason,
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(fence),
         )?;
         #[allow(clippy::expect_used, reason = "one event always yields one outcome")]
         Ok(outcomes
@@ -2708,6 +2874,8 @@ impl Journal {
             None,
             Some(abandon_fence),
             None,
+            None,
+            None,
         )?;
         #[allow(clippy::expect_used, reason = "one event always yields one outcome")]
         Ok(outcomes
@@ -2758,6 +2926,8 @@ impl Journal {
             None,
             None,
             Some(recovery_fence),
+            None,
+            None,
         )?;
         #[allow(clippy::expect_used, reason = "one event always yields one outcome")]
         Ok(outcomes
@@ -3518,7 +3688,7 @@ impl Journal {
     where
         I: IntoIterator<Item = Event>,
     {
-        self.apply_many_inner(events, None, None, None, None, None)
+        self.apply_many_inner(events, None, None, None, None, None, None, None)
     }
 
     fn apply_many_inner<'a, I>(
@@ -3529,11 +3699,24 @@ impl Journal {
         acquisition_response_fence: Option<AcquisitionResponseFence>,
         acquisition_abandon_fence: Option<AcquisitionAbandonFence>,
         acquisition_recovery_fence: Option<AcquisitionRecoveryFence>,
+        acquisition_resolution_fence: Option<AcquisitionResolutionFence>,
+        acquisition_loss_fence: Option<AcquisitionLossFence>,
     ) -> StoreResult<Vec<ReduceOutcome>>
     where
         I: IntoIterator<Item = Event>,
     {
         if (acquisition_response_fence.is_some() && acquisition_abandon_fence.is_some())
+            || (acquisition_resolution_fence.is_some()
+                && (acquisition_intent_fence.is_some()
+                    || acquisition_response_fence.is_some()
+                    || acquisition_abandon_fence.is_some()
+                    || acquisition_recovery_fence.is_some()))
+            || (acquisition_loss_fence.is_some()
+                && (acquisition_intent_fence.is_some()
+                    || acquisition_response_fence.is_some()
+                    || acquisition_abandon_fence.is_some()
+                    || acquisition_recovery_fence.is_some()
+                    || acquisition_resolution_fence.is_some()))
             || (acquisition_recovery_fence.is_some()
                 && (acquisition_intent_fence.is_some()
                     || acquisition_response_fence.is_some()
@@ -3604,7 +3787,9 @@ impl Journal {
         if (acquisition_intent_fence.is_some()
             || acquisition_response_fence.is_some()
             || acquisition_abandon_fence.is_some()
-            || acquisition_recovery_fence.is_some())
+            || acquisition_recovery_fence.is_some()
+            || acquisition_resolution_fence.is_some()
+            || acquisition_loss_fence.is_some())
             && events.next().is_some()
         {
             return Err(acquisition_response_fenced());
@@ -3660,6 +3845,37 @@ impl Journal {
             )
         {
             return Err(acquisition_recovery_fenced());
+        }
+        if let Some(fence) = &acquisition_resolution_fence
+            && !matches!(
+                &first_event,
+                Event::JobAcquisitionResolvedAtEndpoint {
+                    provisional_job_id,
+                    acquired_job_id,
+                    plan_id,
+                    generation,
+                    run_service_url,
+                } if provisional_job_id == &fence.provisional_job_id
+                    && acquired_job_id == &fence.acquired_job_id
+                    && plan_id == &fence.plan_id
+                    && generation.0 as i64 == fence.generation
+                    && run_service_url == &fence.job_run_service_url
+            )
+        {
+            return Err(acquisition_response_fenced());
+        }
+        if let Some(fence) = &acquisition_loss_fence
+            && !matches!(
+                &first_event,
+                Event::JobAcquisitionLost {
+                    job_id,
+                    generation,
+                    ..
+                } if job_id == &fence.provisional_job_id
+                    && generation.0 as i64 == fence.generation
+            )
+        {
+            return Err(acquisition_abandon_fenced());
         }
 
         // Lock before reading materialized state. Controller, job, guardian,
@@ -3738,6 +3954,12 @@ impl Journal {
             disk_pressure_bool(active_pressure_episode, "active pressure episode")?;
         if let Some(fence) = &acquisition_response_fence {
             validate_acquisition_response_fence(&transaction, &state, fence)?;
+        }
+        if let Some(fence) = &acquisition_resolution_fence {
+            validate_acquisition_resolution_fence(&transaction, &state, fence)?;
+        }
+        if let Some(fence) = &acquisition_loss_fence {
+            validate_acquisition_loss_fence(&transaction, &state, fence)?;
         }
         if let Some(fence) = &acquisition_abandon_fence {
             validate_acquisition_abandon_fence(&transaction, &state, fence)?;
@@ -4337,6 +4559,7 @@ fn setup_journal(
     migrate_v8_to_v9(&transaction, legacy_eventless)?;
     migrate_v9_to_v10(&transaction)?;
     migrate_v10_to_v11(&transaction, requested_service_instance)?;
+    migrate_v11_to_v12(&transaction)?;
     ensure_journal_write_fence(&transaction)?;
     transaction.commit()?;
     Ok(())
@@ -5229,16 +5452,92 @@ fn exact_provisional_acquisition_row(state: &FleetState, fence: &AcquisitionInte
     })
 }
 
+fn validate_acquisition_resolution_fence(
+    conn: &Connection,
+    state: &FleetState,
+    fence: &AcquisitionResolutionFence,
+) -> StoreResult<()> {
+    let row_is_exact = state.jobs.iter().any(|job| {
+        job.job_id == fence.provisional_job_id
+            && job.slot_id == fence.slot_id
+            && job.generation.0 == fence.generation as u64
+            && job.provisional
+            && job.phase == JobPhase2::Assigned
+            && job.plan_id.is_empty()
+            && job.run_service_url == fence.acquire_run_service_url
+    });
+    if !row_is_exact
+        || !acquisition_intent_event_matches(
+            conn,
+            &fence.slot_id,
+            fence.generation,
+            &fence.provisional_job_id,
+            &fence.message_id,
+            &fence.acquire_run_service_url,
+        )?
+    {
+        return Err(acquisition_response_fenced());
+    }
+    Ok(())
+}
+
+fn validate_acquisition_loss_fence(
+    conn: &Connection,
+    state: &FleetState,
+    fence: &AcquisitionLossFence,
+) -> StoreResult<()> {
+    let row_is_exact = state.jobs.iter().any(|job| {
+        job.job_id == fence.provisional_job_id
+            && job.slot_id == fence.slot_id
+            && job.generation.0 == fence.generation as u64
+            && job.provisional
+            && job.phase == JobPhase2::Assigned
+            && job.plan_id.is_empty()
+            && job.run_service_url == fence.run_service_url
+    });
+    if !row_is_exact
+        || !acquisition_intent_event_matches(
+            conn,
+            &fence.slot_id,
+            fence.generation,
+            &fence.provisional_job_id,
+            &fence.message_id,
+            &fence.run_service_url,
+        )?
+    {
+        return Err(acquisition_abandon_fenced());
+    }
+    Ok(())
+}
+
 fn acquisition_intent_event_is_exact(
     conn: &Connection,
     fence: &AcquisitionIntentFence,
+) -> StoreResult<bool> {
+    acquisition_intent_event_matches(
+        conn,
+        &fence.slot_id,
+        fence.generation,
+        &fence.provisional_job_id,
+        &fence.message_id,
+        &fence.run_service_url,
+    )
+}
+
+fn acquisition_intent_event_matches(
+    conn: &Connection,
+    slot_id: &SlotId,
+    generation: i64,
+    provisional_job_id: &JobId,
+    message_id: &str,
+    run_service_url: &str,
 ) -> StoreResult<bool> {
     let mut statement = conn.prepare(
         "SELECT generation, kind, payload, checksum FROM events
          WHERE generation = ?1 AND kind = 'job_acquisition_intended'
          ORDER BY id DESC",
     )?;
-    let rows = statement.query_map([fence.generation], |row| {
+    let rows = statement.query_map([generation], |row| {
         Ok((
             row.get::<_, i64>(0)?,
             row.get::<_, String>(1)?,
@@ -5247,23 +5546,24 @@ fn acquisition_intent_event_is_exact(
         ))
     })?;
     for row in rows {
-        let (generation, kind, payload, checksum) = row?;
-        if matches!(
-            decode_checked_event(generation, &kind, &payload, &checksum)?,
-            Event::JobAcquisitionIntended {
-                slot_id,
-                job_id,
-                generation: event_generation,
-                message_id,
-                run_service_url,
-                ..
-            } if slot_id == fence.slot_id
-                && job_id == fence.provisional_job_id
-                && event_generation.0 as i64 == fence.generation
-                && message_id == fence.message_id
-                && run_service_url == fence.run_service_url
-        ) {
-            return Ok(true);
+        let (event_generation_sql, kind, payload, checksum) = row?;
+        if let Event::JobAcquisitionIntended {
+            slot_id: event_slot_id,
+            job_id: event_job_id,
+            generation: event_generation,
+            message_id: event_message_id,
+            run_service_url: event_run_service_url,
+            ..
+        } = decode_checked_event(event_generation_sql, &kind, &payload, &checksum)?
+            && event_job_id == *provisional_job_id
+        {
+            // A provisional id can be reused after a terminal loss. Only its
+            // latest durable intent may authorize this response; accepting an
+            // older message could resolve the newer attempt's row.
+            return Ok(event_slot_id == *slot_id
+                && event_generation.0 as i64 == generation
+                && event_message_id == message_id
+                && event_run_service_url == run_service_url);
         }
     }
     Ok(false)
@@ -5388,9 +5688,9 @@ fn resolved_acquisition_intent_is_exact(
     let mut statement = conn.prepare(
         "SELECT generation, kind, payload, checksum FROM events
          WHERE generation = ?1
-           AND kind IN (
+         AND kind IN (
                'job_acquisition_intended', 'job_acquisition_resolved',
-               'job_acquisition_lost'
+               'job_acquisition_resolved_at_endpoint', 'job_acquisition_lost'
            )
          ORDER BY id ASC",
     )?;
@@ -5434,6 +5734,22 @@ fn resolved_acquisition_intent_is_exact(
                     && intent.is_some_and(|(slot_id, url)| {
                         slot_id == fence.slot_id && url == fence.run_service_url
                     })
+                {
+                    return Ok(true);
+                }
+            }
+            Event::JobAcquisitionResolvedAtEndpoint {
+                provisional_job_id,
+                acquired_job_id,
+                plan_id,
+                generation: event_generation,
+                run_service_url,
+            } if event_generation.0 as i64 == fence.generation => {
+                let intent = pending_intents.remove(&provisional_job_id);
+                if acquired_job_id == fence.acquired_job_id
+                    && plan_id == fence.plan_id
+                    && run_service_url == fence.run_service_url
+                    && intent.is_some_and(|(slot_id, _acquire_url)| slot_id == fence.slot_id)
                 {
                     return Ok(true);
                 }
@@ -7523,6 +7839,27 @@ fn migrate_v10_to_v11(
     Ok(())
 }
 
+/// v12 adds the selected run-service URL to acquisition-resolution events.
+/// No materialized table changes; older writers must refuse journals that may
+/// contain the new resolution vocabulary.
+fn migrate_v11_to_v12(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).unwrap_or(0) >= 12 {
+        return Ok(());
+    }
+    if stored != 11 {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.schema.mismatch",
+        )
+        .with_remediation(format!(
+            "preserve the journal unchanged; expected schema 11 before selected-endpoint migration, found {stored}"
+        )));
+    }
+    tx.pragma_update(None, "user_version", 12u32)?;
+    Ok(())
+}
+
 /// Validate the complete v8 event log against its materialized projection
 /// before the migration stamps v9. Keeping this inside the setup transaction
 /// means checksum, decode, reducer, and projection failures roll back the
@@ -7779,6 +8116,7 @@ fn event_generation(event: &Event) -> Generation {
         | Event::ReadyAttempt { generation, .. }
         | Event::JobAcquisitionIntended { generation, .. }
         | Event::JobAcquisitionResolved { generation, .. }
+        | Event::JobAcquisitionResolvedAtEndpoint { generation, .. }
         | Event::AcquisitionProbeFailed { generation, .. }
         | Event::JobAcquisitionLost { generation, .. }
         | Event::JobOwned { generation, .. }
@@ -7808,6 +8146,7 @@ fn event_kind(event: &Event) -> &'static str {
         Event::JournalWritable => "journal_writable",
         Event::JobAcquisitionIntended { .. } => "job_acquisition_intended",
         Event::JobAcquisitionResolved { .. } => "job_acquisition_resolved",
+        Event::JobAcquisitionResolvedAtEndpoint { .. } => "job_acquisition_resolved_at_endpoint",
         Event::AcquisitionProbeFailed { .. } => "acquisition_probe_failed",
         Event::JobAcquisitionLost { .. } => "job_acquisition_lost",
         Event::Dependency { .. } => "dependency",
@@ -8580,6 +8919,134 @@ mod tests {
     }
 
     #[test]
+    fn unmanaged_resolution_requires_the_latest_exact_broker_intent() {
+        let (dir, mut journal) = open_tmp("unmanaged-endpoint-resolution-fence");
+        let slot_id = slot("scope-unmanaged-resolution");
+        let generation = r#gen();
+        let provisional = job("request-unmanaged-resolution");
+        let broker_url = "https://broker.example/jobs/123";
+        let selected_url = "https://selected.example/jobs/456";
+        prime_ready(&mut journal, &slot_id.0);
+
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntended {
+                    slot_id: slot_id.clone(),
+                    job_id: provisional.clone(),
+                    generation,
+                    message_id: "message-old".to_owned(),
+                    run_service_url: broker_url.to_owned(),
+                    intended_unix: 100,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionLost {
+                    job_id: provisional.clone(),
+                    generation,
+                    reason: "old message was gone".to_owned(),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntended {
+                    slot_id: slot_id.clone(),
+                    job_id: provisional.clone(),
+                    generation,
+                    message_id: "message-new".to_owned(),
+                    run_service_url: broker_url.to_owned(),
+                    intended_unix: 101,
+                })
+                .unwrap()
+                .rejected
+        );
+
+        let stale = journal
+            .resolve_acquisition_response_at_endpoint(
+                slot_id.clone(),
+                generation,
+                provisional.clone(),
+                "message-old",
+                job("acquired-stale"),
+                broker_url,
+                selected_url,
+                "plan-stale",
+            )
+            .unwrap_err();
+        assert_eq!(stale.envelope.reason, "journal.acquisition.response.fenced");
+        let wrong_broker = journal
+            .resolve_acquisition_response_at_endpoint(
+                slot_id.clone(),
+                generation,
+                provisional.clone(),
+                "message-new",
+                job("acquired-wrong-broker"),
+                "https://other-broker.example/jobs/123",
+                selected_url,
+                "plan-wrong-broker",
+            )
+            .unwrap_err();
+        assert_eq!(
+            wrong_broker.envelope.reason,
+            "journal.acquisition.response.fenced"
+        );
+        let stale_loss = journal
+            .abandon_acquisition_response_at_endpoint(
+                slot_id.clone(),
+                generation,
+                provisional.clone(),
+                "message-old",
+                broker_url,
+                "stale typed 404".to_owned(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            stale_loss.envelope.reason,
+            "journal.acquisition.abandon.fenced"
+        );
+        assert_eq!(
+            journal.materialized_state().unwrap().jobs[0].job_id,
+            provisional,
+            "rejected responses leave the latest provisional intent intact"
+        );
+
+        let resolved = journal
+            .resolve_acquisition_response_at_endpoint(
+                slot_id,
+                generation,
+                job("request-unmanaged-resolution"),
+                "message-new",
+                job("acquired-current"),
+                broker_url,
+                selected_url,
+                "plan-current",
+            )
+            .unwrap();
+        assert!(!resolved.rejected);
+        drop(journal);
+
+        let reopened = Journal::open(dir.join("journal.db")).unwrap();
+        let state = reopened.materialized_state().unwrap();
+        let acquired = state
+            .jobs
+            .iter()
+            .find(|row| row.job_id == job("acquired-current"))
+            .unwrap();
+        assert_eq!(acquired.run_service_url, selected_url);
+        assert_eq!(acquired.plan_id, "plan-current");
+        assert!(acquired.provisional);
+        assert_eq!(
+            canonical_projection(reopened.load_state().unwrap()),
+            canonical_projection(state)
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn drain_marker_survives_unrelated_event_applies() {
         let (dir, mut journal) = open_tmp("drain-sticky");
         assert!(journal.set_drain(7).unwrap());
@@ -9168,6 +9635,72 @@ mod tests {
         let error = Journal::open(&path).unwrap_err();
         assert_eq!(error.envelope.reason, "journal.schema.newer");
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn schema_twelve_migrates_and_replays_schema_eleven_acquisition_resolution() {
+        let (dir, mut journal) = open_tmp("schema-12-replay-v11-acquisition");
+        let slot_id = slot("schema-12-replay");
+        let generation = r#gen();
+        let broker_url = "https://broker.example/jobs/123";
+        prime_ready(&mut journal, &slot_id.0);
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntended {
+                    slot_id: slot_id.clone(),
+                    job_id: job("request-schema-11"),
+                    generation,
+                    message_id: "message-schema-11".to_owned(),
+                    run_service_url: broker_url.to_owned(),
+                    intended_unix: 100,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionResolved {
+                    provisional_job_id: job("request-schema-11"),
+                    acquired_job_id: job("acquired-schema-11"),
+                    plan_id: "plan-schema-11".to_owned(),
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+        drop(journal);
+
+        let path = dir.join("journal.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", 11u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let reopened = Journal::open(&path).unwrap();
+        let version: u32 = reopened
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .map(|value| u32::try_from(value).unwrap())
+            .unwrap();
+        assert_eq!(version, 12);
+        let state = reopened.materialized_state().unwrap();
+        let acquired = state
+            .jobs
+            .iter()
+            .find(|row| row.job_id == job("acquired-schema-11"))
+            .unwrap();
+        assert_eq!(acquired.plan_id, "plan-schema-11");
+        assert_eq!(acquired.run_service_url, broker_url);
+        assert!(acquired.provisional);
+        assert_eq!(
+            canonical_projection(reopened.load_state().unwrap()),
+            canonical_projection(state)
+        );
+
+        let old_writer = ensure_supported_schema(version, 11).unwrap_err();
+        assert_eq!(old_writer.envelope.reason, "journal.schema.newer");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -11522,7 +12055,8 @@ mod tests {
         let slot_id = slot("scope-1");
         let generation = r#gen();
         let filesystem_id = "device:response-handoff";
-        let run_service_url = "https://run.example/run";
+        let acquire_run_service_url = "https://broker.example/jobs/123";
+        let job_run_service_url = "https://selected.example/jobs/456";
         let mut controller = Journal::open_for_service_instance(&path, service).unwrap();
         let nonce = controller
             .issue_disk_pressure_launch(service, &slot_id, generation, 100)
@@ -11537,7 +12071,7 @@ mod tests {
                 &nonce,
                 job("request-handoff"),
                 "message-handoff".to_owned(),
-                run_service_url.to_owned(),
+                acquire_run_service_url.to_owned(),
                 100,
             )
             .unwrap();
@@ -11596,6 +12130,7 @@ mod tests {
                 "message-handoff",
                 job("acquired-handoff"),
                 "https://other.example/run",
+                job_run_service_url,
                 "plan-handoff",
             )
             .unwrap_err();
@@ -11612,7 +12147,8 @@ mod tests {
                 job("request-handoff"),
                 "message-handoff",
                 job("acquired-handoff"),
-                run_service_url,
+                acquire_run_service_url,
+                job_run_service_url,
                 "plan-handoff",
             )
             .unwrap();
@@ -11637,7 +12173,7 @@ mod tests {
                 generation,
                 job("acquired-handoff"),
                 "plan-handoff",
-                run_service_url,
+                job_run_service_url,
             )
             .unwrap();
         assert!(!confirmed.rejected);
@@ -11647,7 +12183,7 @@ mod tests {
         assert_eq!(state.jobs.len(), 1);
         assert_eq!(state.jobs[0].job_id, job("acquired-handoff"));
         assert_eq!(state.jobs[0].plan_id, "plan-handoff");
-        assert_eq!(state.jobs[0].run_service_url, run_service_url);
+        assert_eq!(state.jobs[0].run_service_url, job_run_service_url);
         assert!(!state.jobs[0].provisional);
         assert_eq!(state.advertised_capacity(), 0);
         assert_eq!(
@@ -11655,6 +12191,11 @@ mod tests {
             canonical_projection(state),
             "terminal handoff confirmation must replay with the slot still fenced"
         );
+        drop(worker);
+        drop(controller);
+        let reopened = Journal::open_for_service_instance(&path, service).unwrap();
+        let reopened_state = reopened.materialized_state().unwrap();
+        assert_eq!(reopened_state.jobs[0].run_service_url, job_run_service_url);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -14441,6 +14982,13 @@ mod tests {
                 plan_id: "plan-1".into(),
                 generation,
             },
+            Event::JobAcquisitionResolvedAtEndpoint {
+                provisional_job_id: job("request-1"),
+                acquired_job_id: job("job-1"),
+                plan_id: "plan-1".into(),
+                generation,
+                run_service_url: "https://run.example/jobs/1".into(),
+            },
             Event::AcquisitionProbeFailed {
                 job_id: job("request-1"),
                 generation,
@@ -15436,7 +15984,7 @@ mod tests {
             .unwrap();
         assert_eq!(u32::try_from(version).unwrap(), JOURNAL_SCHEMA_VERSION);
         assert_eq!(
-            JOURNAL_SCHEMA_VERSION, 11,
+            JOURNAL_SCHEMA_VERSION, 12,
             "this test pins the current upgrade"
         );
         for column in [

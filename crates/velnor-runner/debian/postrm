@@ -2,7 +2,6 @@
 set -e
 
 PACKAGE_TRANSACTION_LOCK=/run/velnor/package-transaction.lock
-WORKER_UNIT_GLOB=velnor-job@*.service
 JOBS_SLICE_DROPIN_DIR=/etc/systemd/system/velnor-jobs.slice.d
 JOBS_SLICE_DROPIN=$JOBS_SLICE_DROPIN_DIR/10-host-cpu.conf
 
@@ -42,14 +41,6 @@ require_package_transaction_lock() {
     current_pid=$parent_pid
   done
   fail "exclusive lock owner is not an apt-wrapper ancestor; aborting removal"
-}
-
-verify_worker_units_inactive() {
-  worker_units=$(systemctl list-units --type=service --all --no-legend --plain \
-    "$WORKER_UNIT_GLOB" 2>/dev/null) || return 1
-  active_workers=$(printf '%s\n' "$worker_units" \
-    | awk '$3 != "inactive" && $3 != "failed" {print $1 "(" $3 ")"}')
-  [ -z "$active_workers" ]
 }
 
 verify_jobs_slice_inactive() {
@@ -134,8 +125,7 @@ case "$1" in
         || fail "cannot enumerate Velnor units; aborting removal"
 
       # Runtime masks close the activation race for every enumerated Velnor
-      # service and timer. They remain until systemd is reloaded and the
-      # final worker and slice proofs pass.
+      # service and timer. They remain through the final jobs-slice proof.
       for unit in $(printf '%s\n' "$all_units" | awk '{print $1}'); do
         systemctl mask --runtime "$unit" \
           || fail "cannot mask $unit; aborting removal"
@@ -159,9 +149,6 @@ case "$1" in
           || fail "cannot stop $unit; aborting removal"
       done
 
-      verify_worker_units_inactive \
-        || fail "Velnor job worker is active or activating; aborting removal"
-
       # This is intentionally immediately after the stop loop: a stale
       # pre-stop check permits a job started in the gap to outlive removal.
       verify_jobs_slice_inactive \
@@ -177,8 +164,6 @@ case "$1" in
       # of the exclusive package lock. Runtime masks leave no persistent file
       # and disappear on reboot; a same-boot reinstall must explicitly unmask
       # the removed fleet before operator-controlled activation.
-      verify_worker_units_inactive \
-        || fail "Velnor job worker became active or activating after daemon-reload"
       verify_jobs_slice_inactive \
         || fail "velnor-jobs.slice is not provably inactive after daemon-reload"
     fi

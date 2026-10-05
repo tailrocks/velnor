@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Barrier};
 
-use velnor_runner::permit_guard::{native_permit_holder, NativePermitGuard};
+use velnor_runner::permit_guard::{native_permit_holder, NativePermitGuard, PermitReleaseOutcome};
 use velnor_runner::scaleset::allocator::{startup_reconcile, ScaleSetAllocator};
 use velnor_runner::scaleset::permit_holder;
 
@@ -43,7 +43,8 @@ fn configure(path: &Path, max_jobs: u32) {
     let mut ledger = PermitLedger::open(path).unwrap();
     ledger.set_max_jobs(max_jobs).unwrap();
     ledger.begin_epoch().unwrap();
-    ledger.reconcile(&[]).unwrap();
+    assert_eq!(ledger.occupied().unwrap(), 0);
+    ledger.reconcile_attempts(&[]).unwrap();
 }
 
 #[test]
@@ -122,7 +123,7 @@ fn deferred_waiter_outlives_stalled_head() {
 fn stalled_head_grants_younger(native: bool) {
     use std::time::Duration;
     use velnor_control::permit_ledger::{
-        unix_now, AcquireOutcome, PermitLane, PermitLedger, PermitState,
+        unix_now, AcquireAttemptOutcome, PermitLane, PermitLedger, PermitState,
     };
 
     let path = temp_ledger(if native {
@@ -169,9 +170,9 @@ fn stalled_head_grants_younger(native: bool) {
             None
         };
         let outcome = ledger
-            .acquire(&head_holder, lane, PermitState::Acquiring, generation, pid)
+            .acquire_attempt(&head_holder, lane, PermitState::Acquiring, generation, pid)
             .unwrap();
-        assert_eq!(outcome, AcquireOutcome::Acquired);
+        assert!(matches!(outcome, AcquireAttemptOutcome::Acquired { .. }));
     });
     // The younger single-shot waiter outlives the stall and grants the
     // second permit instead of departing behind the head.
@@ -242,12 +243,18 @@ fn parked_departure_yields_to_younger(native: bool) {
             .unwrap()
             .is_none());
         assert_eq!(demand_state(&second), Some(DemandState::Waiting));
-        first_guard.release();
+        assert_eq!(
+            first_guard.release().unwrap(),
+            PermitReleaseOutcome::Released
+        );
         // A younger waiter grants past the parked departure.
         let third_guard = NativePermitGuard::acquire(&path, third, scope)
             .unwrap()
             .expect("younger grants past parked departure");
-        third_guard.release();
+        assert_eq!(
+            third_guard.release().unwrap(),
+            PermitReleaseOutcome::Released
+        );
         // Redelivery revives the parked demand at its original age.
         let ticket = PermitLedger::open(&path)
             .unwrap()
@@ -264,18 +271,21 @@ fn parked_departure_yields_to_younger(native: bool) {
             .unwrap();
         assert_eq!(revived.first_seen_unix, ticket.first_seen_unix);
         assert_eq!(revived.sequence, ticket.sequence);
-        second_guard.release();
+        assert_eq!(
+            second_guard.release().unwrap(),
+            PermitReleaseOutcome::Released
+        );
     } else {
         let first_guard = allocator.acquire(&first).unwrap().expect("first grants");
         assert!(allocator.acquire(&second).unwrap().is_none());
         assert_eq!(demand_state(&second), Some(DemandState::Waiting));
-        first_guard.release();
+        first_guard.release().unwrap();
         // A younger waiter grants past the parked departure.
         let third_guard = allocator
             .acquire(&third)
             .unwrap()
             .expect("younger grants past parked departure");
-        third_guard.release();
+        third_guard.release().unwrap();
         // Redelivery revives the parked demand at its original age.
         let ticket = PermitLedger::open(&path)
             .unwrap()
@@ -293,7 +303,7 @@ fn parked_departure_yields_to_younger(native: bool) {
             .unwrap();
         assert_eq!(revived.first_seen_unix, ticket.first_seen_unix);
         assert_eq!(revived.sequence, ticket.sequence);
-        second_guard.release();
+        second_guard.release().unwrap();
     }
     assert_eq!(allocator.occupied().unwrap(), 0);
 }
@@ -325,7 +335,7 @@ fn occupancy_never_exceeds_n_under_churn() {
                             violations.fetch_add(1, Ordering::SeqCst);
                         }
                         guard.transition_running();
-                        guard.release();
+                        guard.release().unwrap();
                     }
                 } else {
                     let holder = native_permit_holder(&format!("churn-{lane}-{round}"));
@@ -338,7 +348,7 @@ fn occupancy_never_exceeds_n_under_churn() {
                         guard.transition_running();
                         // Terminal release: Drop after running retains uncertain
                         // occupancy and would leak counted rows across rounds.
-                        guard.release();
+                        assert_eq!(guard.release().unwrap(), PermitReleaseOutcome::Released);
                     }
                 }
             }
@@ -369,7 +379,7 @@ fn native_occupancy_denies_scaleset_and_vice_versa() {
     // Terminal native cleanup (not Drop): Drop would return native/a to
     // Eligible with its original age, and global demand order would grant
     // that older native demand again instead of the scale-set offer.
-    native_a.release();
+    assert_eq!(native_a.release().unwrap(), PermitReleaseOutcome::Released);
     let guard = allocator
         .acquire(&permit_holder(7, 1))
         .unwrap()
@@ -380,18 +390,20 @@ fn native_occupancy_denies_scaleset_and_vice_versa() {
             .unwrap()
             .is_none()
     );
-    guard.release();
+    guard.release().unwrap();
     let native_c = NativePermitGuard::acquire(&path, native_permit_holder("c"), "scope-a")
         .unwrap()
         .expect("native grant c after scale-set release");
-    native_b.release();
-    native_c.release();
+    assert_eq!(native_b.release().unwrap(), PermitReleaseOutcome::Released);
+    assert_eq!(native_c.release().unwrap(), PermitReleaseOutcome::Released);
     assert_eq!(allocator.occupied().unwrap(), 0);
 }
 
 #[test]
 fn stale_generation_grants_nothing() {
-    use velnor_control::permit_ledger::{AcquireOutcome, PermitLane, PermitLedger, PermitState};
+    use velnor_control::permit_ledger::{
+        AcquireAttemptOutcome, PermitLane, PermitLedger, PermitState,
+    };
     let path = temp_ledger("fence");
     configure(&path, 2);
     let allocator = ScaleSetAllocator::open(&path);
@@ -402,7 +414,7 @@ fn stale_generation_grants_nothing() {
     ledger.begin_epoch().unwrap();
     assert_eq!(
         ledger
-            .acquire(
+            .acquire_attempt(
                 &permit_holder(7, 9),
                 PermitLane::ScaleSet,
                 PermitState::Acquiring,
@@ -410,7 +422,7 @@ fn stale_generation_grants_nothing() {
                 None
             )
             .unwrap(),
-        AcquireOutcome::StaleGeneration
+        AcquireAttemptOutcome::StaleGeneration
     );
     assert_eq!(allocator.occupied().unwrap(), 0);
 
@@ -420,7 +432,9 @@ fn stale_generation_grants_nothing() {
 
 #[test]
 fn reconcile_before_advertise_marks_epoch_once() {
-    use velnor_control::permit_ledger::{PermitLane, PermitLedger, PermitState};
+    use velnor_control::permit_ledger::{
+        AcquireAttemptOutcome, PermitLane, PermitLedger, PermitState,
+    };
     let path = temp_ledger("adv");
     let mut ledger = PermitLedger::open(&path).unwrap();
     ledger.set_max_jobs(3).unwrap();
@@ -430,65 +444,112 @@ fn reconcile_before_advertise_marks_epoch_once() {
 
     // A crash-window row (unreconciled) is adopted, not deleted.
     let generation = PermitLedger::open(&path).unwrap().generation().unwrap();
-    PermitLedger::open(&path)
+    let attempt_token = match PermitLedger::open(&path)
         .unwrap()
-        .acquire(
+        .acquire_attempt(
             &permit_holder(7, 4242),
             PermitLane::ScaleSet,
             PermitState::Running,
             generation,
             None,
         )
-        .unwrap();
-    let (report, swept) = startup_reconcile(
-        &path,
-        &[("scaleset/7/4242", PermitState::Running)],
-        &[],
-        &|_| false,
-    )
-    .unwrap();
+        .unwrap()
+    {
+        AcquireAttemptOutcome::Acquired { attempt_token } => attempt_token,
+        outcome => panic!("expected Scale Set permit, got {outcome:?}"),
+    };
+    let report =
+        startup_reconcile(&path, &[("scaleset/7/4242", attempt_token.as_str())], &[]).unwrap();
     assert_eq!(report.confirmed, vec!["scaleset/7/4242".to_string()]);
-    assert!(swept.is_empty());
     assert_eq!(allocator.advertised_free().unwrap(), Some(2));
 
     // Unattested rows go uncertain (counted), never vanish.
-    let (report, _) = startup_reconcile(&path, &[], &[], &|_| false).unwrap();
+    let report = startup_reconcile(&path, &[], &[]).unwrap();
     assert_eq!(report.marked_uncertain, vec!["scaleset/7/4242".to_string()]);
     assert_eq!(allocator.occupied().unwrap(), 1);
     assert_eq!(allocator.advertised_free().unwrap(), Some(2));
 }
 
 #[test]
-fn sweep_never_frees_scaleset_rows() {
-    use velnor_control::permit_ledger::{PermitLedger, PermitState};
-    let path = temp_ledger("sweep");
-    configure(&path, 4);
+fn dead_peer_with_uninventoried_container_keeps_native_capacity() {
+    use velnor_control::permit_ledger::{
+        AcquireAttemptOutcome, PermitLane, PermitLedger, PermitState,
+    };
+    let path = temp_ledger("dead-peer-unknown-container");
+    configure(&path, 2);
     let allocator = ScaleSetAllocator::open(&path);
 
-    // One uncertain scale-set row (cleanup failure), one uncertain native
-    // row with a dead pid, both unprotected.
-    let guard = allocator
-        .acquire(&permit_holder(7, 4242))
-        .unwrap()
-        .expect("grants");
-    guard.mark_uncertain_and_disarm();
-    let native = NativePermitGuard::acquire(&path, native_permit_holder("dead"), "scope-a")
-        .unwrap()
-        .expect("native grants");
-    // Drop without release would free the row; disarm via the uncertain
-    // path instead so the sweep has an uncertain row to converge. The
-    // sweep's pid probe is stubbed dead below, as in production crashes.
-    native.mark_uncertain_and_disarm();
+    // The daemon died after Run Service assignment but before marker handoff;
+    // its provisional attempt has no local marker. A sibling job's Docker
+    // container also survives under roots this daemon cannot inventory.
+    let surviving_container = "container-still-running-on-peer";
+    let local_marker_inventory: Vec<(&str, &str)> = Vec::new();
+    let local_container_inventory: Vec<&str> = Vec::new();
+    assert!(local_marker_inventory.is_empty());
+    assert!(!local_container_inventory.contains(&surviving_container));
 
-    // Every pid reads dead; nothing is protected.
-    let (_, swept) = startup_reconcile(&path, &[], &[], &|_| false).unwrap();
-    // The native row is swept; the scale-set row survives (pid-less rows
-    // are never swept — holder recovery converges them).
-    assert_eq!(swept, vec!["native/dead".to_string()]);
+    let markerless_holder = native_permit_holder("assigned-no-response");
+    let container_holder = native_permit_holder("peer-container");
+    let mut ledger = PermitLedger::open(&path).unwrap();
+    let generation = ledger.generation().unwrap();
+    let dead_pid = u32::MAX;
+    #[cfg(unix)]
+    assert!(!velnor_runner::permit_guard::pid_alive(dead_pid));
+    let markerless_token = match ledger
+        .acquire_attempt(
+            &markerless_holder,
+            PermitLane::Native,
+            PermitState::Acquiring,
+            generation,
+            Some(dead_pid),
+        )
+        .unwrap()
+    {
+        AcquireAttemptOutcome::Acquired { attempt_token } => attempt_token,
+        outcome => panic!("expected markerless peer permit, got {outcome:?}"),
+    };
+    let container_token = match ledger
+        .acquire_attempt(
+            &container_holder,
+            PermitLane::Native,
+            PermitState::Running,
+            generation,
+            Some(dead_pid),
+        )
+        .unwrap()
+    {
+        AcquireAttemptOutcome::Acquired { attempt_token } => attempt_token,
+        outcome => panic!("expected container peer permit, got {outcome:?}"),
+    };
+    ledger.begin_epoch().unwrap();
+    drop(ledger);
+
+    let report = startup_reconcile(&path, &[], &local_marker_inventory).unwrap();
+    assert_eq!(
+        report.marked_uncertain,
+        vec![markerless_holder.clone(), container_holder.clone()]
+    );
     let ledger = PermitLedger::open(&path).unwrap();
     assert_eq!(
-        ledger.holder_state(&permit_holder(7, 4242)).unwrap(),
+        ledger.holder_state(&markerless_holder).unwrap(),
         Some(PermitState::Uncertain)
     );
-    assert_eq!(allocator.occupied().unwrap(), 1);
+    assert_eq!(
+        ledger.holder_state(&container_holder).unwrap(),
+        Some(PermitState::Uncertain)
+    );
+    assert_eq!(
+        ledger.attempt_token(&markerless_holder).unwrap(),
+        Some(markerless_token)
+    );
+    assert_eq!(
+        ledger.attempt_token(&container_holder).unwrap(),
+        Some(container_token)
+    );
+    assert_eq!(allocator.occupied().unwrap(), 2);
+    assert_eq!(allocator.advertised_free().unwrap(), Some(0));
+    assert!(allocator
+        .acquire(&permit_holder(7, 9999))
+        .unwrap()
+        .is_none());
 }

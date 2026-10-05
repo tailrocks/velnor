@@ -616,9 +616,13 @@ pub mod platform;
 mod preflight;
 pub mod protocol;
 mod release;
+mod runner_json;
 /// The compile-time build identity, shared with `velnorctl --version` so the
 /// operator CLI reports the same release/source SHA as `release export`.
-pub use release::{embedded as embedded_build_identity, EmbeddedIdentity};
+pub use release::{
+    embedded as embedded_build_identity, package_execution_guard, EmbeddedIdentity,
+    PackageExecutionGuard,
+};
 pub mod runner;
 mod runtime_env;
 pub mod scaleset;
@@ -628,12 +632,31 @@ mod sd_notify;
 pub mod service;
 mod slot_log;
 pub(crate) mod stable_workspace;
+#[cfg(unix)]
+mod stale_trust_scope;
 mod storage;
 mod store_catalog;
 mod telemetry;
 pub mod trust_class;
 pub mod trust_scope;
 mod workflow_command;
+
+pub use velnor_storage_snapshot::LocalStorageSnapshotRoot;
+
+/// Resolve logical catalog paths for bounded local-storage diagnostic metadata.
+///
+/// This is used by maintainer evidence tooling. Cache roots are discovered
+/// only below validated trust-scope keys; artifacts and hosted cache paths
+/// come from the store catalog. Returned paths are lexical metadata, not
+/// canonical paths or safe reopen targets. Secure traversal requires pinned
+/// roots from the snapshot API.
+pub fn local_storage_snapshot_roots(
+    work_root: &std::path::Path,
+) -> anyhow::Result<Vec<LocalStorageSnapshotRoot>> {
+    let layout = storage::resolve_required_layout()?;
+    let catalog = store_catalog::StoreCatalog::for_work_root_with_layout(work_root, &layout);
+    catalog.local_diagnostic_roots()
+}
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

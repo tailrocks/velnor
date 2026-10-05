@@ -8,6 +8,8 @@ mod g0_workflow;
 pub(crate) mod github_acquisition;
 mod lane_compare;
 mod live_authority;
+#[cfg(windows)]
+mod snapshot_windows;
 mod workflow_monitor;
 
 use anyhow::{bail, Context, Result};
@@ -3609,7 +3611,10 @@ fn build_live_evidence_content(
         std::env::consts::OS,
         std::env::consts::ARCH
     ));
-    out.push_str(&format!("- work dir: {}\n", work_dir.display()));
+    out.push_str(&format!(
+        "- work dir: {}\n",
+        velnor_storage_snapshot::snapshot_path_identity(work_dir)
+    ));
     out.push_str(&format!(
         "- Docker host work dir: {}\n",
         if args.docker_host_work_dir.is_empty() {
@@ -3631,13 +3636,13 @@ fn build_live_evidence_content(
         "- require Docker socket: {}\n",
         args.require_docker_socket
     ));
+    let dump_job_messages_display = if args.dump_job_messages.is_empty() {
+        "<disabled>".to_string()
+    } else {
+        velnor_storage_snapshot::snapshot_path_identity(Path::new(&args.dump_job_messages))
+    };
     out.push_str(&format!(
-        "- job message dumps: {}\n",
-        if args.dump_job_messages.is_empty() {
-            "<disabled>"
-        } else {
-            &args.dump_job_messages
-        }
+        "- job message dumps: {dump_job_messages_display}\n"
     ));
 
     let ts = run_command_output(
@@ -3838,28 +3843,295 @@ fn evidence_log_snapshot(repo: &str, run_id: u64, log_lines: u64) -> String {
 }
 
 fn evidence_local_storage_snapshot(work_dir: &Path, max_entries: u64) -> String {
-    let max_entries = max_entries as usize;
-    let mut stores: Vec<PathBuf> = vec![];
-    for store_name in &["_velnor_caches", "_velnor_artifacts", "_velnor_sccache"] {
-        collect_dirs_named(work_dir, store_name, &mut stores);
+    evidence_local_storage_snapshot_from_roots(
+        work_dir,
+        usize::try_from(max_entries).unwrap_or(usize::MAX),
+        local_storage_snapshot_roots(work_dir),
+    )
+}
+
+struct ToolSnapshotFilesystem;
+
+#[cfg(test)]
+type ToolSnapshotAnchor =
+    <ToolSnapshotFilesystem as velnor_storage_snapshot::SnapshotFilesystem>::Anchor;
+
+fn local_storage_snapshot_roots(
+    work_dir: &Path,
+) -> Result<
+    Vec<
+        velnor_storage_snapshot::PinnedLocalStorageSnapshotRoot<
+            <ToolSnapshotFilesystem as velnor_storage_snapshot::SnapshotFilesystem>::Anchor,
+        >,
+    >,
+> {
+    let config = velnor_storage_snapshot::SnapshotCatalogConfig::from_environment(work_dir)?;
+    velnor_storage_snapshot::discover_pinned_local_storage_roots(&config, &ToolSnapshotFilesystem)
+}
+
+#[cfg(unix)]
+impl velnor_storage_snapshot::SnapshotFilesystem for ToolSnapshotFilesystem {
+    type Anchor = fs::File;
+
+    fn open_trusted_root(&self, trusted_root: &Path) -> Result<Option<Self::Anchor>> {
+        open_snapshot_trusted_root(trusted_root).map_err(Into::into)
     }
-    stores.sort();
+
+    fn path_kind(
+        &self,
+        anchor: &Self::Anchor,
+        relative: &Path,
+    ) -> Result<velnor_storage_snapshot::SnapshotPathKind> {
+        snapshot_catalog_path_kind(anchor, relative).map_err(Into::into)
+    }
+
+    fn open_directory(
+        &self,
+        anchor: &Self::Anchor,
+        relative: &Path,
+    ) -> Result<Option<Self::Anchor>> {
+        open_snapshot_relative_directory(anchor, relative).map_err(Into::into)
+    }
+
+    fn visit_directory_entries(
+        &self,
+        anchor: &Self::Anchor,
+        relative: &Path,
+        visit: &mut dyn FnMut(std::ffi::OsString) -> Result<bool>,
+    ) -> Result<Option<()>> {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        match snapshot_catalog_path_kind(anchor, relative)? {
+            velnor_storage_snapshot::SnapshotPathKind::Missing => return Ok(None),
+            velnor_storage_snapshot::SnapshotPathKind::Directory => {}
+            velnor_storage_snapshot::SnapshotPathKind::File => {
+                anyhow::bail!(
+                    "snapshot path is not a directory: {}",
+                    velnor_storage_snapshot::snapshot_path_identity(relative)
+                )
+            }
+            velnor_storage_snapshot::SnapshotPathKind::Link => {
+                anyhow::bail!(
+                    "snapshot path is a link: {}",
+                    velnor_storage_snapshot::snapshot_path_identity(relative)
+                )
+            }
+            velnor_storage_snapshot::SnapshotPathKind::Other => {
+                anyhow::bail!(
+                    "snapshot path has an unsupported type: {}",
+                    velnor_storage_snapshot::snapshot_path_identity(relative)
+                )
+            }
+        }
+        let directory = open_snapshot_relative_directory(anchor, relative)?
+            .ok_or_else(|| anyhow::anyhow!("snapshot directory changed during secure open"))?;
+        let entries = rustix::fs::Dir::read_from(&directory)
+            .map_err(std::io::Error::from)
+            .with_context(|| {
+                format!(
+                    "read snapshot directory {}",
+                    velnor_storage_snapshot::snapshot_path_identity(relative)
+                )
+            })?;
+        for entry in entries {
+            let entry = entry.map_err(std::io::Error::from).with_context(|| {
+                format!(
+                    "read snapshot directory {}",
+                    velnor_storage_snapshot::snapshot_path_identity(relative)
+                )
+            })?;
+            let name = std::ffi::OsString::from_vec(entry.file_name().to_bytes().to_vec());
+            if name == "." || name == ".." {
+                continue;
+            }
+            if !visit(name)? {
+                break;
+            }
+        }
+        Ok(Some(()))
+    }
+}
+
+#[cfg(unix)]
+fn open_snapshot_trusted_root(trusted_root: &Path) -> std::io::Result<Option<fs::File>> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let canonical_anchor = match fs::canonicalize(trusted_root) {
+        Ok(canonical) => canonical,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !canonical_anchor.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "snapshot anchor is not absolute",
+        ));
+    }
+
+    let mut options = fs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let mut directory = options.open("/")?;
+    for component in canonical_anchor.components() {
+        match component {
+            std::path::Component::RootDir | std::path::Component::CurDir => {}
+            std::path::Component::Normal(name) => {
+                directory = open_snapshot_directory_child(&directory, name)?;
+            }
+            std::path::Component::ParentDir | std::path::Component::Prefix(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "canonical snapshot anchor contains parent traversal",
+                ));
+            }
+        }
+    }
+    Ok(Some(directory))
+}
+
+#[cfg(unix)]
+fn snapshot_catalog_path_kind(
+    anchor: &fs::File,
+    relative: &Path,
+) -> std::io::Result<velnor_storage_snapshot::SnapshotPathKind> {
+    let mut directory = anchor.try_clone()?;
+
+    let mut components = relative
+        .components()
+        .filter(|component| !matches!(component, std::path::Component::CurDir))
+        .peekable();
+    while let Some(component) = components.next() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "snapshot path is not a normalized relative descendant",
+            ));
+        };
+        let metadata =
+            match rustix::fs::statat(&directory, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(metadata) => metadata,
+                Err(rustix::io::Errno::NOENT) => {
+                    return Ok(velnor_storage_snapshot::SnapshotPathKind::Missing);
+                }
+                Err(error) => return Err(std::io::Error::from(error)),
+            };
+        match rustix::fs::FileType::from_raw_mode(metadata.st_mode) {
+            rustix::fs::FileType::Symlink => {
+                return Ok(velnor_storage_snapshot::SnapshotPathKind::Link);
+            }
+            rustix::fs::FileType::Directory => {
+                let child = open_snapshot_directory_child(&directory, name)?;
+                let opened = rustix::fs::fstat(&child).map_err(std::io::Error::from)?;
+                if rustix::fs::FileType::from_raw_mode(opened.st_mode)
+                    != rustix::fs::FileType::Directory
+                    || opened.st_dev != metadata.st_dev
+                    || opened.st_ino != metadata.st_ino
+                {
+                    return Err(std::io::Error::other(
+                        "snapshot directory changed during secure open",
+                    ));
+                }
+                directory = child;
+            }
+            rustix::fs::FileType::RegularFile if components.peek().is_none() => {
+                return Ok(velnor_storage_snapshot::SnapshotPathKind::File);
+            }
+            rustix::fs::FileType::RegularFile => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    "snapshot path has a non-directory ancestor",
+                ));
+            }
+            _ => {
+                return Ok(velnor_storage_snapshot::SnapshotPathKind::Other);
+            }
+        }
+    }
+    Ok(velnor_storage_snapshot::SnapshotPathKind::Directory)
+}
+
+#[cfg(unix)]
+fn open_snapshot_relative_directory(
+    anchor: &fs::File,
+    relative: &Path,
+) -> std::io::Result<Option<fs::File>> {
+    match snapshot_catalog_path_kind(anchor, relative)? {
+        velnor_storage_snapshot::SnapshotPathKind::Missing => Ok(None),
+        velnor_storage_snapshot::SnapshotPathKind::File => Err(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            "snapshot path is not a directory",
+        )),
+        velnor_storage_snapshot::SnapshotPathKind::Link => Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "snapshot path contains a symlink",
+        )),
+        velnor_storage_snapshot::SnapshotPathKind::Other => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "snapshot path has an unsupported file type",
+        )),
+        velnor_storage_snapshot::SnapshotPathKind::Directory => {
+            let mut directory = anchor.try_clone()?;
+            for component in relative
+                .components()
+                .filter(|component| !matches!(component, std::path::Component::CurDir))
+            {
+                let std::path::Component::Normal(name) = component else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "snapshot path is not a normalized relative descendant",
+                    ));
+                };
+                directory = open_snapshot_directory_child(&directory, name)?;
+            }
+            Ok(Some(directory))
+        }
+    }
+}
+
+fn evidence_local_storage_snapshot_from_roots<A>(
+    work_dir: &Path,
+    max_entries: usize,
+    stores: Result<Vec<velnor_storage_snapshot::PinnedLocalStorageSnapshotRoot<A>>>,
+) -> String
+where
+    ToolSnapshotFilesystem: velnor_storage_snapshot::SnapshotFilesystem<Anchor = A>,
+{
+    let mut stores = match stores {
+        Ok(stores) => stores,
+        Err(error) => {
+            return format!(
+                "\n## Velnor Local Storage Snapshot\n\n- max entries per store: {max_entries}\n\n### Discovery failure\n\nLocal storage scan incomplete:\n\n```text\n{}\n```\n",
+                markdown_safe_text(&format!("{error:#}"))
+            );
+        }
+    };
+    stores.sort_by(|left, right| left.root.path.cmp(&right.root.path));
+    stores.dedup_by(|left, right| left.root.path == right.root.path);
 
     if stores.is_empty() {
         return format!(
-            "\n## Velnor Local Storage Snapshot\n\n- max entries per store: {max_entries}\n\nNo Velnor local cache, artifact, or sccache stores found under {}.\n",
-            work_dir.display()
+            "\n## Velnor Local Storage Snapshot\n\n- max entries per store: {max_entries}\n\nNo Velnor local cache or artifact stores found for work directory {}.\n",
+            velnor_storage_snapshot::snapshot_path_identity(work_dir)
         );
     }
 
     let mut out =
         format!("\n## Velnor Local Storage Snapshot\n\n- max entries per store: {max_entries}\n\n");
     for store in &stores {
-        let size = dir_size_human(store);
-        let entries = list_dir_entries(store, 3, max_entries);
+        // The former path-based `du` probe was separate from the entry cap and
+        // could follow a swapped catalog path. Keep its field explicit until a
+        // handle-bound size walk exists.
+        let size = dir_size_human();
+        let entries = list_pinned_snapshot_directory_entries(
+            &store.directory,
+            &store.root.path,
+            4,
+            max_entries,
+        );
         out.push_str(&format!(
             "### {}\n\n- size: {size}\n\n```text\n",
-            store.display()
+            velnor_storage_snapshot::snapshot_path_identity(&store.root.path)
         ));
         for entry in &entries {
             out.push_str(entry);
@@ -3870,78 +4142,542 @@ fn evidence_local_storage_snapshot(work_dir: &Path, max_entries: u64) -> String 
     out
 }
 
-fn collect_dirs_named(root: &Path, name: &str, result: &mut Vec<PathBuf>) {
-    if !root.is_dir() {
-        return;
-    }
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if path.file_name().and_then(|n| n.to_str()) == Some(name) {
-                result.push(path.clone());
+fn markdown_safe_text(value: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match u32::from(character) {
+            0x25 => escaped.push_str("%25"),
+            0x5c => escaped.push_str("%5C"),
+            0x60 => escaped.push_str("%60"),
+            value if character.is_control() || matches!(value, 0x2028 | 0x2029) => {
+                let _ = write!(escaped, "%u{value:04X}");
             }
-            collect_dirs_named(&path, name, result);
+            _ => escaped.push(character),
         }
+    }
+    escaped
+}
+
+fn list_pinned_snapshot_directory_entries<A>(
+    directory: &A,
+    display_root: &Path,
+    max_depth: usize,
+    max_entries: usize,
+) -> Vec<String>
+where
+    ToolSnapshotFilesystem: velnor_storage_snapshot::SnapshotFilesystem<Anchor = A>,
+{
+    list_pinned_snapshot_directory_entries_with(
+        &ToolSnapshotFilesystem,
+        directory,
+        display_root,
+        max_depth,
+        max_entries,
+    )
+}
+
+fn list_pinned_snapshot_directory_entries_with<F, A>(
+    filesystem: &F,
+    directory: &A,
+    display_root: &Path,
+    max_depth: usize,
+    max_entries: usize,
+) -> Vec<String>
+where
+    F: velnor_storage_snapshot::SnapshotFilesystem<Anchor = A>,
+{
+    let Some(scan_limit) = max_entries.checked_add(1) else {
+        return vec![dir_entries_unavailable_marker()];
+    };
+    let mut entries = Vec::new();
+    let mut visited_entries = 0;
+    match collect_pinned_snapshot_entries(
+        filesystem,
+        directory,
+        Path::new(""),
+        display_root,
+        max_depth,
+        scan_limit,
+        &mut entries,
+        &mut visited_entries,
+    ) {
+        Ok(_) if visited_entries > max_entries => {
+            vec![snapshot_entry_scan_incomplete_marker(max_entries)]
+        }
+        Ok(_) => finish_dir_entries(entries, max_entries),
+        Err(_) => vec![dir_entries_unavailable_marker()],
     }
 }
 
-fn dir_size_human(path: &Path) -> String {
-    Command::new("du")
-        .args(["-sh", &path.display().to_string()])
-        .output()
-        .ok()
-        .and_then(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .split_whitespace()
-                .next()
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "unknown".to_string())
+fn collect_pinned_snapshot_entries<F, A>(
+    filesystem: &F,
+    anchor: &A,
+    relative: &Path,
+    display_root: &Path,
+    depth: usize,
+    max_entries: usize,
+    result: &mut Vec<String>,
+    visited_entries: &mut usize,
+) -> anyhow::Result<usize>
+where
+    F: velnor_storage_snapshot::SnapshotFilesystem<Anchor = A>,
+{
+    if depth == 0 || *visited_entries >= max_entries {
+        return Ok(0);
+    }
+    let first_entry = result.len();
+    let mut visit = |name: std::ffi::OsString| -> Result<bool> {
+        if *visited_entries >= max_entries {
+            return Ok(false);
+        }
+        *visited_entries += 1;
+        let child_relative = relative.join(&name);
+        let child_path = display_root.join(&name);
+        let child_kind = velnor_storage_snapshot::SnapshotFilesystem::path_kind(
+            filesystem,
+            anchor,
+            &child_relative,
+        )?;
+        if child_kind == velnor_storage_snapshot::SnapshotPathKind::Missing {
+            return Ok(*visited_entries < max_entries);
+        }
+        result.push(velnor_storage_snapshot::snapshot_path_identity(&child_path));
+        if depth > 1
+            && *visited_entries < max_entries
+            && child_kind == velnor_storage_snapshot::SnapshotPathKind::Directory
+        {
+            match velnor_storage_snapshot::SnapshotFilesystem::open_directory(
+                filesystem,
+                anchor,
+                &child_relative,
+            ) {
+                Ok(Some(child_directory)) => {
+                    collect_pinned_snapshot_entries(
+                        filesystem,
+                        &child_directory,
+                        Path::new(""),
+                        &child_path,
+                        depth - 1,
+                        max_entries,
+                        result,
+                        visited_entries,
+                    )?;
+                }
+                Ok(None) => {}
+                Err(open_error) => {
+                    match velnor_storage_snapshot::SnapshotFilesystem::path_kind(
+                        filesystem,
+                        anchor,
+                        &child_relative,
+                    ) {
+                        Ok(
+                            velnor_storage_snapshot::SnapshotPathKind::Missing
+                            | velnor_storage_snapshot::SnapshotPathKind::File
+                            | velnor_storage_snapshot::SnapshotPathKind::Link
+                            | velnor_storage_snapshot::SnapshotPathKind::Other,
+                        ) => {}
+                        Ok(velnor_storage_snapshot::SnapshotPathKind::Directory) | Err(_) => {
+                            return Err(open_error.into());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(*visited_entries < max_entries)
+    };
+    velnor_storage_snapshot::SnapshotFilesystem::visit_directory_entries(
+        filesystem, anchor, relative, &mut visit,
+    )?
+    .with_context(|| format!("snapshot directory disappeared: {}", relative.display()))?;
+    Ok(result.len() - first_entry)
+}
+
+fn dir_size_human() -> String {
+    "unavailable (safe size walk omitted; `du` is outside the entry cap)".to_string()
 }
 
 fn list_dir_entries(root: &Path, max_depth: usize, max_entries: usize) -> Vec<String> {
+    list_dir_entries_below(root, root, max_depth, max_entries)
+}
+
+fn list_dir_entries_below(
+    root: &Path,
+    trusted_root: &Path,
+    max_depth: usize,
+    max_entries: usize,
+) -> Vec<String> {
+    list_dir_entries_with_scan(max_entries, |scan_limit, entries| {
+        collect_dir_entries_inner(root, trusted_root, max_depth, scan_limit, entries)
+    })
+}
+
+fn list_dir_entries_with_scan(
+    max_entries: usize,
+    scan: impl FnOnce(usize, &mut Vec<String>) -> std::io::Result<usize>,
+) -> Vec<String> {
+    let Some(scan_limit) = max_entries.checked_add(1) else {
+        return vec![dir_entries_unavailable_marker()];
+    };
     let mut entries = vec![];
-    collect_dir_entries_inner(root, max_depth, &mut entries);
+    match scan(scan_limit, &mut entries) {
+        Ok(_) => finish_dir_entries(entries, max_entries),
+        Err(_) => vec![dir_entries_unavailable_marker()],
+    }
+}
+
+fn finish_dir_entries(mut entries: Vec<String>, max_entries: usize) -> Vec<String> {
+    if entries.len() > max_entries {
+        return vec![dir_entries_omitted_marker(max_entries)];
+    }
     entries.sort();
-    entries.truncate(max_entries);
     entries
 }
 
-fn collect_dir_entries_inner(root: &Path, depth: usize, result: &mut Vec<String>) {
-    if depth == 0 || !root.is_dir() {
-        return;
+fn dir_entries_omitted_marker(max_entries: usize) -> String {
+    format!("[listing omitted: more than {max_entries} entries]")
+}
+
+fn snapshot_entry_scan_incomplete_marker(max_entries: usize) -> String {
+    format!("[listing incomplete: more than {max_entries} directory names visited]")
+}
+
+fn dir_entries_unavailable_marker() -> String {
+    "[listing unavailable: safe traversal failed]".to_string()
+}
+
+#[cfg(unix)]
+fn collect_dir_entries_inner(
+    root: &Path,
+    trusted_root: &Path,
+    depth: usize,
+    max_entries: usize,
+    result: &mut Vec<String>,
+) -> std::io::Result<usize> {
+    if depth == 0 || result.len() >= max_entries {
+        return Ok(0);
     }
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        result.push(path.display().to_string());
-        if path.is_dir() {
-            collect_dir_entries_inner(&path, depth - 1, result);
+    let directory = open_snapshot_root(root, trusted_root).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "could not open snapshot root without following links",
+        )
+    })?;
+    collect_dir_entries_from_directory(&directory, root, depth, max_entries, result)
+}
+
+#[cfg(unix)]
+fn open_snapshot_root(root: &Path, trusted_root: &Path) -> Option<fs::File> {
+    open_snapshot_root_after_canonicalize(root, trusted_root, |_| {})
+}
+
+#[cfg(unix)]
+fn open_snapshot_root_after_canonicalize(
+    root: &Path,
+    trusted_root: &Path,
+    after_canonicalize: impl FnOnce(&Path),
+) -> Option<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    // Resolve only the operator-selected anchor; store descendants can be
+    // job-writable and must never be canonicalized through existing links.
+    let relative_root = root.strip_prefix(trusted_root).ok()?;
+    let canonical_anchor = fs::canonicalize(trusted_root).ok()?;
+    if !canonical_anchor.is_absolute() {
+        return None;
+    }
+    after_canonicalize(&canonical_anchor);
+
+    let mut options = fs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let mut directory = options.open("/").ok()?;
+    for component in canonical_anchor.components() {
+        match component {
+            std::path::Component::RootDir | std::path::Component::CurDir => {}
+            std::path::Component::Normal(name) => {
+                directory = open_snapshot_directory_child(&directory, name).ok()?;
+            }
+            std::path::Component::ParentDir | std::path::Component::Prefix(_) => return None,
         }
     }
+    for component in relative_root.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(name) => {
+                directory = open_snapshot_directory_child(&directory, name).ok()?;
+            }
+            std::path::Component::RootDir
+            | std::path::Component::ParentDir
+            | std::path::Component::Prefix(_) => return None,
+        }
+    }
+    Some(directory)
+}
+
+#[cfg(unix)]
+fn collect_dir_entries_from_directory(
+    directory: &fs::File,
+    display_root: &Path,
+    depth: usize,
+    max_entries: usize,
+    result: &mut Vec<String>,
+) -> std::io::Result<usize> {
+    collect_dir_entries_from_directory_with_opener(
+        directory,
+        display_root,
+        depth,
+        max_entries,
+        result,
+        &open_snapshot_directory_for_recursion,
+    )
+}
+
+#[cfg(unix)]
+fn collect_dir_entries_from_directory_with_opener(
+    directory: &fs::File,
+    display_root: &Path,
+    depth: usize,
+    max_entries: usize,
+    result: &mut Vec<String>,
+    open_child: &impl Fn(&fs::File, &std::ffi::OsStr) -> std::io::Result<Option<fs::File>>,
+) -> std::io::Result<usize> {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    if depth == 0 || result.len() >= max_entries {
+        return Ok(0);
+    }
+    // Open a fresh cursor relative to the pinned directory. Keep setup errors
+    // in the same result as entry-read errors so neither becomes an empty list.
+    let entries = open_snapshot_directory_child(directory, std::ffi::OsStr::new("."))
+        .and_then(|scan_directory| {
+            let scan_fd: rustix::fd::OwnedFd = scan_directory.into();
+            rustix::fs::Dir::new(scan_fd).map_err(std::io::Error::from)
+        })
+        .map(|mut stream| {
+            std::iter::from_fn(move || {
+                stream.read().map(|entry| {
+                    entry
+                        .map(|entry| {
+                            std::ffi::OsString::from_vec(entry.file_name().to_bytes().to_vec())
+                        })
+                        .map_err(std::io::Error::from)
+                })
+            })
+        });
+    collect_dir_entries_from_entries_with_opener(
+        directory,
+        display_root,
+        depth,
+        max_entries,
+        result,
+        entries,
+        open_child,
+    )
+}
+
+#[cfg(all(unix, test))]
+fn collect_dir_entries_from_entries<I>(
+    directory: &fs::File,
+    display_root: &Path,
+    depth: usize,
+    max_entries: usize,
+    result: &mut Vec<String>,
+    entries: std::io::Result<I>,
+) -> std::io::Result<usize>
+where
+    I: Iterator<Item = std::io::Result<std::ffi::OsString>>,
+{
+    collect_dir_entries_from_entries_with_opener(
+        directory,
+        display_root,
+        depth,
+        max_entries,
+        result,
+        entries,
+        &open_snapshot_directory_for_recursion,
+    )
+}
+
+#[cfg(unix)]
+fn collect_dir_entries_from_entries_with_opener<I>(
+    directory: &fs::File,
+    display_root: &Path,
+    depth: usize,
+    max_entries: usize,
+    result: &mut Vec<String>,
+    entries: std::io::Result<I>,
+    open_child: &impl Fn(&fs::File, &std::ffi::OsStr) -> std::io::Result<Option<fs::File>>,
+) -> std::io::Result<usize>
+where
+    I: Iterator<Item = std::io::Result<std::ffi::OsString>>,
+{
+    use std::os::unix::ffi::OsStrExt as _;
+
+    if depth == 0 || result.len() >= max_entries {
+        return Ok(0);
+    }
+    let first_entry = result.len();
+    let mut entries = entries?;
+    while result.len() < max_entries {
+        let Some(name) = entries.next() else {
+            break;
+        };
+        let name = name?;
+        let bytes = name.as_bytes();
+        if bytes == b"." || bytes == b".." {
+            continue;
+        }
+        let child_path = display_root.join(&name);
+        result.push(velnor_storage_snapshot::snapshot_path_identity(&child_path));
+
+        if depth > 1 && result.len() < max_entries {
+            if let Some(child_directory) = open_child(directory, &name)? {
+                collect_dir_entries_from_directory_with_opener(
+                    &child_directory,
+                    &child_path,
+                    depth - 1,
+                    max_entries,
+                    result,
+                    open_child,
+                )?;
+            }
+        }
+    }
+    Ok(result.len() - first_entry)
+}
+
+#[cfg(unix)]
+fn open_snapshot_directory_for_recursion(
+    parent: &fs::File,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<Option<fs::File>> {
+    open_snapshot_directory_for_recursion_with(parent, name, open_snapshot_directory_child)
+}
+
+#[cfg(unix)]
+fn open_snapshot_directory_for_recursion_with(
+    parent: &fs::File,
+    name: &std::ffi::OsStr,
+    open_child: impl FnOnce(&fs::File, &std::ffi::OsStr) -> std::io::Result<fs::File>,
+) -> std::io::Result<Option<fs::File>> {
+    let metadata = match rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(metadata) => metadata,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(error) => return Err(std::io::Error::from(error)),
+    };
+    if rustix::fs::FileType::from_raw_mode(metadata.st_mode) != rustix::fs::FileType::Directory {
+        return Ok(None);
+    }
+
+    let child = match open_child(parent, name) {
+        Ok(child) => child,
+        Err(open_error) => {
+            // A directory may vanish or be replaced by a link/non-directory
+            // after statat. Skip only when a second nofollow stat proves that
+            // case; permissions and other I/O failures must invalidate the
+            // whole listing.
+            match rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+                Err(rustix::io::Errno::NOENT) => return Ok(None),
+                Ok(current)
+                    if rustix::fs::FileType::from_raw_mode(current.st_mode)
+                        != rustix::fs::FileType::Directory =>
+                {
+                    return Ok(None);
+                }
+                Ok(_) => return Err(open_error),
+                Err(error) => return Err(std::io::Error::from(error)),
+            }
+        }
+    };
+    let opened = rustix::fs::fstat(&child).map_err(std::io::Error::from)?;
+    if rustix::fs::FileType::from_raw_mode(opened.st_mode) != rustix::fs::FileType::Directory
+        || opened.st_dev != metadata.st_dev
+        || opened.st_ino != metadata.st_ino
+    {
+        return Err(std::io::Error::other(
+            "snapshot directory changed during secure open",
+        ));
+    }
+    Ok(Some(child))
+}
+
+#[cfg(unix)]
+fn open_snapshot_directory_child(
+    parent: &fs::File,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<fs::File> {
+    use std::os::{
+        fd::{AsRawFd as _, FromRawFd as _},
+        unix::ffi::OsStrExt as _,
+    };
+
+    let name = std::ffi::CString::new(name.as_bytes())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    // SAFETY: parent is live and name is one NUL-terminated path component.
+    let child_fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if child_fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: openat returned a new owned descriptor.
+    Ok(unsafe { fs::File::from_raw_fd(child_fd) })
+}
+
+#[cfg(windows)]
+fn collect_dir_entries_inner(
+    root: &Path,
+    trusted_root: &Path,
+    depth: usize,
+    max_entries: usize,
+    result: &mut Vec<String>,
+) -> std::io::Result<usize> {
+    snapshot_windows::collect_dir_entries(root, trusted_root, depth, max_entries, result)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn collect_dir_entries_inner(
+    _root: &Path,
+    _trusted_root: &Path,
+    _depth: usize,
+    _max_entries: usize,
+    _result: &mut Vec<String>,
+) -> std::io::Result<usize> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "safe snapshot traversal is unavailable on this platform",
+    ))
 }
 
 fn evidence_job_dump_snapshot(dump_dir: &str, max_entries: u64) -> String {
-    let max_entries = max_entries as usize;
+    let max_entries = usize::try_from(max_entries).unwrap_or(usize::MAX);
     if dump_dir.is_empty() {
         return "\n## Sanitized Job Message Dumps\n\nJob message dumps disabled.\n".to_string();
     }
-    let mut out = format!("\n## Sanitized Job Message Dumps\n\n- directory: {dump_dir}\n");
     let dir = Path::new(dump_dir);
-    if !dir.is_dir() {
-        out.push_str("- files: 0\n");
-        return out;
-    }
-    let mut files: Vec<String> = vec![];
-    collect_dir_entries_inner(dir, 1, &mut files);
-    files.sort();
-    files.truncate(max_entries);
-    out.push_str(&format!("- files: {}\n\n```text\n", files.len()));
+    let directory_identity = velnor_storage_snapshot::snapshot_path_identity(dir);
+    let mut out =
+        format!("\n## Sanitized Job Message Dumps\n\n- directory: {directory_identity}\n");
+    let files = list_dir_entries(dir, 1, max_entries);
+    let omitted_marker = dir_entries_omitted_marker(max_entries);
+    let listing_omitted = files.len() == 1 && files.first() == Some(&omitted_marker);
+    let unavailable_marker = dir_entries_unavailable_marker();
+    let listing_unavailable = files.len() == 1 && files.first() == Some(&unavailable_marker);
+    let file_count = if listing_omitted {
+        format!("more than {max_entries} (listing omitted)")
+    } else if listing_unavailable {
+        "unavailable (safe traversal failed)".to_string()
+    } else {
+        files.len().to_string()
+    };
+    out.push_str(&format!("- files: {file_count}\n\n```text\n"));
     for f in &files {
         out.push_str(f);
         out.push('\n');
@@ -4781,7 +5517,102 @@ fn find_hardcoded_lane_strings(steps_yaml: &str, ctx: &str) -> Vec<String> {
     reason = "tests may panic"
 )]
 mod tests {
+    use std::{cell::Cell, ffi::OsString};
+
     use super::*;
+
+    fn pinned_snapshot_root(
+        path: PathBuf,
+        trusted_root: PathBuf,
+    ) -> velnor_storage_snapshot::PinnedLocalStorageSnapshotRoot<
+        <ToolSnapshotFilesystem as velnor_storage_snapshot::SnapshotFilesystem>::Anchor,
+    > {
+        let filesystem = ToolSnapshotFilesystem;
+        let anchor = velnor_storage_snapshot::SnapshotFilesystem::open_trusted_root(
+            &filesystem,
+            &trusted_root,
+        )
+        .unwrap()
+        .unwrap();
+        let relative = path.strip_prefix(&trusted_root).unwrap();
+        let directory = velnor_storage_snapshot::SnapshotFilesystem::open_directory(
+            &filesystem,
+            &anchor,
+            relative,
+        )
+        .unwrap()
+        .unwrap();
+        velnor_storage_snapshot::PinnedLocalStorageSnapshotRoot {
+            root: velnor_storage_snapshot::LocalStorageSnapshotRoot { path, trusted_root },
+            directory,
+        }
+    }
+
+    #[derive(Default)]
+    struct MissingSnapshotEntriesFilesystem {
+        streamed_names: Cell<usize>,
+        path_kind_calls: Cell<usize>,
+        open_directory_calls: Cell<usize>,
+    }
+
+    impl velnor_storage_snapshot::SnapshotFilesystem for MissingSnapshotEntriesFilesystem {
+        type Anchor = ();
+
+        fn open_trusted_root(&self, _trusted_root: &Path) -> anyhow::Result<Option<Self::Anchor>> {
+            Ok(Some(()))
+        }
+
+        fn path_kind(
+            &self,
+            _anchor: &Self::Anchor,
+            _relative: &Path,
+        ) -> anyhow::Result<velnor_storage_snapshot::SnapshotPathKind> {
+            self.path_kind_calls.set(self.path_kind_calls.get() + 1);
+            Ok(velnor_storage_snapshot::SnapshotPathKind::Missing)
+        }
+
+        fn open_directory(
+            &self,
+            _anchor: &Self::Anchor,
+            _relative: &Path,
+        ) -> anyhow::Result<Option<Self::Anchor>> {
+            self.open_directory_calls
+                .set(self.open_directory_calls.get() + 1);
+            Ok(None)
+        }
+
+        fn visit_directory_entries(
+            &self,
+            _anchor: &Self::Anchor,
+            _relative: &Path,
+            visit: &mut dyn FnMut(OsString) -> anyhow::Result<bool>,
+        ) -> anyhow::Result<Option<()>> {
+            for index in 0..1_000 {
+                self.streamed_names.set(self.streamed_names.get() + 1);
+                if !visit(OsString::from(format!("deleted-{index}")))? {
+                    break;
+                }
+            }
+            Ok(Some(()))
+        }
+    }
+
+    #[test]
+    fn pinned_snapshot_counts_missing_names_toward_entry_limit() {
+        let filesystem = MissingSnapshotEntriesFilesystem::default();
+        let snapshot = list_pinned_snapshot_directory_entries_with(
+            &filesystem,
+            &(),
+            Path::new("/store"),
+            4,
+            7,
+        );
+
+        assert_eq!(snapshot, vec![snapshot_entry_scan_incomplete_marker(7)]);
+        assert_eq!(filesystem.streamed_names.get(), 8);
+        assert_eq!(filesystem.path_kind_calls.get(), 8);
+        assert_eq!(filesystem.open_directory_calls.get(), 0);
+    }
 
     #[test]
     fn evidence_check_has_one_canonical_cli_name() {
@@ -5067,6 +5898,484 @@ with:
         );
         assert!(validate_real_target_manual_confirmation("jackin-project/jackin", "true").is_ok());
         assert!(validate_real_target_manual_confirmation("jackin-project/jackin", "yes").is_err());
+    }
+
+    #[test]
+    fn local_storage_snapshot_keeps_markdown_schema_and_renders_catalog_roots() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-tools-storage-evidence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("work");
+        let keyed_cache = root.join("cache/v1__trust_scope_v1/trust-scope-v1-test/caches");
+        let git_mirror =
+            root.join("cache/v1__trust_scope_v1/trust-scope-v1-test/git-mirrors/repo-key-v1-test");
+        let artifacts = work.join("_velnor_artifacts");
+        let legacy_cache = work.join("_velnor_caches");
+        fs::create_dir_all(&keyed_cache).unwrap();
+        fs::create_dir_all(&git_mirror).unwrap();
+        fs::create_dir_all(&artifacts).unwrap();
+        fs::create_dir_all(&legacy_cache).unwrap();
+        fs::write(keyed_cache.join("cache-entry"), "entry").unwrap();
+
+        let snapshot = evidence_local_storage_snapshot_from_roots(
+            &work,
+            10,
+            Ok(vec![
+                pinned_snapshot_root(keyed_cache.clone(), root.join("cache")),
+                pinned_snapshot_root(git_mirror.clone(), root.join("cache")),
+                pinned_snapshot_root(artifacts.clone(), work.clone()),
+            ]),
+        );
+
+        assert!(snapshot.starts_with("\n## Velnor Local Storage Snapshot\n"));
+        assert!(snapshot.contains("- max entries per store: 10"));
+        assert!(
+            snapshot.contains(&velnor_storage_snapshot::snapshot_path_identity(
+                &keyed_cache
+            ))
+        );
+        assert!(
+            snapshot.contains(&velnor_storage_snapshot::snapshot_path_identity(
+                &git_mirror
+            ))
+        );
+        assert!(snapshot.contains(&velnor_storage_snapshot::snapshot_path_identity(&artifacts)));
+        assert!(snapshot.contains("size: unavailable"));
+        assert!(snapshot.contains("cache-entry"));
+        assert!(
+            !snapshot.contains(&velnor_storage_snapshot::snapshot_path_identity(
+                &legacy_cache
+            ))
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_storage_snapshot_displays_discovery_failures_instead_of_no_stores() {
+        let work = std::env::temp_dir().join(format!(
+            "velnor-tools-storage-error-evidence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let failure =
+            anyhow::anyhow!("read directory /cache/v1__trust_scope_v1: Permission denied");
+
+        let snapshot = evidence_local_storage_snapshot_from_roots::<ToolSnapshotAnchor>(
+            &work,
+            10,
+            Err(failure),
+        );
+
+        assert!(snapshot.starts_with("\n## Velnor Local Storage Snapshot\n"));
+        assert!(snapshot.contains("- max entries per store: 10"));
+        assert!(snapshot.contains("### Discovery failure"));
+        assert!(snapshot.contains("Local storage scan incomplete"));
+        assert!(snapshot.contains("Permission denied"));
+        assert!(!snapshot.contains("No Velnor local cache or artifact stores found"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_storage_snapshot_escapes_path_and_error_markdown_injection() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-tools-storage-markdown-evidence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = root.join("store\n### forged section\n```\n");
+        let injected_entry = store.join("entry\n```\n### forged entry");
+        fs::create_dir_all(&store).unwrap();
+        fs::write(&injected_entry, "entry").unwrap();
+
+        let snapshot = evidence_local_storage_snapshot_from_roots(
+            &root,
+            10,
+            Ok(vec![pinned_snapshot_root(store.clone(), root.clone())]),
+        );
+        let store_identity = velnor_storage_snapshot::snapshot_path_identity(&store);
+        let entry_identity = velnor_storage_snapshot::snapshot_path_identity(&injected_entry);
+
+        assert!(snapshot.contains(&format!("### {store_identity}")));
+        assert!(snapshot.contains(&entry_identity));
+        assert!(!snapshot.contains("### forged section"));
+        assert!(!snapshot.contains("### forged entry"));
+        assert!(!snapshot.contains("\n```\n###"));
+        assert!(store_identity.contains("%0A"));
+        assert!(store_identity.contains("%60"));
+
+        let error_snapshot = evidence_local_storage_snapshot_from_roots::<ToolSnapshotAnchor>(
+            &root,
+            10,
+            Err(anyhow::anyhow!("read failed\n```\n### forged error")),
+        );
+        assert!(error_snapshot.contains("Local storage scan incomplete"));
+        assert!(!error_snapshot.contains("\n```\n### forged error"));
+        assert!(!error_snapshot.contains("### forged error"));
+        assert!(error_snapshot.contains("%u000A%60%60%60%u000A"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_storage_snapshot_lists_external_directory_symlink_without_following_it() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-tools-storage-symlink-evidence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = root.join("store");
+        let outside = root.join("outside");
+        let external_link = store.join("external");
+        fs::create_dir_all(&store).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(store.join("ordinary-sibling"), "inside store").unwrap();
+        fs::write(outside.join("secret"), "outside store").unwrap();
+        symlink(&outside, &external_link).unwrap();
+
+        let snapshot = evidence_local_storage_snapshot_from_roots(
+            &root,
+            10,
+            Ok(vec![pinned_snapshot_root(store.clone(), root.clone())]),
+        );
+
+        assert!(snapshot.contains("ordinary-sibling"));
+        let external_identity = velnor_storage_snapshot::snapshot_path_identity(&external_link);
+        assert!(snapshot.contains(&external_identity));
+        let external_prefix = format!("{external_identity}/");
+        assert!(!snapshot.contains(&external_prefix));
+        assert!(!snapshot.contains("secret"));
+        assert!(!snapshot.contains("[listing unavailable: safe traversal failed]"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_storage_snapshot_accepts_root_alias_but_rejects_ancestor_symlink_swap() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-tools-storage-root-swap-evidence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let selected_parent = root.join("selected-parent");
+        let selected_store = selected_parent.join("store");
+        let moved_parent = root.join("moved-parent");
+        let replacement_parent = root.join("replacement-parent");
+        let operator_alias = root.join("operator-root");
+        fs::create_dir_all(&selected_store).unwrap();
+        fs::write(selected_store.join("selected"), "selected root").unwrap();
+        fs::create_dir_all(replacement_parent.join("store")).unwrap();
+        fs::write(
+            replacement_parent.join("store/replacement"),
+            "replacement root",
+        )
+        .unwrap();
+        symlink(&selected_parent, &operator_alias).unwrap();
+
+        let aliased_store = operator_alias.join("store");
+        let entries = list_dir_entries_below(&aliased_store, &operator_alias, 1, 10);
+        assert!(entries.contains(&aliased_store.join("selected").display().to_string()));
+
+        let opened =
+            open_snapshot_root_after_canonicalize(&aliased_store, &operator_alias, |canonical| {
+                assert_eq!(canonical, &fs::canonicalize(&selected_parent).unwrap());
+                fs::rename(&selected_parent, &moved_parent).unwrap();
+                symlink(&replacement_parent, &selected_parent).unwrap();
+            });
+        assert!(opened.is_none());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_storage_snapshot_listing_is_order_independent_for_readdir_permutations() {
+        let expected = vec![
+            "/store/a".to_string(),
+            "/store/m".to_string(),
+            "/store/z".to_string(),
+        ];
+        let permutations = [
+            vec!["/store/z", "/store/a", "/store/m"],
+            vec!["/store/m", "/store/z", "/store/a"],
+            vec!["/store/a", "/store/m", "/store/z"],
+        ];
+
+        for permutation in permutations {
+            let entries = permutation.into_iter().map(str::to_string).collect();
+            assert_eq!(finish_dir_entries(entries, 3), expected);
+        }
+    }
+
+    #[test]
+    fn local_storage_snapshot_listing_sorts_nested_and_prefix_paths() {
+        let entries = vec![
+            "/store/ab".to_string(),
+            "/store/a/file".to_string(),
+            "/store/a-thing".to_string(),
+            "/store/a".to_string(),
+        ];
+
+        assert_eq!(
+            finish_dir_entries(entries, 4),
+            vec![
+                "/store/a".to_string(),
+                "/store/a-thing".to_string(),
+                "/store/a/file".to_string(),
+                "/store/ab".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn local_storage_snapshot_listing_emits_only_the_marker_at_n_plus_one() {
+        let at_limit = finish_dir_entries(vec!["/store/b".to_string(), "/store/a".to_string()], 2);
+        assert_eq!(
+            at_limit,
+            vec!["/store/a".to_string(), "/store/b".to_string()]
+        );
+
+        let over_limit_permutations = [
+            vec!["/store/c", "/store/a", "/store/b"],
+            vec!["/store/b", "/store/c", "/store/a"],
+        ];
+        for permutation in over_limit_permutations {
+            let entries = permutation.into_iter().map(str::to_string).collect();
+            assert_eq!(
+                finish_dir_entries(entries, 2),
+                vec!["[listing omitted: more than 2 entries]".to_string()]
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_storage_snapshot_reports_stream_and_readdir_errors_as_unavailable() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-tools-storage-reader-error-evidence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let directory = open_snapshot_root(&root, &root).unwrap();
+
+        let failed_stream: std::io::Result<std::iter::Empty<std::io::Result<std::ffi::OsString>>> =
+            Err(std::io::Error::other("injected fdopendir failure"));
+        let stream_failure = list_dir_entries_with_scan(2, |scan_limit, entries| {
+            collect_dir_entries_from_entries(
+                &directory,
+                &root,
+                1,
+                scan_limit,
+                entries,
+                failed_stream,
+            )
+        });
+        assert_eq!(stream_failure, vec![dir_entries_unavailable_marker()]);
+
+        let readdir_entries = std::iter::once(Ok(std::ffi::OsString::from("partial-entry"))).chain(
+            std::iter::once(Err(std::io::Error::other("injected readdir failure"))),
+        );
+        let readdir_failure = list_dir_entries_with_scan(2, |scan_limit, entries| {
+            collect_dir_entries_from_entries(
+                &directory,
+                &root,
+                1,
+                scan_limit,
+                entries,
+                Ok(readdir_entries),
+            )
+        });
+        assert_eq!(readdir_failure, vec![dir_entries_unavailable_marker()]);
+        assert!(!readdir_failure
+            .iter()
+            .any(|entry| entry.contains("partial-entry")));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_storage_snapshot_reports_unreadable_child_as_unavailable() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-tools-storage-child-open-error-evidence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let child = root.join("child");
+        fs::create_dir_all(&child).unwrap();
+        let directory = open_snapshot_root(&root, &root).unwrap();
+        let readdir_entries = ["partial-entry", "child"]
+            .into_iter()
+            .map(|name| Ok(std::ffi::OsString::from(name)));
+        let injected_open_error = |_: &fs::File, _: &std::ffi::OsStr| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected child directory open failure",
+            ))
+        };
+        let unavailable = list_dir_entries_with_scan(4, |scan_limit, _entries| {
+            collect_dir_entries_from_entries_with_opener(
+                &directory,
+                &root,
+                2,
+                scan_limit,
+                &mut vec![],
+                Ok(readdir_entries),
+                &injected_open_error,
+            )
+        });
+
+        assert_eq!(unavailable, vec![dir_entries_unavailable_marker()]);
+        assert!(!unavailable
+            .iter()
+            .any(|entry| entry.contains("partial-entry")));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_storage_snapshot_omits_a_high_fanout_tree_after_the_limit_probe() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-tools-storage-fanout-evidence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = root.join("store");
+        fs::create_dir_all(&store).unwrap();
+        for index in 0..256 {
+            let branch = store.join(format!("branch-{index:04}"));
+            fs::create_dir_all(&branch).unwrap();
+            fs::write(branch.join("leaf"), "entry").unwrap();
+        }
+
+        let pinned_store = pinned_snapshot_root(store.clone(), root.clone());
+        assert_eq!(
+            list_pinned_snapshot_directory_entries(&pinned_store.directory, &store, 4, 12),
+            vec![snapshot_entry_scan_incomplete_marker(12)]
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_storage_snapshot_pins_catalog_tree_across_trusted_alias_retarget() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-tools-storage-discovery-swap-evidence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let selected = root.join("selected-storage");
+        let selected_moved = root.join("selected-storage-moved");
+        let trusted_alias = root.join("operator-storage");
+        let cache_root = trusted_alias.join("cache");
+        let keyed_root = velnor_storage_snapshot::filesystem_key_namespace(&cache_root);
+        let key = format!("trust-scope-v1-{}", "a".repeat(64));
+        let discovered_store = keyed_root.join(&key);
+        let selected_store =
+            velnor_storage_snapshot::filesystem_key_namespace(&selected.join("cache")).join(&key);
+        let outside = root.join("outside");
+        let outside_store =
+            velnor_storage_snapshot::filesystem_key_namespace(&outside.join("cache")).join(&key);
+        fs::create_dir_all(&selected_store).unwrap();
+        fs::create_dir_all(selected_store.join("cargo")).unwrap();
+        fs::write(
+            selected_store.join("cargo/inside-sentinel"),
+            "selected tree",
+        )
+        .unwrap();
+        fs::create_dir_all(outside_store.join("cargo")).unwrap();
+        fs::write(
+            outside_store.join("cargo/outside-sentinel"),
+            "must not appear",
+        )
+        .unwrap();
+        symlink(&selected, &trusted_alias).unwrap();
+
+        let config = velnor_storage_snapshot::SnapshotCatalogConfig::from_resolved_layout(
+            &root.join("work"),
+            &cache_root,
+            &trusted_alias,
+        );
+        let stores = velnor_storage_snapshot::discover_pinned_local_storage_roots(
+            &config,
+            &ToolSnapshotFilesystem,
+        )
+        .unwrap();
+        assert!(stores
+            .iter()
+            .any(|store| store.root.path == discovered_store));
+
+        fs::rename(&selected, &selected_moved).unwrap();
+        fs::remove_file(&trusted_alias).unwrap();
+        symlink(&outside, &trusted_alias).unwrap();
+
+        let snapshot =
+            evidence_local_storage_snapshot_from_roots(&root.join("work"), 10, Ok(stores));
+
+        assert!(snapshot.contains("inside-sentinel"));
+        assert!(!snapshot.contains("outside-sentinel"));
+        assert!(!snapshot.contains("must not appear"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn job_dump_listing_reports_n_and_n_plus_one_boundary_without_partial_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-tools-job-dump-cap-evidence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        for name in ["a.json", "b.json", "c.json"] {
+            fs::write(root.join(name), "dump").unwrap();
+        }
+
+        let at_limit = evidence_job_dump_snapshot(root.to_str().unwrap(), 3);
+        assert!(at_limit.contains("- files: 3"));
+        assert!(at_limit.contains("a.json"));
+        assert!(at_limit.contains("b.json"));
+        assert!(at_limit.contains("c.json"));
+
+        let over_limit = evidence_job_dump_snapshot(root.to_str().unwrap(), 2);
+        assert!(over_limit.contains("- files: more than 2 (listing omitted)"));
+        assert_eq!(
+            over_limit
+                .matches("[listing omitted: more than 2 entries]")
+                .count(),
+            1
+        );
+        assert!(!over_limit.contains("a.json"));
+        assert!(!over_limit.contains("b.json"));
+        assert!(!over_limit.contains("c.json"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn job_dump_snapshot_escapes_path_markdown_injection() {
+        let fence = char::from(96).to_string().repeat(3);
+        let root = std::env::temp_dir().join(format!(
+            "velnor-tools-job-dump-markdown-{}\n### forged section\n{fence}\n",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let entry = root.join(format!("job\n{fence}\n### forged entry.json"));
+        fs::write(&entry, "dump").unwrap();
+
+        let snapshot = evidence_job_dump_snapshot(root.to_str().unwrap(), 10);
+        let root_identity = velnor_storage_snapshot::snapshot_path_identity(&root);
+        let entry_identity = velnor_storage_snapshot::snapshot_path_identity(&entry);
+
+        assert!(snapshot.contains(&format!("- directory: {root_identity}")));
+        assert!(snapshot.contains(&entry_identity));
+        assert!(!snapshot.contains("\n### forged section"));
+        assert!(!snapshot.contains("\n### forged entry"));
+        assert!(!snapshot.contains(&format!("\n{fence}\n### forged")));
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
