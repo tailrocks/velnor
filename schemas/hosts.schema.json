@@ -1,0 +1,233 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://velnor.invalid/schemas/hosts.schema.json",
+  "title": "hosts",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "const": "../schemas/hosts.schema.json"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "campaign_id": {
+      "const": "velnor-five-consumer-rollout"
+    },
+    "recorded_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "status": {
+      "$ref": "common.schema.json#/$defs/status"
+    },
+    "hosts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "enum": [
+              "local-mac",
+              "bastion"
+            ]
+          },
+          "status": {
+            "$ref": "common.schema.json#/$defs/status"
+          },
+          "readiness": {
+            "$ref": "common.schema.json#/$defs/claim"
+          },
+          "facts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "enum": [
+                    "os",
+                    "docker_provider",
+                    "docker_version",
+                    "configured_max_jobs",
+                    "measured_max_jobs",
+                    "hardware_model",
+                    "architecture",
+                    "docker_engine_architecture",
+                    "live_supervisor_present",
+                    "state_max_jobs",
+                    "monitor_max_jobs",
+                    "address",
+                    "physical_cores",
+                    "logical_cpus",
+                    "memory_gib",
+                    "root_device",
+                    "secondary_device",
+                    "secondary_partition_count",
+                    "secondary_filesystem_present",
+                    "secondary_mounted",
+                    "package_version",
+                    "release_source_commit",
+                    "runner_sha256",
+                    "release_verify_installed",
+                    "apt_origin",
+                    "apt_key_fingerprint",
+                    "job_image",
+                    "job_image_index_digest",
+                    "running_containers",
+                    "controller_active",
+                    "controller_enabled",
+                    "guardian_active",
+                    "guardian_enabled",
+                    "daemon_active",
+                    "doctor_timer_active",
+                    "policy_audit_timer_active",
+                    "local_slot_processes",
+                    "cpu_quota_percent",
+                    "memory_high_percent",
+                    "memory_max_percent",
+                    "memory_swap_max_bytes",
+                    "tasks_max",
+                    "github_url",
+                    "credential_state",
+                    "secrets_file_state",
+                    "routing_group",
+                    "selected_repository",
+                    "trust_scope",
+                    "registered_slots",
+                    "actual_ready_slots",
+                    "executor_ready_slots",
+                    "controller_desired_slots",
+                    "cli_desired_slots",
+                    "controller_control_live",
+                    "cli_control_live",
+                    "control_api_available",
+                    "github_reachable",
+                    "routing_valid",
+                    "runner_group_valid",
+                    "active_permits",
+                    "demand_rows",
+                    "ledger_generation",
+                    "ledger_reconciled_generation",
+                    "reported_slots",
+                    "resource_quotas_present"
+                  ]
+                },
+                "value": {
+                  "type": [
+                    "string",
+                    "integer",
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "status": {
+                  "$ref": "common.schema.json#/$defs/status"
+                },
+                "evidence_refs": {
+                  "$ref": "common.schema.json#/$defs/evidenceRefs"
+                }
+              },
+              "required": [
+                "key",
+                "value",
+                "status",
+                "evidence_refs"
+              ],
+              "additionalProperties": false,
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "status": {
+                        "enum": [
+                          "observed",
+                          "historical"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "status"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "evidence_refs": {
+                        "minItems": 1
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "key": {
+                        "enum": [
+                          "credential_state",
+                          "secrets_file_state"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "key"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "value": {
+                        "enum": [
+                          "empty",
+                          "absent",
+                          "present",
+                          "unknown"
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "status": {
+                        "enum": [
+                          "pending",
+                          "blocked"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "status"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "value": {
+                        "type": "null"
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "minItems": 1
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "readiness",
+          "facts"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 2,
+      "maxItems": 2
+    }
+  },
+  "required": [
+    "$schema",
+    "schema_version",
+    "campaign_id",
+    "recorded_at",
+    "status",
+    "hosts"
+  ],
+  "additionalProperties": false
+}

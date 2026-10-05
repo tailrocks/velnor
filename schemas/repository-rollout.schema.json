@@ -1,0 +1,228 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://velnor.invalid/schemas/repository-rollout.schema.json",
+  "title": "repository-rollout",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "const": "../schemas/repository-rollout.schema.json"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "campaign_id": {
+      "const": "velnor-five-consumer-rollout"
+    },
+    "recorded_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "status": {
+      "$ref": "common.schema.json#/$defs/status"
+    },
+    "providers": {
+      "const": [
+        "github-hosted",
+        "github-self-hosted",
+        "velnor"
+      ]
+    },
+    "host_order": {
+      "const": [
+        "local-mac",
+        "bastion"
+      ]
+    },
+    "mac_pilot_modes": {
+      "const": [
+        "scale-set",
+        "native",
+        "combined"
+      ]
+    },
+    "bastion_pilot_modes": {
+      "const": [
+        "native",
+        "scale-set",
+        "combined"
+      ]
+    },
+    "product_dependencies": {
+      "const": [
+        "tailrocks/velnor",
+        "tailrocks/velnor-apt",
+        "tailrocks/homebrew-velnor"
+      ]
+    },
+    "repositories": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "enum": [
+              "donbeave/essential-mac",
+              "ChainArgos/jackin-agent-brown",
+              "ChainArgos/cloudflare-tofu",
+              "ChainArgos/github-terraform",
+              "ChainArgos/java-monorepo"
+            ]
+          },
+          "order": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0,
+            "uniqueItems": true
+          },
+          "status": {
+            "$ref": "common.schema.json#/$defs/status"
+          },
+          "source_commit": {
+            "anyOf": [
+              {
+                "$ref": "common.schema.json#/$defs/sha"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lifecycle": {
+            "type": "object",
+            "properties": {
+              "implemented": {
+                "$ref": "common.schema.json#/$defs/claim"
+              },
+              "tested": {
+                "$ref": "common.schema.json#/$defs/claim"
+              },
+              "integrated": {
+                "$ref": "common.schema.json#/$defs/claim"
+              },
+              "published": {
+                "$ref": "common.schema.json#/$defs/claim"
+              },
+              "installed": {
+                "$ref": "common.schema.json#/$defs/claim"
+              },
+              "qualified": {
+                "$ref": "common.schema.json#/$defs/claim"
+              }
+            },
+            "required": [
+              "implemented",
+              "tested",
+              "integrated",
+              "published",
+              "installed",
+              "qualified"
+            ],
+            "additionalProperties": false
+          },
+          "qualification": {
+            "type": "object",
+            "properties": {
+              "local-mac": {
+                "$ref": "common.schema.json#/$defs/claim"
+              },
+              "bastion": {
+                "$ref": "common.schema.json#/$defs/claim"
+              }
+            },
+            "required": [
+              "local-mac",
+              "bastion"
+            ],
+            "additionalProperties": false
+          },
+          "historical": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "historical"
+              },
+              "evidence_refs": {
+                "$ref": "common.schema.json#/$defs/evidenceRefs"
+              },
+              "pull_request": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "merge_commit": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{7,40}$"
+              },
+              "mac_run_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                },
+                "minItems": 3,
+                "maxItems": 3,
+                "uniqueItems": true
+              },
+              "alternate_mac_run_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                },
+                "minItems": 0,
+                "uniqueItems": true
+              },
+              "bastion_run_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]*$"
+              }
+            },
+            "required": [
+              "status",
+              "evidence_refs",
+              "pull_request",
+              "merge_commit",
+              "mac_run_ids",
+              "alternate_mac_run_ids",
+              "bastion_run_id"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "id",
+          "order",
+          "depends_on",
+          "status",
+          "source_commit",
+          "lifecycle",
+          "qualification",
+          "historical"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 5,
+      "maxItems": 5
+    }
+  },
+  "required": [
+    "$schema",
+    "schema_version",
+    "campaign_id",
+    "recorded_at",
+    "status",
+    "providers",
+    "host_order",
+    "mac_pilot_modes",
+    "bastion_pilot_modes",
+    "product_dependencies",
+    "repositories"
+  ],
+  "additionalProperties": false
+}

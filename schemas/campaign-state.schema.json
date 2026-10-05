@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://velnor.invalid/schemas/campaign-state.schema.json",
+  "title": "campaign-state",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "const": "../schemas/campaign-state.schema.json"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "campaign_id": {
+      "const": "velnor-five-consumer-rollout"
+    },
+    "recorded_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "status": {
+      "$ref": "common.schema.json#/$defs/status"
+    },
+    "canonical_plan": {
+      "const": "docs/CAMPAIGN_PLAN.md"
+    },
+    "resumption_handoff": {
+      "const": "docs/RESUMPTION_HANDOFF.md"
+    },
+    "source_commit": {
+      "$ref": "common.schema.json#/$defs/sha"
+    },
+    "scope": {
+      "const": "coordination-only"
+    },
+    "operational_authorization": {
+      "const": false
+    },
+    "objective_evidence_ref": {
+      "const": "E-OBJECTIVE"
+    },
+    "next_gate": {
+      "type": "string",
+      "pattern": "^G[0-8]$"
+    },
+    "gates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^G[0-8]$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "$ref": "common.schema.json#/$defs/status"
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^G[0-8]$"
+            },
+            "minItems": 0,
+            "uniqueItems": true
+          },
+          "author_role": {
+            "type": "string",
+            "minLength": 1
+          },
+          "verifier_role": {
+            "type": "string",
+            "minLength": 1
+          },
+          "author": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "verifier": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "acceptance": {
+            "type": "string",
+            "minLength": 1
+          },
+          "blocker_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0,
+            "uniqueItems": true
+          },
+          "evidence_refs": {
+            "$ref": "common.schema.json#/$defs/evidenceRefs"
+          },
+          "historical_evidence_refs": {
+            "$ref": "common.schema.json#/$defs/evidenceRefs"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "status",
+          "depends_on",
+          "author_role",
+          "verifier_role",
+          "author",
+          "verifier",
+          "acceptance",
+          "blocker_ids",
+          "evidence_refs",
+          "historical_evidence_refs"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 9,
+      "maxItems": 9
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^B-[A-Z][A-Z0-9-]*$"
+          },
+          "status": {
+            "const": "blocked"
+          },
+          "scope": {
+            "enum": [
+              "all",
+              "local-mac",
+              "bastion",
+              "preview"
+            ]
+          },
+          "gate_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^G[0-8]$"
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          },
+          "evidence_refs": {
+            "$ref": "common.schema.json#/$defs/evidenceRefs"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "next_action": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "scope",
+          "gate_ids",
+          "evidence_refs",
+          "reason",
+          "next_action"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1
+    }
+  },
+  "required": [
+    "$schema",
+    "schema_version",
+    "campaign_id",
+    "recorded_at",
+    "status",
+    "canonical_plan",
+    "resumption_handoff",
+    "source_commit",
+    "scope",
+    "operational_authorization",
+    "objective_evidence_ref",
+    "next_gate",
+    "gates",
+    "blockers"
+  ],
+  "additionalProperties": false
+}

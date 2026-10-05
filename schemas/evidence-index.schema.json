@@ -1,0 +1,266 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://velnor.invalid/schemas/evidence-index.schema.json",
+  "title": "evidence-index",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "const": "../schemas/evidence-index.schema.json"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "campaign_id": {
+      "const": "velnor-five-consumer-rollout"
+    },
+    "recorded_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "status": {
+      "$ref": "common.schema.json#/$defs/status"
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^S-[A-Z][A-Z0-9-]*$"
+          },
+          "path": {
+            "type": "string",
+            "pattern": "^(?:docs/)?[A-Za-z0-9_./-]+\\.(?:md|json)$"
+          },
+          "sha256": {
+            "$ref": "common.schema.json#/$defs/sha256"
+          },
+          "status": {
+            "enum": [
+              "observed",
+              "historical"
+            ]
+          },
+          "captured_at": {
+            "anyOf": [
+              {
+                "$ref": "common.schema.json#/$defs/timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "method": {
+            "enum": [
+              "recorded-read-only-inspection",
+              "archive",
+              "user-report"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "sha256",
+          "status",
+          "captured_at",
+          "description",
+          "method"
+        ],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "observed"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "captured_at": {
+                  "$ref": "common.schema.json#/$defs/timestamp"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "minItems": 1
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^E-[A-Z][A-Z0-9-]*$"
+          },
+          "status": {
+            "enum": [
+              "observed",
+              "historical"
+            ]
+          },
+          "kind": {
+            "enum": [
+              "observation",
+              "history",
+              "requirement",
+              "qualification"
+            ]
+          },
+          "source_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "line_start": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "line_end": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_at": {
+            "anyOf": [
+              {
+                "$ref": "common.schema.json#/$defs/timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_on": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "kind",
+          "source_id",
+          "line_start",
+          "line_end",
+          "summary",
+          "subject",
+          "observed_at",
+          "observed_on",
+          "timezone"
+        ],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "history",
+                    "requirement"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "status": {
+                  "const": "historical"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "qualification"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "status": {
+                  "const": "observed"
+                },
+                "subject": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "observation"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "status": {
+                  "const": "observed"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "minItems": 1
+    }
+  },
+  "required": [
+    "$schema",
+    "schema_version",
+    "campaign_id",
+    "recorded_at",
+    "status",
+    "sources",
+    "evidence"
+  ],
+  "additionalProperties": false
+}

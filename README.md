@@ -7,3 +7,7 @@ Snapshot captured from `root@37.27.110.241` on 2026-09-23. The host has the Veln
 `CAMPAIGN_LEDGER.md` and the paused handoff preserve historical rollout claims and plans. They are not live health evidence. Do not resume from their “complete” or “in progress” status without rechecking [CURRENT_STATE.md](docs/CURRENT_STATE.md).
 
 The snapshot intentionally excludes secret values. Remote inspection was read-only.
+
+Canonical continuation plan: [docs/CAMPAIGN_PLAN.md](docs/CAMPAIGN_PLAN.md).
+
+Local state validator: [scripts/validate-campaign-state.py](scripts/validate-campaign-state.py).

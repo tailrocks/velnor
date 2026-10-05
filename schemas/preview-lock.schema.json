@@ -1,0 +1,258 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://velnor.invalid/schemas/preview-lock.schema.json",
+  "title": "preview-lock",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "const": "../schemas/preview-lock.schema.json"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "campaign_id": {
+      "const": "velnor-five-consumer-rollout"
+    },
+    "recorded_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "status": {
+      "$ref": "common.schema.json#/$defs/status"
+    },
+    "lock_id": {
+      "anyOf": [
+        {
+          "$ref": "common.schema.json#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "promotion_authorized": {
+      "const": false
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "components": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "enum": [
+              "product-source",
+              "generator",
+              "runtime-linux-amd64",
+              "runtime-linux-arm64",
+              "homebrew-macos-arm64",
+              "apt-debian-amd64",
+              "native-job-image",
+              "scaleset-reference",
+              "official-runner-image",
+              "dind-image"
+            ]
+          },
+          "repository": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requirement": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "$ref": "common.schema.json#/$defs/status"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_commit": {
+            "anyOf": [
+              {
+                "$ref": "common.schema.json#/$defs/sha"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sha256": {
+            "anyOf": [
+              {
+                "$ref": "common.schema.json#/$defs/sha256"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "evidence_refs": {
+            "$ref": "common.schema.json#/$defs/evidenceRefs"
+          }
+        },
+        "required": [
+          "id",
+          "repository",
+          "requirement",
+          "status",
+          "version",
+          "source_commit",
+          "sha256",
+          "evidence_refs"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 10,
+      "maxItems": 10
+    },
+    "known_evidence_refs": {
+      "$ref": "common.schema.json#/$defs/evidenceRefs"
+    },
+    "observed_inputs": {
+      "type": "object",
+      "properties": {
+        "main": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "observed"
+            },
+            "repository": {
+              "const": "tailrocks/velnor"
+            },
+            "source_commit": {
+              "$ref": "common.schema.json#/$defs/sha"
+            },
+            "evidence_refs": {
+              "$ref": "common.schema.json#/$defs/evidenceRefs"
+            }
+          },
+          "required": [
+            "status",
+            "repository",
+            "source_commit",
+            "evidence_refs"
+          ],
+          "additionalProperties": false
+        },
+        "preview_run": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "observed"
+            },
+            "run_id": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "run_state": {
+              "enum": [
+                "queued",
+                "in_progress",
+                "completed"
+              ]
+            },
+            "source_commit": {
+              "anyOf": [
+                {
+                  "$ref": "common.schema.json#/$defs/sha"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "attempt": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "evidence_refs": {
+              "$ref": "common.schema.json#/$defs/evidenceRefs"
+            },
+            "conclusion": {
+              "enum": [
+                null,
+                "success",
+                "failure",
+                "cancelled",
+                "timed_out",
+                "action_required",
+                "neutral",
+                "skipped",
+                "stale",
+                "startup_failure"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "run_id",
+            "run_state",
+            "source_commit",
+            "attempt",
+            "evidence_refs",
+            "conclusion"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "main",
+        "preview_run"
+      ],
+      "additionalProperties": false
+    },
+    "excluded_source_prefixes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{7,40}$"
+      },
+      "minItems": 1,
+      "uniqueItems": true,
+      "contains": {
+        "const": "f7bc191"
+      }
+    }
+  },
+  "required": [
+    "$schema",
+    "schema_version",
+    "campaign_id",
+    "recorded_at",
+    "status",
+    "lock_id",
+    "promotion_authorized",
+    "reason",
+    "components",
+    "known_evidence_refs",
+    "observed_inputs",
+    "excluded_source_prefixes"
+  ],
+  "additionalProperties": false
+}

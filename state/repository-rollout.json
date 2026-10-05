@@ -1,0 +1,391 @@
+{
+  "$schema": "../schemas/repository-rollout.schema.json",
+  "schema_version": 1,
+  "campaign_id": "velnor-five-consumer-rollout",
+  "recorded_at": "2026-09-22T23:52:14Z",
+  "status": "blocked",
+  "providers": [
+    "github-hosted",
+    "github-self-hosted",
+    "velnor"
+  ],
+  "host_order": [
+    "local-mac",
+    "bastion"
+  ],
+  "mac_pilot_modes": [
+    "scale-set",
+    "native",
+    "combined"
+  ],
+  "bastion_pilot_modes": [
+    "native",
+    "scale-set",
+    "combined"
+  ],
+  "product_dependencies": [
+    "tailrocks/velnor",
+    "tailrocks/velnor-apt",
+    "tailrocks/homebrew-velnor"
+  ],
+  "repositories": [
+    {
+      "id": "donbeave/essential-mac",
+      "order": 1,
+      "depends_on": [],
+      "status": "blocked",
+      "source_commit": null,
+      "lifecycle": {
+        "implemented": {
+          "status": "pending",
+          "summary": "Current implemented evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "tested": {
+          "status": "pending",
+          "summary": "Current tested evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "integrated": {
+          "status": "pending",
+          "summary": "Current integrated evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "published": {
+          "status": "pending",
+          "summary": "Current published evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "installed": {
+          "status": "pending",
+          "summary": "Current installed evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "qualified": {
+          "status": "pending",
+          "summary": "Current qualified evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        }
+      },
+      "qualification": {
+        "local-mac": {
+          "status": "blocked",
+          "summary": "G0-G3 and fresh Scale Set, native and combined pilot proof are required.",
+          "evidence_refs": []
+        },
+        "bastion": {
+          "status": "blocked",
+          "summary": "All five Mac qualifications and G6 must precede the ordered bastion replay.",
+          "evidence_refs": [
+            "E-BLOCKERS"
+          ]
+        }
+      },
+      "historical": {
+        "status": "historical",
+        "evidence_refs": [
+          "E-LEDGER-RUNS",
+          "E-PAUSE",
+          "E-LEDGER-CONFLICTS"
+        ],
+        "pull_request": 13,
+        "merge_commit": "c8f6997a3f7a",
+        "mac_run_ids": [
+          "35640576186",
+          "35642170004",
+          "35643273619"
+        ],
+        "alternate_mac_run_ids": [
+          "35632148901",
+          "35632510243",
+          "35632891204"
+        ],
+        "bastion_run_id": "35640128945"
+      }
+    },
+    {
+      "id": "ChainArgos/jackin-agent-brown",
+      "order": 2,
+      "depends_on": [
+        "donbeave/essential-mac"
+      ],
+      "status": "blocked",
+      "source_commit": null,
+      "lifecycle": {
+        "implemented": {
+          "status": "pending",
+          "summary": "Current implemented evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "tested": {
+          "status": "pending",
+          "summary": "Current tested evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "integrated": {
+          "status": "pending",
+          "summary": "Current integrated evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "published": {
+          "status": "pending",
+          "summary": "Current published evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "installed": {
+          "status": "pending",
+          "summary": "Current installed evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "qualified": {
+          "status": "pending",
+          "summary": "Current qualified evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        }
+      },
+      "qualification": {
+        "local-mac": {
+          "status": "blocked",
+          "summary": "Previous consumer and current installed-product proof are required.",
+          "evidence_refs": []
+        },
+        "bastion": {
+          "status": "blocked",
+          "summary": "All five Mac qualifications and G6 must precede the ordered bastion replay.",
+          "evidence_refs": [
+            "E-BLOCKERS"
+          ]
+        }
+      },
+      "historical": {
+        "status": "historical",
+        "evidence_refs": [
+          "E-LEDGER-RUNS",
+          "E-PAUSE"
+        ],
+        "pull_request": 241,
+        "merge_commit": "67aa16b0189d",
+        "mac_run_ids": [
+          "35633810245",
+          "35634182410",
+          "35634551298"
+        ],
+        "alternate_mac_run_ids": [],
+        "bastion_run_id": "35640581024"
+      }
+    },
+    {
+      "id": "ChainArgos/cloudflare-tofu",
+      "order": 3,
+      "depends_on": [
+        "ChainArgos/jackin-agent-brown"
+      ],
+      "status": "blocked",
+      "source_commit": null,
+      "lifecycle": {
+        "implemented": {
+          "status": "pending",
+          "summary": "Current implemented evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "tested": {
+          "status": "pending",
+          "summary": "Current tested evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "integrated": {
+          "status": "pending",
+          "summary": "Current integrated evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "published": {
+          "status": "pending",
+          "summary": "Current published evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "installed": {
+          "status": "pending",
+          "summary": "Current installed evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "qualified": {
+          "status": "pending",
+          "summary": "Current qualified evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        }
+      },
+      "qualification": {
+        "local-mac": {
+          "status": "blocked",
+          "summary": "Previous consumer and current installed-product proof are required.",
+          "evidence_refs": []
+        },
+        "bastion": {
+          "status": "blocked",
+          "summary": "All five Mac qualifications and G6 must precede the ordered bastion replay.",
+          "evidence_refs": [
+            "E-BLOCKERS"
+          ]
+        }
+      },
+      "historical": {
+        "status": "historical",
+        "evidence_refs": [
+          "E-LEDGER-RUNS",
+          "E-PAUSE"
+        ],
+        "pull_request": 5,
+        "merge_commit": "f545bd709f79",
+        "mac_run_ids": [
+          "35635281045",
+          "35635551280",
+          "35635821945"
+        ],
+        "alternate_mac_run_ids": [],
+        "bastion_run_id": "35640912410"
+      }
+    },
+    {
+      "id": "ChainArgos/github-terraform",
+      "order": 4,
+      "depends_on": [
+        "ChainArgos/cloudflare-tofu"
+      ],
+      "status": "blocked",
+      "source_commit": null,
+      "lifecycle": {
+        "implemented": {
+          "status": "pending",
+          "summary": "Current implemented evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "tested": {
+          "status": "pending",
+          "summary": "Current tested evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "integrated": {
+          "status": "pending",
+          "summary": "Current integrated evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "published": {
+          "status": "pending",
+          "summary": "Current published evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "installed": {
+          "status": "pending",
+          "summary": "Current installed evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "qualified": {
+          "status": "pending",
+          "summary": "Current qualified evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        }
+      },
+      "qualification": {
+        "local-mac": {
+          "status": "blocked",
+          "summary": "Previous consumer and current installed-product proof are required.",
+          "evidence_refs": []
+        },
+        "bastion": {
+          "status": "blocked",
+          "summary": "All five Mac qualifications and G6 must precede the ordered bastion replay.",
+          "evidence_refs": [
+            "E-BLOCKERS"
+          ]
+        }
+      },
+      "historical": {
+        "status": "historical",
+        "evidence_refs": [
+          "E-LEDGER-RUNS",
+          "E-PAUSE"
+        ],
+        "pull_request": 13,
+        "merge_commit": "cf1b23c5e204",
+        "mac_run_ids": [
+          "35636541085",
+          "35636810943",
+          "35637081290"
+        ],
+        "alternate_mac_run_ids": [],
+        "bastion_run_id": "35641289450"
+      }
+    },
+    {
+      "id": "ChainArgos/java-monorepo",
+      "order": 5,
+      "depends_on": [
+        "ChainArgos/github-terraform"
+      ],
+      "status": "blocked",
+      "source_commit": null,
+      "lifecycle": {
+        "implemented": {
+          "status": "pending",
+          "summary": "Current implemented evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "tested": {
+          "status": "pending",
+          "summary": "Current tested evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "integrated": {
+          "status": "pending",
+          "summary": "Current integrated evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "published": {
+          "status": "pending",
+          "summary": "Current published evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "installed": {
+          "status": "pending",
+          "summary": "Current installed evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        },
+        "qualified": {
+          "status": "pending",
+          "summary": "Current qualified evidence at exact source and product identities has not been collected.",
+          "evidence_refs": []
+        }
+      },
+      "qualification": {
+        "local-mac": {
+          "status": "blocked",
+          "summary": "Previous consumer and current installed-product proof are required.",
+          "evidence_refs": []
+        },
+        "bastion": {
+          "status": "blocked",
+          "summary": "All five Mac qualifications and G6 must precede the ordered bastion replay.",
+          "evidence_refs": [
+            "E-BLOCKERS"
+          ]
+        }
+      },
+      "historical": {
+        "status": "historical",
+        "evidence_refs": [
+          "E-LEDGER-RUNS",
+          "E-PAUSE"
+        ],
+        "pull_request": 2063,
+        "merge_commit": "e737b9d577cc",
+        "mac_run_ids": [
+          "35638102450",
+          "35638751280",
+          "35639410934"
+        ],
+        "alternate_mac_run_ids": [],
+        "bastion_run_id": "35641651298"
+      }
+    }
+  ]
+}

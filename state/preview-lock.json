@@ -1,0 +1,142 @@
+{
+  "$schema": "../schemas/preview-lock.schema.json",
+  "schema_version": 1,
+  "campaign_id": "velnor-five-consumer-rollout",
+  "recorded_at": "2026-09-22T23:52:14Z",
+  "status": "blocked",
+  "lock_id": null,
+  "promotion_authorized": false,
+  "reason": "Observed main and running preview are not release pins. Run source/attempt/artifacts remain unknown; stale rolling preview f7bc191 is explicitly excluded. Stable installed 0.1.274 remains an observation.",
+  "components": [
+    {
+      "id": "product-source",
+      "repository": "tailrocks/velnor",
+      "requirement": "Exact preview source commit and product version",
+      "status": "pending",
+      "version": null,
+      "source_commit": null,
+      "sha256": null,
+      "evidence_refs": []
+    },
+    {
+      "id": "generator",
+      "repository": "tailrocks/velnor",
+      "requirement": "Published velnor-workflow source closure and binary digest",
+      "status": "pending",
+      "version": null,
+      "source_commit": null,
+      "sha256": null,
+      "evidence_refs": []
+    },
+    {
+      "id": "runtime-linux-amd64",
+      "repository": "tailrocks/velnor",
+      "requirement": "Published Linux amd64 runtime closure and digest",
+      "status": "pending",
+      "version": null,
+      "source_commit": null,
+      "sha256": null,
+      "evidence_refs": []
+    },
+    {
+      "id": "runtime-linux-arm64",
+      "repository": "tailrocks/velnor",
+      "requirement": "Published Linux arm64 runtime closure and digest",
+      "status": "pending",
+      "version": null,
+      "source_commit": null,
+      "sha256": null,
+      "evidence_refs": []
+    },
+    {
+      "id": "homebrew-macos-arm64",
+      "repository": "tailrocks/homebrew-velnor",
+      "requirement": "Coherent Mac product manifest, bottle and service assets",
+      "status": "pending",
+      "version": null,
+      "source_commit": null,
+      "sha256": null,
+      "evidence_refs": []
+    },
+    {
+      "id": "apt-debian-amd64",
+      "repository": "tailrocks/velnor-apt",
+      "requirement": "Exact signed APT metadata, package digest, source and activation identity",
+      "status": "pending",
+      "version": null,
+      "source_commit": null,
+      "sha256": null,
+      "evidence_refs": []
+    },
+    {
+      "id": "native-job-image",
+      "repository": "tailrocks/velnor",
+      "requirement": "Verified multi-architecture job image on Ubuntu 26.04",
+      "status": "pending",
+      "version": null,
+      "source_commit": null,
+      "sha256": null,
+      "evidence_refs": []
+    },
+    {
+      "id": "scaleset-reference",
+      "repository": "actions/scaleset",
+      "requirement": "Reviewed upstream protocol revision",
+      "status": "pending",
+      "version": null,
+      "source_commit": null,
+      "sha256": null,
+      "evidence_refs": []
+    },
+    {
+      "id": "official-runner-image",
+      "repository": "actions/runner",
+      "requirement": "Reviewed runner revision, version and image digest",
+      "status": "pending",
+      "version": null,
+      "source_commit": null,
+      "sha256": null,
+      "evidence_refs": []
+    },
+    {
+      "id": "dind-image",
+      "repository": null,
+      "requirement": "Exact tested private DinD image digest and supported platforms",
+      "status": "pending",
+      "version": null,
+      "source_commit": null,
+      "sha256": null,
+      "evidence_refs": []
+    }
+  ],
+  "known_evidence_refs": [
+    "E-RELEASE",
+    "E-LEDGER-GATES",
+    "E-PREVIEW-REFRESH",
+    "E-BASTION-REFRESH"
+  ],
+  "observed_inputs": {
+    "main": {
+      "status": "observed",
+      "repository": "tailrocks/velnor",
+      "source_commit": "6391a0ce53b7e666d1bfb391083011622158f4f3",
+      "evidence_refs": [
+        "E-PREVIEW-REFRESH"
+      ]
+    },
+    "preview_run": {
+      "status": "observed",
+      "run_id": "35797775098",
+      "run_state": "in_progress",
+      "source_commit": null,
+      "attempt": null,
+      "evidence_refs": [
+        "E-PREVIEW-REFRESH"
+      ],
+      "conclusion": null
+    }
+  },
+  "excluded_source_prefixes": [
+    "f7bc191"
+  ]
+}
