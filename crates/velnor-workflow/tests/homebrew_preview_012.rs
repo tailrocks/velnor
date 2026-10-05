@@ -2172,7 +2172,7 @@ fn assert_unsupported_provider_is_rejected() {
         )
         .replace(
             "[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]",
-            "[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"velnor-target-mvp\"]",
+            "[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"synthetic-target\"]",
         );
     fs::write(path, config).expect("write unsupported-provider fixture");
     let output = run_generate(&non_hosted);
