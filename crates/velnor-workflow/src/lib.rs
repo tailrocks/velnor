@@ -6989,9 +6989,6 @@ pub(crate) struct PolicyJobSpec<'a> {
     pub(crate) trusted_gate: Option<&'a str>,
     /// The branch whose rulesets are the required status-check contexts.
     pub(crate) default_branch: &'a str,
-    /// Declared `[policy]` contexts passed to `--ruleset-contexts` when the
-    /// rulesets API answers 403 on private repositories.
-    pub(crate) declared_ruleset_contexts: &'a str,
     pub(crate) candidate_artifact_wiring: bool,
 }
 
@@ -7298,7 +7295,6 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
         cache_backend,
         trusted_gate,
         default_branch,
-        declared_ruleset_contexts,
         candidate_artifact_wiring,
     } = *spec;
     let trusted_gate = trusted_gate.unwrap_or_default();
@@ -7311,7 +7307,7 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
     let owner = !repository.is_empty() && repository == workflow_setup_action_repository();
     let ruleset_step = if hosted {
         format!(
-            "      - name: Resolve required status checks\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          DEFAULT_BRANCH: {default_branch}\n          DECLARED_RULESET_CONTEXTS: {declared_ruleset_contexts}\n        run: |\n          set -euo pipefail\n          stderr=\"$(mktemp)\"\n          trap 'rm -f \"$stderr\"' EXIT\n          if contexts=\"$(gh api \"repos/$GITHUB_REPOSITORY/rulesets?includes_parents=true\" 2>\"$stderr\" \\\n            | jq -r '.[] | select(.target == \"branch\" and .enforcement == \"active\") | .id' \\\n            | while read -r id; do gh api \"repos/$GITHUB_REPOSITORY/rulesets/$id\"; done \\\n            | jq -r --arg branch \"refs/heads/$DEFAULT_BRANCH\" 'select(.conditions.ref_name.include | any(. == \"~DEFAULT_BRANCH\" or . == \"~ALL\" or . == $branch)) | .rules[] | select(.type == \"required_status_checks\") | .parameters.required_status_checks[].context' \\\n            | sort -u | paste -sd, -)\"; then\n            :\n          elif grep -qE '(HTTP 403|Upgrade to GitHub Team)' \"$stderr\"; then\n            echo \"::warning::rulesets API returned 403; falling back to declared contexts [$DECLARED_RULESET_CONTEXTS]\"\n            contexts=\"$DECLARED_RULESET_CONTEXTS\"\n          else\n            cat \"$stderr\" >&2\n            exit 1\n          fi\n          echo \"RULESET_CONTEXTS=$contexts\" >> \"$GITHUB_ENV\"\n"
+            "      - name: Resolve required status checks\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          DEFAULT_BRANCH: {default_branch}\n        run: |\n          set -euo pipefail\n          stderr=\"$(mktemp)\"\n          trap 'rm -f \"$stderr\"' EXIT\n          if contexts=\"$(gh api \"repos/$GITHUB_REPOSITORY/rulesets?includes_parents=true\" 2>\"$stderr\" \\\n            | jq -r '.[] | select(.target == \"branch\" and .enforcement == \"active\") | .id' \\\n            | while read -r id; do gh api \"repos/$GITHUB_REPOSITORY/rulesets/$id\"; done \\\n            | jq -r --arg branch \"refs/heads/$DEFAULT_BRANCH\" 'select(.conditions.ref_name.include | any(. == \"~DEFAULT_BRANCH\" or . == \"~ALL\" or . == $branch)) | .rules[] | select(.type == \"required_status_checks\") | .parameters.required_status_checks[].context' \\\n            | sort -u | paste -sd, -)\"; then\n            :\n          else\n            cat \"$stderr\" >&2\n            exit 1\n          fi\n          test -n \"$contexts\" || {{ echo \"::error::ruleset lookup returned no active required status checks for refs/heads/$DEFAULT_BRANCH\" >&2; exit 1; }}\n          echo \"RULESET_CONTEXTS=$contexts\" >> \"$GITHUB_ENV\"\n"
         )
     } else {
         String::new()
@@ -7456,7 +7452,6 @@ pub(crate) fn render_policy_entrypoint(config: &ProjectConfig) -> String {
     } else {
         yaml_scalar(POLICY_VALIDATION_RUNNER)
     };
-    let declared_ruleset_contexts = declared_ruleset_contexts_literal(config);
     let policy_job = policy_job(&PolicyJobSpec {
         name: "Policy",
         revision: &config.workflow_revision,
@@ -7465,7 +7460,6 @@ pub(crate) fn render_policy_entrypoint(config: &ProjectConfig) -> String {
         cache_backend: if velnor { "local" } else { "github" },
         trusted_gate: gate.as_deref(),
         default_branch: &config.default_branch,
-        declared_ruleset_contexts: &declared_ruleset_contexts,
         candidate_artifact_wiring: candidate_artifact_wiring_enabled(&config.workflow_revision),
     });
     let concurrency = policy_concurrency_block(config);
@@ -7626,17 +7620,6 @@ fn ruleset_required_status_check_contexts(config: &ProjectConfig) -> Vec<String>
         return vec![crate::reuse::REQUIRED_CHECK.to_owned()];
     }
     Vec::new()
-}
-
-/// Comma-separated ruleset contexts from `[policy]` for hosted policy jobs
-/// when the GitHub rulesets API is unavailable (private repos without Team).
-pub(crate) fn declared_ruleset_contexts_literal(config: &ProjectConfig) -> String {
-    let mut contexts: BTreeSet<String> = ruleset_required_status_check_contexts(config)
-        .into_iter()
-        .collect();
-    contexts.extend(config.ruleset_external_status_checks.iter().cloned());
-    contexts.insert("Policy".to_owned());
-    contexts.into_iter().collect::<Vec<_>>().join(",")
 }
 
 /// Fail closed when a repository ruleset context is absent from the union
@@ -14892,12 +14875,10 @@ mod tests {
         }
     }
 
-    /// A `workflow_dispatch` selecting the Velnor lane is admitted on any
-    /// ref: the runner classifies every dispatch as trusted without reading
-    /// `github.ref` (`TrustClass::derive`), and only a write-access actor can
-    /// dispatch a ref of this repository.
+    /// A workflow_dispatch selecting the Velnor lane is admitted only from
+    /// the configured default branch, matching the trusted-runner policy.
     #[test]
-    fn velnor_lane_admits_workflow_dispatch_on_any_ref() {
+    fn velnor_lane_requires_default_branch_workflow_dispatch() {
         for (runners, automatic, opt_in) in [
             (RunnerMode::Both, RunnerMode::Both, true),
             (RunnerMode::Both, RunnerMode::Both, false),
@@ -14910,12 +14891,12 @@ mod tests {
             let workflow = WorkflowIr::from_config(&config);
             let velnor = workflow.lane_admission_expression(primitives::LaneAdmission::Velnor);
             assert!(
-                !velnor.contains("refs/heads/main' && (github.event_name == 'workflow_dispatch'"),
-                "{runners:?}/{automatic:?}/opt-in {opt_in}: dispatch is not ref-gated: {velnor}"
+                velnor.contains("github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor'"),
+                "{runners:?}/{automatic:?}/opt-in {opt_in}: Velnor dispatch is default-branch gated: {velnor}"
             );
             assert!(
-                velnor.contains("github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'"),
-                "{runners:?}/{automatic:?}/opt-in {opt_in}: dispatch selecting the lane admits it: {velnor}"
+                !velnor.contains("|| (github.event_name == 'workflow_dispatch'"),
+                "{runners:?}/{automatic:?}/opt-in {opt_in}: no any-ref dispatch alternative exists: {velnor}"
             );
             let automatic_velnor = matches!(automatic, RunnerMode::Velnor | RunnerMode::Both);
             assert_eq!(
@@ -14945,17 +14926,18 @@ mod tests {
         );
         let pr = PathBuf::from(".github/workflows/ci-pr.yml");
         let callee = PathBuf::from(".github/workflows/ci-unit-rust.yml");
-        let dispatch =
+        let ref_gated =
+            "(github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor'";
+        let any_ref =
             "(github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor'";
-        let ref_gated = "(github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor'";
 
-        // The callee re-introduces the default-branch dispatch gate.
+        // The callee loses its required default-branch dispatch gate.
         let mut drifted = files.clone();
         let velnor_job = job_gate(&files[&callee], "verify-velnor");
-        assert!(velnor_job.contains(dispatch), "{velnor_job}");
+        assert!(velnor_job.contains(ref_gated), "{velnor_job}");
         drifted.insert(
             callee.clone(),
-            files[&callee].replace(&velnor_job, &velnor_job.replace(dispatch, ref_gated)),
+            files[&callee].replace(&velnor_job, &velnor_job.replace(ref_gated, any_ref)),
         );
         let error = must_fail(
             validate_lane_admission_single_source(&drifted),
@@ -14972,10 +14954,10 @@ mod tests {
         // The caller drifts from the check.
         let mut drifted = files.clone();
         let caller_job = job_gate(&files[&pr], "velnor-rust-fixture");
-        assert!(caller_job.contains(dispatch), "{caller_job}");
+        assert!(caller_job.contains(ref_gated), "{caller_job}");
         drifted.insert(
             pr.clone(),
-            files[&pr].replace(&caller_job, &caller_job.replace(dispatch, ref_gated)),
+            files[&pr].replace(&caller_job, &caller_job.replace(ref_gated, any_ref)),
         );
         let error = must_fail(
             validate_lane_admission_single_source(&drifted),
@@ -19972,7 +19954,6 @@ channel = "stable"
             cache_backend: "github",
             trusted_gate: None,
             default_branch: "main",
-            declared_ruleset_contexts: "ci-required,DCO,Policy",
             candidate_artifact_wiring: true,
         })
     }
@@ -19986,7 +19967,6 @@ channel = "stable"
             cache_backend: "local",
             trusted_gate: None,
             default_branch: "main",
-            declared_ruleset_contexts: "ci-required,DCO,Policy",
             candidate_artifact_wiring: true,
         })
     }
@@ -20789,13 +20769,12 @@ channel = "stable"
             hosted.contains("GH_TOKEN: ${{ github.token }}") && !hosted.contains("${{ secrets."),
             "the ruleset lookup uses the job token, never a secret expression: {hosted}"
         );
+        assert!(hosted.contains("test -n \"$contexts\""), "{hosted}");
         assert!(
-            hosted.contains("DECLARED_RULESET_CONTEXTS: ci-required,DCO,Policy"),
-            "{hosted}"
-        );
-        assert!(
-            hosted.contains("falling back to declared contexts"),
-            "{hosted}"
+            hosted.contains("exit 1")
+                && !hosted.contains("DECLARED_RULESET_CONTEXTS")
+                && !hosted.contains("fallback"),
+            "ruleset API errors and empty results fail closed without inventing contexts: {hosted}"
         );
     }
 
@@ -20877,7 +20856,6 @@ channel = "stable"
             cache_backend: "github",
             trusted_gate: None,
             default_branch: "main",
-            declared_ruleset_contexts: "ci-required,DCO,Policy",
             candidate_artifact_wiring: candidate_artifact_wiring_enabled(
                 LEGACY_CANDIDATE_POLICY_PIN,
             ),
@@ -21458,7 +21436,7 @@ channel = "stable"
         assert!(!velnor.contains("runs-on: ubuntu-24.04"));
         assert!(velnor.contains(&fixture_lane_selector()));
         assert!(velnor.contains(
-            "(github.event_name=='merge_group'||(github.ref=='refs/heads/main'&&(github.event_name=='push'||github.event_name=='schedule')))||(github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))"
+            "(github.event_name=='merge_group'||(github.ref=='refs/heads/main'&&(github.event_name=='push'||github.event_name=='schedule')))||(github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))"
         ));
         assert!(velnor.contains("default: velnor"));
         assert!(!velnor.contains("default: github"));
@@ -21575,7 +21553,7 @@ channel = "stable"
         assert!(main.contains("  velnor-"), "{main}");
         assert!(
             main.contains(
-                "(github.event_name=='merge_group'||(github.ref=='refs/heads/main'&&(github.event_name=='push'||github.event_name=='schedule')))||(github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))"
+                "(github.event_name=='merge_group'||(github.ref=='refs/heads/main'&&(github.event_name=='push'||github.event_name=='schedule')))||(github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))"
             ),
             "automatic=both runs Velnor on trusted push so lanes can be compared: {main}"
         );

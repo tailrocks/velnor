@@ -760,7 +760,6 @@ fn owner_entrypoint_pin_ignores_variable_references() {
         cache_backend: "github",
         trusted_gate: None,
         default_branch: "main",
-        declared_ruleset_contexts: "ci-required,Policy",
     });
     assert!(job.contains("--rev=\"$pin\""), "{job}");
     assert!(
@@ -800,7 +799,6 @@ fn owner_policy_resolves_squash_merge_push_to_pr_head() {
         cache_backend: "github",
         trusted_gate: None,
         default_branch: "main",
-        declared_ruleset_contexts: "ci-required,Policy",
     });
     assert!(
         job.contains("EVENT_NAME: ${{ github.event_name }}")
@@ -870,7 +868,6 @@ fn owner_policy_fails_closed_for_direct_push_without_merged_pr() {
         cache_backend: "github",
         trusted_gate: None,
         default_branch: "main",
-        declared_ruleset_contexts: "ci-required,Policy",
     });
     assert!(
         job.contains(
@@ -902,7 +899,6 @@ fn owner_policy_rejects_merge_sha_wrong_head_repository_and_revision() {
         cache_backend: "github",
         trusted_gate: None,
         default_branch: "main",
-        declared_ruleset_contexts: "ci-required,Policy",
     });
     assert!(
         job.contains("actions/workflows/ci-pr.yml/runs?head_sha=$CANDIDATE_SHA"),
@@ -1133,7 +1129,6 @@ fn velnor_entrypoint_is_gated_and_never_builds_the_pin() {
         cache_backend: "local",
         trusted_gate: Some(&crate::s2::control_plane_trusted_gate("main")),
         default_branch: "main",
-        declared_ruleset_contexts: "ci-required,Policy",
     });
     assert!(!job.contains("--pin-build"), "{job}");
     assert!(job.contains("    if: ${{ github.event_name == 'pull_request_target' ||"));
@@ -4311,7 +4306,6 @@ fn rendered_entrypoints_pass_the_legacy_space_marker_scan() {
             cache_backend: "github",
             trusted_gate: None,
             default_branch: "main",
-            declared_ruleset_contexts: "ci-required,Policy",
         });
         let mut values = Vec::new();
         for line in job.lines() {
