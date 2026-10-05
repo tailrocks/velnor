@@ -1155,6 +1155,43 @@ mod runner_lane_tests {
     }
 
     #[test]
+    fn ffi_transitive_inputs_select_the_cross_language_consumer() {
+        // Generation compiles a prerequisite edge into `depends_on`, so the
+        // existing transitive closure carries producer changes to the
+        // consumer: a change to the FFI crate's own dependency selects the
+        // FFI crate and, through it, the Swift consumer.
+        let unit = |id: &str, kind: &str, depends_on: &[&str]| CiUnit {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            kind: kind.to_owned(),
+            root: ".".to_owned(),
+            watch: Vec::new(),
+            github_pr_commands: vec![id.to_owned()],
+            github_full_commands: vec![id.to_owned()],
+            velnor_pr_commands: vec![id.to_owned()],
+            velnor_full_commands: vec![id.to_owned()],
+            depends_on: depends_on.iter().map(|name| (*name).to_owned()).collect(),
+            tool_version: None,
+            cache: None,
+            workspace_check: false,
+        };
+        let units = vec![
+            unit("rust-base", "rust", &[]),
+            unit("rust-ffi", "rust", &["rust-base"]),
+            unit("swift-app", "swift", &["rust-ffi"]),
+        ];
+        let selected =
+            expand_affected_units(&units, ["rust-base".to_owned()].into_iter().collect());
+        assert_eq!(
+            selected,
+            ["rust-base", "rust-ffi", "swift-app"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+    }
+
+    #[test]
     fn crate_test_collection_matches_scanner_fixture_exclusions() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut manifests = Vec::new();
