@@ -3386,18 +3386,16 @@ fn render_release_unit_job(
     // reading the missing selection file.
     let _ = writeln!(
         output,
-        "      - name: Plan full release selection\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: |\n          set -euo pipefail\n          mkdir -p .velnor-ci-selection\n          velnor-workflow plan --config .github/ci/project.toml\n"
+        "      - name: Plan full release selection\n        env:\n          CI_SCOPE_OVERRIDE: full\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: |\n          set -euo pipefail\n          mkdir -p .velnor-ci-selection\n          velnor-workflow plan --config .github/ci/project.toml\n"
     );
     // The generator's self-check resolves the D19 pin's closure from local
     // history, but release checkouts are shallow: the hosted leg fetches the
     // pin before the checks, like the unit provider job.
     render_release_pin_fetch(output, provider, unit);
-    let _ = writeln!(
-        output,
-        "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}{token_env}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
-        yaml_scalar(&unit.id),
-        yaml_scalar(&unit.id)
-    );
+    let environment = format!("          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.sha }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection", yaml_scalar(&unit.id));
+    let check_environment = format!("{cargo_offline}{token_env}");
+    super::ir::render_visible_checks(output, &[unit], &environment, &check_environment, "");
+
     id
 }
 
@@ -5380,14 +5378,15 @@ cp "$record" "$out"
 
     fn unit(id: &str) -> crate::s2::Unit {
         crate::s2::Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: id.to_owned(),
             label: id.to_owned(),
             kind: crate::s2::UnitKind::Rust,
             root: ".".to_owned(),
             pinned_lockfile: true,
             watch: vec!["Cargo.toml".to_owned()],
-            pr_commands: vec!["cargo check".to_owned()],
-            full_commands: vec!["cargo check".to_owned()],
+            pr_commands: vec!["cargo check".into()],
+            full_commands: vec!["cargo check".into()],
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
@@ -6002,10 +6001,8 @@ cp "$record" "$out"
         let mut cfg = config(&["release.yml"], Some(binary_spec()));
         let mut docker = unit("docker-example");
         docker.kind = crate::s2::UnitKind::Docker;
-        docker.full_commands = vec![
-            "docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.' --secret id=github_token,env=GITHUB_TOKEN"
-                .to_owned(),
-        ];
+        docker.full_commands = vec!["docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.' --secret id=github_token,env=GITHUB_TOKEN"
+                .into()];
         cfg.units.push(docker);
         let Some(release) = cfg.release.as_ref() else {
             panic!("release fixture must carry a release contract")
@@ -6402,8 +6399,8 @@ cp "$record" "$out"
     #[test]
     fn github_release_unit_cache_restore_declares_cache_step_id() {
         let mut config = config(&["release.yml"], Some(binary_spec()));
-        config.units[0].pr_commands = vec!["mbx nextest run --locked".to_owned()];
-        config.units[0].full_commands = vec!["mbx nextest run --locked".to_owned()];
+        config.units[0].pr_commands = vec!["mbx nextest run --locked".into()];
+        config.units[0].full_commands = vec!["mbx nextest run --locked".into()];
         config.units[0].cache = Some(crate::s2::CacheSpec {
             key_files: vec!["Cargo.lock".to_owned()],
             paths: vec!["~/.cargo/registry".to_owned()],
@@ -7470,13 +7467,11 @@ cp "$record" "$out"
         let mut docker = unit("docker");
         docker.kind = crate::s2::UnitKind::Docker;
         docker.label = "Docker".to_owned();
-        docker.pr_commands = vec![
-            "docker buildx build --target ci --build-context velnor-cache-seed='.velnor-docker-cache/seed' '.'"
-                .to_owned(),
-        ];
+        docker.pr_commands = vec!["docker buildx build --target ci --build-context velnor-cache-seed='.velnor-docker-cache/seed' '.'"
+                .into()];
         docker.full_commands = vec![
             "docker buildx build --build-context velnor-cache-seed='.velnor-docker-cache/seed' '.'"
-                .to_owned(),
+                .into(),
         ];
         docker.cache = Some(crate::s2::CacheSpec {
             key_files: vec!["Cargo.lock".to_owned(), "Dockerfile".to_owned()],
@@ -7535,9 +7530,8 @@ cp "$record" "$out"
     fn native_release_hosted_check_leg_fetches_the_d19_pin_before_running() {
         let mut config = native_identity_config(&["release.yml", "preview.yml"]);
         let mut checks = unit("rust-example-checks");
-        checks.full_commands = vec![
-            "mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../..".to_owned(),
-        ];
+        checks.full_commands =
+            vec!["mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../..".into()];
         config.units.push(checks);
         let Some(release) = config.release.as_ref() else {
             panic!("identity fixture must carry a release contract")

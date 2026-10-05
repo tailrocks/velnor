@@ -163,18 +163,96 @@ mod tests {
         );
     }
 
+    #[test]
+    fn visible_check_steps_cover_both_scopes_on_every_rendered_provider() {
+        use crate::validation::{CargoOperation, CargoRecipe, CheckCommand, CheckContract};
+        let mut unit = rust_unit("rust-stage-fixture", ".");
+        unit.check_contract = CheckContract::RustTestsAndDoctests;
+        unit.pr_commands = [
+            CargoOperation::Format,
+            CargoOperation::Clippy,
+            CargoOperation::Test,
+            CargoOperation::Doctest,
+        ]
+        .into_iter()
+        .map(|operation| {
+            CheckCommand::cargo(CargoRecipe {
+                operation,
+                root: ".".to_owned(),
+                package: Some("stage-fixture".to_owned()),
+                workspace: false,
+                locked: true,
+                all_features: true,
+                backend: crate::validation::CargoBackend::Cargo,
+            })
+        })
+        .collect();
+        unit.full_commands = unit.pr_commands.clone();
+        let ir = owner_test_ir("example/stage-fixture", vec![unit]);
+        let rendered = must_render_kind(&ir);
+        let document: serde_yaml::Value =
+            must_some(serde_yaml::from_str(&rendered).ok(), "parse rendered steps");
+        let jobs = must_some(document["jobs"].as_mapping(), "jobs render");
+        let mut verified = 0;
+        for job in jobs.values() {
+            let Some(steps) = job.get("steps").and_then(serde_yaml::Value::as_sequence) else {
+                continue;
+            };
+            let checks = steps
+                .iter()
+                .filter(|step| {
+                    step.get("run")
+                        .and_then(serde_yaml::Value::as_str)
+                        .is_some_and(|run| run.contains("--check-index"))
+                })
+                .collect::<Vec<_>>();
+            if checks.is_empty() {
+                continue;
+            }
+            verified += 1;
+            assert_eq!(checks.len(), 4, "each check is a visible step");
+            for (index, (step, name)) in checks
+                .iter()
+                .zip(["Formatting", "Clippy", "Cargo test", "Doctests"])
+                .enumerate()
+            {
+                assert_eq!(step["name"].as_str(), Some(name));
+                let guard = must_some(step["if"].as_str(), "success guard");
+                assert!(guard.starts_with("success() && steps.unit-checks.outputs.check_"));
+                let run = must_some(
+                    step.get("run").and_then(serde_yaml::Value::as_str),
+                    "check run",
+                );
+                assert_eq!(run.matches("--check-index").count(), 1);
+                assert!(run.contains(&format!("--check-index {index} 2>&1")));
+            }
+            assert!(
+                steps.iter().any(|step| step
+                    .get("run")
+                    .and_then(serde_yaml::Value::as_str)
+                    .is_some_and(|run| run.contains("velnor-workflow validate-unit"))),
+                "unit admission precedes conditional phase steps"
+            );
+        }
+        assert!(
+            verified >= 2,
+            "hosted and local provider jobs must carry the contract"
+        );
+    }
+
     /// One hand-built Rust unit: the id is fixture-local, the root decides
     /// ownership of the generator crate.
     fn rust_unit(id: &str, root: &str) -> Unit {
         Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: id.to_owned(),
             label: format!("Rust crate ({id})"),
             kind: UnitKind::Rust,
             root: root.to_owned(),
             pinned_lockfile: false,
             watch: Vec::new(),
-            pr_commands: vec!["cargo test --locked".to_owned()],
-            full_commands: vec!["cargo test --locked".to_owned()],
+            pr_commands: vec!["cargo test --locked".into()],
+            full_commands: vec!["cargo test --locked".into()],
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
@@ -200,14 +278,10 @@ mod tests {
         let mut unit = rust_unit(id, ".");
         unit.label = format!("Docker ({id})");
         unit.kind = UnitKind::Docker;
-        unit.pr_commands = vec![
-            "docker buildx build --load --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.' --secret id=github_token,env=GITHUB_TOKEN"
-                .to_owned(),
-        ];
-        unit.full_commands = vec![
-            "docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.' --secret id=github_token,env=GITHUB_TOKEN"
-                .to_owned(),
-        ];
+        unit.pr_commands = vec!["docker buildx build --load --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.' --secret id=github_token,env=GITHUB_TOKEN"
+                .into()];
+        unit.full_commands = vec!["docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.' --secret id=github_token,env=GITHUB_TOKEN"
+                .into()];
         unit
     }
 
@@ -998,12 +1072,12 @@ mod tests {
         // implies the provision flag on every local provider, never GitHub.
         let mut variants: Vec<(&str, Unit)> = Vec::new();
         let mut pr = rust_unit("rust-check", "crates/check");
-        pr.pr_commands = vec![CHECK.to_owned()];
-        pr.full_commands = vec![OTHER.to_owned()];
+        pr.pr_commands = vec![CHECK.into()];
+        pr.full_commands = vec![OTHER.into()];
         variants.push(("pr_commands", pr));
         let mut full = rust_unit("rust-check", "crates/check");
-        full.pr_commands = vec![OTHER.to_owned()];
-        full.full_commands = vec![CHECK.to_owned()];
+        full.pr_commands = vec![OTHER.into()];
+        full.full_commands = vec![CHECK.into()];
         variants.push(("full_commands", full));
         for (name, unit) in &variants {
             let ir = owner_test_ir(&owner, vec![unit.clone()]);
@@ -1035,7 +1109,7 @@ mod tests {
         // Render level: each collapsed local provider job provisions the
         // pinned policy binary behind the input gate.
         let mut check = rust_unit("rust-check", "crates/check");
-        check.pr_commands = vec![CHECK.to_owned()];
+        check.pr_commands = vec![CHECK.into()];
         let ir = owner_test_ir(&owner, vec![check, rust_unit("rust-plain", "crates/plain")]);
         let content = must_render_kind(&ir);
         for job in ["verify-github-self-hosted", "verify-velnor"] {
@@ -1256,7 +1330,7 @@ mod tests {
         let mut checker = rust_unit("rust-generator-crate", "crates/velnor-workflow");
         checker
             .pr_commands
-            .push("mbx run --locked -- --plain --check ../..".to_owned());
+            .push("mbx run --locked -- --plain --check ../..".into());
         let ir = owner_test_ir(
             &owner,
             vec![checker, rust_unit("rust-sibling-crate", "crates/sibling")],
@@ -1274,7 +1348,7 @@ mod tests {
             hosted.find("      - name: Fetch D19 pin history"),
             "fetch step renders on the GitHub provider: {hosted}",
         );
-        let checks = must_some(hosted.find("- name: Run unit checks"), "checks render");
+        let checks = must_some(hosted.find("- name: Start unit checks"), "checks render");
         assert!(
             fetch < checks,
             "the pin is present before verification runs: {hosted}"
@@ -1304,7 +1378,7 @@ mod tests {
         );
         let content = must_some(rendered, "docker kind has members").1;
         let checks = content
-            .split("- name: Run unit checks")
+            .split("- name: Start unit checks")
             .skip(1)
             .collect::<Vec<_>>();
         assert!(
@@ -1395,7 +1469,7 @@ mod tests {
             !velnor.contains("candidate generator product"),
             "the Velnor provider never publishes: {velnor}"
         );
-        let checks = must_some(hosted.find("- name: Run unit checks"), "checks render");
+        let checks = must_some(hosted.find("- name: Start unit checks"), "checks render");
         let start = must_some(
             hosted.find("      - name: Prepare candidate generator product"),
             "prepare step renders",
@@ -1885,7 +1959,9 @@ fn snapshot_compatibility(
             String::new()
         },
         cargo_inputs: dependency_inputs.to_vec(),
-        recipe: unit_commands(unit).cloned().collect(),
+        recipe: unit_commands(unit)
+            .map(|command| serde_json::to_string(command).unwrap_or_default())
+            .collect(),
     }
 }
 
@@ -2354,7 +2430,7 @@ fn render_collapsed_sccache_env_step(
 /// A unit may pin commands per provider only — its base vectors then stay empty —
 /// so a predicate that skips the overrides would conclude the unit runs
 /// nothing at all.
-fn unit_commands(unit: &Unit) -> impl Iterator<Item = &String> {
+fn unit_commands(unit: &Unit) -> impl Iterator<Item = &crate::validation::CheckCommand> {
     unit.pr_commands.iter().chain(&unit.full_commands)
 }
 
@@ -5399,14 +5475,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             );
         }
 
-        // Verification.
-        let checks_started_marker = render_epoch_marker_commands("CHECKS_STARTED", "          ");
-        let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
         let token_env = docker_build_token_env_for_members(members);
-        let _ = writeln!(
-            output,
-            "      - name: Run unit checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
-        );
+        let environment = "          CI_SCOPE: ${{ inputs.scope }}\n          CI_UNIT_ID: ${{ inputs.unit }}\n          EVENT_NAME: ${{ github.event_name }}\n          BASE_SHA: ${{ inputs.base_sha }}\n          HEAD_SHA: ${{ inputs.head_sha }}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection".to_owned();
+        let check_environment = format!("{checks_env}{token_env}");
+        render_visible_checks(output, members, &environment, &check_environment, "");
 
         // Stage-1 candidate packaging, after the checks that build the
         // binary it reuses: only the hosted job of the generator crate's
@@ -6205,4 +6277,29 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             );
         }
     }
+}
+
+pub(super) fn render_visible_checks(
+    output: &mut String,
+    members: &[&Unit],
+    environment: &str,
+    check_environment: &str,
+    prelude: &str,
+) {
+    crate::validation::insert_job_environment(output, environment);
+    let mut paths = Vec::new();
+    for unit in members {
+        let pr = &unit.pr_commands;
+        let full = &unit.full_commands;
+        for commands in [pr, full] {
+            paths.push(crate::validation::CheckPath { commands });
+        }
+    }
+    output.push_str(&crate::validation::render_steps(
+        &paths,
+        check_environment.trim_start_matches('\n'),
+        prelude,
+        &render_epoch_marker_commands("CHECKS_STARTED", "          "),
+        &render_epoch_marker_commands("CHECKS_ENDED", "          "),
+    ));
 }
