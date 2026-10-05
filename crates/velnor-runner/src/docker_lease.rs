@@ -6394,6 +6394,9 @@ fn recover_unbound_created_builder_for_request(
     generation: u64,
     config_fingerprint: &str,
 ) -> Result<bool> {
+    if has_recoverable_pending_buildkit_create(domain, builder)? {
+        checked_pending_recovery_endpoint(host_socket, domain)?;
+    }
     let _recovery = match policy.begin_persistent_builder_recovery(
         domain,
         builder,
@@ -6464,6 +6467,7 @@ fn recover_pending_buildkit_create_for_request(
     if !has_recoverable_pending_buildkit_create(domain, builder)? {
         return Ok(None);
     }
+    checked_pending_recovery_endpoint(host_socket, domain)?;
     policy.ensure_pending_create_creator_lease(domain, builder, config_fingerprint, generation)?;
     let Some(recovery) =
         policy.begin_pending_create_recovery(domain, builder, generation, config_fingerprint)?
@@ -6496,9 +6500,11 @@ fn recover_pending_buildkit_create_for_setup_with_volume_lock(
         &crate::buildkit::PendingBuildKitCreateAccess,
     ) -> Result<VolumeOperationLocks>,
 ) -> Result<Option<String>> {
+    if !has_recoverable_pending_buildkit_create(domain, builder)? {
+        return Ok(None);
+    }
     let mut transport = HostPendingBuildKitRecoveryTransport {
-        host_socket,
-        endpoint: domain.endpoint.clone(),
+        endpoint: checked_pending_recovery_endpoint(host_socket, domain)?,
     };
     recover_pending_buildkit_create_for_setup_with_volume_lock_and_transport(
         policy,
@@ -6598,9 +6604,11 @@ fn recover_pending_buildkit_create_under_gate(
     config_fingerprint: &str,
     recovery: PersistentBuilderRecoveryAdmission,
 ) -> Result<Option<String>> {
+    if !has_recoverable_pending_buildkit_create(domain, builder)? {
+        return Ok(None);
+    }
     let mut transport = HostPendingBuildKitRecoveryTransport {
-        host_socket,
-        endpoint: domain.endpoint.clone(),
+        endpoint: checked_pending_recovery_endpoint(host_socket, domain)?,
     };
     recover_pending_buildkit_create_under_gate_with_volume_lock(
         policy,
@@ -6631,23 +6639,37 @@ trait PendingBuildKitRecoveryTransport {
 }
 
 #[cfg(unix)]
-struct HostPendingBuildKitRecoveryTransport<'a> {
-    host_socket: &'a Path,
+fn checked_pending_recovery_endpoint(
+    host_socket: &Path,
+    domain: &crate::buildkit::PersistentBuildKitDomain,
+) -> Result<crate::docker::DockerEndpoint> {
+    if host_socket != domain.endpoint.socket.as_path() {
+        bail!("pending BuildKit recovery lease socket differs from its domain endpoint");
+    }
+    Ok(domain.endpoint.clone())
+}
+
+#[cfg(unix)]
+struct HostPendingBuildKitRecoveryTransport {
     endpoint: crate::docker::DockerEndpoint,
 }
 
 #[cfg(unix)]
-impl PendingBuildKitRecoveryTransport for HostPendingBuildKitRecoveryTransport<'_> {
+impl PendingBuildKitRecoveryTransport for HostPendingBuildKitRecoveryTransport {
     fn inspect_volume(&mut self, target: &str) -> Result<(u16, Vec<u8>)> {
-        inspect_volume_on_host(self.host_socket, target)
+        inspect_volume_on_host(&self.endpoint.socket, target)
     }
 
     fn inspect_container(&mut self, target: &str) -> Result<(u16, Vec<u8>)> {
-        inspect_container_on_host(self.host_socket, target)
+        inspect_container_on_host(&self.endpoint.socket, target)
     }
 
     fn upload_archive(&mut self, container_id: &str, config_fingerprint: &str) -> Result<()> {
-        upload_approved_buildkit_archive_on_host(self.host_socket, container_id, config_fingerprint)
+        upload_approved_buildkit_archive_on_host(
+            &self.endpoint.socket,
+            container_id,
+            config_fingerprint,
+        )
     }
 
     fn start_container(&mut self, container_id: &str) -> Result<()> {
@@ -6664,6 +6686,9 @@ impl PendingBuildKitRecoveryTransport for HostPendingBuildKitRecoveryTransport<'
         config_fingerprint: &str,
         readiness_epoch: u64,
     ) -> Result<()> {
+        if domain.endpoint != self.endpoint {
+            bail!("pending BuildKit recovery endpoint changed before readiness publication");
+        }
         crate::buildkit::persist_builder_readiness_after_start(
             domain,
             builder,
@@ -9267,6 +9292,16 @@ pub(crate) fn test_orphan_cleanup_endpoint() -> crate::docker::DockerEndpoint {
     }
 }
 
+#[cfg(all(test, unix))]
+fn test_endpoint_at_socket(socket: &Path) -> crate::docker::DockerEndpoint {
+    crate::docker::DockerEndpoint {
+        host: format!("unix://{}", socket.display()),
+        socket: socket.to_path_buf(),
+        source: crate::docker::DockerEndpointSource::Default,
+        context: None,
+    }
+}
+
 #[cfg(test)]
 struct ContextSwitchingOrphanCleanupTransport {
     endpoint: crate::docker::DockerEndpoint,
@@ -9797,8 +9832,9 @@ impl DockerLeaseGuard {
         if !has_recoverable_pending_buildkit_create(domain, builder)? {
             return Ok(None);
         }
+        let endpoint = checked_pending_recovery_endpoint(&self.host_socket, domain)?;
         let engine_id = require_volume_lock_engine_id(
-            crate::docker::engine::daemon_identity_blocking(&self.host_socket)
+            crate::docker::engine::daemon_identity_blocking(&endpoint.socket)
                 .map(|identity| identity.id),
         )?;
         recover_pending_buildkit_create_for_setup_with_volume_lock(
@@ -14482,7 +14518,8 @@ mod tests {
         use std::os::unix::net::UnixListener;
 
         let root = test_storage_root("pending-create-setup-missing-volume");
-        let (domain, creator, fence, builder, volume) = test_pending_buildkit_create_fence(&root);
+        let (mut domain, creator, fence, builder, volume) =
+            test_pending_buildkit_create_fence(&root);
         let original = crate::buildkit::pending_buildkit_create_transaction(&domain, &builder)
             .unwrap()
             .unwrap();
@@ -14496,6 +14533,7 @@ mod tests {
             .begin_persistent_builder_setup(&builder, config_fingerprint)
             .unwrap();
         let socket = root.join("fake-engine.sock");
+        domain.endpoint = test_endpoint_at_socket(&socket);
         let listener = UnixListener::bind(&socket).unwrap();
         let expected_path = format!("/v1.43/volumes/{volume}");
         let server = std::thread::spawn(move || {
@@ -14565,6 +14603,100 @@ mod tests {
                 .is_err(),
             "ordinary setup locks stay fenced after failed recovery"
         );
+        drop(policy);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_recovery_rejects_socket_mismatch_before_io_and_retains_transaction() {
+        let (root, domain, policy, generation, builder, volume, original) =
+            pending_recovery_setup("pending-create-setup-socket-mismatch");
+        let mismatched_socket = root.join("another-engine.sock");
+
+        let result = recover_pending_buildkit_create_for_setup_with_volume_lock(
+            &policy,
+            &mismatched_socket,
+            &domain,
+            &builder,
+            generation,
+            &original.config_fingerprint,
+            &domain.engine_id,
+            |_, _, _| panic!("endpoint mismatch must be rejected before volume locking"),
+        );
+
+        let error = result.expect_err("a mismatched recovery socket must fail closed");
+        assert!(error
+            .to_string()
+            .contains("lease socket differs from its domain endpoint"));
+        assert!(
+            !mismatched_socket.exists(),
+            "mismatched endpoint must not be contacted or created"
+        );
+        assert_eq!(
+            crate::buildkit::pending_buildkit_create_transaction(&domain, &builder)
+                .unwrap()
+                .unwrap(),
+            original,
+            "endpoint mismatch must preserve the durable recovery transaction"
+        );
+        assert!(
+            policy
+                .lock_volume_names_with_create_access(
+                    &BTreeSet::from([volume]),
+                    Some(&domain),
+                    None,
+                )
+                .is_err(),
+            "endpoint mismatch must retain the pending-create fence"
+        );
+
+        drop(policy);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn request_recovery_rejects_socket_mismatch_before_admission_and_io() {
+        let (root, domain, policy, generation, builder, volume, original) =
+            pending_recovery_setup("pending-create-request-socket-mismatch");
+        let mismatched_socket = root.join("another-engine.sock");
+
+        let result = recover_pending_buildkit_create_for_request(
+            &policy,
+            &mismatched_socket,
+            &domain,
+            &builder,
+            generation,
+            &original.config_fingerprint,
+        );
+
+        let error = result.expect_err("a mismatched request socket must fail closed");
+        assert!(error
+            .to_string()
+            .contains("lease socket differs from its domain endpoint"));
+        assert!(
+            !mismatched_socket.exists(),
+            "mismatched endpoint must not be contacted or created"
+        );
+        assert_eq!(
+            crate::buildkit::pending_buildkit_create_transaction(&domain, &builder)
+                .unwrap()
+                .unwrap(),
+            original,
+            "endpoint mismatch must preserve the durable recovery transaction"
+        );
+        assert!(
+            policy
+                .lock_volume_names_with_create_access(
+                    &BTreeSet::from([volume]),
+                    Some(&domain),
+                    None,
+                )
+                .is_err(),
+            "endpoint mismatch must retain the pending-create fence"
+        );
+
         drop(policy);
         std::fs::remove_dir_all(root).unwrap();
     }
