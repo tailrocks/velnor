@@ -1242,6 +1242,34 @@ fn deb_arch_matrix(config: &ProjectConfig, targets: &[String], guest: bool) -> O
     Some(matrix)
 }
 
+/// Native previews add every Apple target the repository pins to its Rust
+/// toolchain. The release target list remains Linux-only so Debian and stable
+/// release topology stay unchanged; the pin is the source of truth for the
+/// preview-only macOS product set.
+fn native_preview_apple_targets(config: &ProjectConfig) -> Vec<String> {
+    let Some(toolchain) = crate::s2::config_rust_toolchain(config) else {
+        return Vec::new();
+    };
+    toolchain
+        .targets
+        .into_iter()
+        .filter(|target| target.ends_with("-apple-darwin"))
+        .collect()
+}
+
+/// The primary release binary plus optional package-name-matched auxiliary
+/// binaries. Native preview archives carry the operator CLI beside the
+/// runner; every member is built with the same checkout and preview identity.
+fn native_preview_binaries(release: &ReleaseSpec) -> Vec<String> {
+    let mut binaries = vec![release.binary.clone()];
+    for package in &release.packages {
+        if package != &release.binary && !package.is_empty() {
+            binaries.push(package.clone());
+        }
+    }
+    binaries
+}
+
 /// Step-level env exporting the cross C toolchain to Cargo and the C build
 /// scripts (`cc` et al.) for matrix jobs that compile `AArch64` Linux on
 /// the x64 builder. The toolchain install alone leaves Cargo on the host
@@ -2337,6 +2365,86 @@ fn policy_enforcement_step() -> &'static str {
     "      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{ github.event_name }}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n"
 }
 
+/// Build the native macOS preview archive from the identity-pinned checkout.
+/// The archive carries the runner plus any package-name-matched auxiliary
+/// binaries, so a binary consumer installs one verified target archive.
+fn render_macos_preview_job(
+    config: &ProjectConfig,
+    release: &ReleaseSpec,
+    targets: &[String],
+    verification_job_ids: &[String],
+) -> String {
+    let checkout = ActionPin::Checkout.reference();
+    let sccache = ActionPin::Sccache.reference();
+    let attest = ActionPin::Attest.reference();
+    let upload = ActionPin::UploadArtifact.reference();
+    let package = shell_quote(&release.package);
+    let binary = shell_quote(&release.binary);
+    let binaries = native_preview_binaries(release);
+    let members = binaries.iter().skip(1).cloned().collect::<Vec<_>>();
+    let member_arg = if members.is_empty() {
+        String::new()
+    } else {
+        format!(" --members {}", shell_quote(&members.join(",")))
+    };
+    let extra_packages = members
+        .iter()
+        .map(|package| shell_quote(package))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut setup = workflow_runtime_setup_for_config(config);
+    let workflow = WorkflowIr::from_config(config);
+    let cargo_cmd = if let Some(unit) = rust_package_unit(config, &release.package) {
+        workflow.render_tool_provisioning(&mut setup, ProviderId::GithubHosted, unit, false);
+        "mbx"
+    } else {
+        "cargo"
+    };
+    let extra_build = if members.is_empty() {
+        "          :\n".to_owned()
+    } else {
+        format!(
+            "          extra_packages=( {extra_packages} )\n          metadata=\"$(cargo metadata --locked --no-deps --format-version 1)\"\n          for package in \"${{extra_packages[@]}}\"; do\n            jq -e --arg p \"$package\" '.packages[] | select(.name == $p) | .features | has(\"release-build\")' <<<\"$metadata\" >/dev/null || {{ echo \"::error::preview auxiliary package $package lacks the release-build feature\" >&2; exit 1; }}\n            {cargo_cmd} build --locked --release --package \"$package\" --bin \"$package\" --features release-build --target \"$TARGET\"\n          done\n",
+            cargo_cmd = cargo_cmd,
+        )
+    };
+    let mut matrix = String::new();
+    for target in targets {
+        let _ = writeln!(matrix, "          - target: {}", yaml_scalar(target));
+    }
+    let mut needs = vec!["identity".to_owned(), "metadata".to_owned()];
+    needs.extend(verification_job_ids.iter().cloned());
+    let needs = needs.join(", ");
+    let package_members_check = binaries
+        .iter()
+        .map(|member| {
+            format!(
+                "          tar -tzf \"$archive\" | grep -Fx {} >/dev/null || {{ echo \"::error::preview archive is missing {member}\" >&2; exit 1; }}\n",
+                shell_quote(member),
+                member = member,
+            )
+        })
+        .collect::<String>();
+    format!(
+        "  macos:\n    name: Build ${{{{ matrix.target }}}} preview archive\n    needs: [{needs}]\n{gate}    runs-on: {runner}\n    timeout-minutes: 90\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    env:\n      TARGET: ${{{{ matrix.target }}}}\n      VERSION: ${{{{ needs.identity.outputs.version }}}}\n      SOURCE_COMMIT: ${{{{ needs.identity.outputs.commit }}}}\n      VELNOR_RELEASE_BUILD: \"1\"\n      VELNOR_PREVIEW_SOURCE_SHA: ${{{{ needs.identity.outputs.commit }}}}\n    steps:\n      - name: Checkout preview identity\n        uses: {checkout}\n        with:\n          ref: ${{{{ needs.identity.outputs.commit }}}}\n          persist-credentials: false\n{setup}      - name: Add Rust target\n        run: rustup target add \"$TARGET\"\n      - name: Set up sccache\n        uses: {sccache}\n        with:\n          version: v0.16.0\n      - name: Prove the checkout is the preview identity\n        run: |\n          set -euo pipefail\n          [ \"$(git rev-parse HEAD)\" = \"$SOURCE_COMMIT\" ] || {{ echo \"::error::macOS checkout is not the preview commit\" >&2; exit 1; }}\n          git diff --exit-code\n      - name: Build preview runner\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: {cargo_cmd} build --locked --release --package {package} --bin {binary} --features release-build --target \"$TARGET\"\n{extra_build}      - name: Package preview binaries\n        run: |\n          set -euo pipefail\n          rm -rf dist\n          velnor-workflow release package-binary --target \"$TARGET\" --version \"$VERSION\" --package {package} --binary {binary}{member_arg}\n          for archive in dist/*.tar.gz; do\n            test -f \"$archive\" || {{ echo \"::error::macOS preview archive was not produced\" >&2; exit 1; }}\n            normalized=\"${{archive//\\~/.}}\"\n            if [ \"$normalized\" != \"$archive\" ]; then\n              mv \"$archive\" \"$normalized\"\n            fi\n            rm -f \"$archive.sha256\"\n            digest=\"$(shasum -a 256 \"$normalized\" | awk '{{print $1}}')\"\n            printf '%s  %s\\n' \"$digest\" \"$(basename \"$normalized\")\" > \"$normalized.sha256\"\n{package_members_check}          done\n      - name: Attest macOS preview archive\n        uses: {attest}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload macOS preview archive\n        uses: {upload}\n        with:\n          name: macos-packages-${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 1\n",
+        gate = release_branch_gate(config),
+        runner = release_matrix_runner(config, targets),
+        setup = setup,
+        cargo_cmd = cargo_cmd,
+        matrix = matrix,
+        needs = needs,
+        checkout = checkout,
+        sccache = sccache,
+        attest = attest,
+        upload = upload,
+        package = package,
+        binary = binary,
+        member_arg = member_arg,
+        extra_build = extra_build,
+        package_members_check = package_members_check,
+    )
+}
+
 /// The rolling preview publish job: the per-arch preview debs are
 /// re-verified from their own bytes (each deb's packaged record must name
 /// exactly this identity), then the rolling `preview` release is replaced
@@ -2358,6 +2466,11 @@ fn render_preview_publish_job(
     } else {
         vec!["identity".to_owned(), "debian".to_owned()]
     };
+    let mac_targets = native_preview_apple_targets(config);
+    let mac_binaries = native_preview_binaries(release);
+    if !mac_targets.is_empty() {
+        needs.push("macos".to_owned());
+    }
     needs.extend(verification_job_ids.iter().cloned());
     let needs = needs.join(", ");
     let binary = yaml_scalar(&release.binary);
@@ -2368,6 +2481,10 @@ fn render_preview_publish_job(
         .collect::<Vec<_>>()
         .join(" ");
     let mut assets = vec!["SHA256SUMS".to_owned(), "release-manifest.json".to_owned()];
+    if !mac_targets.is_empty() {
+        assets.push("preview-product-manifest.json".to_owned());
+        assets.push("preview-product-manifest.json.sha256".to_owned());
+    }
     for (arch, _) in &arches {
         assets.push(format!(
             "\"artifacts/{}-preview-$VERSION-{arch}.deb\"",
@@ -2378,11 +2495,25 @@ fn render_preview_publish_job(
             release.package
         ));
     }
+    for target in &mac_targets {
+        assets.push(format!(
+            "\"artifacts/{}-$ASSET_VERSION-{target}.tar.gz\"",
+            release.binary
+        ));
+        assets.push(format!(
+            "\"artifacts/{}-$ASSET_VERSION-{target}.tar.gz.sha256\"",
+            release.binary
+        ));
+    }
     let create_assets = assets.join(" \\\n            ");
     let mut expected_assets = vec![
         "\"SHA256SUMS\"".to_owned(),
         "\"release-manifest.json\"".to_owned(),
     ];
+    if !mac_targets.is_empty() {
+        expected_assets.push("\"preview-product-manifest.json\"".to_owned());
+        expected_assets.push("\"preview-product-manifest.json.sha256\"".to_owned());
+    }
     for (arch, _) in &arches {
         expected_assets.push(format!(
             "(\"{}-preview-\" + $asset_version + \"-{arch}.deb\")",
@@ -2391,6 +2522,16 @@ fn render_preview_publish_job(
         expected_assets.push(format!(
             "(\"{}-preview-\" + $asset_version + \"-{arch}.deb.sha256\")",
             release.package
+        ));
+    }
+    for target in &mac_targets {
+        expected_assets.push(format!(
+            "(\"{}-\" + $asset_version + \"-{target}.tar.gz\")",
+            release.binary
+        ));
+        expected_assets.push(format!(
+            "(\"{}-\" + $asset_version + \"-{target}.tar.gz.sha256\")",
+            release.binary
         ));
     }
     let expected_assets = expected_assets.join(",\n                ");
