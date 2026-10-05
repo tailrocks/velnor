@@ -8092,7 +8092,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let configured_units = members
             .iter()
             .filter(|unit| unit.homebrew_preview.is_some())
-            .map(|unit| format!("inputs.unit == '{}'", unit.id.replace('\'', "''")))
+            .map(|unit| {
+                let unit_selector = format!("inputs.unit == '{}'", unit.id.replace('\'', "''"));
+                let admission = self.provider_admission_expression(ProviderAdmission::for_unit(
+                    ProviderId::GithubHosted,
+                    unit,
+                ));
+                format!("({unit_selector} && ({admission}))")
+            })
             .collect::<Vec<_>>();
         if configured_units.is_empty() {
             return;
