@@ -579,6 +579,78 @@ fn the_declared_release_surface_is_repo_name_independent() {
     }
 }
 
+/// The bindings fixture renders end to end: the stable publisher takes
+/// the drill modes, archive contract, and credential pairing, the rolling
+/// lane additionally binds the trusted producer, and the emitted runtime
+/// contract carries none of the generation-time-only keys.
+#[test]
+fn declared_release_bindings_render() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/release-bindings/velnor-workflow.toml");
+    let bindings = fs::read_to_string(&fixture).unwrap();
+    let workspace = tempfile();
+    let root = copy_release_fixture(&workspace.join("fixture"));
+    // The `[release]` contract validates its targets against the pinned
+    // toolchain, so the test copy pins the targets the binding builds for.
+    fs::write(
+        root.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.91.1\"\ntargets = [\"x86_64-unknown-linux-gnu\", \"aarch64-unknown-linux-gnu\"]\n",
+    )
+    .unwrap();
+    write_config(&root, &bindings);
+    let with = generate(&root);
+    let files = with.workflow_files();
+    assert!(files.contains(&"release.yml".to_owned()), "{files:?}");
+    assert!(files.contains(&"preview.yml".to_owned()), "{files:?}");
+
+    let release = with.workflow("release.yml");
+    assert!(
+        release.contains("      mode:\n")
+            && release.contains("      - name: Resolve release mode\n")
+            && release.contains("needs.verify.outputs.mode == 'publish'"),
+        "the stable publisher must resolve and gate modes: {release}"
+    );
+    assert!(
+        release.contains("--members 'app-role' --deterministic \"$deterministic\"")
+            && release.contains("release assemble-manifest --dir dist"),
+        "the stable publisher must package and manifest declared archives: {release}"
+    );
+    assert!(
+        release.contains("      - name: Mount store credential\n")
+            && release.contains("trap teardown_store EXIT")
+            && release
+                .contains("      - name: Restore store credential state\n        if: always()\n"),
+        "the stable publisher must pair credential teardown: {release}"
+    );
+
+    let preview = with.workflow("preview.yml");
+    assert!(
+        preview.contains("  workflow_run:\n    workflows: [CI]\n")
+            && preview.contains("  source:\n")
+            && preview.contains("  publish-gate:\n")
+            && preview.contains("release admit-producer"),
+        "the rolling lane must bind the trusted producer: {preview}"
+    );
+    assert!(
+        preview.contains("needs.publish-gate.outputs.mode == 'publish'"),
+        "the rolling publish must admit only the gate: {preview}"
+    );
+
+    let project = with.project_toml();
+    for key in [
+        "producer_workflow",
+        "modes",
+        "archive_members",
+        "archive_retention_days",
+        "credential",
+    ] {
+        assert!(
+            !project.contains(key),
+            "the runtime contract must not carry {key}: {project}"
+        );
+    }
+}
+
 #[test]
 fn an_incomplete_declared_release_stops_generation() {
     let incomplete = RELEASE_CONFIG

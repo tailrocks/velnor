@@ -292,6 +292,36 @@ pub(crate) struct ReleaseSection {
     artifact_path: Option<String>,
     description: Option<String>,
     manifest_schema: Option<String>,
+    /// The trusted producer workflow a `workflow_run` event must come from.
+    producer_workflow: Option<String>,
+    /// The producer conclusion the publish gate requires (`success`).
+    producer_conclusion: Option<String>,
+    /// The dispatch modes the workflows offer. `publish` is never a dispatch
+    /// option: publication stays tag-triggered (or admitted-producer).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    modes: Vec<String>,
+    /// Extra members packaged into each release archive next to the binary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    archive_members: Vec<String>,
+    /// The archive checksum sidecar algorithm (`sha256`).
+    archive_checksum: Option<String>,
+    /// The `retention-days` release artifacts upload with (1-90).
+    archive_retention_days: Option<i64>,
+    /// Credential setup/teardown pairs, one `[[release.credential]]` row per
+    /// credential the lane mounts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    credential: Vec<CredentialSection>,
+}
+
+/// One credential the release lane mounts: the setup command that
+/// materializes it and the teardown command that restores the host. Both
+/// are required; a setup without a teardown is a configuration error.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CredentialSection {
+    name: Option<String>,
+    setup: Option<String>,
+    teardown: Option<String>,
 }
 
 /// One verification unit the repository adds to, or overrides in, the scanned
@@ -495,6 +525,48 @@ impl ReleaseSection {
 
     pub(crate) fn manifest_schema(&self) -> Option<&str> {
         self.manifest_schema.as_deref()
+    }
+
+    pub(crate) fn producer_workflow(&self) -> Option<&str> {
+        self.producer_workflow.as_deref()
+    }
+
+    pub(crate) fn producer_conclusion(&self) -> Option<&str> {
+        self.producer_conclusion.as_deref()
+    }
+
+    pub(crate) fn modes(&self) -> &[String] {
+        &self.modes
+    }
+
+    pub(crate) fn archive_members(&self) -> &[String] {
+        &self.archive_members
+    }
+
+    pub(crate) fn archive_checksum(&self) -> Option<&str> {
+        self.archive_checksum.as_deref()
+    }
+
+    pub(crate) fn archive_retention_days(&self) -> Option<i64> {
+        self.archive_retention_days
+    }
+
+    pub(crate) fn credentials(&self) -> &[CredentialSection] {
+        &self.credential
+    }
+}
+
+impl CredentialSection {
+    pub(crate) fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    pub(crate) fn setup(&self) -> Option<&str> {
+        self.setup.as_deref()
+    }
+
+    pub(crate) fn teardown(&self) -> Option<&str> {
+        self.teardown.as_deref()
     }
 }
 
@@ -1689,6 +1761,7 @@ impl RepoGenerationConfig {
 
     fn validate_release(&self) -> Result<(), GeneratorError> {
         let release = &self.release;
+        validate_release_bindings(release)?;
         if release.enabled != Some(true) {
             return Ok(());
         }
@@ -1759,6 +1832,92 @@ impl RepoGenerationConfig {
             crate::RELEASE_WORKFLOW
         )))
     }
+}
+
+/// The dispatch modes a release contract may offer. `publish` is never a
+/// dispatch option: publication stays tag-triggered (stable) or
+/// admitted-producer-triggered (rolling).
+pub(crate) const RELEASE_MODES: &[&str] = &["validate", "build", "rehearse"];
+
+/// Whether `value` is a dispatch mode the release renderer offers.
+pub(crate) fn is_release_mode(value: &str) -> bool {
+    RELEASE_MODES.contains(&value)
+}
+
+/// Validate the shape of the release event bindings, modes, archive
+/// contract, and credential pairs. Shape errors fail closed whether or not
+/// the contract is enabled: a typo'd mode or an unpaired credential must
+/// never render a silently weaker lane.
+fn validate_release_bindings(release: &ReleaseSection) -> Result<(), GeneratorError> {
+    if let Some(conclusion) = release.producer_conclusion.as_deref()
+        && conclusion != "success"
+    {
+        return Err(GeneratorError::usage(format!(
+            "[release] producer_conclusion must be `success`, found `{conclusion}`"
+        )));
+    }
+    if release.producer_conclusion.is_some() && release.producer_workflow.is_none() {
+        return Err(GeneratorError::usage(
+            "[release] producer_conclusion needs producer_workflow: a required conclusion without a trusted producer binds nothing",
+        ));
+    }
+    for mode in &release.modes {
+        if !is_release_mode(mode) {
+            return Err(GeneratorError::usage(format!(
+                "[release] modes must be one of {}, found `{mode}`; publish is tag-triggered, never a dispatch option",
+                RELEASE_MODES.join(", ")
+            )));
+        }
+    }
+    if let Some(checksum) = release.archive_checksum.as_deref()
+        && checksum != "sha256"
+    {
+        return Err(GeneratorError::usage(format!(
+            "[release] archive_checksum must be `sha256`, found `{checksum}`"
+        )));
+    }
+    if let Some(retention) = release.archive_retention_days
+        && !(1..=90).contains(&retention)
+    {
+        return Err(GeneratorError::usage(format!(
+            "[release] archive_retention_days must be 1-90, found `{retention}`"
+        )));
+    }
+    for member in &release.archive_members {
+        if !is_archive_member(member) {
+            return Err(GeneratorError::usage(format!(
+                "[release] archive_members must be portable file names without directories, found `{member}`"
+            )));
+        }
+    }
+    for credential in &release.credential {
+        let name = credential.name.as_deref().unwrap_or_default();
+        if name.is_empty() {
+            return Err(GeneratorError::usage(
+                "[release] every [[release.credential]] row needs `name`",
+            ));
+        }
+        if credential.setup.as_deref().is_none_or(str::is_empty) {
+            return Err(GeneratorError::usage(format!(
+                "[release] credential `{name}` needs `setup`"
+            )));
+        }
+        if credential.teardown.as_deref().is_none_or(str::is_empty) {
+            return Err(GeneratorError::usage(format!(
+                "[release] credential `{name}` needs `teardown`: a setup without a teardown leaks host state"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `value` is a portable archive member name: a bare file name over
+/// the portable asset alphabet, never a path.
+fn is_archive_member(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 /// The unit kinds the generator implements, as the `[[unit]]` `kind` strings.
@@ -2769,5 +2928,113 @@ mod tests {
             "unknown renovate field must fail",
         );
         assert!(error.contains("unknown field"), "{error}");
+    }
+
+    /// Release binding shapes fail closed whether or not the contract is
+    /// enabled: a typo'd mode or an unpaired credential must never render
+    /// a silently weaker lane.
+    #[test]
+    fn release_binding_shapes_fail_closed() {
+        let root = scanned_root("release-bindings-validate");
+        let shape = shape_for(&root);
+        let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
+        for (name, release, expected) in [
+            (
+                "publish-mode",
+                "[release]\nmodes = [\"publish\"]\n",
+                "never a dispatch option",
+            ),
+            (
+                "bad-mode",
+                "[release]\nmodes = [\"ship\"]\n",
+                "must be one of",
+            ),
+            (
+                "bad-conclusion",
+                "[release]\nproducer_workflow = \"CI\"\nproducer_conclusion = \"completed\"\n",
+                "must be `success`",
+            ),
+            (
+                "lonely-conclusion",
+                "[release]\nproducer_conclusion = \"success\"\n",
+                "needs producer_workflow",
+            ),
+            (
+                "bad-checksum",
+                "[release]\narchive_checksum = \"sha512\"\n",
+                "must be `sha256`",
+            ),
+            (
+                "bad-retention",
+                "[release]\narchive_retention_days = 0\n",
+                "must be 1-90",
+            ),
+            (
+                "bad-member",
+                "[release]\narchive_members = [\"sub/dir\"]\n",
+                "portable file names",
+            ),
+            (
+                "nameless-credential",
+                "[release]\n[[release.credential]]\nsetup = \"mount\"\nteardown = \"unmount\"\n",
+                "needs `name`",
+            ),
+            (
+                "setup-without-teardown",
+                "[release]\n[[release.credential]]\nname = \"store\"\nsetup = \"mount\"\n",
+                "needs `teardown`",
+            ),
+        ] {
+            let error = must_fail(
+                config_for(&format!(
+                    "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n{release}"
+                ))
+                .validate(&unit_ids, &[], &BTreeSet::new()),
+                name,
+            );
+            assert!(
+                error.to_string().contains(expected),
+                "`{name}` must name the problem: {error}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A complete binding contract parses and validates: producer, modes,
+    /// archive members, retention, and paired credentials.
+    #[test]
+    fn release_bindings_parse_and_validate() {
+        let root = scanned_root("release-bindings-parse");
+        let shape = shape_for(&root);
+        let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
+        let parsed = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [release]\nenabled = true\nkind = \"rust-binary\"\npackage = \"example\"\n\
+             binary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n\
+             producer_workflow = \"CI\"\nproducer_conclusion = \"success\"\n\
+             modes = [\"validate\", \"build\", \"rehearse\"]\n\
+             archive_members = [\"example-role\"]\narchive_checksum = \"sha256\"\n\
+             archive_retention_days = 14\n\
+             [[release.credential]]\nname = \"store\"\nsetup = \"mount\"\nteardown = \"unmount\"\n",
+        );
+        must(
+            parsed.validate(&unit_ids, &[], &BTreeSet::new()),
+            "complete bindings must validate",
+        );
+        let release = parsed.release();
+        assert_eq!(release.producer_workflow(), Some("CI"));
+        assert_eq!(
+            release.modes(),
+            &[
+                "validate".to_owned(),
+                "build".to_owned(),
+                "rehearse".to_owned()
+            ]
+        );
+        assert_eq!(release.archive_members(), &["example-role".to_owned()]);
+        assert_eq!(release.archive_retention_days(), Some(14));
+        assert_eq!(release.credentials().len(), 1);
+        assert_eq!(release.credentials()[0].teardown(), Some("unmount"));
+        let _ = fs::remove_dir_all(root);
     }
 }
