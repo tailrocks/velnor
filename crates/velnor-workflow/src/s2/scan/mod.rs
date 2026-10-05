@@ -6,6 +6,7 @@
 //! renderer consumes the shape; repository-specific estate profiles are
 //! applied by the caller, never here.
 
+pub(crate) mod action;
 mod docker;
 mod docs;
 pub(crate) mod file_walk;
@@ -67,6 +68,7 @@ pub(crate) fn scan_shape(
     // Detector order is part of the contract: ids are sorted stably below, so
     // the first detector to claim an id keeps the un-suffixed form.
     file_walk::detect(&context, &mut shape);
+    action::detect(&context, &mut shape)?;
     rust::detect(&context, &mut shape)?;
     signals::detect(&context, &mut shape);
     gradle::detect(&context, &mut shape)?;
@@ -80,6 +82,17 @@ pub(crate) fn scan_shape(
     shape.finalize();
     shape.files = files;
     Ok(shape)
+}
+
+#[cfg(test)]
+pub(crate) fn scan_shape_for_tests(
+    root: &Path,
+    providers: &ProviderSet,
+    default_branch: &str,
+    exclude: &[String],
+) -> Result<RepositoryShape, GeneratorError> {
+    let apple = rust::AppleNativePolicy::default();
+    scan_shape(root, providers, default_branch, exclude, &apple)
 }
 
 /// Join Swift local-path binaries against `BoltFFI` Apple producers, from
@@ -448,7 +461,7 @@ fn detection_contract(kind: UnitKind) -> (Platform, TrustReq, Capabilities) {
                 ..Capabilities::default()
             },
         ),
-        UnitKind::OpenTofu | UnitKind::Homebrew | UnitKind::Docs => {
+        UnitKind::GithubAction | UnitKind::OpenTofu | UnitKind::Homebrew | UnitKind::Docs => {
             (Platform::LinuxX64, trust, Capabilities::default())
         }
     }

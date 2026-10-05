@@ -67,6 +67,8 @@ pub(crate) const OPENTOFU: &str = "opentofu-pipeline";
 pub(crate) const DOCKER_IMAGE: &str = "docker-image-pipeline";
 pub(crate) const HOMEBREW_TAP: &str = "homebrew-tap-pipeline";
 pub(crate) const DOCS_LINT: &str = "docs-lint-pipeline";
+/// The generic GitHub Action metadata and entrypoint verification pipeline.
+pub(crate) const GITHUB_ACTION: &str = "github-action-pipeline";
 /// The `docs.yml` documentation-site pipeline: build, link checks, spelling,
 /// Pages deployment, and post-deployment verification from one `[docs]`
 /// consumer contract.
@@ -1010,6 +1012,7 @@ pub(crate) fn pipeline_id(kind: UnitKind) -> &'static str {
         UnitKind::Docker => DOCKER_IMAGE,
         UnitKind::Homebrew => HOMEBREW_TAP,
         UnitKind::Docs => DOCS_LINT,
+        UnitKind::GithubAction => GITHUB_ACTION,
     }
 }
 
@@ -1031,6 +1034,7 @@ pub(crate) fn registry() -> Vec<Box<dyn Primitive>> {
         Box::new(pipeline::DockerImage),
         Box::new(pipeline::HomebrewTap),
         Box::new(pipeline::DocsLint),
+        Box::new(pipeline::GithubAction),
         Box::new(release::Release),
         Box::new(release::Preview),
         Box::new(release::Maintenance),
