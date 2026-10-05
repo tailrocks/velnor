@@ -72,8 +72,9 @@ mod tests {
 
     use super::{
         automatic_event_selects_lane, dispatch_choice_selects_lane, dispatch_lane_expression,
-        lane_input, unit_owns_workflow_crate, AutomaticEvent, DispatchChoice::*, GraphNode, Pins,
-        RunnerMode, Unit, UnitKind, VelnorPullRequest, VelnorRustNeeds, WorkflowIr, WorkflowKind,
+        lane_input, unit_owns_workflow_crate, AutomaticEvent, DispatchChoice::*, GraphNode,
+        LaneAdmission, Pins, RunnerMode, Unit, UnitKind, VelnorPullRequest, VelnorRustNeeds,
+        WorkflowIr, WorkflowKind,
     };
     use crate::{
         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
@@ -457,6 +458,95 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn lane_facts_carry_dependency_closure_and_admission() {
+        let mut leaf = rust_unit("rust-leaf", "crates/leaf");
+        leaf.depends_on = vec!["rust-root".to_owned()];
+        let mut trusted = rust_unit("rust-trusted-leaf", "crates/trusted");
+        trusted.requires_trusted = true;
+        let ir = owner_test_ir(
+            "example/fixture",
+            vec![
+                rust_unit("rust-root", "crates/root"),
+                leaf.clone(),
+                trusted.clone(),
+            ],
+        );
+        for (unit, lane, admission) in [
+            (&leaf, RunnerMode::Github, LaneAdmission::Github),
+            (&leaf, RunnerMode::Velnor, LaneAdmission::Velnor),
+            (&trusted, RunnerMode::Velnor, LaneAdmission::VelnorTrusted),
+        ] {
+            let facts = ir.unit_lane_facts(unit, &ir.default_unit_contract(unit, true), lane);
+            assert_eq!(facts.unit_dependencies, unit.depends_on, "{lane:?}");
+            assert_eq!(facts.unit_admission, admission, "{lane:?}");
+            let values = facts.input_values();
+            assert!(
+                values
+                    .iter()
+                    .any(|(name, value)| *name == lane_input::UNIT_ADMISSION
+                        && value == admission.info_id()),
+                "every caller passes its admission: {values:?}"
+            );
+        }
+        let contract = ir.default_unit_contract(&leaf, true);
+        let facts = ir.unit_lane_facts(&leaf, &contract, RunnerMode::Github);
+        assert!(
+            facts.input_values().iter().any(|(name, value)| {
+                *name == lane_input::UNIT_DEPENDENCIES && value == "rust-root"
+            }),
+            "a unit with dependencies passes them: {:?}",
+            facts.input_values()
+        );
+        let root = &ir.units[0];
+        let facts = ir.unit_lane_facts(
+            root,
+            &ir.default_unit_contract(root, true),
+            RunnerMode::Github,
+        );
+        assert!(
+            facts
+                .input_values()
+                .iter()
+                .all(|(name, _)| *name != lane_input::UNIT_DEPENDENCIES),
+            "a unit without dependencies passes no closure: {:?}",
+            facts.input_values()
+        );
+    }
+
+    #[test]
+    fn collapsed_callee_records_dependencies_from_inputs() {
+        let mut leaf = rust_unit("rust-leaf", "crates/leaf");
+        leaf.depends_on = vec!["rust-root".to_owned()];
+        let ir = owner_test_ir(
+            "example/fixture",
+            vec![rust_unit("rust-root", "crates/root"), leaf],
+        );
+        let callee = must_render_kind(&ir);
+        for declaration in [
+            "      unit_dependencies:\n        required: false\n        type: string\n        default: \"\"\n",
+            "      unit_admission:\n        required: false\n        type: string\n        default: \"\"\n",
+        ] {
+            assert!(callee.contains(declaration), "{callee}");
+        }
+        assert!(
+            callee.contains("- name: Record unit dependencies\n"),
+            "{callee}"
+        );
+        assert!(
+            callee.contains("UNIT_DEPENDENCIES: ${{ inputs.unit_dependencies }}"),
+            "{callee}"
+        );
+        assert!(
+            callee.contains("UNIT_ADMISSION: ${{ inputs.unit_admission }}"),
+            "{callee}"
+        );
+        assert!(
+            !callee.contains("rust-root"),
+            "the callee reads the closure through inputs, never as a literal: {callee}"
+        );
     }
 
     #[test]
@@ -2438,9 +2528,10 @@ fn dispatch_lane_expression(lane: RunnerMode, include_omitted: bool) -> String {
 /// trusted runner are all just values of that predicate, never special cases
 /// of the gate. [`crate::validate_lane_admission_single_source`] checks the
 /// rendered tree for drift between the three surfaces.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LaneAdmission {
     /// The GitHub-hosted lane.
+    #[default]
     Github,
     /// The Velnor lane on the base runner labels.
     Velnor,
@@ -2474,6 +2565,16 @@ impl LaneAdmission {
             Self::Github => "LANE_ADMITTED_GITHUB",
             Self::Velnor => "LANE_ADMITTED_VELNOR",
             Self::VelnorTrusted => "LANE_ADMITTED_VELNOR_TRUSTED",
+        }
+    }
+
+    /// The dependency-info input value naming this class: what the nested
+    /// job records beside the unit's dependency closure.
+    pub(crate) fn info_id(self) -> &'static str {
+        match self {
+            Self::Github => "github",
+            Self::Velnor => "velnor",
+            Self::VelnorTrusted => "velnor-trust-gated",
         }
     }
 }
@@ -2726,6 +2827,11 @@ pub(crate) mod lane_input {
     /// policy run consumes. Only the generator crate's owning Rust unit sets
     /// it, on the hosted lane, in the owner repository, on pull requests.
     pub(crate) const CANDIDATE_PUBLISH: &str = "candidate_publish";
+    /// Comma-separated `depends_on` ids the nested job records; empty when
+    /// the unit depends on nothing.
+    pub(crate) const UNIT_DEPENDENCIES: &str = "unit_dependencies";
+    /// The lane admission class id the nested job records.
+    pub(crate) const UNIT_ADMISSION: &str = "unit_admission";
 
     /// Every per-unit input, in declaration order.
     pub(crate) const ALL: &[&str] = &[
@@ -2748,6 +2854,8 @@ pub(crate) mod lane_input {
         HOST_WARM_LAYERS,
         POLICY_RUNTIME,
         CANDIDATE_PUBLISH,
+        UNIT_DEPENDENCIES,
+        UNIT_ADMISSION,
     ];
 
     /// The inputs declared as `type: boolean`. Callers pass them unquoted so
@@ -2832,6 +2940,8 @@ pub(crate) struct LaneStepFacts {
     pub(crate) host_warm_layers: Vec<&'static str>,
     pub(crate) policy_runtime: bool,
     pub(crate) candidate_publish: bool,
+    pub(crate) unit_dependencies: Vec<String>,
+    pub(crate) unit_admission: LaneAdmission,
 }
 
 impl LaneStepFacts {
@@ -2898,6 +3008,16 @@ impl LaneStepFacts {
         if self.candidate_publish {
             values.push((lane_input::CANDIDATE_PUBLISH, "true".to_owned()));
         }
+        if !self.unit_dependencies.is_empty() {
+            values.push((
+                lane_input::UNIT_DEPENDENCIES,
+                self.unit_dependencies.join(","),
+            ));
+        }
+        values.push((
+            lane_input::UNIT_ADMISSION,
+            self.unit_admission.info_id().to_owned(),
+        ));
         values
     }
 }
@@ -4038,6 +4158,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}",
             self.pins.checkout
         );
+        render_unit_dependency_info_step(output);
         if lane == RunnerMode::Velnor {
             render_velnor_runner_identity_step(output);
         }
@@ -4158,6 +4279,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 && !self.repository.is_empty()
                 && self.repository == crate::workflow_setup_action_repository()
                 && unit_owns_workflow_crate(unit),
+            unit_dependencies: unit.depends_on.clone(),
+            unit_admission: LaneAdmission::for_unit(lane, unit),
         }
     }
 
@@ -5944,6 +6067,17 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             self.runner_for(self.control_plane_lane()),
         );
     }
+}
+
+/// The nested job's dependency record: the caller's unit, its dependency
+/// closure, and its lane admission class, as the caller passed them through
+/// `workflow_call` inputs. The step reads inputs only, so the callee stays
+/// O(1) in the kind's units, and it carries no gate: the record is emitted
+/// on every run of the job.
+pub(crate) fn render_unit_dependency_info_step(output: &mut String) {
+    output.push_str(
+        "      - name: Record unit dependencies\n        env:\n          UNIT_ID: ${{ inputs.unit }}\n          UNIT_DEPENDENCIES: ${{ inputs.unit_dependencies }}\n          UNIT_ADMISSION: ${{ inputs.unit_admission }}\n          UNIT_LANE: ${{ inputs.lane }}\n        run: |\n          {\n            echo '## Unit dependencies'\n            echo\n            echo \"- Unit: $UNIT_ID\"\n            echo \"- Lane: $UNIT_LANE\"\n            echo \"- Admission: $UNIT_ADMISSION\"\n            if [[ -z \"$UNIT_DEPENDENCIES\" ]]; then\n              echo '- Dependencies: none'\n            else\n              echo \"- Dependencies: $UNIT_DEPENDENCIES\"\n            fi\n          } >> \"$GITHUB_STEP_SUMMARY\"\n",
+    );
 }
 
 pub(crate) fn render_velnor_runner_identity_step(output: &mut String) {

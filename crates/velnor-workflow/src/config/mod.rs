@@ -103,6 +103,8 @@ pub(crate) struct RepoGenerationConfig {
     release: ReleaseSection,
     #[serde(default)]
     renovate: RenovateSection,
+    #[serde(default, skip_serializing_if = "MaintenanceSection::is_empty")]
+    maintenance: MaintenanceSection,
     #[serde(default)]
     units: Vec<UnitSection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -264,10 +266,62 @@ pub(crate) struct RenovateSection {
     enabled: Option<bool>,
     reason: Option<String>,
     schedule: Option<String>,
+    /// Additional cron schedules beside `schedule`, each a 5-field cron.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    schedules: Vec<String>,
     token: Option<String>,
     config: Option<String>,
     validate: Option<bool>,
     cache: Option<bool>,
+    /// Repository targets (`owner/repository`) the writer renovates instead
+    /// of autodiscovering. Empty keeps autodiscovery.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    repositories: Vec<String>,
+    /// Secret holding the JSON `hostRules` array Renovate authenticates
+    /// private registries with. A name, never the credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_rules_secret: Option<String>,
+    /// The git author Renovate commits as (`Name <email>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+    /// Append a `Signed-off-by` trailer for `author` to Renovate commits.
+    /// Requires `author`; the DCO check the repository gates on stays the
+    /// enforcement, this only makes the writer produce signed-off commits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signoff: Option<bool>,
+    /// Regex allowlist for Renovate post-upgrade commands
+    /// (`allowedCommands`): execution allowances for self-hosted runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    allowed_commands: Vec<String>,
+}
+
+/// Cache-hygiene maintenance overrides (`[maintenance]`). Generator-only:
+/// the rendered `maintenance.yml` carries the schedule, the producer gate,
+/// and the per-run delete bound, so the workflow needs no inputs of its own.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MaintenanceSection {
+    /// Cron schedule of the retention sweep. Absent keeps `31 3 * * *`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    schedule: Option<String>,
+    /// Producer workflows whose in-progress runs defer retention. Absent
+    /// keeps `ci-main.yml` and `nightly.yml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    producers: Option<Vec<String>>,
+    /// Per-run bound on cache deletes in any one maintenance job. A run that
+    /// reaches it fails with "rerun maintenance" instead of an unbounded
+    /// sweep. Absent keeps 500.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_deletes: Option<u32>,
+}
+
+impl MaintenanceSection {
+    /// Whether the repository declared any maintenance override. The whole
+    /// table is skipped in the canonical form when empty, so repositories
+    /// that do not use it keep their recorded config digest.
+    fn is_empty(&self) -> bool {
+        self.schedule.is_none() && self.producers.is_none() && self.max_deletes.is_none()
+    }
 }
 
 /// The release contract a repository declares for itself. `kind` names the
@@ -427,6 +481,10 @@ impl RenovateSection {
         self.schedule.as_deref()
     }
 
+    pub(crate) fn schedules(&self) -> &[String] {
+        &self.schedules
+    }
+
     pub(crate) fn token(&self) -> Option<&str> {
         self.token.as_deref()
     }
@@ -441,6 +499,40 @@ impl RenovateSection {
 
     pub(crate) fn cache(&self) -> Option<bool> {
         self.cache
+    }
+
+    pub(crate) fn repositories(&self) -> &[String] {
+        &self.repositories
+    }
+
+    pub(crate) fn host_rules_secret(&self) -> Option<&str> {
+        self.host_rules_secret.as_deref()
+    }
+
+    pub(crate) fn author(&self) -> Option<&str> {
+        self.author.as_deref()
+    }
+
+    pub(crate) fn signoff(&self) -> Option<bool> {
+        self.signoff
+    }
+
+    pub(crate) fn allowed_commands(&self) -> &[String] {
+        &self.allowed_commands
+    }
+}
+
+impl MaintenanceSection {
+    pub(crate) fn schedule(&self) -> Option<&str> {
+        self.schedule.as_deref()
+    }
+
+    pub(crate) fn producers(&self) -> Option<&[String]> {
+        self.producers.as_deref()
+    }
+
+    pub(crate) fn max_deletes(&self) -> Option<u32> {
+        self.max_deletes
     }
 }
 
@@ -803,6 +895,11 @@ impl RepoGenerationConfig {
         &self.renovate
     }
 
+    /// The declared maintenance overrides.
+    pub(crate) fn maintenance(&self) -> &MaintenanceSection {
+        &self.maintenance
+    }
+
     /// The declared unit rows, in the order the config declares them.
     pub(crate) fn units(&self) -> &[UnitSection] {
         &self.units
@@ -832,6 +929,16 @@ impl RepoGenerationConfig {
     /// Whether the generated CI aggregate should be required.
     pub(crate) fn ci_required(&self) -> Option<bool> {
         self.policy.ci_required
+    }
+
+    /// Whether every commit must carry a `Signed-off-by` trailer.
+    pub(crate) fn dco_required(&self) -> Option<bool> {
+        self.policy.dco_required
+    }
+
+    /// Admission rule for actions that are not pinned to a full commit SHA.
+    pub(crate) fn action_pin_admission(&self) -> Option<&str> {
+        self.policy.action_pin_admission.as_deref()
     }
 
     /// Status-check contexts the repository ruleset gates on that `ci-pr.yml`
@@ -942,6 +1049,8 @@ impl RepoGenerationConfig {
         validate_static_files(&self.static_files)?;
         self.validate_release()?;
         self.validate_renovate()?;
+        self.validate_maintenance()?;
+        self.validate_policy()?;
         Ok(())
     }
 
@@ -1055,6 +1164,20 @@ fn validate_excludes(exclude: &[String]) -> Result<(), GeneratorError> {
         if globset::Glob::new(pattern).is_err() {
             return Err(GeneratorError::usage(format!(
                 "[scan] exclude is not a valid glob: {pattern}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// A repeated list entry is a typo-class error: the render would carry it
+/// once, so the declaration must name it once.
+fn reject_duplicates(owner: &str, values: &[String]) -> Result<(), GeneratorError> {
+    let mut seen = BTreeSet::new();
+    for value in values {
+        if !seen.insert(value) {
+            return Err(GeneratorError::usage(format!(
+                "{owner} names `{value}` twice; list each entry once"
             )));
         }
     }
@@ -1572,10 +1695,26 @@ const RELEASE_KINDS: &[&str] = &[
 ];
 
 pub(crate) fn validate_renovate_token_name(token: &str) -> Result<(), GeneratorError> {
+    validate_secret_name("[renovate] token", token, "GH_RENOVATE_TOKEN")
+}
+
+pub(crate) fn validate_renovate_host_rules_secret(secret: &str) -> Result<(), GeneratorError> {
+    validate_secret_name(
+        "[renovate] host_rules_secret",
+        secret,
+        "RENOVATE_HOST_RULES_JSON",
+    )
+}
+
+/// A credential reference: an uppercase secret name, never `GITHUB_TOKEN`
+/// (a Renovate PAT needs repository write scope the automatic token must
+/// not lend) and never an empty or lowercase spelling a `secrets.` lookup
+/// would miss.
+fn validate_secret_name(owner: &str, token: &str, example: &str) -> Result<(), GeneratorError> {
     if token == "GITHUB_TOKEN" {
-        return Err(GeneratorError::usage(
-            "[renovate] token must name a dedicated PAT secret, not GITHUB_TOKEN",
-        ));
+        return Err(GeneratorError::usage(format!(
+            "{owner} must name a dedicated PAT secret, not GITHUB_TOKEN"
+        )));
     }
     let valid = !token.is_empty()
         && token.chars().all(|character| {
@@ -1587,17 +1726,113 @@ pub(crate) fn validate_renovate_token_name(token: &str) -> Result<(), GeneratorE
             .is_some_and(|character| character.is_ascii_uppercase());
     if !valid {
         return Err(GeneratorError::usage(format!(
-            "[renovate] token must be an uppercase secret name such as GH_RENOVATE_TOKEN, found `{token}`"
+            "{owner} must be an uppercase secret name such as {example}, found `{token}`"
         )));
     }
     Ok(())
 }
 
 pub(crate) fn validate_renovate_cron(schedule: &str) -> Result<(), GeneratorError> {
+    validate_cron_schedule("[renovate] schedule", schedule)
+}
+
+pub(crate) fn validate_maintenance_cron(schedule: &str) -> Result<(), GeneratorError> {
+    validate_cron_schedule("[maintenance] schedule", schedule)
+}
+
+fn validate_cron_schedule(owner: &str, schedule: &str) -> Result<(), GeneratorError> {
     let fields = schedule.split_whitespace().collect::<Vec<_>>();
     if fields.len() != 5 {
         return Err(GeneratorError::usage(format!(
-            "[renovate] schedule must be a 5-field cron expression, found `{schedule}`"
+            "{owner} must be a 5-field cron expression, found `{schedule}`"
+        )));
+    }
+    Ok(())
+}
+
+/// One `[renovate] repositories` target: an `owner/repository` slug with the
+/// same GitHub-name shape the generator's own repository slug carries.
+pub(crate) fn validate_renovate_repository_target(repository: &str) -> Result<(), GeneratorError> {
+    let valid = repository.split_once('/').is_some_and(|(owner, name)| {
+        !repository.contains("..")
+            && [owner, name].iter().all(|segment| {
+                !segment.is_empty()
+                    && segment.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || matches!(character, '-' | '.' | '_')
+                    })
+                    && !segment.starts_with('.')
+                    && !Path::new(segment)
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("git"))
+            })
+    });
+    if !valid {
+        return Err(GeneratorError::usage(format!(
+            "[renovate] repositories must be `owner/repository` slugs, found `{repository}`"
+        )));
+    }
+    Ok(())
+}
+
+/// The `[renovate] author` Renovate commits as: a display name plus an
+/// angle-bracket email, the shape `gitAuthor` and the DCO trailer share.
+pub(crate) fn validate_renovate_git_author(author: &str) -> Result<(), GeneratorError> {
+    let valid = author
+        .rsplit_once('<')
+        .and_then(|(name, email)| email.strip_suffix('>').map(|email| (name, email)))
+        .is_some_and(|(name, email)| {
+            !name.trim().is_empty()
+                && !name.contains(['\n', '\r'])
+                && !email.contains(['\n', '\r', ' ', '<', '>'])
+                && email.split_once('@').is_some_and(|(user, host)| {
+                    !user.is_empty() && !host.is_empty() && host.contains('.')
+                })
+        });
+    if !valid {
+        return Err(GeneratorError::usage(format!(
+            "[renovate] author must be `Name <email>`, found `{author}`"
+        )));
+    }
+    Ok(())
+}
+
+/// One `[renovate] allowed_commands` entry: a single-line regex the rendered
+/// `RENOVATE_ALLOWED_COMMANDS` JSON array carries verbatim.
+pub(crate) fn validate_renovate_allowed_command(command: &str) -> Result<(), GeneratorError> {
+    if command.is_empty() || command.contains(['\n', '\r', '\0']) {
+        return Err(GeneratorError::usage(format!(
+            "[renovate] allowed_commands must be single-line command patterns, found `{command}`"
+        )));
+    }
+    Ok(())
+}
+
+/// One `[maintenance] producers` entry: a bare `.yml` workflow basename the
+/// retention gate watches, never a path.
+pub(crate) fn validate_maintenance_producer(producer: &str) -> Result<(), GeneratorError> {
+    let valid = producer.len() > ".yml".len()
+        && Path::new(producer)
+            .extension()
+            .is_some_and(|extension| extension == "yml")
+        && !producer.contains(['/', '\\'])
+        && !producer.contains("..")
+        && Path::new(producer)
+            .file_stem()
+            .is_some_and(|stem| !stem.is_empty());
+    if !valid {
+        return Err(GeneratorError::usage(format!(
+            "[maintenance] producers must be bare `.yml` workflow file names, found `{producer}`"
+        )));
+    }
+    Ok(())
+}
+
+/// The `[maintenance] max_deletes` per-run bound: at least one delete, and
+/// small enough that one run cannot sweep the account in a single pass.
+pub(crate) fn validate_maintenance_max_deletes(max_deletes: u32) -> Result<(), GeneratorError> {
+    if !(1..=5000).contains(&max_deletes) {
+        return Err(GeneratorError::usage(format!(
+            "[maintenance] max_deletes must be between 1 and 5000, found `{max_deletes}`"
         )));
     }
     Ok(())
@@ -1681,8 +1916,88 @@ impl RepoGenerationConfig {
         if let Some(schedule) = renovate.schedule.as_deref() {
             validate_renovate_cron(schedule)?;
         }
+        for schedule in &renovate.schedules {
+            validate_renovate_cron(schedule)?;
+        }
+        reject_duplicates("[renovate] schedules", &renovate.schedules)?;
+        if let Some(primary) = renovate.schedule.as_deref()
+            && renovate.schedules.iter().any(|extra| extra == primary)
+        {
+            return Err(GeneratorError::usage(format!(
+                "[renovate] schedules repeats the primary schedule `{primary}`; list each cron once"
+            )));
+        }
         if let Some(config) = renovate.config.as_deref() {
             validate_renovate_config_path(config)?;
+        }
+        for repository in &renovate.repositories {
+            validate_renovate_repository_target(repository)?;
+        }
+        reject_duplicates("[renovate] repositories", &renovate.repositories)?;
+        if let Some(secret) = renovate.host_rules_secret.as_deref() {
+            validate_renovate_host_rules_secret(secret)?;
+        }
+        if let Some(author) = renovate.author.as_deref() {
+            validate_renovate_git_author(author)?;
+        }
+        if renovate.signoff == Some(true) && renovate.author.is_none() {
+            return Err(GeneratorError::usage(
+                "[renovate] signoff = true requires `author`: the Signed-off-by trailer names the author Renovate commits as",
+            ));
+        }
+        for command in &renovate.allowed_commands {
+            validate_renovate_allowed_command(command)?;
+        }
+        reject_duplicates("[renovate] allowed_commands", &renovate.allowed_commands)?;
+        Ok(())
+    }
+
+    /// The `[maintenance]` overrides: a valid cron, producer basenames, and
+    /// a delete bound that keeps one run's sweep finite.
+    fn validate_maintenance(&self) -> Result<(), GeneratorError> {
+        let maintenance = &self.maintenance;
+        if let Some(schedule) = maintenance.schedule.as_deref() {
+            validate_maintenance_cron(schedule)?;
+        }
+        if let Some(producers) = maintenance.producers.as_deref() {
+            if producers.is_empty() {
+                return Err(GeneratorError::usage(
+                    "[maintenance] producers must name at least one producer workflow",
+                ));
+            }
+            for producer in producers {
+                validate_maintenance_producer(producer)?;
+            }
+            reject_duplicates("[maintenance] producers", producers)?;
+        }
+        if let Some(max_deletes) = maintenance.max_deletes {
+            validate_maintenance_max_deletes(max_deletes)?;
+        }
+        Ok(())
+    }
+
+    /// The `[policy]` compliance contract: the only implemented action-pin
+    /// admission is the reviewed allowlist — full-SHA pins and reviewed
+    /// local paths, exactly what the validator's `action-pins` rule admits —
+    /// and a required DCO sign-off needs the external DCO check that
+    /// enforces it.
+    fn validate_policy(&self) -> Result<(), GeneratorError> {
+        if let Some(admission) = self.action_pin_admission()
+            && admission != "reviewed-allowlist"
+        {
+            return Err(GeneratorError::usage(format!(
+                "[policy] action_pin_admission must be `reviewed-allowlist`, found `{admission}`: the validator admits only full-SHA pins and reviewed local paths"
+            )));
+        }
+        if self.dco_required() == Some(true)
+            && !self
+                .ruleset_external_status_checks()
+                .iter()
+                .any(|context| context == "DCO")
+        {
+            return Err(GeneratorError::usage(
+                "[policy] dco_required = true requires `DCO` in ruleset_external_status_checks: sign-off is enforced by the external DCO check, and without it the requirement is unenforced",
+            ));
         }
         Ok(())
     }
@@ -1906,6 +2221,7 @@ mod tests {
              [policy]\n\
              dco_required = true\n\
              ci_required = true\n\
+             ruleset_external_status_checks = [\"DCO\"]\n\
              action_pin_admission = \"reviewed-allowlist\"\n\
              actionlint_config_variables_null = true\n\
              \n\
@@ -2769,5 +3085,309 @@ mod tests {
             "unknown renovate field must fail",
         );
         assert!(error.contains("unknown field"), "{error}");
+    }
+
+    /// The smallest config that enables Renovate: trusted Velnor runners plus
+    /// the writer declare row. Tests append contract fields to `[renovate]`.
+    const RENOVATE_CONTRACT_CONFIG: &str = "schema = 1\n\n\
+         [generator]\n\
+         repository = \"example/fixture\"\n\n\
+         [workflow]\n\
+         runners = \"velnor\"\n\
+         velnor_labels = [\"self-hosted\", \"example-lane\"]\n\
+         velnor_trusted_label = \"example-trusted\"\n\
+         velnor_trusted_runner_available = true\n\n\
+         [renovate]\n\
+         enabled = true\n\
+         reason = \"Self-hosted Renovate for repository dependencies.\"\n\n\
+         [[declare]]\n\
+         primitive = \"renovate\"\n\
+         file = \"renovate.yml\"\n";
+
+    fn validate_renovate_contract(extra: &str) -> Result<RepoGenerationConfig, GeneratorError> {
+        let text = RENOVATE_CONTRACT_CONFIG.replace(
+            "reason = \"Self-hosted Renovate for repository dependencies.\"\n",
+            &format!("reason = \"Self-hosted Renovate for repository dependencies.\"\n{extra}"),
+        );
+        let config = config_for(&text);
+        config.validate(&[], &[], &BTreeSet::new()).map(|()| config)
+    }
+
+    #[test]
+    fn renovate_repository_targets_must_be_slugs() {
+        for repository in ["example/fixture", "Example-Name.Slug_1/repo.name-2", "a/b"] {
+            must(
+                validate_renovate_repository_target(repository),
+                "valid repository target",
+            );
+        }
+        for repository in [
+            "noslash",
+            "/empty-owner",
+            "empty-name/",
+            "three/slashes/here",
+            "a b/c",
+            "a/../c",
+            ".hidden/repo",
+            "owner/repo.git",
+        ] {
+            let error = must_fail(
+                validate_renovate_repository_target(repository),
+                "invalid repository target must fail",
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("must be `owner/repository` slugs"),
+                "{error}"
+            );
+        }
+        must(
+            validate_renovate_contract("repositories = [\"example/one\", \"example/two\"]\n"),
+            "declared repository targets",
+        );
+        let error = must_fail(
+            validate_renovate_contract("repositories = [\"bogus\"]\n"),
+            "a non-slug repository target must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("must be `owner/repository` slugs"),
+            "{error}"
+        );
+        let error = must_fail(
+            validate_renovate_contract("repositories = [\"example/one\", \"example/one\"]\n"),
+            "a duplicated repository target must fail",
+        );
+        assert!(
+            error.to_string().contains("names `example/one` twice"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn renovate_git_author_must_name_an_email() {
+        for author in ["Renovate Bot <bot@example.com>", "R <r@example.co>"] {
+            must(validate_renovate_git_author(author), "valid git author");
+        }
+        for author in [
+            "no-email",
+            "Renovate Bot",
+            "Renovate Bot <>",
+            "<bot@example.com>",
+            "Renovate Bot <not-an-email>",
+            "Renovate Bot <bot@host>",
+            "Renovate Bot <bot @example.com>",
+            "Renovate\nBot <bot@example.com>",
+        ] {
+            let error = must_fail(
+                validate_renovate_git_author(author),
+                "invalid git author must fail",
+            );
+            assert!(
+                error.to_string().contains("must be `Name <email>`"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn renovate_signoff_requires_an_author() {
+        let error = must_fail(
+            validate_renovate_contract("signoff = true\n"),
+            "signoff without an author must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("signoff = true requires `author`"),
+            "{error}"
+        );
+        must(
+            validate_renovate_contract(
+                "author = \"Renovate Bot <bot@example.com>\"\nsignoff = true\n",
+            ),
+            "signoff with an author",
+        );
+    }
+
+    #[test]
+    fn renovate_allowed_commands_must_be_single_line_patterns() {
+        for command in ["^npm install --package-lock-only$", "^echo "] {
+            must(
+                validate_renovate_allowed_command(command),
+                "valid allowed command",
+            );
+        }
+        for command in ["", "first\nsecond", "null\0byte"] {
+            let error = must_fail(
+                validate_renovate_allowed_command(command),
+                "invalid allowed command must fail",
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("must be single-line command patterns"),
+                "{error}"
+            );
+        }
+        let error = must_fail(
+            validate_renovate_contract("allowed_commands = [\"^echo \", \"^echo \"]\n"),
+            "a duplicated allowed command must fail",
+        );
+        assert!(error.to_string().contains("twice"), "{error}");
+    }
+
+    #[test]
+    fn renovate_extra_schedules_must_be_unique_crons() {
+        must(
+            validate_renovate_contract("schedules = [\"0 18 * * *\"]\n"),
+            "a valid extra schedule",
+        );
+        let error = must_fail(
+            validate_renovate_contract("schedules = [\"hourly\"]\n"),
+            "a non-cron extra schedule must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("must be a 5-field cron expression"),
+            "{error}"
+        );
+        let error = must_fail(
+            validate_renovate_contract("schedules = [\"0 18 * * *\", \"0 18 * * *\"]\n"),
+            "a duplicated extra schedule must fail",
+        );
+        assert!(error.to_string().contains("twice"), "{error}");
+        let error = must_fail(
+            validate_renovate_contract("schedule = \"0 7 * * *\"\nschedules = [\"0 7 * * *\"]\n"),
+            "an extra schedule repeating the primary must fail",
+        );
+        assert!(
+            error.to_string().contains("repeats the primary schedule"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn renovate_host_rules_secret_must_be_a_secret_name() {
+        must(
+            validate_renovate_contract("host_rules_secret = \"RENOVATE_HOST_RULES_JSON\"\n"),
+            "a valid host-rules secret name",
+        );
+        for secret in ["GITHUB_TOKEN", "lowercase", ""] {
+            let error = must_fail(
+                validate_renovate_contract(&format!("host_rules_secret = \"{secret}\"\n")),
+                "an invalid host-rules secret name must fail",
+            );
+            assert!(
+                error.to_string().contains("[renovate] host_rules_secret"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn maintenance_overrides_must_be_shaped() {
+        let valid = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [maintenance]\nschedule = \"17 4 * * *\"\nproducers = [\"ci-main.yml\"]\nmax_deletes = 50\n",
+        );
+        must(
+            valid.validate(&[], &[], &BTreeSet::new()),
+            "valid maintenance overrides",
+        );
+        for (name, body) in [
+            ("cron", "schedule = \"hourly\"\n"),
+            (
+                "empty producers",
+                "schedule = \"17 4 * * *\"\nproducers = []\n",
+            ),
+            ("producer path", "producers = [\"../ci-main.yml\"]\n"),
+            ("producer extension", "producers = [\"ci-main.yaml\"]\n"),
+            ("producer bare", "producers = [\"ci-main\"]\n"),
+            (
+                "duplicate producers",
+                "producers = [\"ci-main.yml\", \"ci-main.yml\"]\n",
+            ),
+            ("zero bound", "max_deletes = 0\n"),
+            ("oversized bound", "max_deletes = 5001\n"),
+        ] {
+            let config = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[maintenance]\n{body}"
+            ));
+            let error = must_fail(
+                config.validate(&[], &[], &BTreeSet::new()),
+                "invalid maintenance override must fail",
+            );
+            assert!(
+                error.to_string().contains("[maintenance]"),
+                "{name}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn maintenance_unknown_field_fails_closed() {
+        let error = must_some_error(
+            toml::from_str::<RepoGenerationConfig>(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [maintenance]\nschedule = \"17 4 * * *\"\nunknown = true\n",
+            )
+            .err(),
+            "unknown maintenance field must fail",
+        );
+        assert!(error.contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn policy_dco_requires_the_external_dco_check() {
+        let enforced = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [policy]\ndco_required = true\nruleset_external_status_checks = [\"DCO\"]\n",
+        );
+        must(
+            enforced.validate(&[], &[], &BTreeSet::new()),
+            "DCO required with the DCO check",
+        );
+        let unenforced = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [policy]\ndco_required = true\n",
+        );
+        let error = must_fail(
+            unenforced.validate(&[], &[], &BTreeSet::new()),
+            "DCO required without the DCO check must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("requires `DCO` in ruleset_external_status_checks"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn policy_action_pin_admission_names_the_reviewed_allowlist() {
+        let admitted = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [policy]\naction_pin_admission = \"reviewed-allowlist\"\n",
+        );
+        must(
+            admitted.validate(&[], &[], &BTreeSet::new()),
+            "the reviewed allowlist admission",
+        );
+        let invented = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [policy]\naction_pin_admission = \"strict\"\n",
+        );
+        let error = must_fail(
+            invented.validate(&[], &[], &BTreeSet::new()),
+            "an unimplemented admission must fail",
+        );
+        assert!(
+            error.to_string().contains("must be `reviewed-allowlist`"),
+            "{error}"
+        );
     }
 }
