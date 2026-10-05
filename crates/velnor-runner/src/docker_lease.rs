@@ -18014,6 +18014,29 @@ mod tests {
         let (_, target) = docker_request_line(&rewritten).unwrap();
         assert_eq!(target, "/v1.43/networks/net-owned/connect");
 
+        let longer_alias_body =
+            br#"{ "Container" : "very-long-container-alias", "EndpointConfig" : {} }"#;
+        let longer_alias_request = api_request(
+            "POST",
+            "/v1.43/networks/net-owned/connect",
+            longer_alias_body,
+        );
+        let shorter_id =
+            rewrite_network_container_reference(&longer_alias_request, "short-id").unwrap();
+        let shorter_id_body = docker_request_body(&shorter_id).unwrap();
+        assert!(longer_alias_body.len() > shorter_id_body.len());
+        let shorter_id_value: Value = serde_json::from_slice(shorter_id_body).unwrap();
+        assert_eq!(shorter_id_value["Container"], "short-id");
+        let shorter_id_header_end = shorter_id
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        let shorter_id_header = std::str::from_utf8(&shorter_id[..shorter_id_header_end]).unwrap();
+        assert!(
+            shorter_id_header.contains(&format!("Content-Length: {}\r\n", shorter_id_body.len()))
+        );
+
         let malformed = format!(
             "POST /v1.43/networks/net-owned/connect HTTP/1.1\r\nHost: docker\r\nContent-Length: 1\r\n\r\n{}",
             r#"{ "Container" : "container-alias", "EndpointConfig" : {} }"#
@@ -21241,7 +21264,10 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
                     &mut forwarded_buffer,
                     &mut sink,
                     "POST",
-                    ForwardResponseOptions::default(),
+                    ForwardResponseOptions {
+                        capture_body: true,
+                        ..ForwardResponseOptions::default()
+                    },
                     |status, body| {
                         observed.borrow_mut().push((status, body.to_vec()));
                         Ok(())
