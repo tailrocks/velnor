@@ -2108,7 +2108,7 @@ fn collect_manifests(
 fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
         return Err(GeneratorError::usage(
-            "usage: release verify-tag | release package-binary | release package-deb | release package-guest | release verify-feed | release update-feed",
+            "usage: release verify-tag | release package-binary | release package-deb | release package-guest | release verify-feed | release update-feed | release resolve-mode | release resolve-source | release admit-producer | release assemble-manifest",
         ));
     };
     match command {
@@ -2118,6 +2118,10 @@ fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
         "package-guest" => package_guest(&arguments[1..]),
         "verify-feed" => verify_feed(&arguments[1..]),
         "update-feed" => update_feed(&arguments[1..]),
+        "resolve-mode" => resolve_mode(&arguments[1..]),
+        "resolve-source" => resolve_source(&arguments[1..]),
+        "admit-producer" => admit_producer(&arguments[1..]),
+        "assemble-manifest" => assemble_manifest(&arguments[1..]),
         _ => Err(GeneratorError::usage(format!(
             "unsupported release command: {command}"
         ))),
@@ -2178,7 +2182,17 @@ fn verify_tag(arguments: &[OsString]) -> Result<(), GeneratorError> {
 }
 
 fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
-    let options = parse_options(arguments, &["target", "version", "package", "binary"])?;
+    let options = parse_options(
+        arguments,
+        &[
+            "target",
+            "version",
+            "package",
+            "binary",
+            "members",
+            "deterministic",
+        ],
+    )?;
     let target = required_option(&options, "target")?;
     let version = required_option(&options, "version")?;
     let package = required_option(&options, "package")?;
@@ -2192,6 +2206,8 @@ fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
             "invalid target, version, package, or binary",
         ));
     }
+    let members = package_archive_members(&options, binary)?;
+    let deterministic = package_deterministic(&options)?;
     let root = env::current_dir()
         .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
     let source = root
@@ -2205,20 +2221,41 @@ fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
             source.display()
         )));
     }
+    let directory = source
+        .parent()
+        .map_or_else(|| root.clone(), Path::to_path_buf);
+    for member in &members {
+        if !directory.join(member).is_file() {
+            return Err(GeneratorError::usage(format!(
+                "declared archive member is missing: {member}"
+            )));
+        }
+    }
     let dist = root.join("dist");
     fs::create_dir_all(&dist)
         .map_err(|error| GeneratorError::io("create release directory", &dist, &error))?;
     let archive = dist.join(format!("{binary}-{version}-{target}.tar.gz"));
-    let status = Command::new("tar")
-        .arg("-C")
-        .arg(source.parent().unwrap_or(&root))
-        .arg("-czf")
-        .arg(&archive)
-        .arg(binary)
-        .status()
-        .map_err(|error| GeneratorError::usage(format!("package binary: {error}")))?;
-    if !status.success() {
-        return Err(GeneratorError::usage("tar failed while packaging binary"));
+    // A deterministic archive is byte-reproducible: sorted entries, a fixed
+    // mtime, normalized ownership, and a timestamp-free gzip stream. Without
+    // the flag the lane keeps its historical `tar -czf` bytes exactly. The
+    // normalizing flags are GNU tar's; any other tar fails closed with
+    // guidance instead of shipping a silently skewed archive.
+    if deterministic {
+        require_gnu_tar()?;
+        write_deterministic_archive(&directory, binary, &members, &archive)?;
+    } else {
+        let status = Command::new("tar")
+            .arg("-C")
+            .arg(&directory)
+            .arg("-czf")
+            .arg(&archive)
+            .arg(binary)
+            .args(&members)
+            .status()
+            .map_err(|error| GeneratorError::usage(format!("package binary: {error}")))?;
+        if !status.success() {
+            return Err(GeneratorError::usage("tar failed while packaging binary"));
+        }
     }
     let digest = sha256_file(&archive)?;
     // Append, never `with_extension`: the sidecar sits next to its subject
@@ -2242,6 +2279,82 @@ fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
     )
     .map_err(|error| GeneratorError::io("write release checksum", &checksum, &error))?;
     println!("{}", archive.display());
+    Ok(())
+}
+
+/// The declared archive members: portable names that must exist beside the
+/// built binary, never the binary itself and never a path.
+fn package_archive_members(
+    options: &BTreeMap<String, String>,
+    binary: &str,
+) -> Result<Vec<String>, GeneratorError> {
+    match options.get("members").map(String::as_str) {
+        None | Some("") => Ok(Vec::new()),
+        Some(list) => {
+            let mut members = Vec::new();
+            for member in list.split(',') {
+                if !valid_archive_member(member) || member == binary {
+                    return Err(GeneratorError::usage(format!(
+                        "invalid archive member: {member}"
+                    )));
+                }
+                members.push(member.to_owned());
+            }
+            Ok(members)
+        }
+    }
+}
+
+/// Whether the lane packages reproducibly. Rendered lanes pass an explicit
+/// `true` or `false` per target row; anything else fails closed.
+fn package_deterministic(options: &BTreeMap<String, String>) -> Result<bool, GeneratorError> {
+    match options.get("deterministic").map(String::as_str) {
+        None | Some("false") => Ok(false),
+        Some("true") => Ok(true),
+        Some(other) => Err(GeneratorError::usage(format!(
+            "invalid --deterministic value: {other}"
+        ))),
+    }
+}
+
+/// Write one reproducible archive: GNU tar normalizes entry order, mtime,
+/// and ownership onto stdout, and `gzip -n` strips the timestamp. The
+/// caller probes for GNU tar first.
+fn write_deterministic_archive(
+    directory: &Path,
+    binary: &str,
+    members: &[String],
+    archive: &Path,
+) -> Result<(), GeneratorError> {
+    let mut command = Command::new("tar");
+    command.arg("-C").arg(directory).args([
+        "--sort=name",
+        "--mtime=@0",
+        "--owner=0",
+        "--group=0",
+        "--numeric-owner",
+        "-cf",
+        "-",
+        binary,
+    ]);
+    command.args(members);
+    let tar = command
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|error| GeneratorError::usage(format!("package binary: {error}")))?;
+    let Some(tar_stdout) = tar.stdout else {
+        return Err(GeneratorError::usage("tar produced no archive stream"));
+    };
+    let output = Command::new("gzip")
+        .arg("-n")
+        .stdin(tar_stdout)
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("package binary: {error}")))?;
+    if !output.status.success() {
+        return Err(GeneratorError::usage("gzip failed while packaging binary"));
+    }
+    fs::write(archive, output.stdout)
+        .map_err(|error| GeneratorError::io("write release archive", archive, &error))?;
     Ok(())
 }
 
@@ -2581,6 +2694,317 @@ fn update_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
     }
 }
 
+/// Resolve the release mode for one event: the total event×mode matrix.
+/// Prints the mode and refuses anything that would write externally from an
+/// untrusted context. `publish` is reachable only from a version tag push
+/// (stable) or an admitted producer run (rolling); `rehearse` finishes on
+/// its feature branch and never waits for default-branch CI — the rendered
+/// gate encodes that by resolving here, not by polling.
+fn resolve_mode(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "event",
+            "ref",
+            "input",
+            "producer",
+            "conclusion",
+            "rolling",
+            "branch",
+        ],
+    )?;
+    let event = required_option(&options, "event")?;
+    let reference = options.get("ref").map_or("", String::as_str);
+    let input = options.get("input").map_or("validate", String::as_str);
+    if !matches!(input, "validate" | "build" | "rehearse" | "publish") {
+        return Err(GeneratorError::usage(format!(
+            "unsupported release mode: {input}"
+        )));
+    }
+    let rolling = match options.get("rolling").map(String::as_str) {
+        None | Some("false") => false,
+        Some("true") => true,
+        Some(other) => {
+            return Err(GeneratorError::usage(format!(
+                "invalid --rolling value: {other}"
+            )));
+        }
+    };
+    match event {
+        // Untrusted pull-request code never publishes, builds for release,
+        // or rehearses with secrets: every PR resolves to secret-free
+        // validation, and a publish request from a PR is a hard refusal.
+        "pull_request" | "pull_request_target" => {
+            if input == "publish" {
+                return Err(GeneratorError::usage(
+                    "release publish refused: pull requests resolve to validate only",
+                ));
+            }
+            println!("validate");
+            Ok(())
+        }
+        "schedule" => {
+            if input == "publish" {
+                return Err(GeneratorError::usage(
+                    "release publish refused: scheduled runs resolve to validate only",
+                ));
+            }
+            println!("validate");
+            Ok(())
+        }
+        "push" => {
+            if is_version_tag_ref(reference)
+                || rolling && is_default_branch_ref(reference, &options)
+            {
+                println!("publish");
+                Ok(())
+            } else if input == "publish" {
+                Err(GeneratorError::usage(
+                    "release publish refused: branch pushes publish only on the rolling lane's default branch",
+                ))
+            } else {
+                println!("{input}");
+                Ok(())
+            }
+        }
+        // Dispatch carries the declared mode, defaulting to validation.
+        // Publication is tag-triggered (or admitted-producer) only: a
+        // dispatch can rehearse the whole assembly but never publish it.
+        "workflow_dispatch" => {
+            if input == "publish" {
+                return Err(GeneratorError::usage(
+                    "release publish refused: publication is tag-triggered, never dispatched",
+                ));
+            }
+            println!("{input}");
+            Ok(())
+        }
+        "workflow_run" => {
+            let producer = options.get("producer").map_or("", String::as_str);
+            let conclusion = options.get("conclusion").map_or("", String::as_str);
+            if producer.is_empty() {
+                return Err(GeneratorError::usage(
+                    "release publish refused: workflow_run without an admitted producer",
+                ));
+            }
+            if conclusion != "success" {
+                return Err(GeneratorError::usage(format!(
+                    "release publish refused: producer concluded {conclusion}, not success"
+                )));
+            }
+            println!("publish");
+            Ok(())
+        }
+        other => Err(GeneratorError::usage(format!(
+            "unsupported release event: {other}"
+        ))),
+    }
+}
+
+/// Whether `reference` is a version tag push (`refs/tags/v[0-9]*`).
+fn is_version_tag_ref(reference: &str) -> bool {
+    reference.starts_with("refs/tags/v")
+        && reference["refs/tags/v".len()..]
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_digit())
+}
+
+/// Whether `reference` is the default branch the lane rolls on. The branch
+/// arrives as `--branch`; without it only the tag and rolling-default
+/// shape can resolve, never an arbitrary branch.
+fn is_default_branch_ref(reference: &str, options: &BTreeMap<String, String>) -> bool {
+    let branch = options.get("branch").map_or("main", String::as_str);
+    reference == format!("refs/heads/{branch}")
+}
+
+/// Resolve the source revision the lane builds: a `workflow_run` event
+/// builds the producer run's head SHA, every other event builds its own
+/// SHA. Both must be full 40-hex revisions; anything else fails closed
+/// instead of building an unidentified tree.
+fn resolve_source(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["event", "sha", "run-sha"])?;
+    let event = required_option(&options, "event")?;
+    let sha = if event == "workflow_run" {
+        required_option(&options, "run-sha")?
+    } else {
+        required_option(&options, "sha")?
+    };
+    if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(GeneratorError::usage(format!(
+            "release source must be a 40-hex revision, found `{sha}`"
+        )));
+    }
+    println!("{sha}");
+    Ok(())
+}
+
+/// Admit a `workflow_run` producer: the run's workflow name must equal the
+/// declared trusted producer and its conclusion must be `success`. A name
+/// or conclusion mismatch is a hard refusal, never a warning.
+fn admit_producer(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["producer", "expected", "conclusion"])?;
+    let producer = required_option(&options, "producer")?;
+    let expected = required_option(&options, "expected")?;
+    let conclusion = required_option(&options, "conclusion")?;
+    if producer != expected {
+        return Err(GeneratorError::usage(format!(
+            "release publish refused: producer `{producer}` is not the trusted `{expected}`"
+        )));
+    }
+    if conclusion != "success" {
+        return Err(GeneratorError::usage(format!(
+            "release publish refused: producer `{producer}` concluded {conclusion}, not success"
+        )));
+    }
+    println!("admitted");
+    Ok(())
+}
+
+/// Assemble the consumer release manifest and the independent checksum
+/// corpus from declared subjects: every `--subjects` entry must exist in
+/// `--dir`, the corpus re-hashes each subject independently, and the
+/// manifest binds the schema URN, source, version, and digests. The corpus
+/// is verified strictly before anything prints success.
+fn assemble_manifest(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "dir",
+            "subjects",
+            "schema",
+            "repository",
+            "ref",
+            "commit",
+            "version",
+        ],
+    )?;
+    let dir = Path::new(required_option(&options, "dir")?);
+    let schema = required_option(&options, "schema")?;
+    let repository = required_option(&options, "repository")?;
+    let source_ref = required_option(&options, "ref")?;
+    let commit = required_option(&options, "commit")?;
+    let version = required_option(&options, "version")?;
+    if schema.is_empty() || !schema.contains('/') {
+        return Err(GeneratorError::usage(
+            "release manifest needs a schema URN of the form <domain>/<name>",
+        ));
+    }
+    if commit.len() != 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(GeneratorError::usage(
+            "release manifest needs a 40-hex source commit",
+        ));
+    }
+    if !is_artifact_version(version) {
+        return Err(GeneratorError::usage(format!(
+            "invalid release manifest version: {version}"
+        )));
+    }
+    let subjects = required_option(&options, "subjects")?;
+    let mut names: Vec<&str> = subjects.split(',').collect();
+    if names.is_empty() || names.iter().any(|name| !valid_subject_name(name)) {
+        return Err(GeneratorError::usage(
+            "release manifest needs declared subject file names",
+        ));
+    }
+    names.sort_unstable();
+    let mut corpus = String::new();
+    let mut assets = Vec::new();
+    for name in &names {
+        let path = dir.join(name);
+        if !path.is_file() {
+            return Err(GeneratorError::usage(format!(
+                "declared manifest subject is missing: {name}"
+            )));
+        }
+        let digest = sha256_file(&path)?;
+        corpus.push_str(&digest);
+        corpus.push_str("  ");
+        corpus.push_str(name);
+        corpus.push('\n');
+        assets.push(serde_json::json!({"name": name, "sha256": digest}));
+    }
+    let document = serde_json::json!({
+        "schema": schema,
+        "source_repository": repository,
+        "source_ref": source_ref,
+        "source_commit": commit,
+        "version": version,
+        "assets": assets,
+    });
+    let Some(manifest) = serde_json::to_string_pretty(&document)
+        .ok()
+        .map(|mut text| {
+            text.push('\n');
+            text
+        })
+    else {
+        return Err(GeneratorError::usage("release manifest is not encodable"));
+    };
+    let corpus_path = dir.join("SHA256SUMS");
+    fs::write(&corpus_path, &corpus)
+        .map_err(|error| GeneratorError::io("write checksum corpus", &corpus_path, &error))?;
+    // The corpus is re-verified strictly from disk before the manifest is
+    // written: a subject that changed mid-assembly fails here, not in a
+    // consumer that trusted the manifest.
+    verify_checksum_corpus(dir, &corpus)?;
+    let manifest_path = dir.join("release-manifest.json");
+    fs::write(&manifest_path, &manifest)
+        .map_err(|error| GeneratorError::io("write release manifest", &manifest_path, &error))?;
+    println!("{}", manifest_path.display());
+    Ok(())
+}
+
+/// Re-verify a checksum corpus strictly: every line re-hashes its subject
+/// from disk and any mismatch, miss, or malformed line fails.
+fn verify_checksum_corpus(dir: &Path, corpus: &str) -> Result<(), GeneratorError> {
+    for line in corpus.lines() {
+        let (digest, name) = line.split_once("  ").ok_or_else(|| {
+            GeneratorError::usage(format!("malformed checksum corpus line: {line}"))
+        })?;
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(GeneratorError::usage(format!(
+                "malformed checksum corpus digest: {line}"
+            )));
+        }
+        let actual = sha256_file(&dir.join(name))?;
+        if actual != digest {
+            return Err(GeneratorError::usage(format!(
+                "checksum corpus mismatch for {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `name` is a portable manifest subject: a bare file name over the
+/// portable asset alphabet, never a path.
+fn valid_subject_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// The deterministic archive flags are GNU tar's. Any other tar fails
+/// closed here, before it writes a silently skewed archive.
+fn require_gnu_tar() -> Result<(), GeneratorError> {
+    let output = Command::new("tar")
+        .arg("--version")
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("probe tar: {error}")))?;
+    if !output.status.success()
+        || !String::from_utf8_lossy(&output.stdout)
+            .to_lowercase()
+            .contains("gnu tar")
+    {
+        return Err(GeneratorError::usage(
+            "deterministic archives need GNU tar; refusing to package on this runner",
+        ));
+    }
+    Ok(())
+}
+
 fn required_option<'a>(
     options: &'a BTreeMap<String, String>,
     name: &str,
@@ -2714,6 +3138,12 @@ fn valid_binary(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// Whether `value` is a portable archive member: a bare file name over the
+/// portable asset alphabet, never a path or traversal.
+fn valid_archive_member(value: &str) -> bool {
+    valid_binary(value) && value != "." && value != ".."
 }
 
 #[cfg(test)]
@@ -4233,5 +4663,525 @@ workspace_check = true
             .any(|unit| unit.id == "rust-root-workspace"));
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    fn release_args(options: &[&str]) -> Vec<OsString> {
+        options.iter().map(OsString::from).collect()
+    }
+
+    /// Every event resolves to exactly one mode: tag pushes and admitted
+    /// producer runs publish, dispatches drill, and everything else
+    /// validates.
+    #[test]
+    fn resolve_mode_resolves_each_event() {
+        // Tag pushes publish.
+        must(
+            resolve_mode(&release_args(&[
+                "--event",
+                "push",
+                "--ref",
+                "refs/tags/v1.2.3",
+            ])),
+            "tag push resolves",
+        );
+        // A rolling push to the default branch publishes; anywhere else a
+        // branch push drills or validates.
+        must(
+            resolve_mode(&release_args(&[
+                "--event",
+                "push",
+                "--ref",
+                "refs/heads/main",
+                "--rolling",
+                "true",
+                "--branch",
+                "main",
+            ])),
+            "rolling default-branch push resolves",
+        );
+        must(
+            resolve_mode(&release_args(&[
+                "--event",
+                "push",
+                "--ref",
+                "refs/heads/main",
+            ])),
+            "non-rolling branch push resolves",
+        );
+        must(
+            resolve_mode(&release_args(&[
+                "--event",
+                "push",
+                "--ref",
+                "refs/heads/feature",
+                "--input",
+                "rehearse",
+            ])),
+            "feature push rehearses",
+        );
+        // Dispatch carries the declared drill mode, defaulting to
+        // validation.
+        for mode in ["validate", "build", "rehearse"] {
+            must(
+                resolve_mode(&release_args(&[
+                    "--event",
+                    "workflow_dispatch",
+                    "--input",
+                    mode,
+                ])),
+                "dispatch drills",
+            );
+        }
+        must(
+            resolve_mode(&release_args(&["--event", "workflow_dispatch"])),
+            "dispatch defaults",
+        );
+        // Scheduled runs and pull requests validate.
+        must(
+            resolve_mode(&release_args(&["--event", "schedule"])),
+            "schedule resolves",
+        );
+        for event in ["pull_request", "pull_request_target"] {
+            must(
+                resolve_mode(&release_args(&["--event", event])),
+                "pull request resolves",
+            );
+        }
+        // An admitted producer run at success publishes.
+        must(
+            resolve_mode(&release_args(&[
+                "--event",
+                "workflow_run",
+                "--producer",
+                "CI",
+                "--conclusion",
+                "success",
+            ])),
+            "admitted producer resolves",
+        );
+    }
+
+    /// Anything that would write externally from an untrusted context is a
+    /// hard refusal, and unknown events and modes fail closed.
+    #[test]
+    fn resolve_mode_refuses_untrusted_publish() {
+        let error = must_fail(
+            resolve_mode(&release_args(&[
+                "--event",
+                "push",
+                "--ref",
+                "refs/heads/feature",
+                "--input",
+                "publish",
+            ])),
+            "feature push must not publish",
+        );
+        assert!(
+            error.to_string().contains("publish refused"),
+            "unexpected error: {error}"
+        );
+        // Publication is tag-triggered, never dispatched.
+        let error = must_fail(
+            resolve_mode(&release_args(&[
+                "--event",
+                "workflow_dispatch",
+                "--input",
+                "publish",
+            ])),
+            "dispatch must not publish",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("tag-triggered, never dispatched"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            resolve_mode(&release_args(&[
+                "--event", "schedule", "--input", "publish",
+            ])),
+            "schedule must not publish",
+        );
+        assert!(
+            error.to_string().contains("publish refused"),
+            "unexpected error: {error}"
+        );
+        // Untrusted pull-request code validates only.
+        for event in ["pull_request", "pull_request_target"] {
+            let error = must_fail(
+                resolve_mode(&release_args(&["--event", event, "--input", "publish"])),
+                "pull request must not publish",
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("pull requests resolve to validate only"),
+                "unexpected error: {error}"
+            );
+        }
+        let error = must_fail(
+            resolve_mode(&release_args(&[
+                "--event",
+                "workflow_run",
+                "--conclusion",
+                "success",
+            ])),
+            "producer-less run must not publish",
+        );
+        assert!(
+            error.to_string().contains("without an admitted producer"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            resolve_mode(&release_args(&[
+                "--event",
+                "workflow_run",
+                "--producer",
+                "CI",
+                "--conclusion",
+                "failure",
+            ])),
+            "failed producer must not publish",
+        );
+        assert!(
+            error.to_string().contains("not success"),
+            "unexpected error: {error}"
+        );
+        // Unknown events and modes fail closed.
+        let error = must_fail(
+            resolve_mode(&release_args(&["--event", "merge_group"])),
+            "unknown event",
+        );
+        assert!(
+            error.to_string().contains("unsupported release event"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            resolve_mode(&release_args(&["--event", "push", "--input", "ship"])),
+            "unknown mode",
+        );
+        assert!(
+            error.to_string().contains("unsupported release mode"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// A `workflow_run` builds the producer run's head SHA; every other
+    /// event builds its own SHA. Both must be full revisions.
+    #[test]
+    fn resolve_source_binds_the_producer_revision() {
+        let run = "0123456789abcdef0123456789abcdef01234567";
+        let own = "89abcdef0123456789abcdef0123456789abcdef";
+        must(
+            resolve_source(&release_args(&[
+                "--event",
+                "workflow_run",
+                "--sha",
+                own,
+                "--run-sha",
+                run,
+            ])),
+            "producer revision resolves",
+        );
+        must(
+            resolve_source(&release_args(&["--event", "push", "--sha", own])),
+            "own revision resolves",
+        );
+        let error = must_fail(
+            resolve_source(&release_args(&["--event", "push", "--sha", "short"])),
+            "short revision",
+        );
+        assert!(
+            error.to_string().contains("40-hex revision"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            resolve_source(&release_args(&["--event", "workflow_run", "--sha", own])),
+            "producer run without a run SHA",
+        );
+        assert!(
+            error.to_string().contains("--run-sha needs a value"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// The producer name must equal the trusted producer and its conclusion
+    /// must be `success`; a mismatch is a refusal, never a warning.
+    #[test]
+    fn admit_producer_refuses_name_and_conclusion_mismatch() {
+        must(
+            admit_producer(&release_args(&[
+                "--producer",
+                "CI",
+                "--expected",
+                "CI",
+                "--conclusion",
+                "success",
+            ])),
+            "trusted producer admits",
+        );
+        let error = must_fail(
+            admit_producer(&release_args(&[
+                "--producer",
+                "Other",
+                "--expected",
+                "CI",
+                "--conclusion",
+                "success",
+            ])),
+            "untrusted producer",
+        );
+        assert!(
+            error.to_string().contains("is not the trusted"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            admit_producer(&release_args(&[
+                "--producer",
+                "CI",
+                "--expected",
+                "CI",
+                "--conclusion",
+                "cancelled",
+            ])),
+            "cancelled producer",
+        );
+        assert!(
+            error.to_string().contains("not success"),
+            "unexpected error: {error}"
+        );
+    }
+
+    fn manifest_fixture(name: &str) -> std::path::PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-workflow-manifest-{name}-{pid}-{id}",
+            pid = std::process::id()
+        ));
+        must(std::fs::create_dir_all(&dir), "create manifest fixture");
+        must(
+            std::fs::write(dir.join("b.tar.gz"), "second-subject"),
+            "write second subject",
+        );
+        must(
+            std::fs::write(dir.join("a.tar.gz"), "first-subject"),
+            "write first subject",
+        );
+        dir
+    }
+
+    /// The manifest binds the declared subjects with independently
+    /// re-hashed digests, and the corpus is strictly re-verified from disk
+    /// before the manifest is written.
+    #[test]
+    fn assemble_manifest_writes_and_verifies_the_corpus() {
+        let dir = manifest_fixture("corpus");
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        must(
+            assemble_manifest(&release_args(&[
+                "--dir",
+                dir.to_str().unwrap_or_default(),
+                "--subjects",
+                "b.tar.gz,a.tar.gz",
+                "--schema",
+                "example.test/release-manifest-v1",
+                "--repository",
+                "example/app",
+                "--ref",
+                "refs/tags/v1.2.3",
+                "--commit",
+                commit,
+                "--version",
+                "1.2.3",
+            ])),
+            "assemble manifest",
+        );
+        let corpus = must(
+            std::fs::read_to_string(dir.join("SHA256SUMS")),
+            "read checksum corpus",
+        );
+        let lines: Vec<&str> = corpus.lines().collect();
+        assert_eq!(lines.len(), 2, "unexpected corpus: {corpus}");
+        assert!(
+            lines[0].ends_with("  a.tar.gz") && lines[1].ends_with("  b.tar.gz"),
+            "subjects must be sorted: {corpus}"
+        );
+        let manifest = must(
+            std::fs::read_to_string(dir.join("release-manifest.json")),
+            "read release manifest",
+        );
+        let document: serde_json::Value =
+            must(serde_json::from_str(&manifest), "parse release manifest");
+        assert_eq!(document["schema"], "example.test/release-manifest-v1");
+        assert_eq!(document["source_commit"], commit);
+        assert_eq!(document["version"], "1.2.3");
+        let assets = must(
+            document["assets"].as_array().ok_or("manifest assets"),
+            "manifest assets",
+        );
+        assert_eq!(assets.len(), 2);
+        for (line, asset) in lines.iter().zip(assets.iter()) {
+            let digest = line.split_once("  ").unwrap_or_default().0;
+            assert_eq!(asset["sha256"], digest);
+        }
+        must(std::fs::remove_dir_all(&dir), "remove manifest fixture");
+    }
+
+    /// A corpus line that no longer matches its subject fails strictly:
+    /// conflicting bytes are never papered over.
+    #[test]
+    fn checksum_corpus_mismatch_fails_strict_verification() {
+        let dir = manifest_fixture("conflict");
+        let digest = "0".repeat(64);
+        let error = must_fail(
+            verify_checksum_corpus(&dir, &format!("{digest}  a.tar.gz\n")),
+            "conflicting corpus digest",
+        );
+        assert!(
+            error.to_string().contains("corpus mismatch"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            verify_checksum_corpus(&dir, "not-a-corpus-line\n"),
+            "malformed corpus line",
+        );
+        assert!(
+            error.to_string().contains("malformed checksum corpus"),
+            "unexpected error: {error}"
+        );
+        must(std::fs::remove_dir_all(&dir), "remove manifest fixture");
+    }
+
+    /// Missing and traversing subjects fail before anything is written.
+    #[test]
+    fn assemble_manifest_refuses_bad_subjects() {
+        let dir = manifest_fixture("refuse");
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let error = must_fail(
+            assemble_manifest(&release_args(&[
+                "--dir",
+                dir.to_str().unwrap_or_default(),
+                "--subjects",
+                "missing.tar.gz",
+                "--schema",
+                "example.test/release-manifest-v1",
+                "--repository",
+                "example/app",
+                "--ref",
+                "refs/tags/v1.2.3",
+                "--commit",
+                commit,
+                "--version",
+                "1.2.3",
+            ])),
+            "missing subject",
+        );
+        assert!(
+            error.to_string().contains("subject is missing"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            assemble_manifest(&release_args(&[
+                "--dir",
+                dir.to_str().unwrap_or_default(),
+                "--subjects",
+                "../escape.tar.gz",
+                "--schema",
+                "example.test/release-manifest-v1",
+                "--repository",
+                "example/app",
+                "--ref",
+                "refs/tags/v1.2.3",
+                "--commit",
+                commit,
+                "--version",
+                "1.2.3",
+            ])),
+            "traversal subject",
+        );
+        assert!(
+            error.to_string().contains("declared subject file names"),
+            "unexpected error: {error}"
+        );
+        must(std::fs::remove_dir_all(&dir), "remove manifest fixture");
+    }
+
+    /// Archive members validate before any tar call: no traversal, no
+    /// duplicates of the binary, no bad deterministic flag.
+    #[test]
+    fn package_binary_validates_members_before_any_tar_call() {
+        let error = must_fail(
+            package_binary(&release_args(&[
+                "--target",
+                "x86_64-unknown-linux-gnu",
+                "--version",
+                "1.2.3",
+                "--package",
+                "example",
+                "--binary",
+                "example",
+                "--members",
+                "../escape",
+            ])),
+            "traversal member",
+        );
+        assert!(
+            error.to_string().contains("invalid archive member"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            package_binary(&release_args(&[
+                "--target",
+                "x86_64-unknown-linux-gnu",
+                "--version",
+                "1.2.3",
+                "--package",
+                "example",
+                "--binary",
+                "example",
+                "--members",
+                "example",
+            ])),
+            "member duplicating the binary",
+        );
+        assert!(
+            error.to_string().contains("invalid archive member"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            package_binary(&release_args(&[
+                "--target",
+                "x86_64-unknown-linux-gnu",
+                "--version",
+                "1.2.3",
+                "--package",
+                "example",
+                "--binary",
+                "example",
+                "--deterministic",
+                "sometimes",
+            ])),
+            "bad deterministic flag",
+        );
+        assert!(
+            error.to_string().contains("invalid --deterministic value"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// The GNU tar probe reports exactly what `tar --version` says: GNU
+    /// tar admits deterministic packaging, anything else refuses it.
+    #[test]
+    fn deterministic_packaging_needs_gnu_tar() {
+        let output = must(
+            std::process::Command::new("tar").arg("--version").output(),
+            "probe tar",
+        );
+        let gnu = output.status.success()
+            && String::from_utf8_lossy(&output.stdout)
+                .to_lowercase()
+                .contains("gnu tar");
+        assert_eq!(require_gnu_tar().is_ok(), gnu);
     }
 }
