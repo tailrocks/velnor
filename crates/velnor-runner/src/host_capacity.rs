@@ -16,7 +16,8 @@
 //! carries a deadline, and the terminal state is `Deregistered`. There is no
 //! transition back into an unbounded park.
 
-use std::path::Path;
+use std::fs::File;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -36,7 +37,7 @@ pub const DEFAULT_DRAIN_DEADLINE: Duration = Duration::from_secs(5 * 60);
 /// `available_bytes` is the unprivileged figure (`f_bavail`) — the number that
 /// decides whether a job can run — not `f_bfree`, which includes the
 /// root-reserved blocks a runner never gets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostCapacity {
     pub total_bytes: u64,
     pub available_bytes: u64,
@@ -44,6 +45,11 @@ pub struct HostCapacity {
     /// measured. `None` means unmeasured, which must be treated as unknown
     /// rather than zero.
     pub docker_bytes: Option<u64>,
+    /// Device number of the filesystem sampled by `statvfs`.
+    pub filesystem_device: u64,
+    /// Stable `statvfs.f_fsid` combined with the device number. This is
+    /// filesystem identity evidence, not a user-facing volume UUID.
+    pub volume_fingerprint: Option<String>,
 }
 
 impl HostCapacity {
@@ -62,10 +68,21 @@ impl HostCapacity {
         let stat =
             rustix::fs::statvfs(probe).with_context(|| format!("statvfs {}", probe.display()))?;
         let block = stat.f_frsize.max(1);
+        #[cfg(unix)]
+        let filesystem_device = {
+            use std::os::unix::fs::MetadataExt as _;
+            std::fs::metadata(probe)
+                .with_context(|| format!("stat filesystem probe {}", probe.display()))?
+                .dev()
+        };
+        #[cfg(not(unix))]
+        let filesystem_device = 0;
         Ok(Self {
             total_bytes: stat.f_blocks.saturating_mul(block),
             available_bytes: stat.f_bavail.saturating_mul(block),
             docker_bytes,
+            filesystem_device,
+            volume_fingerprint: Some(filesystem_fingerprint(filesystem_device, stat.f_fsid)),
         })
     }
 
@@ -96,6 +113,119 @@ impl HostCapacity {
             Some(_) => self.available_bytes.saturating_sub(docker_growth_allowance),
             None => self.available_bytes,
         }
+    }
+}
+
+fn filesystem_fingerprint(device: u64, fsid: u64) -> String {
+    format!("{device:016x}:{fsid:016x}")
+}
+
+/// A descriptor-bound capacity measurement for one existing directory.
+///
+/// Disk reclaim must not attribute freed bytes to whichever filesystem later
+/// happens to occupy the same path. The open descriptor pins the original
+/// filesystem for `fstatvfs`; every sample also securely reopens the path and
+/// rejects a renamed/replaced root.
+#[derive(Debug)]
+pub(crate) struct HostCapacityPin {
+    root: PathBuf,
+    file: File,
+    device: u64,
+    inode: u64,
+    fsid: u64,
+}
+
+impl HostCapacityPin {
+    pub(crate) fn open(path: &Path) -> Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            if !path.is_absolute() {
+                anyhow::bail!("pressure filesystem root must be absolute");
+            }
+            let directory =
+                crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(path)
+                    .with_context(|| format!("securely open pressure root {}", path.display()))?;
+            let (device, inode) = directory
+                .physical_identity()
+                .context("read pressure root physical identity")?;
+            let file = directory
+                .try_clone_file()
+                .context("pin pressure root directory descriptor")?;
+            let stats = rustix::fs::fstatvfs(&file).context("fstatvfs pinned pressure root")?;
+            let metadata = file.metadata().context("fstat pinned pressure root")?;
+            if !metadata.is_dir() {
+                anyhow::bail!("pinned pressure root is not a directory");
+            }
+            if metadata.dev() != device || metadata.ino() != inode {
+                anyhow::bail!("pressure root identity changed while it was being pinned");
+            }
+            let pin = Self {
+                root: path.to_path_buf(),
+                file,
+                device,
+                inode,
+                fsid: stats.f_fsid,
+            };
+            pin.revalidate()?;
+            Ok(pin)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            anyhow::bail!("descriptor-bound pressure measurement requires Unix no-follow support")
+        }
+    }
+
+    pub(crate) fn identity(&self) -> (u64, u64, u64) {
+        (self.device, self.inode, self.fsid)
+    }
+
+    pub(crate) fn device_id(&self) -> u64 {
+        self.device
+    }
+
+    pub(crate) fn revalidate(&self) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            let pinned = self.file.metadata().context("fstat pinned pressure root")?;
+            if !pinned.is_dir() || pinned.dev() != self.device || pinned.ino() != self.inode {
+                anyhow::bail!("pinned pressure directory descriptor identity changed");
+            }
+            let stats = rustix::fs::fstatvfs(&self.file)
+                .context("revalidate pinned pressure filesystem")?;
+            if stats.f_fsid != self.fsid {
+                anyhow::bail!("pinned pressure filesystem identifier changed");
+            }
+            let current =
+                crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(&self.root)
+                    .with_context(|| format!("reopen pressure root {}", self.root.display()))?;
+            if current.physical_identity()? != (self.device, self.inode) {
+                anyhow::bail!("pressure root path now resolves to a different directory");
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            anyhow::bail!("descriptor-bound pressure measurement requires Unix no-follow support")
+        }
+    }
+
+    pub(crate) fn probe(&self) -> Result<HostCapacity> {
+        self.revalidate()?;
+        let stats =
+            rustix::fs::fstatvfs(&self.file).context("sample pinned pressure filesystem")?;
+        let block = stats.f_frsize.max(1);
+        Ok(HostCapacity {
+            total_bytes: stats.f_blocks.saturating_mul(block),
+            available_bytes: stats.f_bavail.saturating_mul(block),
+            docker_bytes: None,
+            filesystem_device: self.device,
+            volume_fingerprint: Some(filesystem_fingerprint(self.device, self.fsid)),
+        })
     }
 }
 
@@ -362,6 +492,8 @@ mod tests {
             total_bytes: 100 * gib,
             available_bytes: 20 * gib,
             docker_bytes: Some(bytes),
+            filesystem_device: 1,
+            volume_fingerprint: Some("0000000000000001:0000000000000002".to_string()),
         };
         assert_eq!(capacity.used_percent(), 80);
         assert_eq!(capacity.promisable_bytes(5 * gib), 15 * gib);

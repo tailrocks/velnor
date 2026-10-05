@@ -2540,6 +2540,7 @@ async fn run_with_jit_prewarmer(
     }
 
     let storage_layout = select_runner_storage_layout(&dir, storage_mode)?;
+    crate::storage::install_selected_layout(storage_layout.clone())?;
     wait_for_prior_slot_teardown(&dir).await?;
     preflight_before_executable_run(&args, &dir).map_err(local_failure)?;
     let stored = config::load(&dir).map_err(local_identity_unavailable)?;
@@ -3272,6 +3273,7 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
     let config_base = daemon_config_dir(args)?;
     let storage_layout = select_runner_storage_layout(&config_base, daemon_storage_mode(args))?;
+    crate::storage::install_selected_layout(storage_layout.clone())?;
     if args.url.is_some() && !args.dry_run_registration {
         // Before preflight and before any slot can admit a job: delete every
         // mbx store layout the current code no longer produces, then bring
@@ -5713,25 +5715,29 @@ fn maybe_startup_host_docker_reclaim_with(
     // path stops unclaimed daemons and deletes builders idle past the
     // horizon. Gated on storage: unit tests run without VELNOR_STORAGE_ROOT
     // and must not touch the Engine.
-    if let Some(run_root) = crate::buildkit::claims_run_root() {
-        let report = crate::buildkit::reap_idle_builders(&run_root, std::time::SystemTime::now());
-        for failure in &report.failures {
-            eprintln!("Warning: startup builder horizon reap: {failure}");
+    match crate::buildkit::PersistentBuildKitDomain::try_resolve() {
+        Ok(Some(domain)) => {
+            let report = crate::buildkit::reap_idle_builders(&domain, std::time::SystemTime::now());
+            for failure in &report.failures {
+                eprintln!("Warning: startup builder horizon reap: {failure}");
+            }
+            for claims in &report.unreadable_claims {
+                eprintln!(
+                    "Warning: startup builder horizon reap: unreadable ownership file {claims} pins \
+                     its builder as claimed; quiesce this daemon's jobs, delete the file, and \
+                     let the next claim recreate it"
+                );
+            }
+            if !report.stopped.is_empty() || !report.deleted.is_empty() {
+                eprintln!(
+                    "startup builder horizon: stopped {} idle daemon(s), deleted {} builder(s)",
+                    report.stopped.len(),
+                    report.deleted.len()
+                );
+            }
         }
-        for claims in &report.unreadable_claims {
-            eprintln!(
-                "Warning: startup builder horizon reap: unreadable ownership file {claims} pins \
-                 its builder as claimed; quiesce this daemon's jobs, delete the file, and \
-                 let the next claim recreate it"
-            );
-        }
-        if !report.stopped.is_empty() || !report.deleted.is_empty() {
-            eprintln!(
-                "startup builder horizon: stopped {} idle daemon(s), deleted {} builder(s)",
-                report.stopped.len(),
-                report.deleted.len()
-            );
-        }
+        Ok(None) => {}
+        Err(error) => eprintln!("Warning: startup BuildKit domain is unavailable: {error:#}"),
     }
 }
 
@@ -16740,25 +16746,29 @@ fn doctor_host_docker_reclaim(
     // Same horizon pass as startup: stop unclaimed builder daemons, delete
     // builders idle past the horizon. Gated on storage so unit tests (no
     // VELNOR_STORAGE_ROOT) never touch the Engine.
-    if let Some(run_root) = crate::buildkit::claims_run_root() {
-        let report = crate::buildkit::reap_idle_builders(&run_root, std::time::SystemTime::now());
-        for failure in &report.failures {
-            eprintln!("Warning: doctor builder horizon reap: {failure}");
+    match crate::buildkit::PersistentBuildKitDomain::try_resolve() {
+        Ok(Some(domain)) => {
+            let report = crate::buildkit::reap_idle_builders(&domain, std::time::SystemTime::now());
+            for failure in &report.failures {
+                eprintln!("Warning: doctor builder horizon reap: {failure}");
+            }
+            for claims in &report.unreadable_claims {
+                eprintln!(
+                    "doctor builder horizon: unreadable ownership file {claims} pins its builder as \
+                     claimed; quiesce this daemon's jobs, delete the file, and let the next \
+                     claim recreate it"
+                );
+            }
+            if !report.stopped.is_empty() || !report.deleted.is_empty() {
+                println!(
+                    "doctor builder horizon: stopped {} idle daemon(s), deleted {} builder(s)",
+                    report.stopped.len(),
+                    report.deleted.len()
+                );
+            }
         }
-        for claims in &report.unreadable_claims {
-            eprintln!(
-                "doctor builder horizon: unreadable ownership file {claims} pins its builder as \
-                 claimed; quiesce this daemon's jobs, delete the file, and let the next \
-                 claim recreate it"
-            );
-        }
-        if !report.stopped.is_empty() || !report.deleted.is_empty() {
-            println!(
-                "doctor builder horizon: stopped {} idle daemon(s), deleted {} builder(s)",
-                report.stopped.len(),
-                report.deleted.len()
-            );
-        }
+        Ok(None) => {}
+        Err(error) => eprintln!("Warning: doctor BuildKit domain is unavailable: {error:#}"),
     }
 }
 

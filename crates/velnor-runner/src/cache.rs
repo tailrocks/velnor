@@ -1089,12 +1089,46 @@ fn reclaim_work_root_with_layout(
     // the old dead reclaim (enumerate, then deliberately do nothing) live.
     if emergency && report.freed_bytes < target_bytes {
         let remaining = target_bytes.saturating_sub(report.freed_bytes);
-        let pruned = crate::buildkit::pressure_prune_builders(run_root, remaining);
-        report.freed_bytes = report.freed_bytes.saturating_add(pruned.freed_bytes);
-        for builder in pruned.pruned {
-            tracing::info!(builder = %builder, "emergency reclaim pruned unclaimed BuildKit builder");
+        match crate::buildkit::PersistentBuildKitDomain::try_resolve() {
+            Ok(Some(domain)) => match crate::host_capacity::HostCapacityPin::open(work_root) {
+                Ok(pressure_pin) => match pressure_pin.probe() {
+                    Ok(initial) => {
+                        let required_free = initial.available_bytes.saturating_add(remaining);
+                        let pruned = crate::buildkit::reclaim_domain_buildkit_for_device(
+                            &domain,
+                            &pressure_pin,
+                            &|capacity| capacity.available_bytes < required_free,
+                        );
+                        match pruned {
+                            Ok(pruned) => {
+                                report.freed_bytes =
+                                    report.freed_bytes.saturating_add(pruned.freed_bytes);
+                                for builder in pruned.pruned {
+                                    tracing::info!(
+                                        builder = %builder,
+                                        "emergency reclaim pruned unclaimed BuildKit builder"
+                                    );
+                                }
+                                report.failures.extend(pruned.failures);
+                            }
+                            Err(error) => report
+                                .failures
+                                .push(format!("BuildKit pressure reclaim: {error:#}")),
+                        }
+                    }
+                    Err(error) => report
+                        .failures
+                        .push(format!("measure pressure filesystem: {error:#}")),
+                },
+                Err(error) => report
+                    .failures
+                    .push(format!("pin pressure filesystem: {error:#}")),
+            },
+            Ok(None) => {}
+            Err(error) => report.failures.push(format!(
+                "resolve BuildKit domain for pressure reclaim: {error:#}"
+            )),
         }
-        report.failures.extend(pruned.failures);
     }
     Ok(report)
 }

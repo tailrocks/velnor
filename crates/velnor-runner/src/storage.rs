@@ -1,11 +1,41 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
+
+#[cfg(unix)]
+use std::{io::Read, path::Component};
 
 use anyhow::{Context, Result};
 
 use crate::args::{StorageArgs, StorageCommand};
+
+#[cfg(unix)]
+const BUILDKIT_STORAGE_ID_FILE: &str = ".velnor-buildkit-storage-id";
+#[cfg(unix)]
+const BUILDKIT_STORAGE_ID_LOCK_FILE: &str = ".velnor-buildkit-storage-id.lock";
+
+static SELECTED_RUNNER_STORAGE_LAYOUT: OnceLock<StorageLayout> = OnceLock::new();
+
+/// The runner-selected layout is process-local: BuildKit operations and
+/// Docker-lease authorization must resolve the same storage identity chosen
+/// before a job starts, even when it came from an explicit config directory
+/// rather than `VELNOR_STORAGE_ROOT`.
+pub(crate) fn selected_layout() -> Option<StorageLayout> {
+    SELECTED_RUNNER_STORAGE_LAYOUT.get().cloned()
+}
+
+pub(crate) fn install_selected_layout(layout: StorageLayout) -> Result<()> {
+    match SELECTED_RUNNER_STORAGE_LAYOUT.set(layout.clone()) {
+        Ok(()) => Ok(()),
+        Err(_) if SELECTED_RUNNER_STORAGE_LAYOUT.get() == Some(&layout) => Ok(()),
+        Err(_) => anyhow::bail!(
+            "runner process already selected a different storage layout: {:?}",
+            SELECTED_RUNNER_STORAGE_LAYOUT.get()
+        ),
+    }
+}
 
 pub fn run(args: StorageArgs) -> Result<()> {
     let layout = match StorageLayout::resolve() {
@@ -97,6 +127,154 @@ impl StorageLayout {
             .join(crate::container::sanitize_store_key(trust_scope))
             .join(class)
     }
+
+    /// Durable identity root for this storage layout's BuildKit domain.
+    ///
+    /// The physical root identity is combined with the persisted storage UUID
+    /// and Docker Engine ID, so path aliases that reach the same directory
+    /// share a domain while copied/replaced roots do not.
+    pub(crate) fn buildkit_identity_root(&self) -> PathBuf {
+        normalize_buildkit_identity_root(&self.lib_root, cfg!(target_os = "macos"))
+    }
+}
+
+fn normalize_buildkit_identity_root(root: &Path, macos: bool) -> PathBuf {
+    if macos && let Ok(remainder) = root.strip_prefix("/var") {
+        return Path::new("/private/var").join(remainder);
+    }
+    root.to_path_buf()
+}
+
+/// Create or read a stable storage identity without following links in the
+/// storage root or identity entry. Existing malformed identities fail closed
+/// and are never replaced.
+pub(crate) fn ensure_buildkit_storage_identity(root: &Path) -> Result<String> {
+    #[cfg(unix)]
+    {
+        ensure_buildkit_storage_identity_unix(root)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        anyhow::bail!("BuildKit storage identity requires Unix no-follow filesystem support")
+    }
+}
+
+/// Read an existing storage identity without creating or repairing anything.
+/// Domain re-attestation uses this so a missing identity cannot silently turn
+/// into a new authorization domain during cleanup.
+pub(crate) fn read_buildkit_storage_identity(root: &Path) -> Result<String> {
+    #[cfg(unix)]
+    {
+        let directory = crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(root)
+            .with_context(|| format!("securely open BuildKit storage root {}", root.display()))?;
+        let mut file = directory
+            .open_relative_file(Path::new(BUILDKIT_STORAGE_ID_FILE))
+            .context("open existing BuildKit storage identity")?;
+        read_buildkit_storage_identity_file(&mut file)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        anyhow::bail!("BuildKit storage identity requires Unix no-follow filesystem support")
+    }
+}
+
+#[cfg(unix)]
+fn ensure_buildkit_storage_identity_unix(root: &Path) -> Result<String> {
+    use std::io::Write as _;
+
+    if !root.is_absolute()
+        || root
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        anyhow::bail!("BuildKit storage identity root must be normalized and absolute");
+    }
+    let directory = crate::fs_copy::NoFollowDestinationDir::open_or_create_absolute_no_follow(root)
+        .with_context(|| {
+            format!(
+                "securely open or create BuildKit storage root {}",
+                root.display()
+            )
+        })?;
+    let lock = directory
+        .open_or_create_lock_file(std::ffi::OsStr::new(BUILDKIT_STORAGE_ID_LOCK_FILE))
+        .context("open BuildKit storage identity lock")?;
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)
+        .context("serialize BuildKit storage identity initialization")?;
+    directory
+        .sync_directory()
+        .context("sync BuildKit storage root before identity inspection")?;
+
+    let identity_path = Path::new(BUILDKIT_STORAGE_ID_FILE);
+    if let Some(mut file) = directory
+        .open_relative_file_if_exists(identity_path)
+        .context("inspect existing BuildKit storage identity")?
+    {
+        return read_buildkit_storage_identity_file(&mut file);
+    }
+
+    let identity = uuid::Uuid::new_v4().hyphenated().to_string();
+    let (mut staged, staged_name) = directory
+        .create_temporary_file(".velnor-buildkit-storage-id")
+        .context("stage BuildKit storage identity")?;
+    let stage_result = (|| -> Result<()> {
+        writeln!(staged, "{identity}").context("write staged BuildKit storage identity")?;
+        staged
+            .sync_all()
+            .context("sync staged BuildKit storage identity")?;
+        Ok(())
+    })();
+    drop(staged);
+    if let Err(error) = stage_result {
+        let _ = directory.remove_tree_entry(&staged_name);
+        return Err(error);
+    }
+    if let Err(error) = directory.publish_temporary_file_no_replace(
+        &staged_name,
+        std::ffi::OsStr::new(BUILDKIT_STORAGE_ID_FILE),
+    ) {
+        let _ = directory.remove_tree_entry(&staged_name);
+        return Err(error).context("publish BuildKit storage identity");
+    }
+    directory
+        .sync_directory()
+        .context("sync BuildKit storage identity directory")?;
+    let mut file = directory
+        .open_relative_file(identity_path)
+        .context("reopen published BuildKit storage identity")?;
+    read_buildkit_storage_identity_file(&mut file)
+}
+
+#[cfg(unix)]
+fn read_buildkit_storage_identity_file(file: &mut fs::File) -> Result<String> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = file
+        .metadata()
+        .context("inspect BuildKit storage identity file")?;
+    if metadata.nlink() != 1 || metadata.mode() & 0o077 != 0 || !metadata.is_file() {
+        anyhow::bail!("BuildKit storage identity is linked or accessible to group/other");
+    }
+    let mut contents = String::new();
+    (&mut *file)
+        .take(38)
+        .read_to_string(&mut contents)
+        .context("read BuildKit storage identity")?;
+    if contents.len() != 36 && contents.len() != 37 {
+        anyhow::bail!("BuildKit storage identity has invalid length");
+    }
+    let value = contents.strip_suffix('\n').unwrap_or(&contents);
+    if value.bytes().any(|byte| matches!(byte, b'\n' | b'\r')) {
+        anyhow::bail!("BuildKit storage identity has invalid line endings or extra data");
+    }
+    let parsed = uuid::Uuid::parse_str(value).context("parse BuildKit storage identity UUID")?;
+    let canonical = parsed.hyphenated().to_string();
+    if value != canonical {
+        anyhow::bail!("BuildKit storage identity is not a canonical UUID");
+    }
+    Ok(canonical)
 }
 
 /// Resolve the root of a trust-partitioned store class.

@@ -874,31 +874,11 @@ impl CommandRunner for ProcessCommandRunner {
         // Called from spawn_blocking context — synchronous blocking is fine here.
         let (op, timeout) = docker_deadline(program, args, timeout);
         let started = std::time::Instant::now();
-        let rm_claim = if program == "docker" {
-            crate::docker::client::claim_docker_container_rm(args)
+        let _rm_claim = if program == "docker" {
+            crate::docker::client::claim_docker_container_rm(args, timeout)?
         } else {
             None
         };
-        if let Some(claim) = rm_claim.as_ref()
-            && claim.ids.is_empty()
-        {
-            return Ok(CommandResult {
-                code: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-            });
-        }
-        let claimed_args = rm_claim
-            .as_ref()
-            .map(|claim| {
-                crate::docker::client::NonEmptyDockerArgs::new(args)
-                    .map(|args| {
-                        crate::docker::client::container_rm_args_with_claimed_ids(args, &claim.ids)
-                    })
-                    .ok_or_else(|| anyhow::anyhow!("docker rm claim requires non-empty arguments"))
-            })
-            .transpose()?;
-        let args = claimed_args.as_deref().unwrap_or(args);
         let owned_args = timed_docker_args(program, args)?;
         let args = owned_args.as_deref().unwrap_or(args);
         let mut command = Command::new(program);
@@ -4572,12 +4552,12 @@ where
                 let action_state = state.with_env(state.resolve_env(&action.env)?);
                 let requested_name =
                     native_input_or(&action_state, action, "name", "velnor-builder")?;
-                let name = crate::buildkit::persistent_builder_name(
+                let (domain, name) = buildkit_domain_and_name(
                     &requested_name,
                     &state.trust_scope,
                     buildkit_trust_tier(state),
                     container.repository.as_deref(),
-                );
+                )?;
                 // `keep-state` is accepted and always honored: persistent
                 // builders keep their daemon and cache by construction. It is
                 // read (and logged below) so the input is never silently
@@ -4602,40 +4582,64 @@ where
                 let mut stderr = String::new();
                 // cleanup=false releases the hold but never stops: the
                 // no-op stop decides under the claim lock without acting.
-                let stop = || {
-                    if cleanup {
-                        crate::buildkit::stop_builder_daemon(&name)
-                    } else {
-                        Ok(false)
-                    }
-                };
-                let run_root = crate::buildkit::claims_run_root();
-                let outcome = match (state.temp_host.as_deref(), run_root.as_ref()) {
-                    (Some(_temp), Some(run_root)) => {
-                        match crate::buildkit::release_and_stop_if_last(
-                            run_root,
-                            &name,
+                let outcome = match (state.temp_host.as_deref(), domain.as_ref()) {
+                    (Some(temp), Some(domain)) => {
+                        let recorded = crate::buildkit::read_job_builders(
+                            temp,
+                            &domain.token,
                             &container.name,
-                            stop,
-                            || crate::buildkit::start_builder_daemon(&name),
-                        ) {
-                            Ok(outcome) => Some(outcome),
+                        );
+                        match recorded {
+                            Ok(builders) if builders.iter().any(|builder| builder == &name) => {
+                                let stop = || {
+                                    if cleanup {
+                                        crate::buildkit::stop_builder_in_domain(domain, &name)
+                                    } else {
+                                        Ok(false)
+                                    }
+                                };
+                                match crate::buildkit::release_domain_builder_if_last(
+                                    domain,
+                                    &name,
+                                    &container.name,
+                                    stop,
+                                    || crate::buildkit::start_builder_in_domain(domain, &name),
+                                ) {
+                                    Ok(outcome) => Some(outcome),
+                                    Err(error) => {
+                                        use std::fmt::Write as _;
+                                        let _ = writeln!(
+                                            stderr,
+                                            "buildx post: release of {name} failed ({error:#}); \
+                                             the hold converges via slot repair"
+                                        );
+                                        stdout.push_str(
+                                            "Release failed: daemon left running (see stderr)\n",
+                                        );
+                                        None
+                                    }
+                                }
+                            }
+                            Ok(_) => {
+                                stdout.push_str(
+                                    "No recorded BuildKit hold for this job; builder left running\n",
+                                );
+                                None
+                            }
                             Err(error) => {
                                 use std::fmt::Write as _;
                                 let _ = writeln!(
                                     stderr,
-                                    "buildx post: release of {name} failed ({error:#}); \
-                                     the hold converges via slot repair"
+                                    "buildx post: cannot verify the recorded hold for {name} ({error:#}); \
+                                     the builder is left running"
                                 );
-                                stdout
-                                    .push_str("Release failed: daemon left running (see stderr)\n");
                                 None
                             }
                         }
                     }
                     _ => {
                         stdout.push_str(
-                            "No temp dir or run root: hold skipped, builder left running\n",
+                            "No temp dir or storage domain: hold skipped, builder left running\n",
                         );
                         None
                     }
@@ -5231,29 +5235,30 @@ where
         let action_state = state.with_env(state.resolve_env(&action.env)?);
         let requested_name = native_input_or(&action_state, action, "name", "velnor-builder")?;
         let tier = buildkit_trust_tier(state);
-        let name = crate::buildkit::persistent_builder_name(
+        let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
+        let (domain, name) = buildkit_domain_and_name(
             &requested_name,
             &state.trust_scope,
             tier,
             container.repository.as_deref(),
-        );
+        )?;
         // Builder claims live in the storage-backed claim store: without a
         // runner temp dir or without configured Velnor storage (unit tests
         // run hermetically, without VELNOR_STORAGE_ROOT) there is nothing to
         // claim in, so setup proceeds unclaimed and the builder stays
         // unmanaged — the same degraded path every other storage-gated
         // caller takes. The inspect/create below always runs.
-        let lifecycle: Option<(&Path, PathBuf)> = match (
-            state.temp_host.as_deref(),
-            crate::buildkit::claims_run_root(),
-        ) {
-            (Some(temp), Some(run_root)) => {
-                crate::buildkit::record_job_builder(temp, &name)?;
-                Some((temp, run_root))
+        if domain.is_some() && state.temp_host.is_none() {
+            #[cfg(not(test))]
+            anyhow::bail!("setup-buildx requires a runner temp directory for job ownership");
+        }
+        let lifecycle = match (state.temp_host.as_deref(), domain.as_ref()) {
+            (Some(temp), Some(domain)) => {
+                crate::buildkit::record_job_builder(temp, &domain.token, &container.name, &name)?;
+                Some(domain.clone())
             }
             _ => None,
         };
-        let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
         let buildkitd_config_inline =
             native_input(action, &action_state, "buildkitd-config-inline")?;
         let buildkitd_config_container = if buildkitd_config_inline.is_empty() {
@@ -5277,13 +5282,14 @@ where
             // a claim store there is no gate to take and nothing to claim,
             // so setup proceeds straight to inspect/create.
             let _coordinator = match lifecycle.as_ref() {
-                Some((temp, run_root)) => {
-                    let coordinator = crate::capacity::FilesystemCoordinator::lock_shared(run_root)
-                        .context("lock BuildKit lifecycle for setup")?;
-                    crate::buildkit::claim_builder(
-                        run_root,
+                Some(domain) => {
+                    let coordinator =
+                        crate::capacity::FilesystemCoordinator::lock_shared(&domain.root)
+                            .context("lock BuildKit lifecycle for setup")?;
+                    crate::buildkit::claim_domain_builder(
+                        domain,
                         &name,
-                        &job_scope_from_temp(Some(*temp)),
+                        &job_scope_from_temp(state.temp_host.as_deref()),
                         &container.name,
                     )?;
                     Some(coordinator)
@@ -5317,9 +5323,9 @@ where
                 self.container_docker(container, &action_state, &args, None, timeout)?
             }
         };
-        if let Some(run_root) = lifecycle.as_ref().map(|(_, run_root)| run_root)
+        if let Some(domain) = lifecycle.as_ref()
             && let Some(report) =
-                crate::buildkit::maybe_reap_idle_builders(run_root, std::time::SystemTime::now())
+                crate::buildkit::maybe_reap_idle_builders(domain, std::time::SystemTime::now())
         {
             for failure in &report.failures {
                 eprintln!("buildx setup: horizon reap: {failure}");
@@ -5844,17 +5850,18 @@ where
         // path skips posts, so teardown is the backstop. Stopping only
         // happens when the release removed the final hold. Errors propagate
         // like the removal errors below: a broken run root must be loud.
-        for builder in crate::buildkit::read_job_builders(&container.temp_host)? {
-            if !crate::buildkit::is_persistent_builder_name(&builder) {
-                continue;
-            }
-            if let Some(run_root) = crate::buildkit::claims_run_root() {
-                crate::buildkit::release_and_stop_if_last(
-                    &run_root,
+        if let Some(domain) = crate::buildkit::PersistentBuildKitDomain::try_resolve()? {
+            for builder in crate::buildkit::read_job_builders(
+                &container.temp_host,
+                &domain.token,
+                &container.name,
+            )? {
+                crate::buildkit::release_domain_builder_if_last(
+                    &domain,
                     &builder,
                     &container.name,
-                    || crate::buildkit::stop_builder_daemon(&builder),
-                    || crate::buildkit::start_builder_daemon(&builder),
+                    || crate::buildkit::stop_builder_in_domain(&domain, &builder),
+                    || crate::buildkit::start_builder_in_domain(&domain, &builder),
                 )?;
             }
         }
@@ -12213,6 +12220,47 @@ fn buildkit_trust_tier(state: &JobExecutionState) -> &'static str {
     )
 }
 
+fn buildkit_domain_and_name(
+    requested_name: &str,
+    scope: &str,
+    tier: &str,
+    repository: Option<&str>,
+) -> Result<(Option<crate::buildkit::PersistentBuildKitDomain>, String)> {
+    match crate::buildkit::PersistentBuildKitDomain::try_resolve()? {
+        Some(domain) => {
+            let name = crate::buildkit::persistent_builder_name_for_domain(
+                &domain.token,
+                requested_name,
+                scope,
+                tier,
+                repository,
+            );
+            Ok((Some(domain), name))
+        }
+        None => {
+            #[cfg(test)]
+            {
+                Ok((
+                    None,
+                    crate::buildkit::test_domain_builder_name(
+                        requested_name,
+                        scope,
+                        tier,
+                        repository,
+                    ),
+                ))
+            }
+            #[cfg(not(test))]
+            {
+                let _ = (requested_name, scope, tier, repository);
+                anyhow::bail!(
+                    "persistent BuildKit requires an initialized Velnor storage layout and Docker Engine identity"
+                )
+            }
+        }
+    }
+}
+
 fn pages_url_for_repository(repository: &str) -> String {
     let Some((owner, repo)) = repository.split_once('/') else {
         return String::new();
@@ -16738,7 +16786,6 @@ esac
         let temp = root.join("job-scope").join("temp");
         fs::create_dir_all(&temp).unwrap();
         let spec = container(&temp);
-        crate::buildkit::record_job_builder(&temp, "velnor-builder-shared-trusted-o_r").unwrap();
         let mut executor = DockerJobEngine::inert(PersistentCleanupRunner { calls: Vec::new() });
 
         executor.cleanup_job_buildkit(&spec).unwrap();
@@ -19746,16 +19793,16 @@ type=sha,format=long,prefix=,enable=true"
         // Persistent builder: default requested name, trusted test scope,
         // unknown tier (no ref signals in the fixture env),
         // unknown-repository fixture repo.
-        let builder = crate::buildkit::persistent_builder_name(
+        let builder = crate::buildkit::test_domain_builder_name(
             "velnor-builder",
             "trusted",
             crate::buildkit::TRUST_TIER_UNKNOWN,
             Some("unknown-repository"),
         );
-        assert_eq!(
-            builder,
-            "velnor-builder-shared-unbounded-v1-trusted-unknown-unknown-repository"
-        );
+        assert!(builder.starts_with(&format!(
+            "velnor-builder-shared-unbounded-v2-d{}-",
+            crate::buildkit::TEST_BUILDKIT_DOMAIN_TOKEN
+        )));
         // Unbounded: the builder daemon is created with no resource
         // `--driver-opt` sizing (no cpu-*/memory= entries at all).
         let create = calls
@@ -28886,16 +28933,16 @@ fi"#
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
-        let builder = crate::buildkit::persistent_builder_name(
+        let builder = crate::buildkit::test_domain_builder_name(
             "jackin-construct",
             "untrusted",
             crate::buildkit::TRUST_TIER_UNKNOWN,
             Some("unknown-repository"),
         );
-        assert_eq!(
-            builder,
-            "velnor-builder-shared-unbounded-v1-untrusted-unknown-unknown-repository-jackin-construct"
-        );
+        assert!(builder.starts_with(&format!(
+            "velnor-builder-shared-unbounded-v2-d{}-",
+            crate::buildkit::TEST_BUILDKIT_DOMAIN_TOKEN
+        )));
         assert_eq!(results[0].exit_code, 0);
         assert_eq!(results[0].state.outputs["name"], builder);
         assert_eq!(results[0].state.env["BUILDX_BUILDER"], builder);
@@ -28965,10 +29012,15 @@ fi"#
             );
             let post = results.last().expect("post result");
             assert_eq!(post.exit_code, 0);
+            let builder = crate::buildkit::test_domain_builder_name(
+                "builder",
+                "untrusted",
+                crate::buildkit::TRUST_TIER_UNKNOWN,
+                Some("unknown-repository"),
+            );
             assert!(
-                post.stdout.contains(
-                    "Releasing builder velnor-builder-shared-unbounded-v1-untrusted-unknown-unknown-repository-builder"
-                ),
+                post.stdout
+                    .contains(&format!("Releasing builder {builder}")),
                 "post names the persistent builder: {:?}",
                 post.stdout
             );
@@ -28979,7 +29031,7 @@ fi"#
             );
             if cleanup == "false" {
                 assert!(
-                    post.stdout.contains("No temp dir or run root")
+                    post.stdout.contains("No temp dir or storage domain")
                         || post.stdout.contains("cleanup disabled"),
                     "cleanup=false leaves the daemon: {:?}",
                     post.stdout
