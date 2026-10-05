@@ -126,11 +126,14 @@ impl Primitive for Release {
             "artifact_path",
             "binary",
             "consumer_repository",
+            "context",
+            "dockerfile",
             "image",
             "kind",
             "manifest_schema",
             "package",
             "packages",
+            "platforms",
             "source_repository",
             "targets",
         ]
@@ -236,17 +239,17 @@ fn declared_or_configured_spec(
 /// partially rendered publisher.
 fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError> {
     let kind = match args.string("kind")?.as_deref() {
-        Some("crates" | "rust-binary" | "native" | "pages" | "homebrew" | "apt") => {
+        Some("crates" | "rust-binary" | "native" | "pages" | "homebrew" | "apt" | "docker") => {
             args.string("kind")?.unwrap_or_default()
         }
         Some(other) => {
             return Err(GeneratorError::usage(format!(
-                "`{family}` `kind` must be `crates`, `rust-binary`, `native`, `pages`, `homebrew`, or `apt`, found `{other}`"
+                "`{family}` `kind` must be `crates`, `rust-binary`, `native`, `pages`, `homebrew`, `apt`, or `docker`, found `{other}`"
             )))
         }
         None => {
             return Err(GeneratorError::usage(format!(
-                "`{family}` needs `kind`; one of `crates`, `rust-binary`, `native`, `pages`, `homebrew`, or `apt`"
+                "`{family}` needs `kind`; one of `crates`, `rust-binary`, `native`, `pages`, `homebrew`, `apt`, or `docker`"
             )))
         }
     };
@@ -262,6 +265,9 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         artifact_path: args.string("artifact_path")?.unwrap_or_default(),
         description: String::new(),
         manifest_schema: args.string("manifest_schema")?.unwrap_or_default(),
+        dockerfile: args.string("dockerfile")?.unwrap_or_default(),
+        context: args.string("context")?.unwrap_or_default(),
+        platforms: args.strings("platforms")?.unwrap_or_default(),
     })
 }
 
@@ -280,6 +286,9 @@ fn declared_preview_spec(args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError>
         artifact_path: String::new(),
         description: String::new(),
         manifest_schema: String::new(),
+        dockerfile: String::new(),
+        context: String::new(),
+        platforms: Vec::new(),
     })
 }
 
@@ -288,6 +297,7 @@ fn incomplete_contract(family: &str, spec: &ReleaseSpec) -> GeneratorError {
         "crates" => "`packages`",
         "rust-binary" => "`package`, `binary`, and `targets`",
         "pages" => "`artifact_path`",
+        "docker" => "`image`",
         _ => "the contract",
     };
     GeneratorError::usage(format!(
@@ -338,6 +348,9 @@ pub(crate) fn release_contract_complete(release: &ReleaseSpec) -> bool {
         "pages" => !release.artifact_path.is_empty(),
         "homebrew" => !release.package.is_empty() && !release.source_repository.is_empty(),
         "apt" => !release.package.is_empty() && !release.consumer_repository.is_empty(),
+        "docker" => {
+            !release.image.is_empty() && crate::config::valid_docker_platforms(&release.platforms)
+        }
         _ => false,
     }
 }
@@ -1207,7 +1220,7 @@ fn render_image_platform_job(config: &ProjectConfig, release: &ReleaseSpec) -> S
         "cargo"
     };
     format!(
-        "  image-platform:\n    name: Build ${{{{ matrix.arch }}}} GHCR image\n    needs: [{needs}]\n{gate}    timeout-minutes: 60\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    runs-on: ${{{{ matrix.runner }}}}\n    permissions:\n      contents: read\n      packages: write\n    env:\n      GHCR_IMAGE: {image}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n      COMMIT: ${{{{ github.sha }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          ref: ${{{{ github.sha }}}}\n          fetch-depth: 1\n          persist-credentials: false\n{setup}      - name: Build the workflow binary for the image\n        env:\n          CARGO_INCREMENTAL: \"0\"\n        run: |\n          set -euo pipefail\n          {cargo_cmd} build --locked --release --package {workflow_package}\n          binary=\"release-binaries/${{{{ matrix.arch }}}}/{workflow_package}\"\n          mkdir -p \"release-binaries/${{{{ matrix.arch }}}}\"\n          cp \"target/release/{workflow_package}\" \"$binary\"\n          chmod 0755 \"$binary\"\n          test -x \"$binary\"\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n          keep-state: true\n      - name: Log in to GHCR\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n      - name: Build + push platform image\n        id: push\n        uses: {build}\n        with:\n          context: .\n          file: {dockerfile}\n          platforms: ${{{{ matrix.platform }}}}\n          push: true\n          cache-from: |\n            type=registry,ref=${{{{ env.GHCR_IMAGE }}}}:buildcache-${{{{ matrix.arch }}}}\n            type=gha,scope=velnor-job-ubuntu-${{{{ matrix.arch }}}}\n          cache-to: |\n            type=registry,ref=${{{{ env.GHCR_IMAGE }}}}:buildcache-${{{{ matrix.arch }}}},mode=max\n            type=gha,scope=velnor-job-ubuntu-${{{{ matrix.arch }}}},mode=max\n          secrets: |\n            mise_github_token=${{{{ github.token }}}}\n          build-args: |\n            VELNOR_IMAGE_VERSION=${{{{ needs.verify.outputs.version }}}}\n          tags: ${{{{ env.GHCR_IMAGE }}}}:release-${{{{ env.COMMIT }}}}-${{{{ matrix.arch }}}}\n          labels: |\n            org.opencontainers.image.version=${{{{ needs.verify.outputs.version }}}}\n            org.opencontainers.image.revision=${{{{ github.sha }}}}\n            org.opencontainers.image.source={source_url}\n            org.velnor.manifest-sha256=${{{{ needs.metadata.outputs.manifest_sha256 }}}}\n      - name: Record platform digest\n        env:\n          ARCH: ${{{{ matrix.arch }}}}\n        run: |\n          set -euo pipefail\n          docker buildx imagetools inspect \\\n            \"${{GHCR_IMAGE}}:release-${{COMMIT}}-${{ARCH}}\" \\\n            --format '{{{{json .}}}}' > image-inspect.json\n          PLATFORM_DIGEST=\"$(jq -er --arg arch \"$ARCH\" '\n            [.manifest.manifests[]\n             | select(.platform.architecture == $arch and .platform.os == \"linux\")\n             | select((.annotations[\"vnd.docker.reference.type\"] // \"\") != \"attestation-manifest\")\n             | .digest]\n            | if length == 1 then .[0] else error(\"expected one image manifest for architecture\") end\n          ' image-inspect.json)\"\n          case \"$PLATFORM_DIGEST\" in\n            sha256:[0-9a-fA-F]*) ;;\n            *) echo \"::error::staging image inspection did not return a platform digest\" >&2; exit 1 ;;\n          esac\n          printf '%s\\n' \"$PLATFORM_DIGEST\" > \"image-${{{{ matrix.arch }}}}.digest\"\n      - name: Upload platform digest\n        uses: {upload}\n        with:\n          name: image-platform-${{{{ matrix.arch }}}}\n          path: image-${{{{ matrix.arch }}}}.digest\n          if-no-files-found: error\n          retention-days: 2\n",
+        "  image-platform:\n    name: Build ${{{{ matrix.arch }}}} GHCR image\n    needs: [{needs}]\n{gate}    timeout-minutes: 60\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    runs-on: ${{{{ matrix.runner }}}}\n    permissions:\n      contents: read\n      packages: write\n      id-token: write\n      attestations: write\n    env:\n      GHCR_IMAGE: {image}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n      COMMIT: ${{{{ github.sha }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          ref: ${{{{ github.sha }}}}\n          fetch-depth: 1\n          persist-credentials: false\n{setup}      - name: Build the workflow binary for the image\n        env:\n          CARGO_INCREMENTAL: \"0\"\n        run: |\n          set -euo pipefail\n          {cargo_cmd} build --locked --release --package {workflow_package}\n          binary=\"release-binaries/${{{{ matrix.arch }}}}/{workflow_package}\"\n          mkdir -p \"release-binaries/${{{{ matrix.arch }}}}\"\n          cp \"target/release/{workflow_package}\" \"$binary\"\n          chmod 0755 \"$binary\"\n          test -x \"$binary\"\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n          keep-state: true\n      - name: Log in to GHCR\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n      - name: Build + push platform image\n        id: push\n        uses: {build}\n        with:\n          context: .\n          file: {dockerfile}\n          platforms: ${{{{ matrix.platform }}}}\n          push: true\n          provenance: true\n          sbom: true\n          cache-from: |\n            type=registry,ref=${{{{ env.GHCR_IMAGE }}}}:buildcache-${{{{ matrix.arch }}}}\n            type=gha,scope=velnor-job-ubuntu-${{{{ matrix.arch }}}}\n          cache-to: |\n            type=registry,ref=${{{{ env.GHCR_IMAGE }}}}:buildcache-${{{{ matrix.arch }}}},mode=max\n            type=gha,scope=velnor-job-ubuntu-${{{{ matrix.arch }}}},mode=max\n          secrets: |\n            mise_github_token=${{{{ github.token }}}}\n          build-args: |\n            VELNOR_IMAGE_VERSION=${{{{ needs.verify.outputs.version }}}}\n          tags: ${{{{ env.GHCR_IMAGE }}}}:release-${{{{ env.COMMIT }}}}-${{{{ matrix.arch }}}}\n          labels: |\n            org.opencontainers.image.version=${{{{ needs.verify.outputs.version }}}}\n            org.opencontainers.image.revision=${{{{ github.sha }}}}\n            org.opencontainers.image.source={source_url}\n            org.velnor.manifest-sha256=${{{{ needs.metadata.outputs.manifest_sha256 }}}}\n      - name: Record platform digest\n        env:\n          ARCH: ${{{{ matrix.arch }}}}\n        run: |\n          set -euo pipefail\n          docker buildx imagetools inspect \\\n            \"${{GHCR_IMAGE}}:release-${{COMMIT}}-${{ARCH}}\" \\\n            --format '{{{{json .}}}}' > image-inspect.json\n          PLATFORM_DIGEST=\"$(jq -er --arg arch \"$ARCH\" '\n            [.manifest.manifests[]\n             | select(.platform.architecture == $arch and .platform.os == \"linux\")\n             | select((.annotations[\"vnd.docker.reference.type\"] // \"\") != \"attestation-manifest\")\n             | .digest]\n            | if length == 1 then .[0] else error(\"expected one image manifest for architecture\") end\n          ' image-inspect.json)\"\n          case \"$PLATFORM_DIGEST\" in\n            sha256:[0-9a-fA-F]*) ;;\n            *) echo \"::error::staging image inspection did not return a platform digest\" >&2; exit 1 ;;\n          esac\n          printf '%s\\n' \"$PLATFORM_DIGEST\" > \"image-${{{{ matrix.arch }}}}.digest\"\n      - name: Upload platform digest\n        uses: {upload}\n        with:\n          name: image-platform-${{{{ matrix.arch }}}}\n          path: image-${{{{ matrix.arch }}}}.digest\n          if-no-files-found: error\n          retention-days: 2\n",
         image = release.image,
         source_url = release_source_url(release),
         workflow_package = IMAGE_WORKFLOW_PACKAGE,
@@ -1226,7 +1239,7 @@ fn render_image_index_job(config: &ProjectConfig, release: &ReleaseSpec) -> Stri
     let buildx = ActionPin::DockerBuildx.reference();
     let login = ActionPin::DockerLogin.reference();
     format!(
-        "  image:\n    if: ${{{{ always() && needs.admit-runner.result == 'success' && needs.verify.result == 'success' && needs.metadata.result == 'success' && needs.image-admission.result == 'success' && (needs.image-platform.result == 'success' || needs.image-platform.result == 'skipped') }}}}\n    needs: [admit-runner, verify, metadata, image-platform, image-admission]\n    name: Assemble one multi-platform GHCR image\n    timeout-minutes: 15\n    runs-on: {runner}\n    permissions:\n      contents: read\n      packages: write\n    outputs:\n      index_digest: ${{{{ steps.push.outputs.index_digest }}}}\n      manifest_sha256: ${{{{ needs.metadata.outputs.manifest_sha256 }}}}\n    env:\n      GHCR_IMAGE: {image}\n      SOURCE_URL: {source_url}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n      COMMIT: ${{{{ github.sha }}}}\n    steps:\n      - name: Download platform digests\n        if: ${{{{ needs.image-admission.outputs.existing != 'true' }}}}\n        uses: {download}\n        with:\n          pattern: image-platform-*\n          path: image-artifacts\n          merge-multiple: true\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n      - name: Log in to GHCR\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n      - name: Assemble and inspect immutable image index\n        id: push\n        env:\n          AMD64_DIGEST_FILE: image-artifacts/image-amd64.digest\n          ARM64_DIGEST_FILE: image-artifacts/image-arm64.digest\n          IMAGE_ALREADY_EXISTS: ${{{{ needs.image-admission.outputs.existing }}}}\n          EXPECTED_EXISTING_INDEX_DIGEST: ${{{{ needs.image-admission.outputs.index_digest }}}}\n        run: |\n          set -euo pipefail\n          if [ \"$IMAGE_ALREADY_EXISTS\" = true ]; then\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n            [ \"$index_digest\" = \"$EXPECTED_EXISTING_INDEX_DIGEST\" ] || {{\n              echo \"::error::version tag moved from $EXPECTED_EXISTING_INDEX_DIGEST to $index_digest during admission\" >&2\n              exit 1\n            }}\n          else\n            for path in \"$AMD64_DIGEST_FILE\" \"$ARM64_DIGEST_FILE\"; do\n              test -s \"$path\"\n              digest=\"$(tr -d '[:space:]' < \"$path\")\"\n              case \"$digest\" in\n                sha256:[0-9a-fA-F]*) ;;\n                *) echo \"::error::invalid platform digest in $path\" >&2; exit 1 ;;\n              esac\n            done\n            amd64_digest=\"$(tr -d '[:space:]' < \"$AMD64_DIGEST_FILE\")\"\n            arm64_digest=\"$(tr -d '[:space:]' < \"$ARM64_DIGEST_FILE\")\"\n            docker buildx imagetools create \\\n              --tag \"${{GHCR_IMAGE}}:${{VERSION}}\" \\\n              \"${{GHCR_IMAGE}}:release-${{COMMIT}}-amd64\" \\\n              \"${{GHCR_IMAGE}}:release-${{COMMIT}}-arm64\"\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            jq -e --arg amd \"$amd64_digest\" --arg arm \"$arm64_digest\" '\n              any(.manifest.manifests[]; .digest == $amd and .platform.architecture == \"amd64\") and\n              any(.manifest.manifests[]; .digest == $arm and .platform.architecture == \"arm64\")\n            ' image-digests.json >/dev/null || {{\n              echo \"::error::version tag does not reference both newly built platform digests\" >&2\n              exit 1\n            }}\n          fi\n          docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n          index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n          case \"$index_digest\" in\n            sha256:[0-9a-fA-F]*) ;;\n            *) echo \"::error::manifest inspection did not return an index digest\" >&2; exit 1 ;;\n          esac\n          printf 'index_digest=%s\\n' \"$index_digest\" >> \"$GITHUB_OUTPUT\"\n          printf '%s\\n' \"$index_digest\" > image-index.digest\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: release-metadata\n      - name: Upload image digests\n        uses: {upload}\n        with:\n          name: image-digests\n          path: |\n            image-digests.json\n            image-index.digest\n          if-no-files-found: error\n          retention-days: 2\n",
+        "  image:\n    if: ${{{{ always() && needs.admit-runner.result == 'success' && needs.verify.result == 'success' && needs.metadata.result == 'success' && needs.image-admission.result == 'success' && (needs.image-platform.result == 'success' || needs.image-platform.result == 'skipped') }}}}\n    needs: [admit-runner, verify, metadata, image-platform, image-admission]\n    name: Assemble one multi-platform GHCR image\n    timeout-minutes: 15\n    runs-on: {runner}\n    permissions:\n      contents: read\n      packages: write\n    outputs:\n      index_digest: ${{{{ steps.push.outputs.index_digest }}}}\n      manifest_sha256: ${{{{ needs.metadata.outputs.manifest_sha256 }}}}\n    env:\n      GHCR_IMAGE: {image}\n      SOURCE_URL: {source_url}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n      COMMIT: ${{{{ github.sha }}}}\n    steps:\n      - name: Download platform digests\n        if: ${{{{ needs.image-admission.outputs.existing != 'true' }}}}\n        uses: {download}\n        with:\n          pattern: image-platform-*\n          path: image-artifacts\n          merge-multiple: true\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n      - name: Log in to GHCR\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n      - name: Assemble and inspect immutable image index\n        id: push\n        env:\n          AMD64_DIGEST_FILE: image-artifacts/image-amd64.digest\n          ARM64_DIGEST_FILE: image-artifacts/image-arm64.digest\n          IMAGE_ALREADY_EXISTS: ${{{{ needs.image-admission.outputs.existing }}}}\n          EXPECTED_EXISTING_INDEX_DIGEST: ${{{{ needs.image-admission.outputs.index_digest }}}}\n        run: |\n          set -euo pipefail\n          if [ \"$IMAGE_ALREADY_EXISTS\" = true ]; then\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n            [ \"$index_digest\" = \"$EXPECTED_EXISTING_INDEX_DIGEST\" ] || {{\n              echo \"::error::version tag moved from $EXPECTED_EXISTING_INDEX_DIGEST to $index_digest during admission\" >&2\n              exit 1\n            }}\n          else\n            for path in \"$AMD64_DIGEST_FILE\" \"$ARM64_DIGEST_FILE\"; do\n              test -s \"$path\"\n              digest=\"$(tr -d '[:space:]' < \"$path\")\"\n              case \"$digest\" in\n                sha256:[0-9a-fA-F]*) ;;\n                *) echo \"::error::invalid platform digest in $path\" >&2; exit 1 ;;\n              esac\n            done\n            amd64_digest=\"$(tr -d '[:space:]' < \"$AMD64_DIGEST_FILE\")\"\n            arm64_digest=\"$(tr -d '[:space:]' < \"$ARM64_DIGEST_FILE\")\"\n            docker buildx imagetools create \\\n              --tag \"${{GHCR_IMAGE}}:${{VERSION}}\" \\\n              \"${{GHCR_IMAGE}}:release-${{COMMIT}}-amd64\" \\\n              \"${{GHCR_IMAGE}}:release-${{COMMIT}}-arm64\"\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            jq -e --arg amd \"$amd64_digest\" --arg arm \"$arm64_digest\" '\n              any(.manifest.manifests[]; .digest == $amd and .platform.architecture == \"amd64\") and\n              any(.manifest.manifests[]; .digest == $arm and .platform.architecture == \"arm64\")\n            ' image-digests.json >/dev/null || {{\n              echo \"::error::version tag does not reference both newly built platform digests\" >&2\n              exit 1\n            }}\n            [ \"$(jq -r '[.manifest.manifests[] | select((.annotations[\"vnd.docker.reference.type\"] // \"\") != \"attestation-manifest\")] | length' image-digests.json)\" = \"2\" ] || {{\n              echo \"::error::version tag carries an unexpected platform set\" >&2\n              exit 1\n            }}\n          fi\n          docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n          index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n          case \"$index_digest\" in\n            sha256:[0-9a-fA-F]*) ;;\n            *) echo \"::error::manifest inspection did not return an index digest\" >&2; exit 1 ;;\n          esac\n          printf 'index_digest=%s\\n' \"$index_digest\" >> \"$GITHUB_OUTPUT\"\n          printf '%s\\n' \"$index_digest\" > image-index.digest\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: release-metadata\n      - name: Upload image digests\n        uses: {upload}\n        with:\n          name: image-digests\n          path: |\n            image-digests.json\n            image-index.digest\n          if-no-files-found: error\n          retention-days: 2\n",
         runner = yaml_scalar(&config.github_runner),
         image = release.image,
         source_url = release_source_url(release),
@@ -1742,6 +1755,7 @@ pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> S
         "pages" => render_pages_release(config, release),
         "homebrew" => render_homebrew_release(config, release),
         "apt" => render_apt_release(config, release),
+        "docker" => render_docker_release(config, release),
         _ => format!(
             "{GENERATED_HEADER}# Release omitted: this publisher requires a separately verified contract.\n"
         ),
@@ -2182,6 +2196,245 @@ fn native_image_jobs(config: &ProjectConfig, release: &ReleaseSpec, debian: bool
             ActionPin::DockerBuild.reference(),
         )
     }
+}
+
+/// The `docker` publisher's platform rows: `(arch, platform)` per declared
+/// platform, defaulting to both Linux architectures when the contract
+/// declares none. Rows dedupe by arch so one platform can never gain two
+/// authorized publishers. Unknown platforms fail closed at contract
+/// validation, so this mapping is total over complete contracts.
+fn docker_platform_arches(release: &ReleaseSpec) -> Vec<(&'static str, String)> {
+    let platforms: Vec<String> = if release.platforms.is_empty() {
+        crate::config::DOCKER_PLATFORMS
+            .iter()
+            .map(|platform| (*platform).to_owned())
+            .collect()
+    } else {
+        release.platforms.clone()
+    };
+    let mut arches = Vec::new();
+    for platform in &platforms {
+        let arch = match platform.as_str() {
+            "linux/amd64" => "amd64",
+            "linux/arm64" => "arm64",
+            _ => continue,
+        };
+        if !arches.iter().any(|(known, _)| *known == arch) {
+            arches.push((arch, platform.clone()));
+        }
+    }
+    arches
+}
+
+/// The consumer-owned Dockerfile the `docker` publisher builds.
+fn docker_dockerfile(release: &ReleaseSpec) -> &str {
+    if release.dockerfile.is_empty() {
+        "Dockerfile"
+    } else {
+        &release.dockerfile
+    }
+}
+
+/// The build context the `docker` publisher builds from.
+fn docker_context(release: &ReleaseSpec) -> &str {
+    if release.context.is_empty() {
+        "."
+    } else {
+        &release.context
+    }
+}
+
+/// The GHA cache scope stem for one image: the lowercased image slug, so
+/// repositories publishing several images never share a `BuildKit` cache
+/// scope across images. The matrix arch suffixes it per platform row.
+fn docker_cache_scope(image: &str) -> String {
+    let slug: String = image
+        .to_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "image".to_owned()
+    } else {
+        slug.to_owned()
+    }
+}
+
+/// The multi-arch platform matrix: one native builder per declared
+/// platform. Arm64 builders run on the hosted arm64 label; anything else
+/// would silently emulate under QEMU, so there is no fallback.
+fn docker_platform_matrix(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    let mut matrix = String::new();
+    for (arch, platform) in docker_platform_arches(release) {
+        let runner = match arch {
+            "amd64" => yaml_scalar(&config.github_runner),
+            // GitHub's hosted arm64 label; the release contract names it and
+            // no second hosted label exists to configure.
+            _ => "ubuntu-24.04-arm".to_owned(),
+        };
+        let _ = writeln!(
+            matrix,
+            "          - arch: {arch}\n            platform: {platform}\n            runner: {runner}"
+        );
+    }
+    matrix
+}
+
+/// The source URL stamped into the `docker` publisher's OCI labels: the
+/// repository's own address on github.com, never a declared guess.
+fn docker_source_url(config: &ProjectConfig) -> String {
+    format!("https://github.com/{}", config.repository)
+}
+
+fn render_docker_admit_job(config: &ProjectConfig) -> String {
+    format!(
+        "  admit-runner:\n    name: Control / Admit release\n    runs-on: {runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject Velnor-only docker release\n        if: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.runner == 'velnor' }}}}\n        run: |\n          echo 'docker release publishes from GitHub only; Velnor-only dispatch is unsupported' >&2\n          exit 1\n",
+        runner = yaml_scalar(&config.github_runner),
+    )
+}
+
+/// The tag gate: the tag must equal the protected branch tip (via
+/// `verify-tag`, without a Cargo package: the `docker` publisher has none),
+/// and one resolved version flows to every downstream job.
+fn render_docker_verify_job(config: &ProjectConfig) -> String {
+    let checkout = ActionPin::Checkout.reference();
+    // The verify job always runs on the hosted github runner, so its
+    // runtime install is keyed to that placement — never to the repo lane.
+    let setup = workflow_runtime_setup(
+        RunnerMode::Github,
+        &config.repository,
+        &config.workflow_revision,
+    );
+    format!(
+        "  verify:\n    name: Control / Verify release\n    runs-on: {runner}\n    timeout-minutes: 30\n    outputs:\n      version: ${{{{ steps.version.outputs.version }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n{POLICY_CHECKOUT_WITH}{setup}{policy}      - name: Verify tag\n        run: velnor-workflow release verify-tag --branch {branch}\n      - name: Resolve release version\n        id: version\n        env:\n          TAG: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          case \"$TAG\" in\n            v[0-9]*) ;;\n            *) echo \"::error::release tag $TAG must match v[0-9]*\" >&2; exit 1 ;;\n          esac\n          version=\"${{TAG#v}}\"\n          case \"$version\" in\n            ''|*['/ ']*) echo \"::error::release version is not portable: $version\" >&2; exit 1 ;;\n          esac\n          echo \"version=$version\" >> \"$GITHUB_OUTPUT\"\n",
+        runner = yaml_scalar(&config.github_runner),
+        policy = policy_enforcement_step(),
+        branch = shell_quote(&config.default_branch),
+    )
+}
+
+/// The image admission gate: inspect the version tag without mutating it. An
+/// absent tag opens the platform lane; a present tag is adopted only with an
+/// explicitly supplied recovery digest naming its exact index, so a version
+/// tag is never clobbered and unknown bytes are never adopted.
+fn render_docker_admission_job(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    let buildx = ActionPin::DockerBuildx.reference();
+    let login = ActionPin::DockerLogin.reference();
+    format!(
+        "  image-admission:\n    needs: [admit-runner, verify]\n    name: Admit immutable image tag\n    timeout-minutes: 10\n    runs-on: {runner}\n    permissions:\n      contents: read\n      packages: read\n    outputs:\n      existing: ${{{{ steps.inspect.outputs.existing }}}}\n      index_digest: ${{{{ steps.inspect.outputs.index_digest }}}}\n    steps:\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n      - name: Log in to GHCR\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n      - name: Inspect version tag without mutation\n        id: inspect\n        env:\n          GHCR_IMAGE: {image}\n          VERSION: ${{{{ needs.verify.outputs.version }}}}\n          RECOVERY_INDEX_DIGEST: ${{{{ github.event_name == 'workflow_dispatch' && inputs.existing-image-digest || '' }}}}\n        run: |\n          set -euo pipefail\n          ref=\"${{GHCR_IMAGE}}:${{VERSION}}\"\n          error_file=\"$(mktemp)\"\n          if docker buildx imagetools inspect \"$ref\" --format '{{{{json .}}}}' > image.json 2>\"$error_file\"; then\n            index_digest=\"$(jq -er '.manifest.digest' image.json)\"\n            case \"$index_digest\" in\n              sha256:[0-9a-fA-F]*) ;;\n              *) echo \"::error::existing image tag $ref returned an invalid index digest\" >&2; exit 1 ;;\n            esac\n            if [ -z \"$RECOVERY_INDEX_DIGEST\" ] || [ \"$index_digest\" != \"$RECOVERY_INDEX_DIGEST\" ]; then\n              echo \"::error::OCI tag $ref already exists with an unverified index digest; refusing to adopt unknown bytes (supply existing-image-digest to resume a verified run)\" >&2\n              exit 1\n            fi\n            echo \"adopting explicitly supplied recovery index $index_digest\"\n            {{\n              echo \"existing=true\"\n              echo \"index_digest=$index_digest\"\n            }} >> \"$GITHUB_OUTPUT\"\n          elif grep -Eiq 'manifest unknown|no such manifest|not found|name unknown' \"$error_file\"; then\n            {{\n              echo \"existing=false\"\n              echo \"index_digest=\"\n            }} >> \"$GITHUB_OUTPUT\"\n          else\n            cat \"$error_file\" >&2\n            echo \"::error::could not determine whether OCI tag $ref exists; refusing a fail-open publish\" >&2\n            exit 1\n          fi\n",
+        runner = yaml_scalar(&config.github_runner),
+        image = release.image,
+    )
+}
+
+/// The per-arch OCI platform lane: each native builder pushes its platform
+/// by digest — never under a tag — with `BuildKit` caches plus SBOM and
+/// provenance attestations, then records the digest the manifest job
+/// assembles. The `tags:` input names the bare repository the digest push
+/// targets; only the manifest job writes a version tag.
+fn render_docker_platform_job(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    let checkout = ActionPin::Checkout.reference();
+    let upload = ActionPin::UploadArtifact.reference();
+    let buildx = ActionPin::DockerBuildx.reference();
+    let login = ActionPin::DockerLogin.reference();
+    let build = ActionPin::DockerBuild.reference();
+    let matrix = docker_platform_matrix(config, release);
+    format!(
+        "  image-platform:\n    name: Build ${{{{ matrix.arch }}}} image\n    needs: [admit-runner, verify, image-admission]\n    if: ${{{{ needs.image-admission.outputs.existing != 'true' }}}}\n    timeout-minutes: 60\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    runs-on: ${{{{ matrix.runner }}}}\n    permissions:\n      contents: read\n      packages: write\n      id-token: write\n      attestations: write\n    env:\n      GHCR_IMAGE: {image}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          ref: ${{{{ github.sha }}}}\n          fetch-depth: 1\n          persist-credentials: false\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n          keep-state: true\n      - name: Log in to GHCR\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n      - name: Build + push platform image by digest\n        id: build\n        uses: {build}\n        with:\n          context: {context}\n          file: {dockerfile}\n          platforms: ${{{{ matrix.platform }}}}\n          outputs: type=image,push-by-digest=true,name-canonical=true,push=true\n          provenance: true\n          sbom: true\n          cache-from: |\n            type=registry,ref=${{{{ env.GHCR_IMAGE }}}}:buildcache-${{{{ matrix.arch }}}}\n            type=gha,scope={scope}-${{{{ matrix.arch }}}}\n          cache-to: |\n            type=registry,ref=${{{{ env.GHCR_IMAGE }}}}:buildcache-${{{{ matrix.arch }}}},mode=max\n            type=gha,scope={scope}-${{{{ matrix.arch }}}},mode=max\n          build-args: |\n            VERSION=${{{{ needs.verify.outputs.version }}}}\n          tags: ${{{{ env.GHCR_IMAGE }}}}\n          labels: |\n            org.opencontainers.image.version=${{{{ needs.verify.outputs.version }}}}\n            org.opencontainers.image.revision=${{{{ github.sha }}}}\n            org.opencontainers.image.source={source_url}\n      - name: Record platform digest\n        run: |\n          set -euo pipefail\n          digest=\"${{{{ steps.build.outputs.digest }}}}\"\n          hex=\"${{digest#sha256:}}\"\n          case \"$digest\" in\n            sha256:*) ;;\n            *) echo \"::error::platform build did not return a digest\" >&2; exit 1 ;;\n          esac\n          case \"$hex\" in\n            ''|*[!0-9a-f]*) echo \"::error::platform digest is not lowercase hex\" >&2; exit 1 ;;\n          esac\n          [ \"${{#hex}}\" -eq 64 ] || {{ echo \"::error::platform digest has invalid length\" >&2; exit 1; }}\n          printf '%s\\n' \"$digest\" > \"image-${{{{ matrix.arch }}}}.digest\"\n      - name: Upload platform digest\n        uses: {upload}\n        with:\n          name: image-platform-${{{{ matrix.arch }}}}\n          path: image-${{{{ matrix.arch }}}}.digest\n          if-no-files-found: error\n          retention-days: 2\n",
+        image = release.image,
+        context = yaml_scalar(docker_context(release)),
+        dockerfile = yaml_scalar(docker_dockerfile(release)),
+        scope = docker_cache_scope(&release.image),
+        source_url = docker_source_url(config),
+    )
+}
+
+/// The manifest job: assemble the verified platform digests into one
+/// immutable multi-arch version tag (or re-verify an admitted one), and
+/// export the index digest. The job runs whenever its inputs are
+/// trustworthy — including when the platform lane correctly skipped — but
+/// never when admission itself failed. Nothing else in the file writes a
+/// tag: this job is the exactly-one authorized publisher.
+fn render_docker_manifest_job(
+    config: &ProjectConfig,
+    release: &ReleaseSpec,
+    needs: &[String],
+) -> String {
+    let checkout = ActionPin::Checkout.reference();
+    let download = ActionPin::DownloadArtifact.reference();
+    let upload = ActionPin::UploadArtifact.reference();
+    let buildx = ActionPin::DockerBuildx.reference();
+    let login = ActionPin::DockerLogin.reference();
+    // The manifest job always runs on the hosted github runner, so its
+    // runtime install is keyed to that placement — never to the repo lane.
+    let setup = workflow_runtime_setup(
+        RunnerMode::Github,
+        &config.repository,
+        &config.workflow_revision,
+    );
+    let arches = docker_platform_arches(release);
+    let mut reads = String::new();
+    let mut sources = Vec::new();
+    let mut jq_args = String::new();
+    let mut clauses = Vec::new();
+    for (arch, _) in &arches {
+        let _ = writeln!(
+            reads,
+            "            {arch}_digest=\"$(tr -d '[:space:]' < \"image-artifacts/image-{arch}.digest\")\""
+        );
+        sources.push(format!("              \"${{GHCR_IMAGE}}@${arch}_digest\""));
+        let _ = write!(jq_args, " --arg {arch} \"${arch}_digest\"");
+        clauses.push(format!(
+            "any(.manifest.manifests[]; .digest == ${arch} and .platform.architecture == \"{arch}\")"
+        ));
+    }
+    let sources = sources.join(" \\\n");
+    let clauses = clauses.join(" and\n              ");
+    let arch_list = arches
+        .iter()
+        .map(|(arch, _)| (*arch).to_owned())
+        .collect::<Vec<_>>()
+        .join(",");
+    let needs = needs.join(", ");
+    format!(
+        "  image:\n    if: ${{{{ always() && needs.admit-runner.result == 'success' && needs.verify.result == 'success' && needs.image-admission.result == 'success' && (needs.image-platform.result == 'success' || needs.image-platform.result == 'skipped') }}}}\n    needs: [{needs}]\n    name: Assemble one multi-platform image\n    timeout-minutes: 15\n    runs-on: {runner}\n    permissions:\n      contents: read\n      packages: write\n    outputs:\n      index_digest: ${{{{ steps.push.outputs.index_digest }}}}\n    env:\n      GHCR_IMAGE: {image}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n{setup}      - name: Download platform digests\n        if: ${{{{ needs.image-admission.outputs.existing != 'true' }}}}\n        uses: {download}\n        with:\n          pattern: image-platform-*\n          path: image-artifacts\n          merge-multiple: true\n      - name: Verify the complete platform digest set\n        if: ${{{{ needs.image-admission.outputs.existing != 'true' }}}}\n        run: velnor-workflow release verify-digests --dir image-artifacts --archs {arch_list}\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n      - name: Log in to GHCR\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n      - name: Assemble and inspect immutable image index\n        id: push\n        env:\n          IMAGE_ALREADY_EXISTS: ${{{{ needs.image-admission.outputs.existing }}}}\n          EXPECTED_EXISTING_INDEX_DIGEST: ${{{{ needs.image-admission.outputs.index_digest }}}}\n        run: |\n          set -euo pipefail\n          if [ \"$IMAGE_ALREADY_EXISTS\" = true ]; then\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n            [ \"$index_digest\" = \"$EXPECTED_EXISTING_INDEX_DIGEST\" ] || {{\n              echo \"::error::version tag moved from $EXPECTED_EXISTING_INDEX_DIGEST to $index_digest during admission\" >&2\n              exit 1\n            }}\n          else\n{reads}            docker buildx imagetools create \\\n              --tag \"${{GHCR_IMAGE}}:${{VERSION}}\" \\\n{sources}\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            jq -e{jq_args} '\n              {clauses}\n            ' image-digests.json >/dev/null || {{\n              echo \"::error::version tag does not reference the verified platform digests\" >&2\n              exit 1\n            }}\n            [ \"$(jq -r '[.manifest.manifests[] | select((.annotations[\"vnd.docker.reference.type\"] // \"\") != \"attestation-manifest\")] | length' image-digests.json)\" = \"{count}\" ] || {{\n              echo \"::error::version tag carries an unexpected platform set\" >&2\n              exit 1\n            }}\n          fi\n          docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n          index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n          case \"$index_digest\" in\n            sha256:[0-9a-fA-F]*) ;;\n            *) echo \"::error::manifest inspection did not return an index digest\" >&2; exit 1 ;;\n          esac\n          printf 'index_digest=%s\\n' \"$index_digest\" >> \"$GITHUB_OUTPUT\"\n          printf '%s\\n' \"$index_digest\" > image-index.digest\n      - name: Upload image digests\n        uses: {upload}\n        with:\n          name: image-digests\n          path: |\n            image-digests.json\n            image-index.digest\n          if-no-files-found: error\n          retention-days: 2\n",
+        runner = yaml_scalar(&config.github_runner),
+        image = release.image,
+        count = arches.len(),
+    )
+}
+
+/// The standalone multi-arch OCI publisher for consumer-owned Dockerfiles:
+/// one immutable version tag is admitted, built natively per declared
+/// platform with caches and attestations, and assembled from the complete
+/// verified digest set by the single manifest job. One concurrency group
+/// per ref serializes publishers so a resume and a fresh publication can
+/// never interleave on the same tag.
+fn render_docker_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    let (unit_jobs, unit_job_ids) = render_release_unit_jobs(config);
+    let mut manifest_needs = vec![
+        "admit-runner".to_owned(),
+        "verify".to_owned(),
+        "image-admission".to_owned(),
+        "image-platform".to_owned(),
+    ];
+    manifest_needs.extend(unit_job_ids);
+    format!(
+        "{GENERATED_HEADER}name: Release\nrun-name: Release · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    tags: [\"v*\"]\n  workflow_dispatch:\n    inputs:\n      runner:\n        description: Execution backend\n        required: false\n        default: github\n        type: choice\n        options:\n          - github\n          - velnor\n          - both\n      existing-image-digest:\n        description: Exact OCI index digest for an explicitly verified failed-run recovery.\n        type: string\n        required: false\n        default: ''\n\nconcurrency:\n  group: release-${{{{ github.ref }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n{admit}\n{verify}\n{unit_jobs}{admission}\n{platform}\n{manifest}",
+        admit = render_docker_admit_job(config),
+        verify = render_docker_verify_job(config),
+        unit_jobs = unit_jobs,
+        admission = render_docker_admission_job(config, release),
+        platform = render_docker_platform_job(config, release),
+        manifest = render_docker_manifest_job(config, release, &manifest_needs),
+    )
 }
 
 #[allow(clippy::format_push_string)]
@@ -3086,6 +3339,9 @@ mod tests {
             artifact_path: String::new(),
             description: String::new(),
             manifest_schema: String::new(),
+            dockerfile: String::new(),
+            context: String::new(),
+            platforms: Vec::new(),
         }
     }
 
@@ -3108,6 +3364,30 @@ mod tests {
             artifact_path: String::new(),
             description: String::new(),
             manifest_schema: "example.test/consumer-manifest-v1".to_owned(),
+            dockerfile: String::new(),
+            context: String::new(),
+            platforms: Vec::new(),
+        }
+    }
+
+    /// A standalone multi-arch OCI publisher over a consumer-owned
+    /// Dockerfile. All coordinates are fixture-local.
+    fn docker_spec() -> ReleaseSpec {
+        ReleaseSpec {
+            kind: "docker".to_owned(),
+            package: String::new(),
+            packages: Vec::new(),
+            binary: String::new(),
+            targets: Vec::new(),
+            image: "ghcr.io/example/app".to_owned(),
+            source_repository: String::new(),
+            consumer_repository: String::new(),
+            artifact_path: String::new(),
+            description: String::new(),
+            manifest_schema: String::new(),
+            dockerfile: "Dockerfile".to_owned(),
+            context: ".".to_owned(),
+            platforms: vec!["linux/amd64".to_owned(), "linux/arm64".to_owned()],
         }
     }
 
@@ -3350,7 +3630,7 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "f0e44f87fedb2a31d0934f64986b8027041ab36e60f1bde200ff4fda58798f8d",
+                "920ae6e42476701536580811e75c306140a0d54591706ffdc47b00fa128f7085",
             ),
             (
                 "preview.yml",
@@ -4050,6 +4330,358 @@ mod tests {
         );
     }
 
+    /// A `docker` publisher config over a repository that owns its
+    /// Dockerfile. The repository slug feeds the OCI source label.
+    fn docker_config() -> ProjectConfig {
+        let mut config = config(&["release.yml"], Some(docker_spec()));
+        config.repository = "example/app".to_owned();
+        config
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn docker_publisher_renders_one_native_builder_per_platform() {
+        let config = docker_config();
+        let Some(release) = config.release.as_ref() else {
+            panic!("docker fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        let platform = yaml_job(&workflow, "image-platform");
+        assert!(
+            platform.contains("needs: [admit-runner, verify, image-admission]"),
+            "{platform}"
+        );
+        assert!(
+            platform.contains("if: ${{ needs.image-admission.outputs.existing != 'true' }}"),
+            "{platform}"
+        );
+        assert!(platform.contains("- arch: amd64"), "{platform}");
+        assert!(platform.contains("platform: linux/amd64"), "{platform}");
+        assert!(platform.contains("- arch: arm64"), "{platform}");
+        assert!(platform.contains("platform: linux/arm64"), "{platform}");
+        assert!(platform.contains("runner: ubuntu-24.04-arm"), "{platform}");
+        assert!(
+            platform.contains("runs-on: ${{ matrix.runner }}"),
+            "{platform}"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn docker_platform_pushes_by_digest_with_caches_and_attestations() {
+        let config = docker_config();
+        let Some(release) = config.release.as_ref() else {
+            panic!("docker fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        let platform = yaml_job(&workflow, "image-platform");
+        // Push-by-digest: no tag is written here; `tags:` names the bare
+        // repository the digest push targets.
+        assert!(
+            platform
+                .contains("outputs: type=image,push-by-digest=true,name-canonical=true,push=true"),
+            "{platform}"
+        );
+        assert!(
+            platform.contains("tags: ${{ env.GHCR_IMAGE }}"),
+            "{platform}"
+        );
+        assert!(!platform.contains("imagetools create"), "{platform}");
+        assert!(platform.contains("provenance: true"), "{platform}");
+        assert!(platform.contains("sbom: true"), "{platform}");
+        assert!(platform.contains("id-token: write"), "{platform}");
+        assert!(platform.contains("attestations: write"), "{platform}");
+        assert!(
+            platform
+                .contains("type=registry,ref=${{ env.GHCR_IMAGE }}:buildcache-${{ matrix.arch }}"),
+            "{platform}"
+        );
+        assert!(
+            platform.contains("type=gha,scope=ghcr-io-example-app-${{ matrix.arch }}"),
+            "{platform}"
+        );
+        assert!(platform.contains("mode=max"), "{platform}");
+        // The consumer-owned build inputs render verbatim.
+        assert!(platform.contains("file: Dockerfile"), "{platform}");
+        assert!(platform.contains("context: \".\""), "{platform}");
+        assert!(
+            platform
+                .contains("org.opencontainers.image.version=${{ needs.verify.outputs.version }}"),
+            "{platform}"
+        );
+        assert!(
+            platform.contains("org.opencontainers.image.revision=${{ github.sha }}"),
+            "{platform}"
+        );
+        assert!(
+            platform.contains("org.opencontainers.image.source=https://github.com/example/app"),
+            "{platform}"
+        );
+        // The recorded digest is strictly validated before transport.
+        assert!(
+            platform.contains("digest=\"${{ steps.build.outputs.digest }}\""),
+            "{platform}"
+        );
+        assert!(
+            platform.contains("platform digest is not lowercase hex"),
+            "{platform}"
+        );
+        assert!(
+            platform.contains("name: image-platform-${{ matrix.arch }}"),
+            "{platform}"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn docker_admission_reconciles_absent_resume_and_conflict() {
+        let config = docker_config();
+        let Some(release) = config.release.as_ref() else {
+            panic!("docker fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        let admission = yaml_job(&workflow, "image-admission");
+        assert!(
+            admission.contains("needs: [admit-runner, verify]"),
+            "{admission}"
+        );
+        assert!(
+            admission.contains("imagetools inspect \"$ref\" --format '{{json .}}'"),
+            "{admission}"
+        );
+        // Absent opens the lane.
+        assert!(admission.contains("existing=false"), "{admission}");
+        // Resume adopts only the explicitly supplied recovery index.
+        assert!(
+            admission.contains("inputs.existing-image-digest"),
+            "{admission}"
+        );
+        assert!(
+            admission.contains("adopting explicitly supplied recovery index"),
+            "{admission}"
+        );
+        // Conflict fails closed instead of adopting unknown bytes.
+        assert!(
+            admission.contains("refusing to adopt unknown bytes"),
+            "{admission}"
+        );
+        assert!(
+            admission.contains("refusing a fail-open publish"),
+            "{admission}"
+        );
+        assert!(
+            workflow.contains("existing-image-digest:"),
+            "the recovery input must exist wherever admission reads it: {workflow}"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn docker_manifest_assembles_only_the_complete_verified_set() {
+        let config = docker_config();
+        let Some(release) = config.release.as_ref() else {
+            panic!("docker fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        let image = yaml_job(&workflow, "image");
+        assert!(
+            image.contains("needs.image-admission.result == 'success'"),
+            "{image}"
+        );
+        assert!(
+            image.contains(
+                "(needs.image-platform.result == 'success' || needs.image-platform.result == 'skipped')"
+            ),
+            "{image}"
+        );
+        assert!(
+            image.contains("index_digest: ${{ steps.push.outputs.index_digest }}"),
+            "{image}"
+        );
+        // The shared digest-set gate runs before any assembly.
+        assert!(
+            image.contains(
+                "run: velnor-workflow release verify-digests --dir image-artifacts --archs amd64,arm64"
+            ),
+            "{image}"
+        );
+        // Digest-pinned sources; the version tag is created here only.
+        assert!(image.contains("imagetools create"), "{image}");
+        assert!(
+            image.contains("--tag \"${GHCR_IMAGE}:${VERSION}\""),
+            "{image}"
+        );
+        assert!(image.contains("\"${GHCR_IMAGE}@$amd64_digest\""), "{image}");
+        assert!(image.contains("\"${GHCR_IMAGE}@$arm64_digest\""), "{image}");
+        // Inclusion plus exclusivity: exactly the verified set.
+        assert!(
+            image.contains("does not reference the verified platform digests"),
+            "{image}"
+        );
+        assert!(
+            image.contains("carries an unexpected platform set"),
+            "{image}"
+        );
+        assert!(image.contains("name: image-digests"), "{image}");
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn docker_publisher_writes_the_version_tag_exactly_once() {
+        let config = docker_config();
+        let Some(release) = config.release.as_ref() else {
+            panic!("docker fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        assert_eq!(
+            workflow.matches("imagetools create").count(),
+            1,
+            "exactly one job may create the version tag: {workflow}"
+        );
+        assert!(
+            workflow.contains("group: release-${{ github.ref }}"),
+            "{workflow}"
+        );
+        assert!(workflow.contains("cancel-in-progress: false"), "{workflow}");
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn docker_contract_defaults_to_both_linux_architectures() {
+        let mut spec = docker_spec();
+        spec.dockerfile.clear();
+        spec.context.clear();
+        spec.platforms.clear();
+        let mut config = config(&["release.yml"], Some(spec));
+        config.repository = "example/app".to_owned();
+        let Some(release) = config.release.as_ref() else {
+            panic!("docker fixture must carry a release contract")
+        };
+        assert!(super::release_contract_complete(release));
+        let workflow = super::render_release(&config, release);
+        let platform = yaml_job(&workflow, "image-platform");
+        assert!(platform.contains("platform: linux/amd64"), "{platform}");
+        assert!(platform.contains("platform: linux/arm64"), "{platform}");
+        assert!(platform.contains("file: Dockerfile"), "{platform}");
+        assert!(platform.contains("context: \".\""), "{platform}");
+        let image = yaml_job(&workflow, "image");
+        assert!(image.contains("--archs amd64,arm64"), "{image}");
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn docker_contract_rejects_unknown_platforms_and_missing_images() {
+        let mut unknown = docker_spec();
+        unknown.platforms = vec!["linux/riscv64".to_owned()];
+        assert!(!super::release_contract_complete(&unknown));
+        let unknown_config = config(&["release.yml"], Some(unknown));
+        let Some(release) = unknown_config.release.as_ref() else {
+            panic!("docker fixture must carry a release contract")
+        };
+        assert!(
+            super::render_release(&unknown_config, release).contains("# Release omitted"),
+            "an unknown platform must omit the publisher instead of silently dropping it"
+        );
+        let mut missing = docker_spec();
+        missing.image.clear();
+        assert!(!super::release_contract_complete(&missing));
+        let missing_config = config(&["release.yml"], Some(missing));
+        let Some(release) = missing_config.release.as_ref() else {
+            panic!("docker fixture must carry a release contract")
+        };
+        assert!(
+            super::render_release(&missing_config, release).contains("# Release omitted"),
+            "a missing image must omit the publisher"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn docker_single_platform_renders_a_singleton_verified_set() {
+        let mut spec = docker_spec();
+        spec.platforms = vec!["linux/arm64".to_owned()];
+        let mut config = config(&["release.yml"], Some(spec));
+        config.repository = "example/app".to_owned();
+        let Some(release) = config.release.as_ref() else {
+            panic!("docker fixture must carry a release contract")
+        };
+        assert!(super::release_contract_complete(release));
+        let workflow = super::render_release(&config, release);
+        let platform = yaml_job(&workflow, "image-platform");
+        assert!(!platform.contains("- arch: amd64"), "{platform}");
+        assert!(platform.contains("- arch: arm64"), "{platform}");
+        let image = yaml_job(&workflow, "image");
+        assert!(image.contains("--archs arm64"), "{image}");
+        assert!(
+            image.contains(")\" = \"1\" ]"),
+            "a singleton set must expect exactly one manifest: {image}"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn native_identity_platform_emits_provenance_and_sbom() {
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        let platform = yaml_job(&workflow, "image-platform");
+        assert!(platform.contains("provenance: true"), "{platform}");
+        assert!(platform.contains("sbom: true"), "{platform}");
+        assert!(platform.contains("id-token: write"), "{platform}");
+        assert!(platform.contains("attestations: write"), "{platform}");
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn native_identity_index_rejects_an_unexpected_platform_set() {
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        let image = yaml_job(&workflow, "image");
+        assert!(
+            image.contains("does not reference both newly built platform digests"),
+            "{image}"
+        );
+        assert!(
+            image.contains("carries an unexpected platform set"),
+            "{image}"
+        );
+    }
+
     #[test]
     #[expect(
         clippy::panic,
@@ -4472,6 +5104,9 @@ mod tests {
                 artifact_path: String::new(),
                 description: String::new(),
                 manifest_schema: String::new(),
+                dockerfile: String::new(),
+                context: String::new(),
+                platforms: Vec::new(),
             });
             let surface = must(
                 super::super::generate(&root, &shape, &scanned, None),
@@ -4610,6 +5245,9 @@ mod tests {
                 artifact_path: String::new(),
                 description: String::new(),
                 manifest_schema: "example.test/consumer-manifest-v1".to_owned(),
+                dockerfile: String::new(),
+                context: String::new(),
+                platforms: Vec::new(),
             });
             let surface = must(
                 super::super::generate(&root, &shape, &scanned, None),

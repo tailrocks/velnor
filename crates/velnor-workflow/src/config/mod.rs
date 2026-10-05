@@ -292,6 +292,10 @@ pub(crate) struct ReleaseSection {
     artifact_path: Option<String>,
     description: Option<String>,
     manifest_schema: Option<String>,
+    dockerfile: Option<String>,
+    context: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    platforms: Vec<String>,
 }
 
 /// One verification unit the repository adds to, or overrides in, the scanned
@@ -495,6 +499,18 @@ impl ReleaseSection {
 
     pub(crate) fn manifest_schema(&self) -> Option<&str> {
         self.manifest_schema.as_deref()
+    }
+
+    pub(crate) fn dockerfile(&self) -> Option<&str> {
+        self.dockerfile.as_deref()
+    }
+
+    pub(crate) fn context(&self) -> Option<&str> {
+        self.context.as_deref()
+    }
+
+    pub(crate) fn platforms(&self) -> &[String] {
+        &self.platforms
     }
 }
 
@@ -1569,7 +1585,22 @@ const RELEASE_KINDS: &[&str] = &[
     "pages",
     "homebrew",
     "apt",
+    "docker",
 ];
+
+/// The OCI platforms the `docker` publisher builds. Native builders exist
+/// for exactly these; anything else fails closed instead of silently
+/// emulating an architecture under QEMU.
+pub(crate) const DOCKER_PLATFORMS: &[&str] = &["linux/amd64", "linux/arm64"];
+
+/// Whether every declared `docker` platform names a natively built Linux
+/// architecture. An empty list selects both; an unknown value is a
+/// configuration error, never a silently dropped platform.
+pub(crate) fn valid_docker_platforms(platforms: &[String]) -> bool {
+    platforms
+        .iter()
+        .all(|platform| DOCKER_PLATFORMS.contains(&platform.as_str()))
+}
 
 pub(crate) fn validate_renovate_token_name(token: &str) -> Result<(), GeneratorError> {
     if token == "GITHUB_TOKEN" {
@@ -1740,6 +1771,21 @@ impl RepoGenerationConfig {
                         .consumer_repository
                         .as_deref()
                         .is_some_and(|value| !value.is_empty())
+            }
+            "docker" => {
+                release
+                    .image
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                    && valid_docker_platforms(&release.platforms)
+                    && release
+                        .dockerfile
+                        .as_deref()
+                        .is_none_or(is_contained_repository_path)
+                    && release
+                        .context
+                        .as_deref()
+                        .is_none_or(is_contained_repository_path)
             }
             _ => false,
         };
@@ -1972,6 +2018,70 @@ mod tests {
             must(
                 config.validate(&[], &[], &BTreeSet::new()),
                 "validate accepted workflow runner mode",
+            );
+        }
+    }
+
+    #[test]
+    fn docker_release_accepts_an_image_with_defaulted_build_inputs() {
+        let config = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\nkind = \"docker\"\nimage = \"ghcr.io/example/app\"\n",
+        );
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "validate minimal docker release",
+        );
+        let release = config.release();
+        assert_eq!(release.image(), Some("ghcr.io/example/app"));
+        assert!(release.platforms().is_empty());
+        let declared = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\nkind = \"docker\"\nimage = \"ghcr.io/example/app\"\ndockerfile = \"images/app/Dockerfile\"\ncontext = \"images/app\"\nplatforms = [\"linux/amd64\", \"linux/arm64\"]\n",
+        );
+        must(
+            declared.validate(&[], &[], &BTreeSet::new()),
+            "validate declared docker release",
+        );
+        assert_eq!(
+            declared.release().dockerfile(),
+            Some("images/app/Dockerfile")
+        );
+        assert_eq!(declared.release().context(), Some("images/app"));
+        assert_eq!(
+            declared.release().platforms(),
+            &["linux/amd64".to_owned(), "linux/arm64".to_owned()]
+        );
+    }
+
+    #[test]
+    fn docker_release_rejects_unknown_platforms_and_escaping_paths() {
+        for (name, release) in [
+            (
+                "platform",
+                "kind = \"docker\"\nimage = \"ghcr.io/example/app\"\nplatforms = [\"linux/riscv64\"]\n",
+            ),
+            (
+                "image",
+                "kind = \"docker\"\nplatforms = [\"linux/amd64\"]\n",
+            ),
+            (
+                "dockerfile",
+                "kind = \"docker\"\nimage = \"ghcr.io/example/app\"\ndockerfile = \"../Dockerfile\"\n",
+            ),
+            (
+                "context",
+                "kind = \"docker\"\nimage = \"ghcr.io/example/app\"\ncontext = \"/tmp\"\n",
+            ),
+        ] {
+            let config = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\n{release}"
+            ));
+            let error = must_fail(
+                config.validate(&[], &[], &BTreeSet::new()),
+                "an incomplete docker release must fail",
+            );
+            assert!(
+                error.to_string().contains("[release] enabled repositories"),
+                "unexpected error for {name}: {error}"
             );
         }
     }
