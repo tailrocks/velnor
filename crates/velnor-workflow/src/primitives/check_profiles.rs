@@ -13,10 +13,9 @@
 //! `merge_group`, `workflow_dispatch`): the file then renders those triggers alongside the
 //! shared cron, and profiles in an evented file may omit `schedule` entirely
 //! for a cron-less evented file. One file carries one trigger set — scheduled
-//! and schedule-less profiles never mix in one file — and profile jobs stay
-//! on their own lanes exactly as in a cron-only file. Required-artifact
-//! verifier jobs always use a GitHub-hosted Linux runner, independent of the
-//! producer lane.
+//! and schedule-less profiles never mix in one file — and lanes stay
+//! per-profile: each job runs on its own profile's lane exactly as in a
+//! cron-only file, because triggers change when a job runs, never where.
 //!
 //! Why a file, not a CI unit: a scheduled check is a whole-repo compliance
 //! probe that needs its own required status context plus main-branch runs
@@ -30,10 +29,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use super::{
-    lanes_dispatch_inputs, lanes_runs_on, Args, LaneAdmission, Primitive, RenderCtx, Rendered,
-    WorkflowIr,
-};
+use super::{lanes_dispatch_inputs, lanes_runs_on, Args, Primitive, RenderCtx, Rendered};
 use crate::{
     velnor_runner, velnor_runner_group, yaml_scalar, ActionPin, CheckProfileSpec, GeneratorError,
     ProjectConfig, RunnerMode, GENERATED_HEADER,
@@ -430,28 +426,7 @@ fn render_checks_file(
     if let Some((default, _)) = &lanes {
         output.push_str(lanes_dispatch_inputs(*default));
     }
-    output.push_str("\n\npermissions:\n  contents: read\n\n");
-    render_event_concurrency(&mut output, stem, events);
-    output.push_str("jobs:\n");
-    for profile in profiles {
-        render_profile_job_with_selected_profiles(
-            &mut output,
-            config,
-            profile,
-            profiles,
-            lanes.as_ref().map(|(_, runs_on)| runs_on.as_str()),
-        )?;
-    }
-    for profile in profiles {
-        if profile.artifacts_required {
-            render_artifact_verifier_job(&mut output, config, profile, lanes.is_some());
-        }
-    }
-    Ok(output)
-}
-
-fn render_event_concurrency(output: &mut String, stem: &str, events: &[String]) {
-    output.push_str("concurrency:\n");
+    output.push_str("\n\npermissions:\n  contents: read\n\nconcurrency:\n");
     let has_pull_request = events.iter().any(|event| event == "pull_request");
     let has_committed_event = events
         .iter()
@@ -483,16 +458,27 @@ fn render_event_concurrency(output: &mut String, stem: &str, events: &[String]) 
         // PR attempts supersede each other for fast feedback. Committed and
         // merge-queue evidence uses the non-canceling path above, so a later
         // event cannot erase a predecessor's verdict.
-        output.push_str("  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n\n");
+        output.push_str(
+            "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n\njobs:\n",
+        );
     } else if has_committed_event {
         // A push or merge-group run is evidence for a committed/candidate
         // tree. The SHA-scoped group above prevents pending replacement.
-        output.push_str("  cancel-in-progress: false\n\n");
+        output.push_str("  cancel-in-progress: false\n\njobs:\n");
     } else {
         // A cron-only or dispatch-only file has no candidate/main event to
         // preserve, so retain the historical supersession behavior.
-        output.push_str("  cancel-in-progress: true\n\n");
+        output.push_str("  cancel-in-progress: true\n\njobs:\n");
     }
+    for profile in profiles {
+        render_profile_job(
+            &mut output,
+            config,
+            profile,
+            lanes.as_ref().map(|(_, runs_on)| runs_on.as_str()),
+        )?;
+    }
+    Ok(output)
 }
 
 /// The resolved lanes override for a file: the shared dispatch default plus
@@ -567,124 +553,16 @@ fn render_scheduled_checks(
 /// One profile job: the lane it runs on, the timeout it holds, the threshold
 /// environment its tasks read, and the steps that check out, provision tools,
 /// run the named tasks, and upload the declared artifacts.
-#[cfg(test)]
 fn render_profile_job(
     output: &mut String,
     config: &ProjectConfig,
     profile: &CheckProfileSpec,
     dispatch_runs_on: Option<&str>,
 ) -> Result<(), GeneratorError> {
-    render_profile_job_with_selected_profiles(output, config, profile, &[], dispatch_runs_on)
-}
-
-fn artifact_verifier_job_id(profile_id: &str) -> String {
-    format!("verify-{profile_id}-artifacts")
-}
-
-fn profile_admission_expression(
-    config: &ProjectConfig,
-    profile: &CheckProfileSpec,
-    lanes_input: bool,
-) -> Option<String> {
-    if lanes_input {
-        let admission = lane_admission_with_lanes_input(config);
-        return match profile.runner.as_str() {
-            "github" => Some(format!(
-                "github.event_name != 'workflow_dispatch' || inputs.lanes != 'velnor' || ({admission})"
-            )),
-            "velnor" => Some(format!(
-                "github.event_name == 'workflow_dispatch' && inputs.lanes == 'github' || ({admission})"
-            )),
-            _ => None,
-        };
-    }
-    (profile.runner == "velnor")
-        .then(|| WorkflowIr::from_config(config).lane_admission_expression(LaneAdmission::Velnor))
-}
-
-/// Replace the generic runner-choice input in the canonical Velnor admission
-/// predicate with this workflow's `lanes` choice. If the canonical shape
-/// changes unexpectedly, append `&& false` so dispatch to Velnor stays denied.
-fn lane_admission_with_lanes_input(config: &ProjectConfig) -> String {
-    let admission =
-        WorkflowIr::from_config(config).lane_admission_expression(LaneAdmission::Velnor);
-    let prefix = "github.event_name == 'workflow_dispatch' && (";
-    if admission
-        .matches("github.event_name == 'workflow_dispatch'")
-        .count()
-        != 1
-        || admission.matches(prefix).count() != 1
-    {
-        return format!("({admission}) && false");
-    }
-    let Some(selector_start) = admission.find(prefix) else {
-        return format!("({admission}) && false");
-    };
-    let selector_open = selector_start + prefix.len() - 1;
-    let mut depth = 0usize;
-    let selector_end = admission[selector_open..]
-        .char_indices()
-        .find_map(|(offset, character)| match character {
-            '(' => {
-                depth += 1;
-                None
-            }
-            ')' => {
-                depth -= 1;
-                (depth == 0).then_some(selector_open + offset)
-            }
-            _ => None,
-        });
-    let Some(selector_end) = selector_end else {
-        return format!("({admission}) && false");
-    };
-    let mut adapted = String::with_capacity(admission.len());
-    adapted.push_str(&admission[..selector_start]);
-    adapted.push_str("github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor'");
-    adapted.push_str(&admission[selector_end + 1..]);
-    if adapted.contains("github.event.inputs.runner") {
-        return format!("({admission}) && false");
-    }
-    adapted
-}
-
-fn render_profile_job_with_selected_profiles(
-    output: &mut String,
-    config: &ProjectConfig,
-    profile: &CheckProfileSpec,
-    selected_profiles: &[&CheckProfileSpec],
-    dispatch_runs_on: Option<&str>,
-) -> Result<(), GeneratorError> {
     let _ = writeln!(output, "  {}:", profile.id);
     let _ = writeln!(output, "    name: {}", yaml_scalar(&profile.name));
     if !profile.needs.is_empty() {
-        let needs = profile
-            .needs
-            .iter()
-            .map(|dependency| {
-                selected_profiles
-                    .iter()
-                    .find(|candidate| candidate.id == *dependency)
-                    .filter(|candidate| candidate.artifacts_required)
-                    .map_or_else(
-                        || dependency.clone(),
-                        |candidate| artifact_verifier_job_id(&candidate.id),
-                    )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let _ = writeln!(output, "    needs: [{needs}]");
-    }
-    if let Some(admission) =
-        profile_admission_expression(config, profile, dispatch_runs_on.is_some())
-    {
-        let _ = writeln!(output, "    if: ${{{{ ({admission}) }}}}");
-    }
-    if profile.artifacts_required {
-        let _ = writeln!(
-            output,
-            "    outputs:\n      artifact_id: ${{{{ steps.upload_artifact.outputs.artifact-id }}}}",
-        );
+        let _ = writeln!(output, "    needs: [{}]", profile.needs.join(", "));
     }
     // A dispatch selects the github/velnor lane only: macos profiles always
     // render their static label, never the conditional.
@@ -729,80 +607,6 @@ fn render_profile_job_with_selected_profiles(
         render_artifact_step(output, profile);
     }
     Ok(())
-}
-
-fn render_artifact_verifier_job(
-    output: &mut String,
-    config: &ProjectConfig,
-    profile: &CheckProfileSpec,
-    lanes_input: bool,
-) {
-    let job_id = artifact_verifier_job_id(&profile.id);
-    let _ = writeln!(output, "  {job_id}:");
-    let _ = writeln!(
-        output,
-        "    name: Verify {} artifacts",
-        yaml_scalar(&profile.id)
-    );
-    let _ = writeln!(output, "    needs: [{}]", profile.id);
-    let result_condition = format!("needs.{}.result == 'success'", profile.id);
-    let condition = profile_admission_expression(config, profile, lanes_input).map_or_else(
-        || result_condition.clone(),
-        |admission| format!("({result_condition}) && ({admission})"),
-    );
-    let _ = writeln!(output, "    if: ${{{{ {condition} }}}}");
-    output.push_str("    runs-on: ubuntu-latest\n");
-    let _ = writeln!(output, "    timeout-minutes: {}", profile.timeout_minutes);
-    let _ = writeln!(
-        output,
-        "    outputs:\n      artifact_id: ${{{{ needs.{}.outputs.artifact_id }}}}",
-        profile.id
-    );
-    // The verifier only reads the current run's immutable artifact service.
-    // It never checks out or executes repository-controlled code.
-    output.push_str("    permissions:\n      actions: read\n    steps:\n");
-    output.push_str(
-        "      - name: Require GitHub-hosted runner\n        shell: bash\n        env:\n          BASH_ENV: /dev/null\n          VERIFIER_RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set -euo pipefail\n          if [[ \"${VERIFIER_RUNNER_ENVIRONMENT:-}\" != \"github-hosted\" ]]; then\n            echo \"artifact verifier requires a GitHub-hosted runner\" >&2\n            exit 1\n          fi\n",
-    );
-    let root = format!(
-        "${{{{ runner.temp }}}}/velnor-required-artifacts-${{{{ github.run_id }}}}-{}",
-        profile.id
-    );
-    let _ = writeln!(
-        output,
-        "      - name: Clear verifier workspace\n        shell: bash\n        env:\n          BASH_ENV: /dev/null\n        run: |\n          set -euo pipefail\n          root=\"$RUNNER_TEMP/velnor-required-artifacts-$GITHUB_RUN_ID-{}\"\n          rm -rf \"$root\"\n          mkdir -p \"$root\"",
-        profile.id
-    );
-    let download = ActionPin::DownloadArtifact.reference();
-    let _ = writeln!(
-        output,
-        "      - name: Download immutable {} artifact\n        uses: {download}\n        with:\n          artifact-ids: ${{{{ needs.{}.outputs.artifact_id }}}}\n          path: {root}",
-        yaml_scalar(&profile.id),
-        profile.id
-    );
-    let _ = writeln!(
-        output,
-        "      - name: Verify downloaded {} artifacts\n        shell: bash\n        env:\n          BASH_ENV: /dev/null\n        run: |\n          set -euo pipefail\n          root=\"$RUNNER_TEMP/velnor-required-artifacts-$GITHUB_RUN_ID-{}\"",
-        yaml_scalar(&profile.id),
-        profile.id
-    );
-    for artifact in &profile.artifacts {
-        let prefixes = artifact
-            .split('/')
-            .scan(String::new(), |prefix, component| {
-                if !prefix.is_empty() {
-                    prefix.push('/');
-                }
-                prefix.push_str(component);
-                Some(format!("\"$root/{prefix}\""))
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        let _ = writeln!(
-            output,
-            "          path=\"$root/{artifact}\"\n          for prefix in {prefixes}; do\n            if [[ -L \"$prefix\" ]]; then\n              echo \"downloaded required artifact path is a symlink: $prefix\" >&2\n              exit 1\n            fi\n          done\n          if [[ -f \"$path\" && -s \"$path\" ]]; then\n            :\n          else\n            echo \"downloaded required artifact is missing or empty: $path\" >&2\n            exit 1\n          fi"
-        );
-    }
 }
 
 /// The lane selector for one profile: the hosted Linux label, the hosted
@@ -874,79 +678,16 @@ fn render_tool_steps(output: &mut String, config: &ProjectConfig, profile: &Chec
 
 fn render_artifact_step(output: &mut String, profile: &CheckProfileSpec) {
     let upload = ActionPin::UploadArtifact.reference();
-    let gate = if profile.artifacts_required {
-        "success()"
-    } else {
-        "always()"
-    };
-    if profile.artifacts_required {
-        let _ = writeln!(
-            output,
-            "      - name: Verify {} artifacts\n        if: success()\n        shell: bash\n        env:\n          BASH_ENV: /dev/null\n        run: |\n          set -euo pipefail",
-            profile.id
-        );
-        for artifact in &profile.artifacts {
-            let prefixes = artifact
-                .split('/')
-                .scan(String::new(), |prefix, component| {
-                    if !prefix.is_empty() {
-                        prefix.push('/');
-                    }
-                    prefix.push_str(component);
-                    Some(format!("'{prefix}'"))
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            let _ = writeln!(
-                output,
-                "          path='{artifact}'\n          for prefix in {prefixes}; do\n            if [[ -L \"$prefix\" ]]; then\n              echo \"required artifact path uses a symlink: $prefix\" >&2\n              exit 1\n            fi\n          done\n          if [[ -f \"$path\" && -s \"$path\" ]]; then\n            :\n          else\n            echo \"required artifact is missing or empty: $path\" >&2\n            exit 1\n          fi"
-            );
-        }
-        let _ = writeln!(
-            output,
-            "      - name: Stage {} artifacts\n        if: success()\n        shell: bash\n        env:\n          BASH_ENV: /dev/null\n        run: |\n          set -euo pipefail\n          stage=\"$RUNNER_TEMP/velnor-required-artifacts-$GITHUB_RUN_ID-{}\"\n          rm -rf \"$stage\"\n          mkdir -p \"$stage\"",
-            profile.id,
-            profile.id
-        );
-        for artifact in &profile.artifacts {
-            let _ = writeln!(
-                output,
-                "          destination=\"$stage/{artifact}\"\n          mkdir -p \"${{destination%/*}}\"\n          cp \"{artifact}\" \"$destination\"\n          if [[ -L \"$destination\" || ! -f \"$destination\" || ! -s \"$destination\" ]]; then\n            echo \"staged required artifact is missing, empty, or not regular: {artifact}\" >&2\n            exit 1\n          fi"
-            );
-        }
-    }
-    let upload_id = if profile.artifacts_required {
-        "        id: upload_artifact\n"
-    } else {
-        ""
-    };
-    let path = if profile.artifacts_required {
-        format!(
-            "${{{{ runner.temp }}}}/velnor-required-artifacts-${{{{ github.run_id }}}}-{}",
-            profile.id
-        )
-    } else {
-        "|".to_owned()
-    };
     let _ = writeln!(
         output,
-        "      - name: Upload {} artifacts\n        if: {gate}\n{upload_id}        uses: {upload}\n        with:\n          name: {}\n          path: {path}",
+        "      - name: Upload {} artifacts\n        if: always()\n        uses: {upload}\n        with:\n          name: {}\n          path: |",
         profile.id,
-        yaml_scalar(&profile.id),
-        upload_id = upload_id,
-        path = path
+        yaml_scalar(&profile.id)
     );
-    if !profile.artifacts_required {
-        for artifact in &profile.artifacts {
-            let _ = writeln!(output, "            {artifact}");
-        }
+    for artifact in &profile.artifacts {
+        let _ = writeln!(output, "            {artifact}");
     }
-    let if_no_files_found = if profile.artifacts_required {
-        "error"
-    } else {
-        "warn"
-    };
-    let _ = writeln!(output, "          if-no-files-found: {if_no_files_found}");
+    output.push_str("          if-no-files-found: warn\n");
 }
 
 #[cfg(test)]
@@ -957,10 +698,6 @@ mod tests {
     )]
 
     use std::collections::BTreeMap;
-    #[cfg(unix)]
-    use std::fs;
-    #[cfg(unix)]
-    use std::process::Command;
 
     use super::*;
     use crate::config;
@@ -969,13 +706,6 @@ mod tests {
         match result {
             Ok(value) => value,
             Err(error) => panic!("{context}: {error}"),
-        }
-    }
-
-    fn must_some<T>(value: Option<T>, context: &str) -> T {
-        match value {
-            Some(value) => value,
-            None => panic!("{context}: expected a value"),
         }
     }
 
@@ -997,7 +727,6 @@ mod tests {
             needs: Vec::new(),
             timeout_minutes: DEFAULT_CHECK_PROFILE_TIMEOUT_MINUTES,
             artifacts: Vec::new(),
-            artifacts_required: false,
             advisory: false,
             env: BTreeMap::new(),
             permissions: BTreeMap::new(),
@@ -1060,7 +789,6 @@ mod tests {
             mise_lock_backends: std::collections::BTreeMap::new(),
             mise_install_deps: crate::s2::MiseInstallDeps::default(),
             github_cache: config::CacheGithubSection::default(),
-            velnor_host_cache: config::CacheVelnorSection::default(),
         }
     }
 
@@ -1178,499 +906,6 @@ mod tests {
             workflow.contains(crate::ActionPin::UploadArtifact.reference()),
             "{workflow}"
         );
-        assert!(!workflow.contains("Verify load artifacts"), "{workflow}");
-        assert!(workflow.contains("if: always()"), "{workflow}");
-        assert!(workflow.contains("if-no-files-found: warn"), "{workflow}");
-    }
-
-    #[test]
-    fn required_artifacts_preflight_every_exact_file_before_strict_upload() {
-        let mut strict = profile("strict");
-        strict.artifacts = vec![
-            "target/ci-evidence/rollup.json".to_owned(),
-            "target/ci-evidence/rollup.md".to_owned(),
-        ];
-        strict.artifacts_required = true;
-        let config = profile_config(vec![strict]);
-        let map = args_for("");
-        let selected = must(
-            select_profiles(&config.check_profiles, &Args(&map), "scheduled-checks"),
-            "select the strict profile",
-        );
-        let workflow = render(&config, None, &selected);
-        let verify = must_some(
-            workflow.find("- name: Verify strict artifacts"),
-            "strict preflight is rendered",
-        );
-        let upload = must_some(
-            workflow.find("- name: Upload strict artifacts"),
-            "strict upload is rendered",
-        );
-        assert!(verify < upload, "preflight must precede upload: {workflow}");
-        let preflight = &workflow[verify..upload];
-        assert_eq!(
-            preflight
-                .matches("[[ -f \"$path\" && -s \"$path\" ]]")
-                .count(),
-            2,
-            "{preflight}"
-        );
-        assert!(preflight.contains(
-            "for prefix in 'target' 'target/ci-evidence' 'target/ci-evidence/rollup.json'; do"
-        ));
-        assert!(preflight.contains(
-            "for prefix in 'target' 'target/ci-evidence' 'target/ci-evidence/rollup.md'; do"
-        ));
-        assert!(preflight.contains("[[ -L \"$prefix\" ]]"), "{preflight}");
-        assert!(!preflight.contains("test -f --"), "{preflight}");
-        assert!(workflow.contains("- name: Verify strict artifacts\n        if: success()"));
-        assert!(workflow.contains("- name: Upload strict artifacts\n        if: success()"));
-        assert!(workflow.contains("if-no-files-found: error"), "{workflow}");
-        assert!(!workflow.contains("if: always()"), "{workflow}");
-    }
-
-    #[test]
-    fn required_artifacts_verify_the_uploaded_id_before_consumers() {
-        let mut strict = profile("strict");
-        strict.runner = "velnor".to_owned();
-        strict.artifacts = vec![
-            "target/ci-evidence/rollup.json".to_owned(),
-            "target/ci-evidence/rollup.md".to_owned(),
-        ];
-        strict.artifacts_required = true;
-        let mut consumer = profile("consumer");
-        consumer.needs = vec!["strict".to_owned()];
-        let config = profile_config(vec![strict, consumer]);
-        let admission =
-            WorkflowIr::from_config(&config).lane_admission_expression(LaneAdmission::Velnor);
-        let map = args_for("");
-        let selected = must(
-            select_profiles(&config.check_profiles, &Args(&map), "scheduled-checks"),
-            "select producer and consumer",
-        );
-        let workflow = render(&config, None, &selected);
-        assert_required_artifact_producer(&workflow, &admission);
-        assert_required_artifact_verifier(&workflow, &admission);
-        assert_required_artifact_consumer(&workflow);
-
-        let verifier = required_artifact_verifier_job(&workflow);
-        assert_required_artifact_verifier_order(verifier);
-        assert_required_artifact_verifier_security(verifier);
-    }
-
-    fn assert_required_artifact_producer(workflow: &str, admission: &str) {
-        assert!(
-            workflow.contains(&format!("if: ${{{{ ({admission}) }}}}")),
-            "the Velnor artifact producer retains canonical lane admission: {workflow}"
-        );
-        assert!(
-            workflow.contains(
-                "outputs:\n      artifact_id: ${{ steps.upload_artifact.outputs.artifact-id }}"
-            ),
-            "the producer exports the immutable artifact id: {workflow}"
-        );
-        assert!(
-            workflow.contains("id: upload_artifact\n        uses: actions/upload-artifact@"),
-            "the upload step has an output id: {workflow}"
-        );
-        assert!(
-            workflow.contains(
-                "path: ${{ runner.temp }}/velnor-required-artifacts-${{ github.run_id }}-strict"
-            ),
-            "the producer upload path uses exact runner.temp and github.run_id expressions: {workflow}"
-        );
-        assert!(
-            workflow.contains("destination=\"$stage/target/ci-evidence/rollup.json\""),
-            "the staging tree preserves the declared path: {workflow}"
-        );
-    }
-
-    fn assert_required_artifact_verifier(workflow: &str, admission: &str) {
-        assert!(
-            workflow.contains(
-                &format!("  verify-strict-artifacts:\n    name: Verify strict artifacts\n    needs: [strict]\n    if: ${{{{ (needs.strict.result == 'success') && ({admission}) }}}}\n    runs-on: ubuntu-latest\n")
-            ),
-            "the hosted verifier also requires the producer's canonical Velnor admission: {workflow}"
-        );
-        assert!(
-            workflow.contains("artifact-ids: ${{ needs.strict.outputs.artifact_id }}"),
-            "the verifier downloads the exact producer artifact id: {workflow}"
-        );
-        assert!(
-            workflow
-                .contains("outputs:\n      artifact_id: ${{ needs.strict.outputs.artifact_id }}"),
-            "the verifier forwards the immutable artifact id to consumers: {workflow}"
-        );
-        assert!(
-            workflow.contains("permissions:\n      actions: read\n    steps:"),
-            "the verifier has read-only permissions: {workflow}"
-        );
-    }
-
-    fn assert_required_artifact_consumer(workflow: &str) {
-        assert!(
-            workflow.contains(
-                "  consumer:\n    name: \"consumer check\"\n    needs: [verify-strict-artifacts]"
-            ),
-            "consumers wait for verification: {workflow}"
-        );
-    }
-
-    fn required_artifact_verifier_job(workflow: &str) -> &str {
-        let verifier_start = must_some(
-            workflow.find("  verify-strict-artifacts:"),
-            "find verifier job",
-        );
-        &workflow[verifier_start..]
-    }
-
-    fn assert_required_artifact_verifier_order(verifier: &str) {
-        let guard = must_some(
-            verifier.find("- name: Require GitHub-hosted runner"),
-            "find hosted-runner guard",
-        );
-        let clear = must_some(
-            verifier.find("- name: Clear verifier workspace"),
-            "find verifier workspace clear",
-        );
-        let download = must_some(
-            verifier.find("- name: Download immutable strict artifact"),
-            "find immutable artifact download",
-        );
-        let path_check = must_some(
-            verifier.find("path=\"$root/target/ci-evidence/rollup.json\""),
-            "find artifact path check",
-        );
-        assert!(
-            guard < clear && clear < download && download < path_check,
-            "hosted guard must precede all verifier work: {verifier}"
-        );
-    }
-
-    fn assert_required_artifact_verifier_security(verifier: &str) {
-        assert!(
-            verifier.contains("VERIFIER_RUNNER_ENVIRONMENT: ${{ runner.environment }}"),
-            "the guard binds its value from runner.environment: {verifier}"
-        );
-        assert!(
-            verifier.contains(
-                "if [[ \"${VERIFIER_RUNNER_ENVIRONMENT:-}\" != \"github-hosted\" ]]; then"
-            ),
-            "missing runner environment fails closed: {verifier}"
-        );
-        assert!(
-            verifier.contains("runs-on: ubuntu-latest"),
-            "the verifier never follows the profile or dispatch runner: {verifier}"
-        );
-        assert!(
-            verifier.contains("permissions:\n      actions: read\n    steps:")
-                && !verifier.contains("contents:"),
-            "verifier permissions stay limited to Actions read: {verifier}"
-        );
-        assert!(!verifier.contains("Checkout repository"), "{verifier}");
-        assert!(
-            verifier.contains("path=\"$root/target/ci-evidence/rollup.json\""),
-            "the verifier checks the preserved relative path: {verifier}"
-        );
-    }
-
-    #[test]
-    fn lanes_input_gates_velnor_admission_only_for_velnor_dispatches() {
-        let mut strict = profile("strict");
-        strict.artifacts = vec!["target/ci-evidence/rollup.json".to_owned()];
-        strict.artifacts_required = true;
-        let mut config = profile_config(vec![strict]);
-        config.github_runner = "configured-hosted-runner".to_owned();
-        let map = args_for("lanes_input = true");
-        let selected = must(
-            select_profiles(&config.check_profiles, &Args(&map), "scheduled-daily.yml"),
-            "select the required-artifact profile",
-        );
-        let admission = lane_admission_with_lanes_input(&config);
-        assert!(
-            !admission.contains("github.event.inputs.runner"),
-            "lane dispatch admission reads this file's `lanes` input: {admission}"
-        );
-        assert!(
-            admission.contains("inputs.lanes == 'velnor'"),
-            "canonical Velnor admission follows this workflow's lane selector: {admission}"
-        );
-        let dynamic_gate = format!(
-            "github.event_name != 'workflow_dispatch' || inputs.lanes != 'velnor' || ({admission})"
-        );
-        let workflow = must(
-            render_with_lanes(&config, &selected),
-            "render a GitHub-default lane-input file",
-        );
-        assert!(
-            workflow.contains("inputs.lanes == 'velnor'"),
-            "Velnor remains an allowed dispatch lane: {workflow}"
-        );
-        assert!(
-            workflow.contains("description: github (default) | velnor"),
-            "GitHub remains the dispatch default: {workflow}"
-        );
-        assert!(
-            workflow.contains(&format!("if: ${{{{ ({dynamic_gate}) }}}}")),
-            "the producer gates a Velnor dispatch with canonical admission: {workflow}"
-        );
-        let verifier_start = must_some(
-            workflow.find("  verify-strict-artifacts:"),
-            "find verifier job",
-        );
-        let verifier = &workflow[verifier_start..];
-        assert!(
-            verifier.contains(&format!(
-                "if: ${{{{ (needs.strict.result == 'success') && ({dynamic_gate}) }}}}"
-            )),
-            "the verifier requires producer success and the same Velnor admission: {verifier}"
-        );
-        assert!(
-            verifier.contains("runs-on: ubuntu-latest"),
-            "verifier ignores profile and configured GitHub runners: {verifier}"
-        );
-        assert!(
-            !verifier.contains("configured-hosted-runner"),
-            "verifier runner is fixed: {verifier}"
-        );
-        assert!(
-            verifier.contains("permissions:\n      actions: read\n    steps:")
-                && !verifier.contains("contents:"),
-            "verifier permissions stay limited to Actions read: {verifier}"
-        );
-        let guard = must_some(
-            verifier.find("- name: Require GitHub-hosted runner"),
-            "find hosted guard",
-        );
-        let clear = must_some(
-            verifier.find("- name: Clear verifier workspace"),
-            "find workspace clear",
-        );
-        let download = must_some(
-            verifier.find("- name: Download immutable strict artifact"),
-            "find artifact download",
-        );
-        let check = must_some(
-            verifier.find("path=\"$root/target/ci-evidence/rollup.json\""),
-            "find artifact path check",
-        );
-        assert!(
-            guard < clear && clear < download && download < check,
-            "guard runs before verifier filesystem and artifact operations: {verifier}"
-        );
-
-        let admission_gate = |event_name: &str, lanes: &str, admitted: bool| {
-            event_name != "workflow_dispatch" || lanes != "velnor" || admitted
-        };
-        assert!(
-            !admission_gate("workflow_dispatch", "velnor", false),
-            "Velnor dispatch requires canonical admission"
-        );
-        assert!(
-            admission_gate("workflow_dispatch", "github", false),
-            "GitHub dispatch does not require Velnor admission"
-        );
-        assert!(
-            admission_gate("push", "velnor", false),
-            "non-dispatch GitHub-default runs do not require Velnor admission"
-        );
-    }
-
-    #[test]
-    fn lanes_input_velnor_default_preserves_admission_for_velnor_and_allows_github() {
-        let mut strict = profile("strict");
-        strict.runner = "velnor".to_owned();
-        strict.artifacts = vec!["target/ci-evidence/rollup.json".to_owned()];
-        strict.artifacts_required = true;
-        let config = profile_config(vec![strict]);
-        let map = args_for("lanes_input = true");
-        let selected = must(
-            select_profiles(&config.check_profiles, &Args(&map), "scheduled-daily.yml"),
-            "select the required-artifact Velnor profile",
-        );
-        let admission = lane_admission_with_lanes_input(&config);
-        assert!(
-            !admission.contains("github.event.inputs.runner"),
-            "lane dispatch admission reads this file's `lanes` input: {admission}"
-        );
-        assert!(
-            admission.contains("inputs.lanes == 'velnor'"),
-            "the canonical admission follows the selected lane: {admission}"
-        );
-        let dynamic_gate = format!(
-            "github.event_name == 'workflow_dispatch' && inputs.lanes == 'github' || ({admission})"
-        );
-        let workflow = must(
-            render_with_lanes(&config, &selected),
-            "render a Velnor-default lane-input file",
-        );
-        assert!(
-            workflow.contains("description: velnor (default) | github"),
-            "Velnor is the dispatch default: {workflow}"
-        );
-        assert!(
-            workflow.contains(&format!("if: ${{{{ ({dynamic_gate}) }}}}")),
-            "the producer keeps Velnor admission while allowing GitHub dispatch: {workflow}"
-        );
-        let verifier_start = must_some(
-            workflow.find("  verify-strict-artifacts:"),
-            "find verifier job",
-        );
-        let verifier = &workflow[verifier_start..];
-        assert!(
-            verifier.contains(&format!(
-                "if: ${{{{ (needs.strict.result == 'success') && ({dynamic_gate}) }}}}"
-            )),
-            "the verifier mirrors the producer gate after producer success: {verifier}"
-        );
-        assert!(
-            verifier.contains("runs-on: ubuntu-latest"),
-            "the verifier stays hosted despite the Velnor default: {verifier}"
-        );
-
-        let admission_gate = |event_name: &str, lanes: &str, admitted: bool| {
-            (event_name == "workflow_dispatch" && lanes == "github") || admitted
-        };
-        assert!(
-            !admission_gate("workflow_dispatch", "velnor", false),
-            "Velnor dispatch requires canonical admission"
-        );
-        assert!(
-            admission_gate("workflow_dispatch", "github", false),
-            "GitHub dispatch does not require Velnor admission"
-        );
-        assert!(
-            !admission_gate("push", "velnor", false),
-            "non-dispatch Velnor-default runs require canonical admission"
-        );
-        assert!(
-            admission_gate("push", "velnor", true),
-            "admitted non-dispatch Velnor runs pass"
-        );
-    }
-
-    #[test]
-    fn required_artifacts_preflight_sets_bash_env_on_verifier_step() {
-        let mut strict = profile("strict");
-        strict.artifacts = vec!["target/ci-evidence/rollup.json".to_owned()];
-        strict.artifacts_required = true;
-        let config = profile_config(vec![strict]);
-        let map = args_for("");
-        let selected = must(
-            select_profiles(&config.check_profiles, &Args(&map), "scheduled-checks"),
-            "select the strict profile",
-        );
-        let workflow = render(&config, None, &selected);
-        let verify = must_some(
-            workflow.find("- name: Verify strict artifacts"),
-            "strict preflight is rendered",
-        );
-        let upload = must_some(
-            workflow.find("- name: Upload strict artifacts"),
-            "strict upload is rendered",
-        );
-        let verifier = &workflow[verify..upload];
-        assert!(
-            verifier.contains(
-                "- name: Verify strict artifacts\n        if: success()\n        shell: bash\n        env:\n          BASH_ENV: /dev/null\n        run: |\n"
-            ),
-            "BASH_ENV must be step-level on the verifier: {verifier}"
-        );
-        assert_eq!(verifier.matches("BASH_ENV: /dev/null").count(), 2);
-    }
-
-    #[cfg(unix)]
-    fn run_artifact_preflight(root: &std::path::Path, artifact: &str) -> bool {
-        let mut profile = profile("strict");
-        profile.artifacts = vec![artifact.to_owned()];
-        profile.artifacts_required = true;
-        let mut rendered = String::new();
-        render_artifact_step(&mut rendered, &profile);
-        let script_start = must_some(
-            rendered.find("        run: |\n"),
-            "strict preflight has a shell script",
-        ) + "        run: |\n".len();
-        let script_end = must_some(
-            rendered
-                .find("      - name: Stage")
-                .or_else(|| rendered.find("      - name: Upload")),
-            "strict staging follows the preflight",
-        );
-        let script = rendered[script_start..script_end]
-            .lines()
-            .map(|line| line.strip_prefix("          ").unwrap_or(line))
-            .collect::<Vec<_>>()
-            .join("\n");
-        must(
-            Command::new("bash")
-                .args(["-euo", "pipefail", "-c"])
-                .arg(script)
-                .current_dir(root)
-                .status(),
-            "run generated artifact preflight",
-        )
-        .success()
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn required_artifact_preflight_checks_nonempty_files_and_rejects_symlinks() {
-        let root = std::env::temp_dir().join(format!(
-            "velnor-required-artifact-schema1-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        must(
-            fs::create_dir_all(root.join("target/evidence")),
-            "create artifact directory",
-        );
-        let artifact = root.join("target/evidence/rollup.json");
-        must(fs::write(&artifact, b"{}\n"), "write nonempty artifact");
-        assert!(
-            run_artifact_preflight(&root, "target/evidence/rollup.json"),
-            "a nonempty regular file passes"
-        );
-
-        must(fs::write(&artifact, b""), "empty artifact");
-        assert!(
-            !run_artifact_preflight(&root, "target/evidence/rollup.json"),
-            "an empty artifact fails"
-        );
-
-        let outside = root.join("outside.json");
-        must(fs::write(&outside, b"outside\n"), "write symlink target");
-        must(fs::remove_file(&artifact), "remove regular artifact");
-        must(
-            std::os::unix::fs::symlink(&outside, &artifact),
-            "create final symlink",
-        );
-        assert!(
-            !run_artifact_preflight(&root, "target/evidence/rollup.json"),
-            "a final symlink fails"
-        );
-
-        must(fs::remove_file(&artifact), "remove final symlink");
-        must(
-            fs::remove_dir_all(root.join("target/evidence")),
-            "remove real artifact parent",
-        );
-        must(
-            fs::create_dir_all(root.join("real-evidence")),
-            "create symlink target parent",
-        );
-        must(
-            fs::write(root.join("real-evidence/rollup.json"), b"{}\n"),
-            "write nested symlink target",
-        );
-        must(
-            std::os::unix::fs::symlink(root.join("real-evidence"), root.join("target/evidence")),
-            "create parent symlink",
-        );
-        assert!(
-            !run_artifact_preflight(&root, "target/evidence/rollup.json"),
-            "a symlinked parent fails"
-        );
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -2421,13 +1656,9 @@ branches = ["main"]"#,
             "the dispatch carries the github-default lanes choice: {workflow}"
         );
         assert_eq!(
-            workflow
-                .matches(
-                    "github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor') && fromJSON",
-                )
-                .count(),
+            workflow.matches("inputs.lanes == 'velnor'").count(),
             2,
-            "every profile uses the lane input in its runs-on selector: {workflow}"
+            "every job dispatches across lanes: {workflow}"
         );
         for job in ["  smoke:\n", "  load:\n"] {
             assert_eq!(
@@ -2465,13 +1696,9 @@ branches = ["main"]"#,
             "the dispatch carries the velnor-default lanes choice: {workflow}"
         );
         assert_eq!(
-            workflow
-                .matches(
-                    "github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && \"ubuntu-24.04\" || fromJSON",
-                )
-                .count(),
+            workflow.matches("inputs.lanes == 'github'").count(),
             2,
-            "every profile uses the lane input in its runs-on selector: {workflow}"
+            "every job dispatches across lanes: {workflow}"
         );
     }
 
@@ -2497,13 +1724,9 @@ branches = ["main"]"#,
             "the macos job keeps its static label: {workflow}"
         );
         assert_eq!(
-            workflow
-                .matches(
-                    "github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor') && fromJSON",
-                )
-                .count(),
+            workflow.matches("inputs.lanes").count(),
             1,
-            "only the dispatchable job uses the lane input in its runs-on selector: {workflow}"
+            "only the dispatchable job threads the conditional: {workflow}"
         );
     }
 

@@ -635,7 +635,7 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
                 if let Some(entries_path) = options.get("entries") {
                     cache_budget_report(entries_path)?;
                 } else {
-                    println!("{}", retention_policy_for_plan()?.total_bytes);
+                    println!("{}", retention_policy_for_plan().total_bytes);
                 }
                 return Ok(true);
             }
@@ -803,27 +803,16 @@ fn read_cache_entries(entries_path: &str) -> Result<Vec<SnapshotCacheEntry>, Gen
 
 /// Resolve the GitHub Actions retention policy from `.github-gen/velnor-workflow.toml`
 /// when present, otherwise the generator default.
-fn retention_policy_for_plan() -> Result<RetentionPolicy, GeneratorError> {
-    let root = std::env::current_dir()
-        .map_err(|error| GeneratorError::usage(format!("resolve repository root: {error}")))?;
-    retention_policy_for_root(&root)
-}
-
-fn retention_policy_for_root(root: &Path) -> Result<RetentionPolicy, GeneratorError> {
-    // Config discovery follows the repository tree. Validate the physical
-    // boundary first so a symlinked or special-file config cannot be read and
-    // an invalid discovery cannot silently fall back to defaults.
-    crate::scan::file_walk::validate_scan_root(root)?;
-    let discovered = crate::config::discover(root)?;
+fn retention_policy_for_plan() -> RetentionPolicy {
+    let discovered = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| crate::config::discover(&cwd).ok().flatten());
     let policy = discovered
         .as_ref()
         .map_or_else(RetentionPolicy::default_policy, |config| {
             RetentionPolicy::from_config(config.cache_github())
         });
-    Ok(retention_policy_with_declared_tools(
-        policy,
-        discovered.as_ref(),
-    ))
+    retention_policy_with_declared_tools(policy, discovered.as_ref())
 }
 
 /// Extend a retention policy with the prepared-tools class when the
@@ -1169,8 +1158,7 @@ fn append_step_output(path: &Path, text: &str) -> std::io::Result<()> {
 /// Emit per-class totals and headroom for the maintenance budget step.
 fn cache_budget_report(entries_path: &str) -> Result<(), GeneratorError> {
     let entries = read_cache_entries(entries_path)?;
-    let policy = retention_policy_for_plan()?;
-    let report = budget_report(&entries, &policy);
+    let report = budget_report(&entries, &retention_policy_for_plan());
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     serde_json::to_writer(&mut handle, &report)
@@ -1218,8 +1206,7 @@ fn cache_plan(entries_path: Option<&str>, now: Option<&str>) -> Result<(), Gener
             .as_secs()
             .cast_signed(),
     };
-    let policy = retention_policy_for_plan()?;
-    let plan = plan_evictions(&entries, &policy, now_epoch);
+    let plan = plan_evictions(&entries, &retention_policy_for_plan(), now_epoch);
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     serde_json::to_writer(&mut handle, &plan)
@@ -5323,31 +5310,22 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn debian_collect_rejects_stale_cross_arch_outputs_in_both_roots() {
-        // A cached amd64 package and the current arm64 package are an
-        // ambiguous corpus even when cargo-deb left entries in both scan
-        // roots; fail closed and name both packages in the log.
+    fn debian_collect_rejects_two_distinct_debs_with_their_paths() {
+        // Two genuinely different file names are still an ambiguous pick:
+        // fail closed, and name both paths so the log diagnoses itself.
         let (root, canonical, twin) = debian_output_fixture("distinct");
         let dist = root.join("dist");
-        let stale_amd64 = "velnor-runner_0.1.277~preview.362+f7bc191_amd64.deb";
-        let current_arm64 = "velnor-runner_0.1.277~preview.369+507e722_arm64.deb";
-        for directory in [&canonical, &twin] {
-            must(
-                std::fs::write(directory.join(stale_amd64), b"stale amd64"),
-                "write stale amd64 deb",
-            );
-            must(
-                std::fs::write(directory.join(current_arm64), b"current arm64"),
-                "write current arm64 deb",
-            );
-        }
+        must(
+            std::fs::write(canonical.join("widget_1.2.3_amd64.deb"), b"one"),
+            "write first deb",
+        );
+        must(
+            std::fs::write(twin.join("widget_1.2.4_amd64.deb"), b"two"),
+            "write second deb",
+        );
         let error = must_fail(
-            collect_debian_packages_from(
-                &[canonical, twin],
-                &dist,
-                Some("velnor-runner-preview-0.1.277~preview.369+507e722-arm64.deb"),
-            ),
-            "stale cross-arch debs must fail closed",
+            collect_debian_packages_from(&[canonical, twin], &dist, Some("widget-1.2.3-amd64.deb")),
+            "two distinct debs must fail closed",
         );
         let message = error.to_string();
         assert!(
@@ -5355,7 +5333,8 @@ pub(crate) mod tests {
             "unexpected error: {message}"
         );
         assert!(
-            message.contains(stale_amd64) && message.contains(current_arm64),
+            message.contains("widget_1.2.3_amd64.deb")
+                && message.contains("widget_1.2.4_amd64.deb"),
             "error must list both paths: {message}"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -9282,49 +9261,6 @@ workspace_check = true
             policy.classes.len(),
             RetentionPolicy::default_policy().classes.len() + 1
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn retention_policy_refuses_a_symlinked_generation_config_tree() {
-        use std::os::unix::fs::symlink;
-
-        let root = std::env::temp_dir().join(format!(
-            "velnor-retention-policy-root-{}",
-            crate::unique_suffix()
-        ));
-        let outside = std::env::temp_dir().join(format!(
-            "velnor-retention-policy-target-{}",
-            crate::unique_suffix()
-        ));
-        must(
-            std::fs::create_dir_all(&outside),
-            "create external config tree",
-        );
-        must(
-            std::fs::write(outside.join("velnor-workflow.toml"), "schema = 1\n"),
-            "write external generation config",
-        );
-        must(
-            std::fs::create_dir_all(&root),
-            "create retention policy root",
-        );
-        must(
-            symlink(&outside, root.join(".github-gen")),
-            "create symlinked generation config tree",
-        );
-
-        let error = must_fail(
-            retention_policy_for_root(&root),
-            "symlinked generation config must fail before discovery",
-        );
-        assert!(
-            error.to_string().contains("escapes the repository"),
-            "unexpected error: {error}"
-        );
-
-        let _ = std::fs::remove_dir_all(&root);
-        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]

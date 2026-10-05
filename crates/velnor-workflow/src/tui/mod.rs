@@ -544,8 +544,7 @@ impl App {
             );
             return;
         };
-        let symlinks = generated_symlinks();
-        let plan = match plan_generated_write(output_root, &files, &symlinks, &inputs) {
+        let plan = match plan_generated_write(output_root, &files, &generated_symlinks(), &inputs) {
             Ok(plan) => plan,
             Err(error) => {
                 self.fail(FailedOperation::Review, error.to_string());
@@ -1072,7 +1071,6 @@ mod tests {
             mise_lock_backends: BTreeMap::new(),
             mise_install_deps: crate::s2::MiseInstallDeps::default(),
             github_cache: crate::config::CacheGithubSection::default(),
-            velnor_host_cache: crate::config::CacheVelnorSection::default(),
         }
     }
 

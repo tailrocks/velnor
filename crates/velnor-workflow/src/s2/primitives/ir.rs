@@ -3348,7 +3348,7 @@ mod tests {
         assert!(
             candidate.contains("use_unit_binary=false")
                 && candidate.contains(
-                    "if [[ \"$(env -i PATH=\"$PATH\" target/debug/velnor-workflow --closure)\" == \"$head_closure\" ]]; then"
+                    "if [[ \"$(target/debug/velnor-workflow --closure)\" == \"$head_closure\" ]]; then"
                 )
                 && candidate.contains("if [[ \"$use_unit_binary\" == true ]]; then"),
             "the fast path reuses the checks' binary only when it already reports the head closure (the checks may build wider features): {candidate}"
@@ -3361,12 +3361,6 @@ mod tests {
         assert!(
             candidate.contains("cargo build --locked -p velnor-workflow"),
             "the slow build pins the lockfile and the generator package: {candidate}"
-        );
-        assert!(
-            candidate.contains(
-                "env -i PATH=\"$PATH\" cargo build --locked -p velnor-workflow --manifest-path"
-            ),
-            "the candidate build clears runner environment before executing PR build scripts: {candidate}"
         );
         assert!(
             candidate.contains("--manifest-path \"$worktree/crates/velnor-workflow/Cargo.toml\""),
@@ -3398,9 +3392,9 @@ mod tests {
             "the slow path records the head as the build revision: {candidate}"
         );
         assert!(
-            candidate.contains("env -i PATH=\"$PATH\" \"$stage/velnor-workflow\" --closure")
+            candidate.contains("\"$stage/velnor-workflow\" --closure")
                 && candidate.contains("[[ \"$reported\" == \"$head_closure\" ]]"),
-            "the staged binary proves its closure and build revision before upload: {candidate}"
+            "the staged binary proves the head closure before upload: {candidate}"
         );
         for argument in [
             "--arg profile debug",
@@ -4954,9 +4948,7 @@ fn unit_owns_workflow_crate(unit: &Unit) -> bool {
 /// the manifest the policy consumer verifies (`profile`, `platform`,
 /// `repository`, `run_id`, `revision` = PR-head SHA, `closure` = head
 /// candidate closure, `build_revision` = tree the binary compiled from,
-/// `binary_sha256`). The slow build clears the runner environment before
-/// invoking Cargo, so PR build scripts receive only the executable search path.
-/// The publish step uploads both files under the name the
+/// `binary_sha256`). The publish step uploads both files under the name the
 /// policy derives the same way (`velnor-workflow-candidate-<closure16>-<os>-<arch>`).
 ///
 /// Both steps carry the pull-request same-repo gate directly after their name
@@ -5005,7 +4997,7 @@ fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
             # profile stamps, so only reuse their binary when it already
             # reports the head closure; otherwise fall through to a clean
             # default-features build below.
-            if [[ "$(env -i PATH="$PATH" target/debug/velnor-workflow --closure)" == "$head_closure" ]]; then
+            if [[ "$(target/debug/velnor-workflow --closure)" == "$head_closure" ]]; then
               use_unit_binary=true
             fi
           fi
@@ -5017,7 +5009,7 @@ fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
             rm -rf "$worktree"
             git worktree add --detach "$worktree" "$PR_HEAD"
             trap 'git worktree remove --force "$worktree"' EXIT
-            env -i PATH="$PATH" cargo build --locked -p velnor-workflow --manifest-path "$worktree/crates/velnor-workflow/Cargo.toml"
+            cargo build --locked -p velnor-workflow --manifest-path "$worktree/crates/velnor-workflow/Cargo.toml"
             binary="$worktree/target/debug/velnor-workflow"
             build_rev="$PR_HEAD"
           fi
@@ -5026,12 +5018,9 @@ fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
           mkdir -p "$stage"
           install -m 0755 "$binary" "$stage/velnor-workflow"
           digest="$(sha256sum "$stage/velnor-workflow" | awk '{{print $1}}')"
-          reported="$(env -i PATH="$PATH" "$stage/velnor-workflow" --closure)"
+          reported="$("$stage/velnor-workflow" --closure)"
           [[ "$reported" == "$head_closure" ]] || {{ echo "::error::candidate reports closure $reported, head $PR_HEAD declares $head_closure" >&2; exit 1; }}
-          reported_revision="$(env -i PATH="$PATH" "$stage/velnor-workflow" --revision)"
           jq -n --arg profile debug --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repository "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg revision "$PR_HEAD" --arg closure "$head_closure" --arg build_revision "$build_rev" --arg binary_sha256 "$digest" '{{profile: $profile, platform: $platform, repository: $repository, run_id: $run_id, revision: $revision, closure: $closure, build_revision: $build_revision, binary_sha256: $binary_sha256}}' > "$stage/candidate-manifest.json"
-          manifest_build_revision="$(jq -er '.build_revision' "$stage/candidate-manifest.json")"
-          [[ "$reported_revision" == "$manifest_build_revision" ]] || {{ echo "::error::candidate reports revision $reported_revision, manifest build_revision $manifest_build_revision" >&2; exit 1; }}
           if [[ "$worktree" != "" ]]; then
             git worktree remove --force "$worktree"
             trap - EXIT
@@ -7555,7 +7544,7 @@ impl WorkflowIr {
             aggregate_triggers(WorkflowKind::Nightly, &self.default_branch);
         let concurrency = aggregate_concurrency_block(self, WorkflowKind::Nightly, false);
         let default_branch = yaml_scalar(&self.default_branch);
-        let runner = self.control_plane_runner();
+        let runner = self.runs_on_yaml(self.control_plane_provider());
         let dispatch_if = self.control_plane_gated_condition(
             "github.event_name != 'workflow_dispatch' || !inputs.simulate_failure",
         );
@@ -7939,25 +7928,20 @@ impl WorkflowIr {
         let plan_digest = github_expression("needs.plan.outputs.plan_digest");
         let excluded = github_expression("needs.plan.outputs.excluded");
         let expected_callers = required_execution_contract(&callers);
-        let control_plane = self.control_plane_provider();
-        let runner = if control_plane == ProviderId::GithubHosted {
-            crate::yaml_scalar(crate::POLICY_VALIDATION_RUNNER)
-        } else {
-            self.runs_on_yaml(control_plane)
-        };
         let _ = write!(
             output,
             "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n",
             self.control_plane_gated_condition(aggregate_job_guard(cancel_in_progress)),
             needs.join(", "),
-            runner,
+            self.runs_on_yaml(self.control_plane_provider()),
         );
         // The aggregate scores first, the shell verdict re-confirms after:
         // conjunction, so either side failing fails the check. A hosted
         // control plane downloads the verified plan-artifact runtime the
         // plan publishes for this download; a local control plane scores
         // with the ambient fleet runtime, like every other local job.
-        let runtime_steps = workflow_runtime_download(control_plane, &self.workflow_revision);
+        let runtime_steps =
+            workflow_runtime_download(self.control_plane_provider(), &self.workflow_revision);
         output.push_str(&render_aggregate_score_steps(
             &runtime_steps,
             self.pins.download_artifact,
@@ -8025,7 +8009,7 @@ impl WorkflowIr {
                 "  required:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
                 crate::s2::control_job_name("Required"),
                 self.control_plane_gated_condition(aggregate_job_guard(cancel_in_progress)),
-                runner
+                self.runs_on_yaml(self.control_plane_provider())
             );
         }
     }
@@ -8042,7 +8026,7 @@ impl WorkflowIr {
             output,
             "  nightly-alert:\n    name: {}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{needs_job}]\n    runs-on: {}\n    permissions:\n      contents: read\n      issues: write\n    steps:\n      - name: Open or update nightly failure signal\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          NIGHTLY_RESULT: ${{{{ needs.{needs_job}.result }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          if [[ \"$NIGHTLY_RESULT\" == success ]]; then\n            exit 0\n          fi\n          echo \"::error::{needs_job} failed: $NIGHTLY_RESULT\"\n          existing=\"$(gh api \"repos/$GITHUB_REPOSITORY/issues?state=open\" --jq '.[] | select(.title == \"Nightly CI red\") | .number' | sed -n '1p')\"\n          body=\"{needs_job} result: $NIGHTLY_RESULT\nRun: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"\n          if [[ -n \"$existing\" ]]; then\n            gh api --method PATCH \"repos/$GITHUB_REPOSITORY/issues/$existing\" -f body=\"$body\" >/dev/null\n          else\n            gh api --method POST \"repos/$GITHUB_REPOSITORY/issues\" -f title='Nightly CI red' -f body=\"$body\" >/dev/null\n          fi",
             crate::s2::control_job_name("Nightly red-to-signal"),
-            self.control_plane_runner()
+            self.runs_on_yaml(self.control_plane_provider())
         );
         let bad_body = format!(
             r#"          body="{needs_job} result: $NIGHTLY_RESULT
@@ -9687,23 +9671,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             return;
         }
         // Manual dispatch jobs bootstrap the pinned runtime themselves. The
-        // setup acquisition serves every job the Linux x86_64 plan artifact
-        // cannot: ARM and Apple jobs, jobs using another hosted selector, and
-        // Swift jobs, which set the runtime up wherever they land. Collapsed
-        // partitions are executor-homogeneous, so the selector represents
-        // the job.
-        let hosted_linux_selector =
-            self.selectors
-                .get(&ProviderId::GithubHosted)
-                .is_some_and(|selector| {
-                    selector.runs_on.len() == 1
-                        && crate::platform::uses_linux_x64_runtime_artifact_runner(
-                            &selector.runs_on[0],
-                        )
-                });
-        if !hosted_linux_selector
-            || unit.platform != crate::s2::provider::Platform::LinuxX64
-            || unit.kind == UnitKind::Swift
+        // setup acquisition serves every job the Linux-built plan artifact
+        // cannot: Apple jobs, whose executor never matches what the hosted
+        // plan publishes, and Swift jobs, which stay executor-uniform and
+        // set the runtime up wherever they land. A macOS Rust unit (a
+        // `BoltFFI` producer the join forced onto macOS) bootstraps
+        // through the setup action exactly like a Swift unit, while other
+        // Linux units keep the plan download. Collapsed partitions are
+        // executor-homogeneous, so the sampled member represents the job.
+        if unit.kind == UnitKind::Swift
+            || unit.platform == crate::s2::provider::Platform::MacosArm64
         {
             self.render_workflow_runtime_setup(output, provider);
         } else {
@@ -9717,17 +9694,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     /// visibility provider.
     pub(crate) fn control_plane_provider(&self) -> ProviderId {
         crate::s2::provider::control_plane_provider(&self.providers)
-    }
-
-    /// The runner for hosted control-plane jobs is fixed to the Docker-capable
-    /// policy image. Local control planes retain their configured selector.
-    fn control_plane_runner(&self) -> String {
-        let provider = self.control_plane_provider();
-        if provider == ProviderId::GithubHosted {
-            crate::yaml_scalar(crate::POLICY_VALIDATION_RUNNER)
-        } else {
-            self.runs_on_yaml(provider)
-        }
     }
 
     /// The `runs-on:` YAML value routing one provider to its selector. Pure
@@ -9795,16 +9761,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         );
         outputs.push("      planned_no_work: ${{ steps.plan.outputs.planned_no_work }}".to_owned());
         outputs.push("      no_work_reason: ${{ steps.plan.outputs.no_work_reason }}".to_owned());
-        let runner = if control_plane == ProviderId::GithubHosted {
-            crate::yaml_scalar(crate::POLICY_VALIDATION_RUNNER)
-        } else {
-            self.runs_on_yaml(control_plane)
-        };
         let _ = writeln!(
             output,
             "  plan:\n    name: {}\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_PROVIDERS: {automatic}\n          VELNOR_EVENT_TRUSTED: ${{{{ ({trusted}) && 'true' || 'false' }}}}\n          {expected_work_env}: {expected_work_file}\n        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          mkdir -p {expected_work_dir}\n          velnor-workflow plan --config .github/ci/project.toml\n",
             crate::s2::control_job_name("Planning"),
-            runner,
+            self.runs_on_yaml(self.control_plane_provider()),
             outputs.join("\n"),
             self.pins.checkout,
             base_sha = base_sha,
@@ -9828,23 +9789,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     pub(crate) fn render_policy(&self, output: &mut String) {
         let local = self.control_plane_provider().is_local();
         let gate = local.then(|| crate::s2::control_plane_trusted_gate(&self.default_branch));
-        let runner = if local {
-            self.runs_on_yaml(self.control_plane_provider())
-        } else {
-            crate::yaml_scalar(crate::POLICY_VALIDATION_RUNNER)
-        };
         output.push_str(&crate::s2::policy_job(&crate::s2::PolicyJobSpec {
             name: "Policy",
             revision: &self.workflow_revision,
-            runner: &runner,
+            runner: &self.runs_on_yaml(self.control_plane_provider()),
             repository: &self.repository,
             cache_backend: if local { "local" } else { "github" },
             trusted_gate: gate.as_deref(),
             default_branch: &self.default_branch,
             declared_ruleset_contexts: &self.declared_ruleset_contexts,
-            candidate_artifact_wiring: crate::candidate_artifact_wiring_enabled(
-                &self.workflow_revision,
-            ),
         }));
     }
 
@@ -10057,7 +10010,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                     tools.insert(ToolRequirement::Mise);
                 }
             }
-            UnitKind::Docs | UnitKind::GithubAction => {}
+            UnitKind::Docs => {}
         }
         // Declared tools and mise-run commands provision through mise whatever
         // the kind: the scan cannot see tools a test invokes at runtime, so

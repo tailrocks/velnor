@@ -1,4 +1,3 @@
-#![allow(rustdoc::all)]
 //! `velnorctl` — the Velnor operator CLI.
 //!
 //! The command-line surface is a native, modern [`clap`] application: one

@@ -9,9 +9,6 @@
     reason = "fixture setup failures should identify their operation"
 )]
 
-#[path = "common/git_fixture.rs"]
-mod git_fixture;
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -44,7 +41,6 @@ fn copy_tree(source: &Path, destination: &Path) {
 fn fixture_root(destination: &Path) -> PathBuf {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/synthetic-release");
     copy_tree(&source, destination);
-    git_fixture::initialize_git_fixture(destination);
     destination.to_path_buf()
 }
 
@@ -129,7 +125,6 @@ fn write_inputs(root: &Path, config: &str, include_verify_task: bool) {
 }
 
 fn generate_in_place(root: &Path) -> std::process::Output {
-    git_fixture::commit_fixture(root);
     Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
         .args(["--plain", "--force", "--default-branch", "main"])
         .arg(root)
