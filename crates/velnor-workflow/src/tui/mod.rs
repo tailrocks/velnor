@@ -1013,6 +1013,9 @@ mod tests {
             renovate_enabled: false,
             renovate_reason: String::new(),
             renovate: None,
+            docs_enabled: false,
+            docs_reason: String::new(),
+            docs: None,
             units: vec![
                 unit("core", &[]),
                 unit("middle", &["core"]),

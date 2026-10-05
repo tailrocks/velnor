@@ -12,6 +12,7 @@
 
 mod aggregate;
 mod cache;
+pub(crate) mod docs_site;
 mod ir;
 mod lanes;
 mod pipeline;
@@ -63,6 +64,10 @@ pub(crate) const OPENTOFU: &str = "opentofu-pipeline";
 pub(crate) const DOCKER_IMAGE: &str = "docker-image-pipeline";
 pub(crate) const HOMEBREW_TAP: &str = "homebrew-tap-pipeline";
 pub(crate) const DOCS_LINT: &str = "docs-lint-pipeline";
+/// The `docs.yml` documentation-site pipeline: build, link checks, spelling,
+/// Pages deployment, and post-deployment verification from one `[docs]`
+/// consumer contract.
+pub(crate) const DOCS_SITE: &str = "docs-site";
 /// The `release.yml` publisher: tag-triggered, verify-then-publish.
 pub(crate) const RELEASE: &str = "release";
 /// The `preview.yml` rolling artifact lane.
@@ -619,6 +624,7 @@ pub(crate) fn registry() -> Vec<Box<dyn Primitive>> {
         Box::new(release::StaticWorkflow),
         Box::new(renovate::Renovate),
         Box::new(renovate::RenovateValidate),
+        Box::new(docs_site::DocsSite),
         Box::new(runtime_products::RuntimeProducts),
     ]
 }
@@ -798,6 +804,7 @@ pub(crate) fn generate(
         if row.unit_contract
             || (!release::is_release_side(&row.primitive)
                 && !renovate::is_renovate_side(&row.primitive)
+                && !docs_site::is_docs_site_side(&row.primitive)
                 && !runtime_products::is_runtime_products_side(&row.primitive))
         {
             continue;
@@ -912,6 +919,35 @@ fn apply_units(
     Ok(())
 }
 
+/// Default rows for one side-file family: every owned file the config does not
+/// declare itself, when the family contract says the file applies.
+fn push_default_side_rows(
+    rows: &mut Vec<ResolvedRow>,
+    config: &ProjectConfig,
+    declared: &[Declaration],
+    side_files: &[(&str, &str)],
+    available: &dyn Fn(&str) -> bool,
+) {
+    for (file, family) in side_files {
+        if !config.workflow_files.iter().any(|owned| owned == file) {
+            continue;
+        }
+        if declared.iter().any(|row| row.file.as_deref() == Some(file)) {
+            continue;
+        }
+        if !available(family) {
+            continue;
+        }
+        rows.push(ResolvedRow {
+            primitive: (*family).to_owned(),
+            units: Vec::new(),
+            file: Some((*file).to_owned()),
+            unit_contract: false,
+            args: BTreeMap::new(),
+        });
+    }
+}
+
 /// The resolved declaration rows: the repository's rows over the default rows.
 ///
 /// Defaults cover every family the generated surface owns, so a repository
@@ -979,6 +1015,7 @@ fn rows_for(
     for row in declared.iter().filter(|row| {
         release::is_release_side(&row.primitive)
             || renovate::is_renovate_side(&row.primitive)
+            || docs_site::is_docs_site_side(&row.primitive)
             || runtime_products::is_runtime_products_side(&row.primitive)
     }) {
         rows.push(ResolvedRow::declared(row));
@@ -987,48 +1024,34 @@ fn rows_for(
     // same primitives a declared row uses, unless the config declares the
     // family itself.
     if !config.adopted_workflow_surface {
-        for (file, family) in release::RELEASE_SIDE_FILES {
-            if !config.workflow_files.iter().any(|owned| owned == file) {
-                continue;
-            }
-            if declared.iter().any(|row| row.file.as_deref() == Some(file)) {
-                continue;
-            }
+        push_default_side_rows(
+            &mut rows,
+            config,
+            declared,
+            release::RELEASE_SIDE_FILES,
             // A repository without a release contract omits the publisher.
-            if *family == RELEASE && config.release.is_none() {
-                continue;
-            }
-            rows.push(ResolvedRow {
-                primitive: (*family).to_owned(),
-                units: Vec::new(),
-                file: Some((*file).to_owned()),
-                unit_contract: false,
-                args: BTreeMap::new(),
-            });
-        }
-        for (file, family) in renovate::RENOVATE_SIDE_FILES {
-            if !config.workflow_files.iter().any(|owned| owned == file) {
-                continue;
-            }
-            if declared.iter().any(|row| row.file.as_deref() == Some(file)) {
-                continue;
-            }
-            if config.renovate.is_none() {
-                continue;
-            }
-            if *family == RENOVATE_VALIDATE
-                && !config.renovate.as_ref().is_some_and(|spec| spec.validate)
-            {
-                continue;
-            }
-            rows.push(ResolvedRow {
-                primitive: (*family).to_owned(),
-                units: Vec::new(),
-                file: Some((*file).to_owned()),
-                unit_contract: false,
-                args: BTreeMap::new(),
-            });
-        }
+            &|family| family != RELEASE || config.release.is_some(),
+        );
+        push_default_side_rows(
+            &mut rows,
+            config,
+            declared,
+            renovate::RENOVATE_SIDE_FILES,
+            &|family| {
+                config
+                    .renovate
+                    .as_ref()
+                    .is_some_and(|spec| family != RENOVATE_VALIDATE || spec.validate)
+            },
+        );
+        push_default_side_rows(
+            &mut rows,
+            config,
+            declared,
+            docs_site::DOCS_SITE_SIDE_FILES,
+            // A repository without a docs contract omits the pipeline.
+            &|_| config.docs.is_some(),
+        );
     }
     validate(config, declared, &rows)?;
     Ok(rows)
@@ -1273,6 +1296,7 @@ fn validate(
     for row in declared.iter().filter(|row| {
         release::is_release_side(&row.primitive)
             || renovate::is_renovate_side(&row.primitive)
+            || docs_site::is_docs_site_side(&row.primitive)
             || runtime_products::is_runtime_products_side(&row.primitive)
     }) {
         if !row.units.is_empty() {
@@ -1289,6 +1313,7 @@ fn validate(
         })?;
         let canonical = release::canonical_release_side_file(&row.primitive)
             .or_else(|| renovate::canonical_renovate_side_file(&row.primitive))
+            .or_else(|| docs_site::canonical_docs_site_side_file(&row.primitive))
             .or_else(|| runtime_products::canonical_runtime_products_side_file(&row.primitive));
         if let Some(canonical) = canonical
             && file != canonical
@@ -1349,6 +1374,7 @@ mod tests {
             STATIC_WORKFLOW,
             RENOVATE,
             RENOVATE_VALIDATE,
+            DOCS_SITE,
         ] {
             assert!(lookup(contract).is_ok(), "`{contract}` is not registered");
             ids.push(contract);
