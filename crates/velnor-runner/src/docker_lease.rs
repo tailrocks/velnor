@@ -5196,6 +5196,7 @@ fn rewrite_network_container_reference(request: &[u8], container_id: &str) -> Re
     let header_text = std::str::from_utf8(&request[..header_end])
         .context("Docker network request headers must be UTF-8")?;
     let body = &request[header_end..];
+    let original_body_len = body.len();
     let mut object = parse_create_value(body)
         .context("parse Docker network container request")?
         .as_object()
@@ -5231,7 +5232,7 @@ fn rewrite_network_container_reference(request: &[u8], container_id: &str) -> Re
                 .trim()
                 .parse::<usize>()
                 .context("parse Docker network request Content-Length")?;
-            if declared != body.len() {
+            if declared != original_body_len {
                 bail!("Docker network request Content-Length does not match body");
             }
             content_length_seen = true;
@@ -17974,7 +17975,7 @@ mod tests {
         let request = api_request(
             "POST",
             "/v1.43/networks/net-owned/connect",
-            br#"{"Container":"container-alias","EndpointConfig":{}}"#,
+            br#"{ "Container" : "container-alias", "EndpointConfig" : {} }"#,
         );
         let authorization = policy.authorize_admitted(&request).unwrap();
         assert_eq!(authorization.container_id(), Some("old-container-id"));
@@ -18001,10 +18002,28 @@ mod tests {
             )
             .unwrap();
         let body = docker_request_body(&rewritten).unwrap();
+        let header_end = rewritten
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        let header_text = std::str::from_utf8(&rewritten[..header_end]).unwrap();
+        assert!(header_text.contains(&format!("Content-Length: {}\r\n", body.len())));
         let value: Value = serde_json::from_slice(body).unwrap();
         assert_eq!(value["Container"], "old-container-id");
         let (_, target) = docker_request_line(&rewritten).unwrap();
         assert_eq!(target, "/v1.43/networks/net-owned/connect");
+
+        let malformed = format!(
+            "POST /v1.43/networks/net-owned/connect HTTP/1.1\r\nHost: docker\r\nContent-Length: 1\r\n\r\n{}",
+            r#"{ "Container" : "container-alias", "EndpointConfig" : {} }"#
+        )
+        .into_bytes();
+        let error = rewrite_network_container_reference(&malformed, "old-container-id")
+            .expect_err("an incorrect original wire length must be rejected");
+        assert!(error
+            .to_string()
+            .contains("Content-Length does not match body"));
     }
 
     #[test]
