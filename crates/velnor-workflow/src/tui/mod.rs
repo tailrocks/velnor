@@ -979,6 +979,11 @@ mod tests {
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
+            platform: crate::platform::PlatformRequirement::portable(),
+            products: Vec::new(),
+            prerequisites: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            mbx: None,
         }
     }
 
