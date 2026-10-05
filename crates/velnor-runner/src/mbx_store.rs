@@ -16,10 +16,8 @@
 //! `MBX_TARGET_ROOT` was `<store>/targets`. Those trees were never candidates
 //! for any collector once the code moved on — a live host carried ~144 GiB of
 //! them beside the per-slot trees — so [`migrate_at_daemon_start`] deletes
-//! every entry of a store that is not `slots/` or `targets/slots/`, and every
-//! historical unversioned `_velnor_mbx` work-root store once canonical
-//! storage is in effect, and before pruning the versioned store without
-//! canonical storage.
+//! every entry of a store that is not `slots/` or `targets/slots/`, and purges
+//! both historical work-root MBX roots once at daemon startup.
 //! Nothing reads the old trees: mbx is content-addressed and a managed target
 //! is a Cargo target, so deleting them costs one cold build per slot at most.
 //!
@@ -117,22 +115,21 @@ impl MigrationReport {
 
 /// Remove every mbx store tree the current layout does not produce.
 ///
-/// * The historical unversioned `<work>/_velnor_mbx` root is removed whole in
-///   either layout mode. Canonical startup also removes the versioned legacy
-///   sibling because canonical store resolution never falls back to it.
-/// * Under every mbx class root (`<cache-root>__trust_scope_v1/<filesystem-key>/compiler/mbx`,
-///   or `<work>/_velnor_mbx__trust_scope_v1/<filesystem-key>` without canonical storage), every
-///   repository store is pruned to `slots/` and `targets/slots/`: anything else
-///   at the store root is the pre-slot `MBX_CACHE_DIR`, anything else under
-///   `targets/` is the pre-slot `MBX_TARGET_ROOT`, and a non-directory entry
-///   under either `slots/` directory was never written by the runner.
+/// * The historical unversioned and versioned `<work>/_velnor_mbx` roots are
+///   removed whole. No current MBX path resolves below either root.
+/// * Under every canonical MBX class root
+///   (`<cache-root>/<filesystem-key>/compiler/mbx`), every repository store is
+///   pruned to `slots/` and `targets/slots/`: anything else at the store root
+///   is the pre-slot `MBX_CACHE_DIR`, anything else under `targets/` is the
+///   pre-slot `MBX_TARGET_ROOT`, and a non-directory entry under either
+///   `slots/` directory was never written by the runner.
 ///
 /// Idempotent and best-effort: a failure to remove one path is reported and
 /// does not stop the rest.
 pub(crate) fn migrate_at_daemon_start(
     work_root: &Path,
-    layout: Option<&crate::storage::StorageLayout>,
-) -> MigrationReport {
+    layout: &crate::storage::StorageLayout,
+) -> anyhow::Result<MigrationReport> {
     let catalog = crate::store_catalog::StoreCatalog::for_work_root_with_layout(work_root, layout);
     let mut report = MigrationReport::default();
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -143,77 +140,42 @@ pub(crate) fn migrate_at_daemon_start(
         "secure MBX migration requires native mount-identity and no-follow descriptor operations"
             .to_owned(),
     ));
-    report
+    Ok(report)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn migrate_at_daemon_start_secure(
     work_root: &Path,
-    layout: Option<&crate::storage::StorageLayout>,
+    layout: &crate::storage::StorageLayout,
     catalog: &crate::store_catalog::StoreCatalog,
     report: &mut MigrationReport,
 ) {
-    match layout {
-        Some(layout) => {
-            match MbxDir::open_configured_root(work_root) {
-                Ok(Some(work)) => {
-                    for stale_root in [catalog.old_legacy_mbx_root(), catalog.legacy_mbx_root()] {
-                        if let Some(name) = stale_root.file_name() {
-                            remove_reported(&work, name, &stale_root, report);
-                        }
-                    }
+    match MbxDir::open_configured_root(work_root) {
+        Ok(Some(work)) => {
+            for stale_root in [catalog.old_legacy_mbx_root(), catalog.legacy_mbx_root()] {
+                if let Some(name) = stale_root.file_name() {
+                    remove_reported(&work, name, &stale_root, report);
                 }
-                Ok(None) => {}
-                Err(error) => record_failure(work_root, error, report),
-            }
-
-            match open_filesystem_key_namespace(&layout.cache_root) {
-                Ok(Some(namespace)) => migrate_keyed_namespace(
-                    &namespace,
-                    Path::new("compiler/mbx"),
-                    catalog,
-                    crate::trust_scope::filesystem_key_namespace(&layout.cache_root),
-                    report,
-                ),
-                Ok(None) => {}
-                Err(error) => record_failure(
-                    &crate::trust_scope::filesystem_key_namespace(&layout.cache_root),
-                    error,
-                    report,
-                ),
             }
         }
-        None => match MbxDir::open_configured_root(work_root) {
-            Ok(Some(work)) => {
-                let old_legacy = catalog.old_legacy_mbx_root();
-                if let Some(name) = old_legacy.file_name() {
-                    remove_reported(&work, name, &old_legacy, report);
-                }
+        Ok(None) => {}
+        Err(error) => record_failure(work_root, error, report),
+    }
 
-                let legacy_path = catalog.legacy_mbx_root();
-                let Some(name) = legacy_path.file_name() else {
-                    record_failure(
-                        &legacy_path,
-                        anyhow::anyhow!("versioned MBX root has no path component"),
-                        report,
-                    );
-                    return;
-                };
-                match work.open_directory(name) {
-                    Ok(Some(namespace)) => migrate_keyed_namespace(
-                        &namespace,
-                        Path::new("."),
-                        catalog,
-                        legacy_path,
-                        report,
-                    ),
-                    Ok(None) => {}
-                    Err(error) => record_failure(&legacy_path, error, report),
-                }
-            }
-            Ok(None) => {}
-            Err(error) => record_failure(work_root, error, report),
-        },
+    match open_filesystem_key_namespace(&layout.cache_root) {
+        Ok(Some(namespace)) => migrate_keyed_namespace(
+            &namespace,
+            Path::new("compiler/mbx"),
+            catalog,
+            crate::trust_scope::filesystem_key_namespace(&layout.cache_root),
+            report,
+        ),
+        Ok(None) => {}
+        Err(error) => record_failure(
+            &crate::trust_scope::filesystem_key_namespace(&layout.cache_root),
+            error,
+            report,
+        ),
     }
 }
 
@@ -1615,7 +1577,7 @@ mod tests {
         write(&clean.join("slots/slot-1/x"), 11);
         write(&clean.join("targets/slots/slot-1/y"), 12);
 
-        let report = migrate_at_daemon_start(&work_root, Some(&layout));
+        let report = migrate_at_daemon_start(&work_root, &layout).unwrap();
 
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         let removed: Vec<PathBuf> = report.removed.iter().map(|(p, _)| p.clone()).collect();
@@ -1648,7 +1610,7 @@ mod tests {
         }
         // Idempotent: a second pass finds nothing.
         assert_eq!(
-            migrate_at_daemon_start(&work_root, Some(&layout)),
+            migrate_at_daemon_start(&work_root, &layout).unwrap(),
             MigrationReport::default()
         );
         fs::remove_dir_all(&prefix).ok();
@@ -1675,7 +1637,7 @@ mod tests {
             .join("pool_a/compiler/mbx/1255367013/incremental/ambiguous.rlib");
         write(&canonical_old_alias, 4);
 
-        let canonical_report = migrate_at_daemon_start(&work_root, Some(&layout));
+        let canonical_report = migrate_at_daemon_start(&work_root, &layout).unwrap();
 
         assert!(canonical_report.failures.is_empty());
         for store in &canonical_stores {
@@ -1687,31 +1649,6 @@ mod tests {
             "startup migration must leave ambiguous canonical aliases to the drained-upgrade purge"
         );
 
-        let legacy_work_root = prefix.join("legacy/work");
-        let legacy_stores = scopes.map(|scope| {
-            crate::storage::legacy_store_root(&legacy_work_root, "_velnor_mbx")
-                .join(crate::trust_scope::filesystem_key(scope))
-                .join("1255367013")
-        });
-        for store in &legacy_stores {
-            write(&store.join("incremental/old.rlib"), 8);
-            write(&store.join("slots/slot-1/current.rlib"), 16);
-        }
-        let legacy_old_alias =
-            legacy_work_root.join("_velnor_mbx/pool_a/1255367013/incremental/ambiguous.rlib");
-        write(&legacy_old_alias, 4);
-
-        let legacy_report = migrate_at_daemon_start(&legacy_work_root, None);
-
-        assert!(legacy_report.failures.is_empty());
-        for store in &legacy_stores {
-            assert!(!store.join("incremental").exists());
-            assert!(store.join("slots/slot-1/current.rlib").is_file());
-        }
-        assert!(
-            !legacy_old_alias.exists(),
-            "no-layout startup must purge the obsolete historical root"
-        );
         fs::remove_dir_all(&prefix).ok();
     }
 
@@ -1733,7 +1670,7 @@ mod tests {
         write(&versioned.join("incremental/isolated.rlib"), 9);
         fs::create_dir_all(&layout.cache_root).unwrap();
 
-        let report = migrate_at_daemon_start(&work_root, Some(&layout));
+        let report = migrate_at_daemon_start(&work_root, &layout).unwrap();
 
         assert_eq!(
             report.removed,
@@ -1745,55 +1682,6 @@ mod tests {
         assert!(!work_root.join("_velnor_mbx").exists());
         assert!(!versioned_root.exists());
         assert!(!versioned.join("incremental/isolated.rlib").exists());
-        fs::remove_dir_all(&prefix).ok();
-    }
-
-    /// Without canonical storage the legacy root *is* the layout the code
-    /// produces; it is pruned in place, not deleted.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn migration_prunes_the_legacy_root_in_place_without_canonical_storage() {
-        let prefix = temp_root("no-layout");
-        let work_root = prefix.join("work");
-        let store = work_root
-            .join("_velnor_mbx__trust_scope_v1")
-            .join(crate::trust_scope::filesystem_key("trusted"))
-            .join("42");
-        write(&store.join("slots/slot-1/a"), 500);
-        write(&store.join("incremental/b"), 700);
-
-        let report = migrate_at_daemon_start(&work_root, None);
-
-        assert_eq!(report.removed, vec![(store.join("incremental"), 700)]);
-        assert!(store.join("slots/slot-1/a").is_file());
-        fs::remove_dir_all(&prefix).ok();
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn migration_removes_the_historical_unversioned_root_without_canonical_storage() {
-        let prefix = temp_root("no-layout-old-root");
-        let work_root = prefix.join("work");
-        let old_store = work_root.join("_velnor_mbx/trusted/42");
-        write(&old_store.join("incremental/old.rlib"), 700);
-
-        let current_store = work_root
-            .join("_velnor_mbx__trust_scope_v1")
-            .join(crate::trust_scope::filesystem_key("trusted"))
-            .join("42");
-        write(&current_store.join("slots/slot-1/current.rlib"), 500);
-        write(&current_store.join("incremental/old.rlib"), 300);
-
-        let report = migrate_at_daemon_start(&work_root, None);
-
-        assert!(report.failures.is_empty(), "{:?}", report.failures);
-        assert!(report
-            .removed
-            .contains(&(work_root.join("_velnor_mbx"), 700)));
-        assert_eq!(report.total_bytes(), 1000);
-        assert!(!work_root.join("_velnor_mbx").exists());
-        assert!(!current_store.join("incremental").exists());
-        assert!(current_store.join("slots/slot-1/current.rlib").is_file());
         fs::remove_dir_all(&prefix).ok();
     }
 
@@ -1814,7 +1702,7 @@ mod tests {
         symlink(&outside, store.join(SLOTS_DIR)).unwrap();
         symlink(&outside, store.join("obsolete-link")).unwrap();
 
-        let report = migrate_at_daemon_start(&work_root, Some(&layout));
+        let report = migrate_at_daemon_start(&work_root, &layout).unwrap();
 
         assert!(
             report
@@ -1899,7 +1787,7 @@ mod tests {
         let marker = mountpoint.join("outside-marker");
         fs::write(&marker, b"keep mounted data").unwrap();
 
-        let report = migrate_at_daemon_start(&work_root, Some(&layout));
+        let report = migrate_at_daemon_start(&work_root, &layout).unwrap();
 
         assert!(
             report

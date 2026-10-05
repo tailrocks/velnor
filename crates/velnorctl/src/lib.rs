@@ -647,6 +647,13 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
                     error.to_string(),
                 )
             })?;
+            let _package_guard = velnor_runner::package_execution_guard().map_err(|error| {
+                CommandError::new(
+                    ExitClass::Operation,
+                    "daemon.package_guard_failed",
+                    format!("cannot verify the active packaged release: {error:#}"),
+                )
+            })?;
             runtime::run_daemon((*args).clone())
                 .await
                 .map_err(|_| CommandError::operation("daemon.start_failed: unable to start daemon"))

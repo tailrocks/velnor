@@ -1,3 +1,4 @@
+#![cfg(unix)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -302,7 +303,7 @@ fn post_snapshot_activation_child_waits_for_exclusive_package_lock() {
 }
 
 #[test]
-fn every_shipped_runner_exec_start_uses_the_shared_transaction_lock() {
+fn every_shipped_execution_service_has_one_package_guard_owner() {
     let unit_files = [
         include_str!("../debian/velnor-controller@.service"),
         include_str!("../debian/velnor-daemon.service"),
@@ -310,32 +311,43 @@ fn every_shipped_runner_exec_start_uses_the_shared_transaction_lock() {
         include_str!("../debian/velnor-doctor.service"),
         include_str!("../debian/velnor-doctor@.service"),
         include_str!("../debian/velnor-guardian.service"),
-        include_str!("../debian/velnor-job@.service"),
         include_str!("../debian/velnor-slot@.service"),
     ];
     let mut exec_start_count = 0;
+    let runner_roles = ["daemon", "guardian", "controller", "slot"];
     for contents in unit_files {
         for line in contents.lines() {
             let Some(command) = line.strip_prefix("ExecStart=") else {
                 continue;
             };
             exec_start_count += 1;
-            assert!(
-                command.starts_with(
-                    "/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock "
-                ),
-                "shipped ExecStart lacks the shared package lock: {line}"
-            );
-            let runner_command = command
-                .strip_prefix(
-                    "/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock ",
-                )
-                .expect("shared lock wrapper prefix");
-            assert!(
-                runner_command.starts_with("/usr/bin/velnor-runner ")
-                    || runner_command.starts_with("/usr/bin/velnorctl "),
-                "shipped ExecStart does not hold the shared lock before runner work: {line}"
-            );
+            if let Some(runner_command) = command.strip_prefix("/usr/bin/velnor-runner ") {
+                let role = runner_command.split_whitespace().next().unwrap_or_default();
+                assert!(
+                    runner_roles.contains(&role),
+                    "unknown unwrapped runner role: {line}"
+                );
+                assert!(
+                    !command.contains("/usr/bin/flock"),
+                    "runner process acquires its own package guard; do not nest a unit flock: {line}"
+                );
+            } else {
+                assert!(
+                    command.starts_with(
+                        "/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock "
+                    ),
+                    "non-runner execution service lacks its external package lock: {line}"
+                );
+                let protected_command = command
+                    .strip_prefix(
+                        "/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock ",
+                    )
+                    .unwrap_or_default();
+                assert!(
+                    protected_command.starts_with("/usr/bin/velnorctl "),
+                    "unexpected unguarded service command: {line}"
+                );
+            }
         }
     }
     assert_eq!(exec_start_count, unit_files.len());

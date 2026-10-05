@@ -12,16 +12,18 @@
 //!
 //! The adapter deliberately exposes no `set_max_jobs`/`begin_epoch`: only
 //! the daemon startup path resizes or re-epochs the ledger. Scale-set
-//! holders record no pid (`None`): workers are containers, not host
-//! processes, so pid liveness can neither adopt nor sweep them.
+//! holders record their owning daemon pid. PID liveness alone is not
+//! sufficient to adopt Scale Set work: callers must also prove exact worker
+//! resource ownership before the serialized startup adoption path.
 //!
 //! [cap]: crate::scaleset::capacity::CapacityLedger
 
 use std::path::Path;
 
 use velnor_control::permit_ledger::{
-    AcquireOutcome as ControlAcquire, LedgerError as ControlError, PermitDemand,
-    PermitLane as ControlLane, PermitLedger, PermitState as ControlState,
+    AcquireAttemptOutcome as ControlAcquireAttempt, AttemptRotationOutcome as ControlRotation,
+    DemandState as ControlDemandState, LedgerError as ControlError, OwnedReleaseOutcome,
+    PermitDemand, PermitLane as ControlLane, PermitLedger, PermitState as ControlState,
     ReconcileReport as ControlReport,
 };
 
@@ -67,21 +69,23 @@ fn from_control_state(state: ControlState) -> LedgerPermitState {
     }
 }
 
-fn from_control_outcome(outcome: ControlAcquire) -> AcquireOutcome {
+fn from_control_outcome(outcome: ControlAcquireAttempt) -> AcquireOutcome {
     match outcome {
-        ControlAcquire::Acquired => AcquireOutcome::Acquired,
-        ControlAcquire::AlreadyHeld => AcquireOutcome::AlreadyHeld,
-        ControlAcquire::Full | ControlAcquire::Deferred | ControlAcquire::Closed => {
-            AcquireOutcome::Full
+        ControlAcquireAttempt::Acquired { attempt_token } => {
+            AcquireOutcome::Acquired { attempt_token }
         }
-        ControlAcquire::StaleGeneration => AcquireOutcome::StaleGeneration,
-        ControlAcquire::NotConfigured => AcquireOutcome::NotConfigured,
+        ControlAcquireAttempt::AlreadyHeld => AcquireOutcome::AlreadyHeld,
+        ControlAcquireAttempt::Full
+        | ControlAcquireAttempt::Deferred
+        | ControlAcquireAttempt::Closed => AcquireOutcome::Full,
+        ControlAcquireAttempt::StaleGeneration => AcquireOutcome::StaleGeneration,
+        ControlAcquireAttempt::NotConfigured => AcquireOutcome::NotConfigured,
     }
 }
 
 fn from_control_report(report: ControlReport) -> ReconcileReport {
     ReconcileReport {
-        adopted: report.adopted,
+        // Exact reconciliation never inserts a permit or adopts a holder.
         marked_uncertain: report.marked_uncertain,
         confirmed: report.confirmed,
     }
@@ -112,6 +116,30 @@ impl SharedLedger {
         self.inner.path()
     }
 
+    /// Apply a previously staged Scale Set recovery token to an existing
+    /// ledger row under the active ledger-wide recovery claim. The state DB
+    /// records the target and exact prior PID before this cross-database CAS.
+    pub(crate) fn rotate_scaleset_attempt_for_recovery(
+        &mut self,
+        holder: &str,
+        state: LedgerPermitState,
+        generation: u64,
+        previous_pid: u32,
+        previous_token: Option<&str>,
+        target_token: &str,
+        claim_token: &str,
+    ) -> Result<ControlRotation, ControlError> {
+        self.inner.rotate_scaleset_attempt_for_recovery(
+            holder,
+            to_control_state(state),
+            generation,
+            previous_pid,
+            previous_token,
+            target_token,
+            claim_token,
+        )
+    }
+
     /// Record a Scale Set offer in the host-wide demand queue. Pass the
     /// durable first-seen time from the lane's offer record; redelivery
     /// refreshes liveness without changing queue age or global sequence.
@@ -139,21 +167,28 @@ impl SharedLedger {
         self.inner.cancel_demand(holder)
     }
 
-    /// Release after confirmed retry/handoff cleanup while preserving the
-    /// demand's original position in the global queue.
-    pub fn release_to_eligible(&mut self, holder: &str) -> Result<bool, ControlError> {
-        self.inner.release_to_eligible(holder)
-    }
-
-    /// Release after confirmed upstream cancellation.
-    pub fn release_cancelled(&mut self, holder: &str) -> Result<bool, ControlError> {
-        self.inner.release_cancelled(holder)
+    /// Replay a durable Scale Set release stage with atomic exact-token and
+    /// already-absent demand proof.
+    pub fn release_scaleset_staged(
+        &mut self,
+        holder: &str,
+        attempt_token: &str,
+        target: ControlDemandState,
+    ) -> Result<OwnedReleaseOutcome, ControlError> {
+        self.inner
+            .release_scaleset_staged_owned(holder, attempt_token, target)
     }
 
     /// Keep occupancy after cleanup uncertainty and close the served demand
     /// in the same transaction.
-    pub fn retain_uncertain(&mut self, holder: &str, generation: u64) -> Result<(), ControlError> {
-        self.inner.retain_uncertain(holder, generation)
+    pub fn retain_uncertain(
+        &mut self,
+        holder: &str,
+        generation: u64,
+        attempt_token: &str,
+    ) -> Result<(), ControlError> {
+        self.inner
+            .retain_uncertain_owned(holder, generation, attempt_token)
     }
 }
 
@@ -182,12 +217,17 @@ impl CapacityLedger for SharedLedger {
                 lane: from_control_lane(holder.lane),
                 state: from_control_state(holder.state),
                 generation: holder.generation,
+                pid: holder.pid,
             })
             .collect())
     }
 
     fn holder_state(&self, holder: &str) -> Result<Option<LedgerPermitState>, Self::Error> {
         Ok(self.inner.holder_state(holder)?.map(from_control_state))
+    }
+
+    fn is_current_attempt(&self, holder: &str, attempt_token: &str) -> Result<bool, Self::Error> {
+        self.inner.is_current_attempt(holder, attempt_token)
     }
 
     fn observe_demand(
@@ -215,13 +255,31 @@ impl CapacityLedger for SharedLedger {
         state: LedgerPermitState,
         generation: u64,
     ) -> Result<AcquireOutcome, Self::Error> {
-        Ok(from_control_outcome(self.inner.acquire(
+        Ok(from_control_outcome(self.inner.acquire_attempt(
             holder,
             to_control_lane(lane),
             to_control_state(state),
             generation,
-            None,
+            Some(std::process::id()),
         )?))
+    }
+
+    fn acquire_with_attempt_token(
+        &mut self,
+        holder: &str,
+        state: LedgerPermitState,
+        generation: u64,
+        attempt_token: &str,
+    ) -> Result<AcquireOutcome, Self::Error> {
+        Ok(from_control_outcome(
+            self.inner.acquire_scaleset_attempt_with_token(
+                holder,
+                to_control_state(state),
+                generation,
+                Some(std::process::id()),
+                attempt_token,
+            )?,
+        ))
     }
 
     fn transition(
@@ -229,38 +287,41 @@ impl CapacityLedger for SharedLedger {
         holder: &str,
         state: LedgerPermitState,
         generation: u64,
+        attempt_token: &str,
     ) -> Result<(), Self::Error> {
         self.inner
-            .transition(holder, to_control_state(state), generation)
+            .transition_owned(holder, to_control_state(state), generation, attempt_token)
     }
 
-    fn release(&mut self, holder: &str) -> Result<bool, Self::Error> {
-        self.inner.release(holder)
-    }
-
-    fn release_to_eligible(&mut self, holder: &str) -> Result<bool, Self::Error> {
-        SharedLedger::release_to_eligible(self, holder)
-    }
-
-    fn release_cancelled(&mut self, holder: &str) -> Result<bool, Self::Error> {
-        SharedLedger::release_cancelled(self, holder)
-    }
-
-    fn retain_uncertain(&mut self, holder: &str, generation: u64) -> Result<(), Self::Error> {
-        SharedLedger::retain_uncertain(self, holder, generation)
-    }
-
-    fn reconcile(
+    fn release_staged(
         &mut self,
-        alive: &[(&str, LedgerLane, LedgerPermitState)],
+        holder: &str,
+        attempt_token: &str,
+        target: ControlDemandState,
+    ) -> Result<OwnedReleaseOutcome, Self::Error> {
+        SharedLedger::release_scaleset_staged(self, holder, attempt_token, target)
+    }
+
+    fn retain_uncertain(
+        &mut self,
+        holder: &str,
+        generation: u64,
+        attempt_token: &str,
+    ) -> Result<(), Self::Error> {
+        SharedLedger::retain_uncertain(self, holder, generation, attempt_token)
+    }
+
+    fn reconcile_attempts(
+        &mut self,
+        alive: &[(&str, LedgerLane, &str)],
     ) -> Result<ReconcileReport, Self::Error> {
-        let attested: Vec<(&str, ControlLane, ControlState)> = alive
+        let attested: Vec<(&str, ControlLane, &str)> = alive
             .iter()
-            .map(|(holder, lane, state)| {
-                (*holder, to_control_lane(*lane), to_control_state(*state))
-            })
+            .map(|(holder, lane, attempt_token)| (*holder, to_control_lane(*lane), *attempt_token))
             .collect();
-        Ok(from_control_report(self.inner.reconcile(&attested)?))
+        Ok(from_control_report(
+            self.inner.reconcile_attempts(&attested)?,
+        ))
     }
 
     fn is_stale_generation(error: &Self::Error) -> bool {
@@ -301,7 +362,7 @@ mod tests {
         raw.begin_epoch().unwrap();
         drop(raw);
         let mut ledger = SharedLedger::open(path).unwrap();
-        ledger.reconcile(&[]).unwrap();
+        ledger.reconcile_attempts(&[]).unwrap();
         ledger
     }
 
@@ -324,7 +385,7 @@ mod tests {
         assert_eq!(advertise_free(&ledger), 1);
         let generation = ledger.generation().unwrap();
         let (outcome, _) = reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
-        assert_eq!(outcome, ReserveOutcome::Reserved);
+        assert!(matches!(outcome, ReserveOutcome::Reserved { .. }));
         assert_eq!(advertise_free(&ledger), 0);
         let (full, _) = reserve_for_offer(&mut ledger, "scaleset/7/2", generation).unwrap();
         assert_eq!(full, ReserveOutcome::CapacityExhausted);
@@ -337,8 +398,8 @@ mod tests {
         let generation = ledger.generation().unwrap();
         let (first, _) = reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
         let (again, _) = reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
-        assert_eq!(first, ReserveOutcome::Reserved);
-        assert_eq!(again, ReserveOutcome::Reserved);
+        assert!(matches!(first, ReserveOutcome::Reserved { .. }));
+        assert_eq!(again, ReserveOutcome::AlreadyHeld);
         assert_eq!(ledger.occupied().unwrap(), 1);
     }
 
@@ -355,7 +416,7 @@ mod tests {
                 generation,
             )
             .unwrap();
-        assert_eq!(native, AcquireOutcome::Acquired);
+        assert!(matches!(native, AcquireOutcome::Acquired { .. }));
         let (outcome, _) = reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
         assert_eq!(outcome, ReserveOutcome::CapacityExhausted);
         let holders = ledger.holders().unwrap();
@@ -403,7 +464,7 @@ mod tests {
         );
         drop(raw);
 
-        assert_eq!(
+        assert!(matches!(
             ledger
                 .acquire(
                     "native/older",
@@ -412,9 +473,9 @@ mod tests {
                     generation,
                 )
                 .unwrap(),
-            AcquireOutcome::Acquired
-        );
-        assert_eq!(
+            AcquireOutcome::Acquired { .. }
+        ));
+        assert!(matches!(
             ledger
                 .acquire(
                     "scaleset/7/younger",
@@ -423,8 +484,8 @@ mod tests {
                     generation,
                 )
                 .unwrap(),
-            AcquireOutcome::Acquired
-        );
+            AcquireOutcome::Acquired { .. }
+        ));
     }
 
     #[test]
@@ -435,40 +496,59 @@ mod tests {
         PermitLedger::open(&path).unwrap().begin_epoch().unwrap();
         // `reserve_for_offer` re-reads once and lands on the fresh epoch.
         let (outcome, landed) = reserve_for_offer(&mut ledger, "scaleset/7/1", stale).unwrap();
-        assert_eq!(outcome, ReserveOutcome::Reserved);
+        let attempt_token = match outcome {
+            ReserveOutcome::Reserved { attempt_token } => attempt_token,
+            outcome => panic!("unexpected reserve outcome: {outcome:?}"),
+        };
         assert_eq!(landed, stale + 1);
-        // A raw fenced transition on the old epoch reports stale.
+        // A token-fenced transition on the old epoch reports stale.
         let mut raw = PermitLedger::open(&path).unwrap();
         let error = raw
-            .transition("scaleset/7/1", ControlState::Running, stale)
+            .transition_owned("scaleset/7/1", ControlState::Running, stale, &attempt_token)
             .unwrap_err();
         assert!(SharedLedger::is_stale_generation(&error));
     }
 
     #[test]
-    fn reconcile_adopts_live_and_marks_missing_uncertain() {
+    fn shared_reconcile_confirms_only_exact_native_marker_attempts() {
         let path = temp_ledger_path("reconcile");
         let mut ledger = configured(&path, 4);
         let generation = ledger.generation().unwrap();
-        ledger
+        let first_token = match ledger
             .acquire(
-                "scaleset/7/1",
-                LedgerLane::ScaleSet,
+                "native/1",
+                LedgerLane::Native,
                 LedgerPermitState::Running,
                 generation,
             )
-            .unwrap();
-        let report = ledger
-            .reconcile(&[(
-                "scaleset/7/2",
-                LedgerLane::ScaleSet,
+            .unwrap()
+        {
+            AcquireOutcome::Acquired { attempt_token } => attempt_token,
+            outcome => panic!("unexpected native permit outcome: {outcome:?}"),
+        };
+        let second_token = match ledger
+            .acquire(
+                "native/2",
+                LedgerLane::Native,
                 LedgerPermitState::Running,
-            )])
+                generation,
+            )
+            .unwrap()
+        {
+            AcquireOutcome::Acquired { attempt_token } => attempt_token,
+            outcome => panic!("unexpected native permit outcome: {outcome:?}"),
+        };
+        let report = ledger
+            .reconcile_attempts(&[("native/2", LedgerLane::Native, second_token.as_str())])
             .unwrap();
-        assert_eq!(report.adopted, vec!["scaleset/7/2".to_owned()]);
-        assert_eq!(report.marked_uncertain, vec!["scaleset/7/1".to_owned()]);
+        assert_eq!(report.marked_uncertain, vec!["native/1".to_owned()]);
+        assert_eq!(report.confirmed, vec!["native/2".to_owned()]);
+        assert!(ledger.is_current_attempt("native/1", &first_token).unwrap());
+        assert!(ledger
+            .is_current_attempt("native/2", &second_token)
+            .unwrap());
         assert_eq!(
-            ledger.holder_state("scaleset/7/1").unwrap(),
+            ledger.holder_state("native/1").unwrap(),
             Some(LedgerPermitState::Uncertain)
         );
         // Nothing deleted: both rows still occupy N.
@@ -480,9 +560,23 @@ mod tests {
         let path = temp_ledger_path("release");
         let mut ledger = configured(&path, 1);
         let generation = ledger.generation().unwrap();
-        reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
-        assert!(ledger.release("scaleset/7/1").unwrap());
-        assert!(!ledger.release("scaleset/7/1").unwrap());
+        let (outcome, _) = reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
+        let attempt_token = match outcome {
+            ReserveOutcome::Reserved { attempt_token } => attempt_token,
+            outcome => panic!("unexpected reserve outcome: {outcome:?}"),
+        };
+        assert_eq!(
+            ledger
+                .release_staged("scaleset/7/1", &attempt_token, ControlDemandState::Terminal,)
+                .unwrap(),
+            OwnedReleaseOutcome::Released
+        );
+        assert_eq!(
+            ledger
+                .release_staged("scaleset/7/1", &attempt_token, ControlDemandState::Terminal,)
+                .unwrap(),
+            OwnedReleaseOutcome::AlreadyAbsent
+        );
         assert_eq!(advertise_free(&ledger), 1);
     }
 

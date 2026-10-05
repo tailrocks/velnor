@@ -1708,6 +1708,76 @@ mod tests {
     }
 
     #[test]
+    fn delivered_context_values_reach_guest_expression_evaluation_losslessly() {
+        let mut plan = sample_plan();
+        plan.context_data = vec![
+            (
+                "numbers".into(),
+                velnor_model::ContextValue::object(vec![
+                    (
+                        "nan".into(),
+                        velnor_model::ContextValue::non_finite(velnor_model::NonFinite::NaN),
+                    ),
+                    (
+                        "positive".into(),
+                        velnor_model::ContextValue::non_finite(
+                            velnor_model::NonFinite::PositiveInfinity,
+                        ),
+                    ),
+                    (
+                        "negative".into(),
+                        velnor_model::ContextValue::non_finite(
+                            velnor_model::NonFinite::NegativeInfinity,
+                        ),
+                    ),
+                ])
+                .unwrap(),
+            ),
+            (
+                "sensitive".into(),
+                velnor_model::ContextValue::case_sensitive_object(vec![
+                    (
+                        "Path".into(),
+                        velnor_model::ContextValue::String("upper".into()),
+                    ),
+                    (
+                        "path".into(),
+                        velnor_model::ContextValue::String("lower".into()),
+                    ),
+                ])
+                .unwrap(),
+            ),
+        ];
+        plan.steps[0].script = concat!(
+            "printf '%s' '${{ numbers.nan }}|${{ numbers.positive }}|",
+            "${{ numbers.negative }}|${{ sensitive.Path }}|",
+            "${{ sensitive.path }}|${{ sensitive.PATH }}'"
+        )
+        .into();
+
+        let bytes = plan.encode().unwrap();
+        let decoded = decode_guest_plan(&bytes).unwrap();
+        let mut runner = RecordingCommands::default();
+        let mut events = Vec::new();
+        execute_guest_plan(&decoded, &mut runner, &mut events, false).unwrap();
+
+        let script = runner
+            .call_stdin
+            .iter()
+            .find(|stdin| stdin.contains("NaN|Infinity|-Infinity"))
+            .expect("guest step receives the resolved expression script");
+        assert!(script.contains("NaN|Infinity|-Infinity|upper|lower|"));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ExecutionEvent::StepCompleted {
+                step_id,
+                exit_code: 0,
+                skipped: false
+            } if step_id == "run"
+        )));
+    }
+
+    #[test]
     fn guest_plan_uses_guest_docker_and_refuses_host_socket() {
         let mut runner = RecordingCommands {
             next: CommandResult {

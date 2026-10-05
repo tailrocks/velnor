@@ -29,7 +29,10 @@ pub struct GuardianArgs {
 pub async fn run(args: GuardianArgs) -> anyhow::Result<()> {
     std::fs::create_dir_all(&args.state_dir)?;
     let journal_path = args.state_dir.join("journal.db");
-    let mut journal = Journal::open(&journal_path)?;
+    let service_instance = std::fs::canonicalize(&args.state_dir)?
+        .to_string_lossy()
+        .into_owned();
+    let mut journal = Journal::open_for_service_instance(&journal_path, &service_instance)?;
     journal.apply(Event::ControlLive)?;
     journal.apply(Event::JournalWritable)?;
     let server = HealthServer::bind(&args.state_dir)?;

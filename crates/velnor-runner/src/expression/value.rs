@@ -13,6 +13,10 @@
 use std::cmp::Ordering;
 use std::fmt;
 use std::sync::Arc;
+pub use velnor_model::{
+    ordinal_ignore_case_cmp, ordinal_ignore_case_contains, ordinal_ignore_case_ends_with,
+    ordinal_ignore_case_eq, ordinal_ignore_case_starts_with,
+};
 
 /// `src/Sdk/DTExpressions2/Expressions2/ValueKind.cs:6-14`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,7 +138,7 @@ impl ObjectValue {
                 if self.case_sensitive {
                     name == key
                 } else {
-                    name.eq_ignore_ascii_case(key)
+                    ordinal_ignore_case_eq(name, key)
                 }
             })
             .map(|(_, value)| value)
@@ -348,67 +352,6 @@ fn coerce_types(left: Value, right: Value) -> (Value, Value) {
         }
         _ => (left, right),
     }
-}
-
-/// `String.ToUpperInvariant` on a single char, which is what
-/// `StringComparison.OrdinalIgnoreCase` folds with. Multi-char uppercase
-/// expansions (e.g. `ß`) are not 1:1 and are left alone, matching .NET.
-fn upper_invariant(c: char) -> char {
-    let mut upper = c.to_uppercase();
-    match (upper.next(), upper.next()) {
-        (Some(first), None) => first,
-        _ => c,
-    }
-}
-
-pub fn ordinal_ignore_case_eq(left: &str, right: &str) -> bool {
-    ordinal_ignore_case_cmp(left, right) == Ordering::Equal
-}
-
-/// `String.Compare(left, right, StringComparison.OrdinalIgnoreCase)`.
-pub fn ordinal_ignore_case_cmp(left: &str, right: &str) -> Ordering {
-    let mut left = left.chars();
-    let mut right = right.chars();
-    loop {
-        match (left.next(), right.next()) {
-            (None, None) => return Ordering::Equal,
-            (None, Some(_)) => return Ordering::Less,
-            (Some(_), None) => return Ordering::Greater,
-            (Some(l), Some(r)) => {
-                let l = upper_invariant(l);
-                let r = upper_invariant(r);
-                if l != r {
-                    return (l as u32).cmp(&(r as u32));
-                }
-            }
-        }
-    }
-}
-
-pub fn ordinal_ignore_case_contains(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    let haystack: Vec<char> = haystack.chars().map(upper_invariant).collect();
-    let needle: Vec<char> = needle.chars().map(upper_invariant).collect();
-    if needle.len() > haystack.len() {
-        return false;
-    }
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
-}
-
-pub fn ordinal_ignore_case_starts_with(haystack: &str, prefix: &str) -> bool {
-    let haystack: Vec<char> = haystack.chars().map(upper_invariant).collect();
-    let prefix: Vec<char> = prefix.chars().map(upper_invariant).collect();
-    haystack.len() >= prefix.len() && haystack[..prefix.len()] == prefix[..]
-}
-
-pub fn ordinal_ignore_case_ends_with(haystack: &str, suffix: &str) -> bool {
-    let haystack: Vec<char> = haystack.chars().map(upper_invariant).collect();
-    let suffix: Vec<char> = suffix.chars().map(upper_invariant).collect();
-    haystack.len() >= suffix.len() && haystack[haystack.len() - suffix.len()..] == suffix[..]
 }
 
 /// `ExpressionUtility.ParseNumber` (`ExpressionUtility.cs:185-247`) — the

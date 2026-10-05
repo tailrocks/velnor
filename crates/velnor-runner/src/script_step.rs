@@ -15,6 +15,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
 };
+use velnor_model::ContextValue;
 
 #[derive(Debug, Clone)]
 pub struct ScriptStep {
@@ -48,7 +49,7 @@ pub fn github_script_steps_with_context(
     steps: &[ActionStep],
     workspace_container: &str,
     defaults: &[Value],
-    context_data: &[(String, Value)],
+    context_data: &[(String, ContextValue)],
 ) -> Result<Vec<ScriptStep>> {
     let defaults = RunDefaults::from_job_defaults(defaults)?;
     let mut script_steps = Vec::new();
@@ -91,7 +92,7 @@ fn github_script_step_with_context(
     index: usize,
     workspace_container: &str,
     defaults: &RunDefaults,
-    context_data: &[(String, Value)],
+    context_data: &[(String, ContextValue)],
 ) -> Result<ScriptStep> {
     let inputs = step
         .inputs
@@ -397,7 +398,7 @@ fn expr_input_field<'a>(
 /// reading `env`/`steps`/`job`/`jobs`/`runner` or a runner function is handed
 /// on verbatim as `${{ … }}` for the step-time pass, exactly as
 /// `resolve_job_context_expressions` defers such spans in `executor.rs`.
-fn render_setup_expression(expr: &str, context_data: &[(String, Value)]) -> Result<String> {
+fn render_setup_expression(expr: &str, context_data: &[(String, ContextValue)]) -> Result<String> {
     let context = SetupExpressionContext { context_data };
     let node = expression::parse(expr, &context)
         .with_context(|| format!("evaluating step input expression `{expr}`"))?;
@@ -470,7 +471,7 @@ fn render_format_call(
 /// The setup-time expression environment: the job message's context data, and
 /// nothing that only exists once steps run.
 struct SetupExpressionContext<'a> {
-    context_data: &'a [(String, Value)],
+    context_data: &'a [(String, ContextValue)],
 }
 
 impl expression::ParseEnvironment for SetupExpressionContext<'_> {
@@ -496,7 +497,7 @@ impl expression::EvaluationContext for SetupExpressionContext<'_> {
         self.context_data
             .iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| expression::eval::from_serde_json(value))
+            .map(|(_, value)| expression::eval::from_context_value(value))
             .unwrap_or(expression::Value::Null)
     }
 
@@ -1840,7 +1841,7 @@ mod tests {
             "format('just clippy \"{0}\"', matrix.package)",
             &[(
                 "matrix".to_string(),
-                serde_json::json!({"package": "app-b"}),
+                context_value(serde_json::json!({"package": "app-b"})),
             )],
         )
         .unwrap();
@@ -1855,7 +1856,7 @@ mod tests {
             expr,
             &[(
                 "matrix".to_string(),
-                serde_json::json!({"config": {"lane": "velnor"}}),
+                context_value(serde_json::json!({"config": {"lane": "velnor"}})),
             )],
         )
         .unwrap();
@@ -1869,15 +1870,52 @@ mod tests {
             "format('python3 write.py \"{0}\" \"{1}\"', matrix.package, matrix.config.lane)",
             &[(
                 "matrix".to_string(),
-                serde_json::json!({"package": "app-a", "config": {"lane": "velnor"}}),
+                context_value(
+                    serde_json::json!({"package": "app-a", "config": {"lane": "velnor"}}),
+                ),
             )],
         )
         .unwrap();
         assert_eq!(result, "python3 write.py \"app-a\" \"velnor\"");
     }
 
-    fn matrix_context(value: serde_json::Value) -> Vec<(String, Value)> {
-        vec![("matrix".to_string(), value)]
+    fn context_value(value: serde_json::Value) -> ContextValue {
+        ContextValue::from_json(value).unwrap()
+    }
+
+    fn matrix_context(value: serde_json::Value) -> Vec<(String, ContextValue)> {
+        vec![("matrix".to_string(), context_value(value))]
+    }
+
+    #[test]
+    fn setup_expression_preserves_nonfinite_and_object_comparer() {
+        let nested = ContextValue::case_sensitive_object(vec![(
+            "MixedKey".to_string(),
+            ContextValue::String("exact".to_string()),
+        )])
+        .unwrap();
+        let matrix = ContextValue::object(vec![
+            (
+                "nonfinite".to_string(),
+                ContextValue::non_finite(velnor_model::NonFinite::NaN),
+            ),
+            ("nested".to_string(), nested),
+        ])
+        .unwrap();
+        let context = vec![("matrix".to_string(), matrix)];
+
+        assert_eq!(
+            render_setup_expression("matrix.nonfinite != matrix.nonfinite", &context).unwrap(),
+            "true"
+        );
+        assert_eq!(
+            render_setup_expression("matrix.nested.MixedKey", &context).unwrap(),
+            "exact"
+        );
+        assert_eq!(
+            render_setup_expression("matrix.nested.mixedkey", &context).unwrap(),
+            ""
+        );
     }
 
     /// D3 — `Sdk/Value.cs` truthiness: every non-empty string is truthy,
@@ -2047,7 +2085,7 @@ mod tests {
 
         let context = vec![(
             "matrix".to_string(),
-            serde_json::json!({"package": "app-b"}),
+            context_value(serde_json::json!({"package": "app-b"})),
         )];
         let script_steps = github_script_steps_with_context(&steps, "/__w", &[], &context).unwrap();
         assert_eq!(script_steps.len(), 1);
@@ -2091,7 +2129,7 @@ mod tests {
 
         let context = vec![(
             "matrix".to_string(),
-            serde_json::json!({"service": "catalog"}),
+            context_value(serde_json::json!({"service": "catalog"})),
         )];
         let defaults = vec![serde_json::json!({
             "run": { "working-directory": "services/default" }

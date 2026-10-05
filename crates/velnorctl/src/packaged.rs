@@ -195,7 +195,7 @@ mod tests {
             "VELNOR_NAME=velnor-java-monorepo\nVELNOR_SLOTS=4\nVELNOR_WORK_DIR=/var/lib/velnor/work\n",
         )
         .unwrap();
-        daemon_instance::enumerate_in(&etc, &root.join("systemd")).unwrap()
+        daemon_instance::enumerate_in(&etc, root).unwrap()
     }
 
     fn temp_root(label: &str) -> PathBuf {

@@ -16,8 +16,10 @@
 //! [app]: crate::scaleset::ScaleSetClient::new_with_app
 //! [pat]: crate::scaleset::ScaleSetClient::new_with_pat
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -243,6 +245,47 @@ struct Running {
     session: crate::scaleset::MessageSessionClient,
 }
 
+/// Recovery claimant retained across supervised daemon-pass retries. The
+/// durable claim stays in this slot until a successful lane shutdown releases
+/// it, so a failed registration retry reuses the exact same claim identity.
+pub(crate) type RecoveryClaimSlot =
+    Arc<Mutex<Option<velnor_control::permit_ledger::ScaleSetRecoveryClaim>>>;
+
+pub(crate) fn new_recovery_claim_slot() -> RecoveryClaimSlot {
+    Arc::new(Mutex::new(None))
+}
+
+fn ensure_recovery_claim(slot: &RecoveryClaimSlot, ledger_path: &Path) -> Result<String> {
+    let mut slot = slot
+        .lock()
+        .map_err(|_| anyhow::anyhow!("scale-set recovery claim slot is poisoned"))?;
+    if slot.is_none() {
+        let mut ledger = velnor_control::permit_ledger::PermitLedger::open(ledger_path)
+            .context("open shared permit ledger for scale-set recovery claim")?;
+        let claim = ledger
+            .claim_scaleset_recovery(&crate::permit_guard::pid_alive)
+            .context("claim scale-set recovery for this permit ledger")?;
+        *slot = Some(claim);
+    }
+    slot.as_ref()
+        .map(|claim| claim.token().to_owned())
+        .context("scale-set recovery claim disappeared during startup")
+}
+
+async fn with_recovery_claim_before_registration<T, F, Fut>(
+    slot: &RecoveryClaimSlot,
+    ledger_path: &Path,
+    registration: F,
+) -> Result<(String, T)>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let claim_token = ensure_recovery_claim(slot, ledger_path)?;
+    let reconciled = registration().await?;
+    Ok((claim_token, reconciled))
+}
+
 /// The scale-set lane as the daemon runs it.
 pub struct ScaleSetDaemon {
     plan: RegistrationPlan,
@@ -261,6 +304,7 @@ pub struct ScaleSetDaemon {
     running: Option<Running>,
     reconciled: Option<ReconciledSet>,
     adopt_report: Option<AdoptReport>,
+    recovery_claim: RecoveryClaimSlot,
 }
 
 impl ScaleSetDaemon {
@@ -360,7 +404,12 @@ impl ScaleSetDaemon {
             running: None,
             reconciled: None,
             adopt_report: None,
+            recovery_claim: new_recovery_claim_slot(),
         })
+    }
+
+    pub(crate) fn set_recovery_claim_slot(&mut self, slot: RecoveryClaimSlot) {
+        self.recovery_claim = slot;
     }
 
     /// [`ScaleSetDaemon::open`] with the production Docker seams.
@@ -388,9 +437,15 @@ impl ScaleSetDaemon {
     /// the canary — the daemon runs the compiled pin, so there is no second
     /// pin to compare at startup.)
     pub async fn start(&mut self) -> Result<StartReport> {
-        let reconciled = reconcile_registration(&self.client, &self.plan)
-            .await
-            .context("reconcile scale-set registration")?;
+        let client = self.client.clone();
+        let plan = self.plan.clone();
+        let (claim_token, reconciled) = with_recovery_claim_before_registration(
+            &self.recovery_claim,
+            &self.ledger_path,
+            || reconcile_registration(&client, &plan),
+        )
+        .await
+        .context("reconcile scale-set registration")?;
         let set_id = reconciled.set.id;
         self.client
             .set_system_info(self.system_info_for(set_id))
@@ -408,6 +463,7 @@ impl ScaleSetDaemon {
             self.hook.take().context("scale-set lane already started")?,
         )
         .context("open scale-set worker lane")?;
+        lane.set_recovery_claim_token(&claim_token)?;
         let adopt_report = lane
             .adopt_live_workers()
             .context("adopt scale-set workers")?;
@@ -533,6 +589,16 @@ impl ScaleSetDaemon {
             recorded_total = shutdown_report.recorded_total,
             "scale-set lane shut down"
         );
+        let mut claim_slot = self
+            .recovery_claim
+            .lock()
+            .map_err(|_| anyhow::anyhow!("scale-set recovery claim slot is poisoned"))?;
+        claim_slot
+            .as_mut()
+            .context("scale-set recovery claim missing after shutdown pass")?
+            .release()
+            .context("release scale-set recovery claim")?;
+        claim_slot.take();
         Ok(AdapterReport {
             scale_set_id: self.lane_config.scale_set_id,
             adopt_report: self.adopt_report.clone().unwrap_or_default(),
@@ -763,5 +829,60 @@ mod tests {
         assert!(lane_configured(Some(Path::new(
             "/etc/velnor/scaleset.toml"
         ))));
+    }
+
+    #[tokio::test]
+    async fn failed_registration_retry_reuses_same_live_recovery_claim() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-scaleset-recovery-retry-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let ledger_path = root.join("permit-ledger.db");
+        let claim_slot = new_recovery_claim_slot();
+
+        let failed = with_recovery_claim_before_registration(&claim_slot, &ledger_path, || async {
+            Err::<(), _>(anyhow::anyhow!("injected registration failure"))
+        })
+        .await;
+        assert!(failed
+            .unwrap_err()
+            .to_string()
+            .contains("injected registration failure"));
+
+        let first_token = claim_slot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .token()
+            .to_owned();
+        let mut competing =
+            velnor_control::permit_ledger::PermitLedger::open(&ledger_path).unwrap();
+        assert!(matches!(
+            competing.claim_scaleset_recovery(&crate::permit_guard::pid_alive),
+            Err(velnor_control::permit_ledger::LedgerError::RecoveryClaimed(pid))
+                if pid == std::process::id()
+        ));
+        drop(competing);
+
+        let (retry_token, registration) =
+            with_recovery_claim_before_registration(&claim_slot, &ledger_path, || async {
+                Ok("registered")
+            })
+            .await
+            .unwrap();
+        assert_eq!(retry_token, first_token);
+        assert_eq!(registration, "registered");
+
+        let mut claim_slot_guard = claim_slot.lock().unwrap();
+        claim_slot_guard.as_mut().unwrap().release().unwrap();
+        let _ = claim_slot_guard.take();
+        drop(claim_slot_guard);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

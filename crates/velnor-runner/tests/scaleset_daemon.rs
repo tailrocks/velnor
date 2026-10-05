@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use velnor_control::permit_ledger::{PermitLane, PermitLedger, PermitState};
+use velnor_control::permit_ledger::{AcquireAttemptOutcome, PermitLane, PermitLedger, PermitState};
 use velnor_runner::scaleset::worker::{
     HomogeneousProfile, OwnershipId, PinnedImage, ToolContentAttestation, ToolContentExpectation,
     ToolContentHook, WorkerIdentity, WorkerOutput, WorkerRunner,
@@ -883,7 +883,8 @@ fn configure_ledger(path: &std::path::Path, max_jobs: u32) {
     let mut ledger = PermitLedger::open(path).unwrap();
     ledger.set_max_jobs(max_jobs).unwrap();
     ledger.begin_epoch().unwrap();
-    ledger.reconcile(&[]).unwrap();
+    assert_eq!(ledger.occupied().unwrap(), 0);
+    ledger.reconcile_attempts(&[]).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -2184,17 +2185,19 @@ async fn capacity_shares_one_ledger_across_lanes() {
     // A native acquisition occupies the only permit.
     let mut raw = PermitLedger::open(&ledger_path).unwrap();
     let generation = raw.generation().unwrap();
-    assert_eq!(
-        raw.acquire(
+    let native_attempt_token = match raw
+        .acquire_attempt(
             "native/broker-9",
             PermitLane::Native,
             PermitState::Running,
             generation,
             Some(std::process::id()),
         )
-        .unwrap(),
-        velnor_control::permit_ledger::AcquireOutcome::Acquired
-    );
+        .unwrap()
+    {
+        AcquireAttemptOutcome::Acquired { attempt_token } => attempt_token,
+        outcome => panic!("expected native permit, got {outcome:?}"),
+    };
     drop(raw);
 
     let session = MessageSessionClient::create(&client, SCALE_SET_ID, OWNER)
@@ -2279,7 +2282,7 @@ async fn capacity_shares_one_ledger_across_lanes() {
     // unified holder and provisions exactly one pair.
     PermitLedger::open(&ledger_path)
         .unwrap()
-        .release("native/broker-9")
+        .release_owned("native/broker-9", &native_attempt_token)
         .unwrap();
     let outcome = listener.run_once().await.unwrap();
     assert_eq!(outcome.acquired, vec![REQUEST_ID]);

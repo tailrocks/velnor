@@ -23,9 +23,9 @@ use anyhow::Error;
 use reqwest::StatusCode;
 use serde_json::{json, Value};
 use velnor_runner::protocol::{
-    AcquireJobOutcome, BrokerClient, BrokerErrorCategory, BrokerPoll, GitHubApiError,
-    RunServiceClient, RunServiceCompleteJob, RunnerStatus, TaskAgentMessage, TaskAgentSession,
-    TaskResult, RUNNER_JOB_REQUEST, RUNNER_VERSION,
+    AcquireJobOutcome, AcquireJobSkipReason, BrokerClient, BrokerErrorCategory, BrokerPoll,
+    GitHubApiError, RunServiceClient, RunServiceCompleteJob, RunnerStatus, TaskAgentMessage,
+    TaskAgentSession, TaskResult, RUNNER_JOB_REQUEST, RUNNER_VERSION,
 };
 use wiremock::{
     matchers::{header, method, path, query_param},
@@ -122,8 +122,8 @@ async fn broker_run_service_happy_path_acquires_and_completes_job() {
         .and(path("/run/jobs/123/acquirejob"))
         .and(header("authorization", format!("Bearer {TOKEN}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "planId": "plan-1",
-            "jobId": "job-1",
+            "planId": "00000000-0000-0000-0000-000000000002",
+            "jobId": "00000000-0000-0000-0000-000000000001",
             "jobName": "test"
         })))
         .expect(1)
@@ -162,19 +162,14 @@ async fn broker_run_service_happy_path_acquires_and_completes_job() {
     assert_eq!(message.message_type, RUNNER_JOB_REQUEST);
 
     let acquired = run_service
-        .acquire_job(
-            &run_service_url,
-            "broker-message",
-            std::env::consts::OS,
-            Some("42"),
-        )
+        .acquire_job(&run_service_url, "broker-message", "Linux", Some("42"))
         .await
         .unwrap();
     let AcquireJobOutcome::Acquired(job) = acquired else {
         panic!("expected acquired job");
     };
-    assert_eq!(job["planId"], "plan-1");
-    assert_eq!(job["jobId"], "job-1");
+    assert_eq!(job.raw["planId"], "00000000-0000-0000-0000-000000000002");
+    assert_eq!(job.raw["jobId"], "00000000-0000-0000-0000-000000000001");
 
     run_service
         .complete_job(&run_service_url, complete_job())
@@ -190,12 +185,18 @@ async fn broker_run_service_happy_path_acquires_and_completes_job() {
 
     let acquire_body = body_for(&requests, "POST", "/run/jobs/123/acquirejob");
     assert_eq!(acquire_body["jobMessageId"], "broker-message");
-    assert_eq!(acquire_body["runnerOS"], std::env::consts::OS);
+    assert_eq!(acquire_body["runnerOS"], "Linux");
     assert_eq!(acquire_body["billingOwnerId"], "42");
 
     let complete_body = body_for(&requests, "POST", "/run/jobs/123/completejob");
-    assert_eq!(complete_body["planId"], "plan-1");
-    assert_eq!(complete_body["jobId"], "job-1");
+    assert_eq!(
+        complete_body["planId"],
+        "00000000-0000-0000-0000-000000000002"
+    );
+    assert_eq!(
+        complete_body["jobId"],
+        "00000000-0000-0000-0000-000000000001"
+    );
     assert_eq!(complete_body["conclusion"], "succeeded");
 }
 
@@ -288,16 +289,28 @@ async fn one_slow_broker_session_does_not_block_sibling_session() {
 }
 
 #[tokio::test]
-async fn acquire_job_classifies_non_retriable_statuses() {
+async fn acquire_job_classifies_typed_non_retriable_statuses() {
     let _transport_guard = native_transport_guard().await;
     let server = MockServer::start().await;
     let run_service = RunServiceClient::new(TOKEN).unwrap();
     let run_service_url = format!("{}/run/jobs/123", server.uri());
 
-    for status in [
-        StatusCode::NOT_FOUND,
-        StatusCode::CONFLICT,
-        StatusCode::UNPROCESSABLE_ENTITY,
+    for (status, reason, expected_category) in [
+        (
+            StatusCode::NOT_FOUND,
+            AcquireJobSkipReason::NotFound,
+            BrokerErrorCategory::Terminal,
+        ),
+        (
+            StatusCode::CONFLICT,
+            AcquireJobSkipReason::AlreadyAcquired,
+            BrokerErrorCategory::Conflict,
+        ),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            AcquireJobSkipReason::Unprocessable,
+            BrokerErrorCategory::Conflict,
+        ),
     ] {
         server.reset().await;
         Mock::given(method("POST"))
@@ -305,7 +318,11 @@ async fn acquire_job_classifies_non_retriable_statuses() {
             .respond_with(
                 ResponseTemplate::new(status.as_u16())
                     .insert_header("x-github-request-id", "request-1")
-                    .set_body_string("skip"),
+                    .set_body_json(json!({
+                        "source": "actions-run-service",
+                        "statusCode": status.as_u16(),
+                        "errorMessage": "acquire refused"
+                    })),
             )
             .expect(1)
             .mount(&server)
@@ -324,18 +341,117 @@ async fn acquire_job_classifies_non_retriable_statuses() {
             status: actual,
             request_id,
             body,
-            category,
+            reason: actual_reason,
+            category: actual_category,
         } = outcome
         else {
             panic!("expected skipped acquire");
         };
         assert_eq!(actual, status);
+        assert_eq!(actual_reason, reason);
         assert_eq!(request_id.as_deref(), None);
-        assert_eq!(body, "skip");
-        // An untyped body proves nothing, whatever the outer status: the
-        // boundary carries `Conflict` so the row stays for the oracle.
-        assert_eq!(category, BrokerErrorCategory::Conflict);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap(),
+            json!({
+                "source": "actions-run-service",
+                "statusCode": status.as_u16(),
+                "errorMessage": "acquire refused"
+            })
+        );
+        assert_eq!(actual_category, expected_category);
     }
+}
+
+#[tokio::test]
+async fn acquire_job_typed_not_found_controls_skip_when_outer_status_differs() {
+    let _transport_guard = native_transport_guard().await;
+    let server = MockServer::start().await;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let responder_attempts = Arc::clone(&attempts);
+    Mock::given(method("POST"))
+        .and(path("/run/jobs/123/acquirejob"))
+        .respond_with(move |_request: &Request| {
+            responder_attempts.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(500).set_body_string(
+                r#"{"SOURCE":"actions-run-service","STATUSCODE":" 404 ","ERRORMESSAGE":"job message not found"}"#,
+            )
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let run_service = RunServiceClient::new(TOKEN)
+        .unwrap()
+        .with_acquire_retry_delay_for_test(Duration::ZERO);
+    let outcome = run_service
+        .acquire_job(
+            &format!("{}/run/jobs/123", server.uri()),
+            "broker-message",
+            std::env::consts::OS,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let AcquireJobOutcome::Skipped {
+        status,
+        reason,
+        category,
+        ..
+    } = outcome
+    else {
+        panic!("typed run-service 404 must skip without retrying");
+    };
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(reason, AcquireJobSkipReason::NotFound);
+    assert_eq!(category, BrokerErrorCategory::Terminal);
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn acquire_job_retries_outer_not_found_when_typed_code_is_unrecognized() {
+    let _transport_guard = native_transport_guard().await;
+    let server = MockServer::start().await;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let responder_attempts = Arc::clone(&attempts);
+    Mock::given(method("POST"))
+        .and(path("/run/jobs/123/acquirejob"))
+        .respond_with(move |_request: &Request| {
+            if responder_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(404).set_body_json(json!({
+                    "source": "actions-run-service",
+                    "statusCode": 503,
+                    "errorMessage": "temporary run-service failure"
+                }))
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "planId": "00000000-0000-0000-0000-000000000002",
+                    "jobId": "00000000-0000-0000-0000-000000000001"
+                }))
+            }
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let run_service = RunServiceClient::new(TOKEN)
+        .unwrap()
+        .with_acquire_retry_delay_for_test(Duration::ZERO);
+    let outcome = run_service
+        .acquire_job(
+            &format!("{}/run/jobs/123", server.uri()),
+            "broker-message",
+            std::env::consts::OS,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let AcquireJobOutcome::Acquired(job) = outcome else {
+        panic!("unrecognized typed failure must retry despite outer HTTP 404");
+    };
+    assert_eq!(job.raw["jobId"], "00000000-0000-0000-0000-000000000001");
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -416,8 +532,8 @@ fn job_message(run_service_url: &str) -> TaskAgentMessage {
 
 fn complete_job() -> RunServiceCompleteJob {
     RunServiceCompleteJob {
-        plan_id: "plan-1".to_string(),
-        job_id: "job-1".to_string(),
+        plan_id: "00000000-0000-0000-0000-000000000002".to_string(),
+        job_id: "00000000-0000-0000-0000-000000000001".to_string(),
         conclusion: TaskResult::Succeeded,
         outputs: BTreeMap::new(),
         step_results: Vec::new(),

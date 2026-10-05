@@ -69,12 +69,16 @@ pub(crate) const PATH_MARKER: &str = "__VELNOR_SCCACHE_DIR__";
 /// step referencing [`ACTION_REPOSITORY`]. Everything else — store, mounts,
 /// env, PATH, provisioning — keys off this one call.
 pub(crate) fn is_explicit(job: &AgentJobRequestMessage) -> bool {
-    job.steps.iter().filter(|step| step.enabled).any(|step| {
-        step.reference
-            .as_ref()
-            .and_then(|reference| reference.name.as_deref())
-            .is_some_and(|name| name.eq_ignore_ascii_case(ACTION_REPOSITORY))
-    })
+    job.steps
+        .iter()
+        .flatten()
+        .filter(|step| step.enabled)
+        .any(|step| {
+            step.reference
+                .as_ref()
+                .and_then(|reference| reference.name.as_deref())
+                .is_some_and(|name| name.eq_ignore_ascii_case(ACTION_REPOSITORY))
+        })
 }
 
 /// Host path of the explicit-mode compiler store. Call only when
@@ -85,7 +89,7 @@ pub(crate) fn store_host(
     job: &AgentJobRequestMessage,
     temp_host: &Path,
     trust_scope: &str,
-) -> PathBuf {
+) -> anyhow::Result<PathBuf> {
     crate::github_adapter::github_rust_store_host(job, temp_host, trust_scope, "sccache")
 }
 
@@ -207,6 +211,8 @@ fi"#,
 mod tests {
     use super::*;
 
+    const GITHUB_SERVER_URL: &str = "https://github.com";
+
     fn job_with_steps(steps: serde_json::Value) -> AgentJobRequestMessage {
         serde_json::from_value(serde_json::json!({
             "messageType": "RunnerJobRequest",
@@ -216,6 +222,7 @@ mod tests {
             "jobDisplayName": "compat test",
             "requestId": 1,
             "variables": {
+                "github.server_url": { "value": GITHUB_SERVER_URL },
                 "github.repository_id": { "value": "42" }
             },
             "steps": steps,
@@ -250,23 +257,28 @@ mod tests {
 
         let explicit = job_with_steps(serde_json::json!([sccache_step(true)]));
         assert!(is_explicit(&explicit));
+
+        let explicit_after_null = job_with_steps(serde_json::json!([null, sccache_step(true)]));
+        assert!(is_explicit(&explicit_after_null));
     }
 
     #[test]
     fn store_host_is_repo_namespaced_and_slot_shared() {
         let temp = Path::new("/var/lib/velnor/work/slot-1/job/temp");
         let job = job_with_steps(serde_json::json!([]));
+        let repository_key =
+            crate::store_catalog::repository_store_key(GITHUB_SERVER_URL, "42").unwrap();
         assert_eq!(
-            store_host(&job, temp, "trusted"),
-            PathBuf::from("/var/lib/velnor/work/_velnor_sccache__trust_scope_v1")
-                .join(crate::trust_scope::filesystem_key("trusted"))
-                .join("42")
+            store_host(&job, temp, "trusted").unwrap(),
+            crate::storage::cache_class_path("trusted", "compiler/sccache")
+                .unwrap()
+                .join(repository_key)
         );
         // A sibling slot resolves the same daemon-shared store.
         let slot2 = Path::new("/var/lib/velnor/work/slot-2/job/temp");
         assert_eq!(
-            store_host(&job, slot2, "trusted"),
-            store_host(&job, temp, "trusted")
+            store_host(&job, slot2, "trusted").unwrap(),
+            store_host(&job, temp, "trusted").unwrap()
         );
     }
 
