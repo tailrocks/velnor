@@ -17,6 +17,7 @@ use super::{
     CacheBackend, GraphNode, LaneJob, Pins, UnitContract, DEFAULT_UNIT_TIMEOUT_MINUTES,
     MUTABLE_MOUNT_HOST_DIR,
 };
+use crate::reuse::REQUIRED_CHECK;
 use crate::{
     config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_restore,
     hosted_cargo_bin_toolchain_save, hosted_cargo_bin_toolchain_verify, hosted_mold_setup,
@@ -3280,7 +3281,7 @@ impl WorkflowIr {
                 contracts,
                 &mut output,
                 kind != WorkflowKind::PullRequest,
-                "ci-required",
+                REQUIRED_CHECK,
                 false,
             );
         }
@@ -3635,7 +3636,7 @@ impl WorkflowIr {
         }
         needs.extend(callers.iter().map(|caller| caller.job_id.clone()));
         let display_name = match check_name {
-            "ci-required" => yaml_scalar("ci-required"),
+            REQUIRED_CHECK => yaml_scalar(REQUIRED_CHECK),
             "nightly-required" => crate::control_job_name("Nightly aggregate"),
             other => yaml_scalar(other),
         };
@@ -3682,7 +3683,7 @@ impl WorkflowIr {
         }
         output.push_str("          selected=\",$SELECTED_UNITS,\"\n");
         render_required_caller_verdicts(output, &callers);
-        if check_name == "ci-required" {
+        if check_name == REQUIRED_CHECK {
             let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
                 format!("always() && ({})", self.velnor_control_plane_expression())
             } else {
@@ -5855,7 +5856,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         _stable: bool,
         include_policy: bool,
     ) {
-        let display_name = yaml_scalar("ci-required");
+        let display_name = yaml_scalar(REQUIRED_CHECK);
         let lanes = match runners {
             RunnerMode::Github => vec![RunnerMode::Github],
             RunnerMode::Velnor => vec![RunnerMode::Velnor],
