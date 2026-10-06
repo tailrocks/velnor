@@ -2912,6 +2912,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          # Full history: homebrew_preview_009 pins TASK_BASE (69ee4fad)
+          # for its automation-layout drift gate; a depth-1 checkout
+          # fails with "fatal: not a tree object". (This file's header
+          # says it is generated, but .velnor/config.toml exposes no
+          # checkout-depth knob, so this is set directly. Keep on regen.)
+          fetch-depth: "0"
           persist-credentials: "false"
       - name: Setup Mise
         uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5
