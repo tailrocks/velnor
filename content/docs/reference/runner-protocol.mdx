@@ -196,9 +196,9 @@ run service permanently refused this completion payload", "the durable
 completion send budget is spent", or "the completion resolution deadline
 passed".
 
-This guarantee applies to completion intent. Bounded logs, telemetry, and
-normal operational projections have weaker retention and may not be rebuilt
-after service recreation.
+This guarantee applies to completion intent. Telemetry and file-based runner
+logs have weaker retention. Query resources reload from SQLite when queried;
+production log and storage projections are unsupported and return HTTP 501.
 
 ## Interruption matrix
 
@@ -252,7 +252,8 @@ Use the stage that first diverges from the expected sequence:
 - Reference received, no execution: inspect acquisition response, local claim,
   admission decision, capabilities, routing, and backend preflight.
 - Execution without GitHub progress: inspect Results/Timeline upload errors,
-  bounded local logs, and the job's lease state.
+  runner forensic files, telemetry, and the job's lease state. The production
+  `velnorctl logs` endpoint returns HTTP 501.
 - Local completion without GitHub completion: inspect the completion outbox,
   remote terminal state, acknowledgement evidence, and retry classification.
 

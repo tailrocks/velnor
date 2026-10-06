@@ -22129,14 +22129,15 @@ lockfile = true
         );
         // GitHub loads the callee once per caller into one template-memory
         // budget, so the callee must not grow with the kind's unit count.
-        // 17 three-provider rust units (51 callers) stay under the 8 MiB
+        // 16 three-provider rust units (48 callers) stay under the 8 MiB
         // ceiling the generator enforces on the aggregate; the ceiling
         // itself is covered by `template_memory`'s tests. The drift since
         // the three-provider cutover (dependency records, hardened
         // transfers, per-phase checks steps, unit-result record/upload
-        // blocks, expected-work aggregate steps) honestly costs the
-        // headroom the old 25-unit stress level consumed.
-        for index in 0..16 {
+        // blocks, expected-work aggregate steps, strict result records)
+        // honestly costs the headroom the old 25-unit, then 17-unit,
+        // stress levels consumed.
+        for index in 0..15 {
             let mut unit = rust.clone();
             unit.id = format!("rust-pad{index:02}");
             unit.label = format!("Rust crate (pad{index:02})");
@@ -22163,7 +22164,7 @@ lockfile = true
         let growth = padded_rust.len().saturating_sub(baseline_rust.len());
         assert!(
             growth < 32 * 256,
-            "the kind reusable grew by {growth} bytes for 16 extra units; the step blocks must not be per unit"
+            "the kind reusable grew by {growth} bytes for 15 extra units; the step blocks must not be per unit"
         );
         for name in ["ci-pr.yml", "ci-main.yml"] {
             let workflow = must_some(

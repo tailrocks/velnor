@@ -39,6 +39,11 @@ the pin's own source closure, then stamps the pin and regenerates the whole
 tree in a single commit; `--check` verifies the pinned generator renders the
 tree.
 
+Pin replacement atomically preserves only Rust's portable permission state:
+Unix mode bits or the Windows read-only flag. The staged inode gets ownership,
+group, ACL, and xattr metadata from normal OS/filesystem creation rules; custom
+metadata on the old inode is not copied. Rollback restores the captured inode.
+
 During candidate-renderer bootstrap, the exact legacy D19 pin
 `e988d793937c044275e4086b00856444c60f6ab8` keeps policy workflow output at
 the established byte shape. Promoting `[generator] revision` to the newer

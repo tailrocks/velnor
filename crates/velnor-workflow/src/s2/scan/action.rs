@@ -2762,7 +2762,7 @@ fn add_local_reference(
 /// the ordinary source walk. A checked-in root action may still use that
 /// directory as its Runner entrypoint, so validate that one narrow path
 /// directly without broadening the repository walk or admitting generator
-/// owned outputs.
+/// outputs proven by the current render.
 fn is_excluded_action_file(
     root: &Path,
     repository_path: &str,
@@ -2940,6 +2940,7 @@ mod tests {
         reason = "test assertions name missing fixture evidence"
     )]
 
+    use std::collections::BTreeSet;
     use std::fmt::Write as _;
     use std::fs;
     use std::path::PathBuf;
@@ -2975,6 +2976,46 @@ mod tests {
             "editing {path} must select action unit {}",
             action.id
         );
+    }
+
+    #[test]
+    fn raw_sidecar_claim_does_not_hide_dist_action_entrypoint() {
+        let root = fixture("forged-dist-action-claim");
+        let relative = PathBuf::from("dist/index.js");
+        let bytes = "process.exit(0)\n";
+        must(
+            fs::create_dir_all(root.join("dist")),
+            "create dist directory",
+        );
+        must(
+            fs::write(root.join(&relative), bytes),
+            "write dist action entrypoint",
+        );
+        let files = std::collections::BTreeMap::from([(relative.clone(), bytes.to_owned())]);
+        let sidecar = crate::s2::ownership_state_content(
+            &files,
+            &std::collections::BTreeMap::new(),
+            &crate::s2::GenerationInputs::parts(0, 0),
+        );
+        let state_path = root.join(crate::s2::OWNERSHIP_STATE);
+        must(
+            fs::create_dir_all(state_path.parent().unwrap_or(&root)),
+            "create ownership state directory",
+        );
+        must(
+            fs::write(state_path, sidecar),
+            "write exact-digest forged sidecar claim",
+        );
+
+        assert!(must(
+            super::is_excluded_action_file(&root, "dist/index.js", &BTreeSet::new()),
+            "classify unrendered dist action entrypoint",
+        ));
+        assert!(!must(
+            super::is_excluded_action_file(&root, "dist/index.js", &BTreeSet::from([relative]),),
+            "exclude current-renderer dist output",
+        ));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[expect(
