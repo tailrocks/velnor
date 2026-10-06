@@ -460,15 +460,28 @@ impl PinnedStableWorkspaceScope {
         );
         let mut parent = self.workspace.try_clone()?;
         for component in &components[..components.len() - 1] {
-            let Some(child) =
-                parent.open_existing_child_directory(std::ffi::OsStr::new(component))?
+            let Some(child) = parent
+                .open_existing_child_directory(std::ffi::OsStr::new(component))
+                .with_context(|| {
+                    format!(
+                        "open stale destination ancestor {component:?} without following links"
+                    )
+                })?
             else {
                 return Ok(());
             };
             parent = child;
         }
         let name = std::ffi::OsStr::new(components[components.len() - 1]);
-        let Some(expected) = parent.open_existing_child_directory(name)? else {
+        let Some(expected) = parent
+            .open_existing_child_directory(name)
+            .with_context(|| {
+                format!(
+                    "open stale destination {} without following links",
+                    name.to_string_lossy()
+                )
+            })?
+        else {
             return Ok(());
         };
         // The container bind-mount root is `workspace`; its stable-scope
