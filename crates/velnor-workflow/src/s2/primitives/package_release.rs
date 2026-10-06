@@ -854,12 +854,6 @@ fn render_workflow(
     let attest = ActionPin::Attest.reference();
     let source_commit_expr = github_expression("github.sha");
     let publish_source_commit_expr = github_expression("needs.build.outputs.source_commit");
-    let publish_artifact_id_expr = github_expression("needs.build.outputs.artifact_id");
-    let artifact_name = format!(
-        "package-release-{}-{}",
-        github_expression("github.run_id"),
-        github_expression("github.run_attempt")
-    );
     let workspace_expr = github_expression("github.workspace");
     let build_verify = indent_script(&verification_script(spec), 10);
     let publish_verify = indent_script(&verification_script(spec), 10);
@@ -953,14 +947,13 @@ fn render_workflow(
     );
     let _ = writeln!(
         output,
-        "jobs:\n  build:\n    name: Verify package release\n    if: {build_if}\n    runs-on: {runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    outputs:\n      version: {}\n      source_commit: {}\n      artifact_id: {}\n    env:\n      PACKAGE_DIR: {package_dir_yaml}\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/{package_dir}\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n",
+        "jobs:\n  build:\n    name: Verify package release\n    if: {build_if}\n    runs-on: {runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    outputs:\n      version: {}\n      source_commit: {}\n    env:\n      PACKAGE_DIR: {package_dir_yaml}\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/{package_dir}\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n",
         github_expression("steps.verify.outputs.version"),
         github_expression("steps.verify.outputs.source_commit"),
-        github_expression("steps.upload-package.outputs.artifact-id"),
     );
     let _ = writeln!(
         output,
-        "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build verified package directory\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n        run: |\n          set -euo pipefail\n          mkdir -p \"$VELNOR_VERIFIED_PACKAGE_DIR\"\n{tasks}      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{build_verify}{build_verify_tasks}      - name: Attest declared package assets\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload verified package handoff\n        id: upload-package\n        uses: {upload}\n        with:\n          name: {artifact_name}\n          path: |\n{artifact_upload_paths}          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n",
+        "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build verified package directory\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n        run: |\n          set -euo pipefail\n          mkdir -p \"$VELNOR_VERIFIED_PACKAGE_DIR\"\n{tasks}      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{build_verify}{build_verify_tasks}      - name: Attest declared package assets\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: package-release\n          path: |\n{artifact_upload_paths}          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n",
     );
     output.push('\n');
     output.push_str(&render_publish_job(
@@ -990,7 +983,6 @@ fn render_workflow(
         &updater_yaml,
         &message_yaml,
         &concurrency_yaml,
-        &publish_artifact_id_expr,
     ));
     output
 }
@@ -2496,7 +2488,6 @@ fn render_publish_job(
     updater_yaml: &str,
     message_yaml: &str,
     concurrency_yaml: &str,
-    publish_artifact_id_expr: &str,
 ) -> String {
     let publish_environment_yaml = crate::s2::yaml_scalar(&spec.publish_environment);
     let release_prerelease_yaml =
@@ -2625,14 +2616,9 @@ fn render_publish_job(
         "\n        with:\n          install: false\n      - name: Install locked package verification tools\n        working-directory: source\n        run: mise --yes install --locked --include-task-tools\n",
     );
 
-    output.push_str("      - name: Validate producer artifact ID\n        env:\n          PACKAGE_ARTIFACT_ID: ");
-    output.push_str(publish_artifact_id_expr);
-    output.push_str("\n        run: |\n          set -euo pipefail\n          [[ \"$PACKAGE_ARTIFACT_ID\" =~ ^[1-9][0-9]*$ ]] || { echo \"::error::package build did not produce a valid artifact ID\" >&2; exit 1; }\n");
     output.push_str("      - name: Download verified package handoff\n        uses: ");
     output.push_str(download);
-    output.push_str("\n        with:\n          artifact-ids: ");
-    output.push_str(publish_artifact_id_expr);
-    output.push_str("\n          path: package\n          merge-multiple: true\n");
+    output.push_str("\n        with:\n          name: package-release\n          path: package\n          merge-multiple: true\n");
     output.push_str(
         "      - name: Re-verify downloaded handoff\n        id: verify\n        run: |\n",
     );
@@ -2960,123 +2946,6 @@ concurrency_group = "package-release-preview"
         assert!(validate_workflow_file(Some("../release.yml")).is_err());
         assert!(validate_workflow_file(Some("release.txt")).is_err());
         assert!(validate_workflow_file(Some("release.YML")).is_err());
-    }
-
-    #[test]
-    fn package_handoff_download_is_bound_to_the_current_run_attempt_artifact() {
-        let spec = parse_spec(&Args(&args())).expect("valid fixture");
-        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
-        let document = serde_yaml::from_str::<serde_yaml::Value>(&workflow)
-            .expect("rendered workflow is YAML");
-
-        let build = &document["jobs"]["build"];
-        assert_eq!(
-            build["outputs"]["artifact_id"].as_str(),
-            Some("${{ steps.upload-package.outputs.artifact-id }}")
-        );
-        let build_steps = build["steps"].as_sequence().expect("build steps");
-        let upload = build_steps
-            .iter()
-            .find(|step| {
-                step.get("id").and_then(serde_yaml::Value::as_str) == Some("upload-package")
-            })
-            .expect("package upload step");
-        assert_eq!(
-            upload["uses"].as_str(),
-            ActionPin::UploadArtifact.reference().split(" #").next()
-        );
-        assert_eq!(
-            upload["with"]["name"].as_str(),
-            Some("package-release-${{ github.run_id }}-${{ github.run_attempt }}")
-        );
-
-        let publish = &document["jobs"]["publish"];
-        assert_eq!(publish["needs"].as_str(), Some("build"));
-        let publish_steps = publish["steps"].as_sequence().expect("publish steps");
-        let step = |name: &str| {
-            publish_steps
-                .iter()
-                .find(|step| step["name"].as_str() == Some(name))
-                .expect("missing publish step")
-        };
-        let validate = step("Validate producer artifact ID");
-        let download = step("Download verified package handoff");
-        let reverify = step("Re-verify downloaded handoff");
-        let index = |target: &serde_yaml::Value| {
-            publish_steps
-                .iter()
-                .position(|candidate| candidate == target)
-                .expect("publish step index")
-        };
-        assert!(index(validate) < index(download) && index(download) < index(reverify));
-        assert_eq!(
-            validate["env"]["PACKAGE_ARTIFACT_ID"].as_str(),
-            Some("${{ needs.build.outputs.artifact_id }}")
-        );
-        assert!(validate["run"]
-            .as_str()
-            .expect("artifact validation script")
-            .contains("[[ \"$PACKAGE_ARTIFACT_ID\" =~ ^[1-9][0-9]*$ ]]"));
-        assert_eq!(
-            download["uses"].as_str(),
-            ActionPin::DownloadArtifact.reference().split(" #").next()
-        );
-        assert_eq!(
-            download["with"]["artifact-ids"].as_str(),
-            Some("${{ needs.build.outputs.artifact_id }}")
-        );
-        assert!(download["with"].get("name").is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn package_handoff_artifact_id_guard_accepts_only_positive_decimal_ids() {
-        use std::process::Command;
-
-        let spec = parse_spec(&Args(&args())).expect("valid fixture");
-        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
-        let document = serde_yaml::from_str::<serde_yaml::Value>(&workflow)
-            .expect("rendered workflow is YAML");
-        let steps = document["jobs"]["publish"]["steps"]
-            .as_sequence()
-            .expect("publish steps");
-        let script = steps
-            .iter()
-            .find(|step| {
-                step.get("name").and_then(serde_yaml::Value::as_str)
-                    == Some("Validate producer artifact ID")
-            })
-            .and_then(|step| step["run"].as_str())
-            .expect("artifact validation script");
-
-        for (id, accepted) in [
-            ("1", true),
-            ("987654321", true),
-            ("", false),
-            ("0", false),
-            ("01", false),
-            ("1,2", false),
-            ("123 456", false),
-            ("not-an-id", false),
-            ("-1", false),
-        ] {
-            let output = Command::new("/bin/bash")
-                .args(["-e", "-c", script])
-                .env_clear()
-                .env("PACKAGE_ARTIFACT_ID", id)
-                .output()
-                .expect("run emitted artifact validation script");
-            assert_eq!(
-                output.status.success(),
-                accepted,
-                "artifact ID result differed for synthetic input {id:?}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            if !accepted {
-                assert!(String::from_utf8_lossy(&output.stderr)
-                    .contains("package build did not produce a valid artifact ID"));
-            }
-        }
     }
 
     #[test]
