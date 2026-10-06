@@ -2450,20 +2450,35 @@ fn remove_owner_record(registry_root: &Path, builder: &str) -> Result<()> {
     }
 }
 
-/// Read one claim file. Missing reads as empty; torn JSON fails closed as
-/// an error the caller must treat as *claimed*: with atomic rename writes a
-/// torn file means disk corruption or a pre-atomic crash, and the safe
-/// direction is to stop, prune, and delete nothing.
+/// Read one claim file. A missing file is an error: after a proven
+/// deletion nothing may read the builder back as quietly unclaimed, and a
+/// wiped run directory must fail closed rather than look idle. Torn JSON
+/// fails closed as an error the caller must treat as *claimed*: with atomic
+/// rename writes a torn file means disk corruption or a pre-atomic crash,
+/// and the safe direction is to stop, prune, and delete nothing. Callers
+/// that need the old missing-means-empty read (fresh claims, holder
+/// listings) say so via [`read_claims_allowing_missing`].
 fn read_claims(path: &Path, builder: &str) -> Result<BuilderClaims> {
     let Some(bytes) = read_control_file_no_follow(path)? else {
-        return Ok(BuilderClaims {
-            builder: builder.to_owned(),
-            ..BuilderClaims::default()
-        });
+        anyhow::bail!("runtime claims file {} is missing", path.display());
     };
     let claims = parse_claims(path, &bytes)?;
     ensure_claims_builder(path, &claims, builder)?;
     Ok(claims)
+}
+
+/// Read one claim file, treating a missing file as an empty holder set.
+/// Only fresh-claim and holder-listing paths may use this: every
+/// maintenance read must observe a missing file as an error.
+#[cfg(test)]
+fn read_claims_allowing_missing(path: &Path, builder: &str) -> Result<BuilderClaims> {
+    if runtime_claims_missing(path)? {
+        return Ok(BuilderClaims {
+            builder: builder.to_owned(),
+            ..BuilderClaims::default()
+        });
+    }
+    read_claims(path, builder)
 }
 
 fn runtime_claims_missing(path: &Path) -> Result<bool> {
@@ -2518,7 +2533,9 @@ fn read_registered_claims(path: &Path, builder: &str) -> Result<Option<BuilderCl
     };
     let claims = parse_claims(path, &bytes)?;
     ensure_claims_builder(path, &claims, builder)?;
-    if !is_current_domained_persistent_builder(&claims.builder) {
+    if !is_current_domained_persistent_builder(&claims.builder)
+        && !is_legacy_capped_builder_name(&claims.builder)
+    {
         anyhow::bail!(
             "claim file {} names a retired or unscoped builder",
             path.display()
@@ -2844,7 +2861,7 @@ pub(crate) fn claim_builder(
     slot: &str,
     container: &str,
 ) -> Result<()> {
-    if !is_current_domained_persistent_builder(builder) {
+    if !is_current_domained_persistent_builder(builder) && !is_legacy_capped_builder_name(builder) {
         anyhow::bail!("refuse claims for an unscoped or retired BuildKit builder");
     }
     let registry_root = owner_registry_root(domain_root);
@@ -2871,7 +2888,7 @@ fn claim_builder_with_registry(
     slot: &str,
     container: &str,
 ) -> Result<()> {
-    if !is_current_domained_persistent_builder(builder) {
+    if !is_current_domained_persistent_builder(builder) && !is_legacy_capped_builder_name(builder) {
         anyhow::bail!("refuse claims for an unscoped or retired BuildKit builder");
     }
     let path = claims_file(run_root, builder);
@@ -2886,7 +2903,8 @@ fn claim_builder_with_registry(
     {
         anyhow::bail!("BuildKit builder {builder} is durably marked for deletion");
     }
-    if runtime_claims_missing(&path)?
+    let claims_missing = runtime_claims_missing(&path)?;
+    if claims_missing
         && is_current_domained_persistent_builder(builder)
         && let Some(registry_root) = registry_root
         && owner.is_some()
@@ -2896,11 +2914,18 @@ fn claim_builder_with_registry(
             owner_registry_file(registry_root, builder).display()
         );
     }
-    let mut claims = match read_claims(&path, builder) {
-        Ok(claims) => claims,
-        Err(error) => {
-            log_torn_claims(builder, &path, &error);
-            return Err(error);
+    let mut claims = if claims_missing {
+        BuilderClaims {
+            builder: builder.to_owned(),
+            ..BuilderClaims::default()
+        }
+    } else {
+        match read_claims(&path, builder) {
+            Ok(claims) => claims,
+            Err(error) => {
+                log_torn_claims(builder, &path, &error);
+                return Err(error);
+            }
         }
     };
     repair_slot_unlocked(&mut claims, slot, container);
@@ -3159,7 +3184,7 @@ pub(crate) fn builder_holders(
 ) -> Result<Vec<BuilderHolder>> {
     let path = claims_file(run_root, builder);
     let _lock = lock_claims(builder, &path)?;
-    let mut claims = read_claims(&path, builder)?;
+    let mut claims = read_claims_allowing_missing(&path, builder)?;
     if let Some((slot, container)) = my_slot {
         repair_slot_unlocked(&mut claims, slot, container);
         write_claims(&path, &claims)?;
@@ -3190,7 +3215,7 @@ pub(crate) fn repair_absent_holders(
 ) -> Result<Vec<BuilderHolder>> {
     let path = claims_file(run_root, builder);
     let _lock = lock_claims(builder, &path)?;
-    let mut claims = read_claims(&path, builder)?;
+    let mut claims = read_claims_allowing_missing(&path, builder)?;
     repair_absent_unlocked(&mut claims, present);
     write_claims(&path, &claims)?;
     let mut holders: Vec<BuilderHolder> = claims.holders.into_values().collect();
@@ -5259,37 +5284,6 @@ fn reap_idle_builders_with_domain(
     )
 }
 
-fn report_legacy_builder_status(
-    run_root: &Path,
-    builder: &str,
-    active_job_container: bool,
-    report: &mut HorizonReport,
-) {
-    let path = claims_file(run_root, builder);
-    match std::fs::symlink_metadata(&path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if active_job_container {
-                report.failures.push(format!(
-                    "leave old BuildKit builder {builder} untouched: a running job container prevents reboot quiescence proof"
-                ));
-            }
-        }
-        Err(error) => {
-            report
-                .failures
-                .push(format!("stat ownership for {builder}: {error:#}"));
-        }
-        Ok(_) => {
-            if let Err(error) = read_registered_claims(&path, builder) {
-                report
-                    .failures
-                    .push(format!("read ownership for {builder}: {error:#}"));
-                report.unreadable_claims.push(path.display().to_string());
-            }
-        }
-    }
-}
-
 #[allow(
     clippy::too_many_arguments,
     reason = "injected Docker operations keep destructive reaper paths hermetic in tests"
@@ -5337,8 +5331,10 @@ fn reap_idle_builders_with_domain_and_volume_gate(
             &present,
             &mut report,
         ));
-        builders.sort();
-        builders.dedup();
+        // Dedup preserving listing order: reconciled builders append after
+        // the listed ones, and report order follows the listing.
+        let mut seen = BTreeSet::new();
+        builders.retain(|builder| seen.insert(builder.clone()));
     }
     let registered_builders: BTreeSet<String> = builders.iter().cloned().collect();
     for builder in builders.into_iter().filter(|builder| {
@@ -5347,20 +5343,45 @@ fn reap_idle_builders_with_domain_and_volume_gate(
             |token| is_current_domain_builder_name(builder, token),
         ) || is_legacy_capped_builder_name(builder)
     }) {
-        if !domain_token.map_or_else(
+        let legacy_capped = !domain_token.map_or_else(
             || is_current_domained_persistent_builder(&builder),
             |token| is_current_domain_builder_name(&builder, token),
-        ) {
-            report_legacy_builder_status(run_root, &builder, active_job_container, &mut report);
-            continue;
+        );
+        let path = claims_file(run_root, &builder);
+        if legacy_capped {
+            // Old capped generation: its reserved namespace is the durable
+            // owner marker, and only host-wide job quiescence authorizes
+            // touching it. Without quiescence the pass leaves it fully
+            // untouched — no repair write, no failure — and a missing claim
+            // alone never proves quiescence.
+            match std::fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if active_job_container {
+                        report.failures.push(format!(
+                            "leave old BuildKit builder {builder} untouched: a running job container prevents reboot quiescence proof"
+                        ));
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    report
+                        .failures
+                        .push(format!("stat ownership for {builder}: {error:#}"));
+                    continue;
+                }
+                Ok(_) => {
+                    if active_job_container {
+                        continue;
+                    }
+                }
+            }
         }
-        if let Err(error) = check_volume_gate(&builder) {
+        if !legacy_capped && let Err(error) = check_volume_gate(&builder) {
             report.failures.push(format!(
                 "keep BuildKit builder {builder}: Engine-volume create fence blocks reaping: {error:#}"
             ));
             continue;
         }
-        let path = claims_file(run_root, &builder);
         let initial_claims = match read_claims_for_reaping(&path, &builder, registry_root) {
             Ok(Some(claims)) => claims,
             Ok(None) => {
@@ -5645,6 +5666,48 @@ fn reap_idle_builders_with_domain_and_volume_gate(
                         "inspect BuildKit daemon {builder} after ambiguous stop: {inspect_error:#}"
                     )),
                 }
+            }
+            if legacy_capped && !raced {
+                // Old generation with no holders: the stop above converged
+                // the daemon, so remove the retired registration now.
+                match delete_registered_builder(run_root, registry_root, &builder, &mut remove) {
+                    Ok(true) => report.deleted.push(builder.clone()),
+                    Ok(false) => {}
+                    Err(error) => report
+                        .failures
+                        .push(format!("delete builder {builder}: {error:#}")),
+                }
+            }
+            continue;
+        }
+        if legacy_capped {
+            // Old generation past the stop path: only a proven-inactive
+            // daemon may be deleted, after a final holder recheck.
+            if !exit
+                .status
+                .is_some_and(crate::docker::client::ContainerState::safe_to_reclaim)
+            {
+                report.failures.push(format!(
+                    "keep legacy BuildKit builder {builder}: daemon state is not proven inactive"
+                ));
+                continue;
+            }
+            match holders_remain(&path, &builder, registry_root) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    report
+                        .failures
+                        .push(format!("relock claims for {builder}: {error:#}"));
+                    continue;
+                }
+            }
+            match delete_registered_builder(run_root, registry_root, &builder, &mut remove) {
+                Ok(true) => report.deleted.push(builder.clone()),
+                Ok(false) => {}
+                Err(error) => report
+                    .failures
+                    .push(format!("delete builder {builder}: {error:#}")),
             }
             continue;
         }

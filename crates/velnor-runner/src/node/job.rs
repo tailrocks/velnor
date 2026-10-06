@@ -22,7 +22,9 @@ pub struct JobArgs {
     #[arg(long)]
     pub slot_id: Option<String>,
     /// Per-process launch lease issued by the controller for this slot.
-    #[arg(long)]
+    /// Optional at parse time for role dispatch; launching without one
+    /// fails closed before any journal access.
+    #[arg(long, default_value = "")]
     pub pressure_launch_nonce: String,
     #[arg(long, default_value_t = 1)]
     pub generation: u64,
@@ -121,6 +123,12 @@ pub(crate) async fn run_with_package_guard(
     args: JobArgs,
     _package_guard: crate::release::PackageExecutionGuard,
 ) -> anyhow::Result<()> {
+    if args.pressure_launch_nonce.is_empty() {
+        anyhow::bail!(
+            "worker {} launched without a controller-issued pressure nonce",
+            args.job_id
+        );
+    }
     let journal_path = args.state_dir.join("journal.db");
     if !journal_path.is_file() {
         anyhow::bail!("worker journal is missing at {}", journal_path.display());
