@@ -5523,13 +5523,14 @@ mod tests {
         backdate(selected_cache.parent().unwrap(), EMERGENCY_MIN_IDLE * 2);
         backdate(decoy_cache.parent().unwrap(), EMERGENCY_MIN_IDLE * 2);
         let pressure = crate::host_capacity::HostCapacityPin::open(&config).unwrap();
+        // Unreachable floor: concurrent tests perturb live free space, so a
+        // probe-derived margin races the reclaim baseline probe and flakes.
+        // Selection (not the pressure gate) is under test; the floor keeps
+        // reclaim pressured deterministically and stops at candidate
+        // exhaustion.
         let report = reclaim_for_disk_pressure_with_pin(
             &config,
-            pressure
-                .probe()
-                .unwrap()
-                .available_bytes
-                .saturating_add(128),
+            u64::MAX,
             &[work],
             &layout,
             Some(velnor_model::ExecutionBackendKind::MicroVm),

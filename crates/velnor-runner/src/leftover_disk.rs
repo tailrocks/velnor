@@ -3325,6 +3325,7 @@ pub(crate) struct MacOsDirectoryEntry {
 #[cfg(target_os = "linux")]
 #[cfg_attr(not(test), allow(dead_code))]
 fn remove_dir_all_with_identity(
+    trusted_anchor: &Path,
     path: &Path,
     expected_device: u64,
     expected_root_mount_id: Option<u64>,
@@ -3332,7 +3333,7 @@ fn remove_dir_all_with_identity(
 ) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        let anchor_path = Path::new("/");
+        let anchor_path = trusted_anchor;
         let anchor = open_configured_directory(anchor_path)?;
         let anchor_identity = directory_identity(&anchor)?;
         let (parent, name, root_path, _) =
@@ -3357,7 +3358,13 @@ fn remove_dir_all_with_identity(
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (path, expected_device, expected_root_mount_id, identity_of);
+        let _ = (
+            trusted_anchor,
+            path,
+            expected_device,
+            expected_root_mount_id,
+            identity_of,
+        );
         bail!("refusing leftover cleanup without Linux mount-identity proof")
     }
 }
@@ -7037,8 +7044,9 @@ mod tests {
                 (device, mount_id)
             }
         };
-        let error = remove_dir_all_with_identity(&workspace, pressure_device, None, &identify)
-            .expect_err("off-device nested tree must fail preflight before deletion");
+        let error =
+            remove_dir_all_with_identity(&root, &workspace, pressure_device, None, &identify)
+                .expect_err("off-device nested tree must fail preflight before deletion");
 
         assert!(format!("{error:#}").contains("mount boundary"));
         assert!(mounted.join("marker").exists());

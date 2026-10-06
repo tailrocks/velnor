@@ -21982,7 +21982,10 @@ mod tests {
         }
 
         let pressure_pin = crate::host_capacity::HostCapacityPin::open(&work_root).unwrap();
-        let required_free_bytes = pressure_pin.probe().unwrap().available_bytes + 1;
+        // Unreachable floor: concurrent tests perturb live free space, so a
+        // probe-derived margin races the reclaim baseline probe and flakes
+        // (see explicit_config_pressure_reclaims_selected_work_root_and_layout).
+        let required_free_bytes = u64::MAX;
         let report = reclaim_capacity_store_floor(
             &layout,
             &work_root,
@@ -22001,10 +22004,11 @@ mod tests {
             synthesized_cache.exists(),
             "reclaim scanned a synthesized cache root under the work root"
         );
-        assert!(
-            report.freed_bytes > 0,
-            "pressure reclaim reported no capacity gain: {report:?}"
-        );
+        // Live free-space deltas depend on filesystem accounting
+        // synchronicity (delalloc/lazy statvfs), so assert the deterministic
+        // selection outcome instead: exactly the canonical candidate
+        // reclaimed. Probe-credit math is covered by injected-sample tests.
+        assert_eq!(report.deleted, vec![selected_cache], "{report:?}");
         assert!(report.failures.is_empty(), "{report:?}");
         fs::remove_dir_all(root).ok();
     }
