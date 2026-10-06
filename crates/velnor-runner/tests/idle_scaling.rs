@@ -70,6 +70,37 @@ fn scratch() -> ScratchDir {
         "[execution]\nbackend = \"docker\"\n",
     )
     .expect("write execution configuration");
+    std::fs::create_dir_all(scratch.path().join("_work")).expect("create work directory");
+    // Controller permit admission requires a loadable daemon execution
+    // config plus pinnable pressure roots (disk_pressure_gate refuses
+    // slot permits without them). The layout covers the largest slot
+    // count the scaling sweep exercises.
+    std::fs::write(
+        scratch.path().join("daemon-exec.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "url": "https://github.com/o/r",
+            "name": "velnor",
+            "labels": [],
+            "target_mvp_labels": false,
+            "target_mvp_arm_label": false,
+            "replace": false,
+            "dry_run_registration": false,
+            "slots": 16,
+            "once": false,
+            "complete_noop": false,
+            "execute_scripts": false,
+            "dry_run_jobs": false,
+            "docker_image": "img",
+            "trust_scope": "trusted",
+            "emergency_reserve_bytes": 0,
+            "job_peak_bytes": 0,
+            "node_action_image": "img",
+            "skip_preflight": false,
+            "require_docker_socket": false
+        }))
+        .expect("write daemon execution configuration"),
+    )
+    .expect("write daemon execution configuration");
     scratch
 }
 

@@ -387,6 +387,7 @@ impl RecordedOwnerDeathProof {
             }
         }
         let waiter_id = format!("wait-{}", self.slot_id.0);
+        let mut worker_enum: Option<prove::WorkerProcessEnumeration> = None;
         ensure_recorded_owners_dead(&self.job_id, &waiter_id, |owner_id| {
             persisted_worker_owns_slot_at(
                 &self.state_dir,
@@ -395,6 +396,7 @@ impl RecordedOwnerDeathProof {
                 owner_id,
                 &self.slot_id,
                 self.generation,
+                &mut worker_enum,
             )
         })?;
         Ok(())
@@ -476,6 +478,7 @@ impl RecordedOwnerDeathProof {
             anyhow::bail!("replacement job now occupies the recovered slot");
         }
         let waiter_id = format!("wait-{}", self.slot_id.0);
+        let mut worker_enum: Option<prove::WorkerProcessEnumeration> = None;
         ensure_recorded_owners_dead(&self.job_id, &waiter_id, |owner_id| {
             persisted_worker_owns_slot_at(
                 &self.state_dir,
@@ -484,6 +487,7 @@ impl RecordedOwnerDeathProof {
                 owner_id,
                 &self.slot_id,
                 self.generation,
+                &mut worker_enum,
             )
         })?;
         Ok(())
@@ -1797,6 +1801,10 @@ async fn reconcile_once(
     reconcile_lifecycle_admission(journal, lifecycle)?;
     let state = journal.materialized_state()?;
     let pressure_gate = disk_pressure_gate(args, journal)?;
+    // One worker-process enumeration shared by every ownership scan in this
+    // cycle (slot loop plus waiter spawn): re-enumerating per slot costs a
+    // `ps` fork on macOS and breaks the idle-scaling bound.
+    let mut worker_enum: Option<prove::WorkerProcessEnumeration> = None;
     // The loop top exits on drain, so this closes the race where another
     // process latches the marker after this cycle's check. No new permits
     // while draining; the reducer rejects them too.
@@ -1891,7 +1899,15 @@ async fn reconcile_once(
             generation,
             SLOT_HEARTBEAT_MAX_AGE,
         );
-        let acting = slot_is_acting(args, journal, &state, jobs, &id, generation)?;
+        let acting = slot_is_acting(
+            args,
+            journal,
+            &state,
+            jobs,
+            &id,
+            generation,
+            &mut worker_enum,
+        )?;
         // A leftover deadline from before/during a job must not fire the
         // instant the journal row is gone. The waiter is still the broker
         // actor; fencing the supervisor while that waiter lives splits
@@ -1914,7 +1930,8 @@ async fn reconcile_once(
             terminate_fenced_slot_actor(args, slots, jobs, &state, &id, slot.expect("fenced slot"))
                 .await?;
         }
-        let fenced_generation = fenced_slot_recovery_generation(args, journal, slot, &state, jobs)?;
+        let fenced_generation =
+            fenced_slot_recovery_generation(args, journal, slot, &state, jobs, &mut worker_enum)?;
         let generation = fenced_generation.unwrap_or(generation);
         let process_alive = heartbeat_fresh;
         if fenced && fenced_generation.is_none() {
@@ -1922,7 +1939,15 @@ async fn reconcile_once(
         }
         if fenced_generation.is_none()
             && (admission_blocked
-                || child_owns_slot(args, journal, &state, jobs, &id, generation)?
+                || child_owns_slot(
+                    args,
+                    journal,
+                    &state,
+                    jobs,
+                    &id,
+                    generation,
+                    &mut worker_enum,
+                )?
                 || !permit_needs_reconciliation(slot, generation, args.spawn_slots, process_alive))
         {
             continue;
@@ -2065,7 +2090,7 @@ async fn reconcile_once(
     )
     .await?;
 
-    spawn_ready_waiters(args, journal, jobs)?;
+    spawn_ready_waiters(args, journal, jobs, &mut worker_enum)?;
     reap(jobs);
     let outbox_reconcile_due = last_outbox_reconcile.elapsed() >= OUTBOX_RECONCILIATION_INTERVAL;
     reclaim_orphaned_jobs_with_metrics(
@@ -2805,6 +2830,7 @@ fn spawn_ready_waiters(
     args: &ControllerArgs,
     journal: &Journal,
     jobs: &mut HashMap<String, Child>,
+    worker_enum: &mut Option<prove::WorkerProcessEnumeration>,
 ) -> anyhow::Result<()> {
     let Ok(exec) = load_exec_config(&args.state_dir) else {
         return Ok(());
@@ -2833,7 +2859,15 @@ fn spawn_ready_waiters(
         // Journal Ready is not physical idleness. A live waiter, a persisted
         // waiter pid after controller restart, or an in-flight lease whose
         // containers are still tearing down must keep this slot unspawnable.
-        if child_owns_slot(args, journal, &state, jobs, &slot.slot_id, slot.generation)? {
+        if child_owns_slot(
+            args,
+            journal,
+            &state,
+            jobs,
+            &slot.slot_id,
+            slot.generation,
+            worker_enum,
+        )? {
             continue;
         }
         match recovery_slot_config_dir(&args.state_dir, &exec, &state, &slot.slot_id) {
@@ -3093,6 +3127,7 @@ async fn reclaim_orphaned_jobs_with_backend_policy(
     };
 
     let mut orphan_jobs = Vec::new();
+    let mut worker_enum: Option<prove::WorkerProcessEnumeration> = None;
     for job in candidate_jobs {
         let slot_dir = recovery_slot_config_dir(&args.state_dir, &exec, &state, &job.slot_id)?;
         let marker_snapshot = crate::runner::recorded_in_flight_job_record(&slot_dir);
@@ -3101,10 +3136,22 @@ async fn reclaim_orphaned_jobs_with_backend_policy(
         // unrelated process with either recycled PID never protects an
         // orphan row.
         let waiter_id = format!("wait-{}", job.slot_id.0);
-        let job_worker_live =
-            persisted_worker_owns_slot(args, journal, &job.job_id.0, &job.slot_id, job.generation)?;
-        let waiter_live =
-            persisted_worker_owns_slot(args, journal, &waiter_id, &job.slot_id, job.generation)?;
+        let job_worker_live = persisted_worker_owns_slot(
+            args,
+            journal,
+            &job.job_id.0,
+            &job.slot_id,
+            job.generation,
+            &mut worker_enum,
+        )?;
+        let waiter_live = persisted_worker_owns_slot(
+            args,
+            journal,
+            &waiter_id,
+            &job.slot_id,
+            job.generation,
+            &mut worker_enum,
+        )?;
         if !job_worker_live && !waiter_live {
             orphan_jobs.push((job, marker_snapshot?));
         }
@@ -3683,11 +3730,19 @@ fn outbox_owner_is_live(
         return Ok(false);
     };
 
+    let mut worker_enum: Option<prove::WorkerProcessEnumeration> = None;
     for owner_id in [job_id.to_owned(), format!("wait-{}", slot_id.0)] {
         if read_valid_owned_pid(&args.state_dir, &owner_id, generation)?.is_none() {
             continue;
         }
-        if persisted_worker_owns_slot(args, journal, &owner_id, &slot_id, generation)? {
+        if persisted_worker_owns_slot(
+            args,
+            journal,
+            &owner_id,
+            &slot_id,
+            generation,
+            &mut worker_enum,
+        )? {
             return Ok(true);
         }
     }
@@ -3938,12 +3993,21 @@ fn fenced_slot_recovery_generation(
     slot: Option<&SlotRecord>,
     state: &velnor_control::journal::FleetState,
     jobs: &HashMap<String, Child>,
+    worker_enum: &mut Option<prove::WorkerProcessEnumeration>,
 ) -> anyhow::Result<Option<Generation>> {
     let Some(slot) = slot.filter(|slot| slot.phase == SlotPhase2::Fenced) else {
         return Ok(None);
     };
     if slot_has_admission_block(state, &slot.slot_id, slot.generation)
-        || child_owns_slot(args, journal, state, jobs, &slot.slot_id, slot.generation)?
+        || child_owns_slot(
+            args,
+            journal,
+            state,
+            jobs,
+            &slot.slot_id,
+            slot.generation,
+            worker_enum,
+        )?
     {
         return Ok(None);
     }
@@ -3974,6 +4038,7 @@ fn child_owns_slot(
     jobs: &HashMap<String, Child>,
     slot_id: &SlotId,
     generation: Generation,
+    worker_enum: &mut Option<prove::WorkerProcessEnumeration>,
 ) -> anyhow::Result<bool> {
     let waiter_id = format!("wait-{}", slot_id.0);
     if jobs.contains_key(&waiter_id) {
@@ -3988,7 +4053,7 @@ fn child_owns_slot(
     }
     // On restart, adopt only a process whose complete command and nonce match
     // the current durable lease. A reused PID is not process ownership.
-    if persisted_worker_owns_slot(args, journal, &waiter_id, slot_id, generation)? {
+    if persisted_worker_owns_slot(args, journal, &waiter_id, slot_id, generation, worker_enum)? {
         return Ok(true);
     }
     for job in state
@@ -3996,7 +4061,14 @@ fn child_owns_slot(
         .iter()
         .filter(|job| job.slot_id == *slot_id && job.generation == generation)
     {
-        if persisted_worker_owns_slot(args, journal, &job.job_id.0, slot_id, generation)? {
+        if persisted_worker_owns_slot(
+            args,
+            journal,
+            &job.job_id.0,
+            slot_id,
+            generation,
+            worker_enum,
+        )? {
             return Ok(true);
         }
     }
@@ -4009,6 +4081,7 @@ fn persisted_worker_owns_slot(
     job_id: &str,
     slot_id: &SlotId,
     generation: Generation,
+    worker_enum: &mut Option<prove::WorkerProcessEnumeration>,
 ) -> anyhow::Result<bool> {
     persisted_worker_owns_slot_at(
         &args.state_dir,
@@ -4017,6 +4090,7 @@ fn persisted_worker_owns_slot(
         job_id,
         slot_id,
         generation,
+        worker_enum,
     )
 }
 
@@ -4027,6 +4101,7 @@ fn persisted_worker_owns_slot_at(
     job_id: &str,
     slot_id: &SlotId,
     generation: Generation,
+    worker_enum: &mut Option<prove::WorkerProcessEnumeration>,
 ) -> anyhow::Result<bool> {
     let service_instance = std::fs::canonicalize(state_dir)
         .with_context(|| format!("canonicalize service instance {}", state_dir.display()))?
@@ -4039,15 +4114,23 @@ fn persisted_worker_owns_slot_at(
         // process operations. If the controller died between them, recover a
         // live child by its complete command line and launch nonce. This also
         // leaves a live stale-nonce child as an ownership barrier until it
-        // exits, instead of starting a second actor in the same slot.
-        let discovered = prove::discover_job_worker_processes(
+        // exits, instead of starting a second actor in the same slot. The
+        // enumeration is shared per cycle: slot children never match worker
+        // discovery (`slot` vs `job` argv), so mid-cycle spawns cannot hide a
+        // match from a later scan in the same cycle.
+        let enumeration = match worker_enum {
+            Some(enumeration) => enumeration,
+            None => worker_enum.insert(prove::enumerate_worker_processes()?),
+        };
+        let discovered = prove::discover_cached_worker_processes(
+            enumeration,
             state_dir,
             job_id,
             slot_id,
             generation,
             scope,
             current_nonce.as_deref(),
-        )?;
+        );
         if discovered.len() > 1 {
             anyhow::bail!(
                 "multiple unmarked workers match slot {} generation {} job {}",
@@ -4087,7 +4170,13 @@ fn persisted_worker_owns_slot_at(
                 Some(_) => {
                     retire_stale_owned_pid_marker(state_dir, job_id, generation, pid)?;
                     persisted_worker_owns_slot_at(
-                        state_dir, scope, journal, job_id, slot_id, generation,
+                        state_dir,
+                        scope,
+                        journal,
+                        job_id,
+                        slot_id,
+                        generation,
+                        worker_enum,
                     )
                 }
                 None => {
@@ -4108,7 +4197,13 @@ fn persisted_worker_owns_slot_at(
                 Some(_) => {
                     retire_stale_owned_pid_marker(state_dir, job_id, generation, pid)?;
                     persisted_worker_owns_slot_at(
-                        state_dir, scope, journal, job_id, slot_id, generation,
+                        state_dir,
+                        scope,
+                        journal,
+                        job_id,
+                        slot_id,
+                        generation,
+                        worker_enum,
                     )
                 }
                 None => {
@@ -4132,7 +4227,8 @@ fn signal_persisted_pressure_worker(
     slot_id: &SlotId,
     generation: Generation,
 ) -> anyhow::Result<()> {
-    if !persisted_worker_owns_slot(args, journal, job_id, slot_id, generation)? {
+    let mut worker_enum: Option<prove::WorkerProcessEnumeration> = None;
+    if !persisted_worker_owns_slot(args, journal, job_id, slot_id, generation, &mut worker_enum)? {
         return Ok(());
     }
     let Some(pid) = read_valid_owned_pid(&args.state_dir, job_id, generation)? else {
@@ -4230,9 +4326,10 @@ fn slot_is_acting(
     jobs: &HashMap<String, Child>,
     slot_id: &SlotId,
     generation: Generation,
+    worker_enum: &mut Option<prove::WorkerProcessEnumeration>,
 ) -> anyhow::Result<bool> {
     Ok(slot_has_admission_block(state, slot_id, generation)
-        || child_owns_slot(args, journal, state, jobs, slot_id, generation)?)
+        || child_owns_slot(args, journal, state, jobs, slot_id, generation, worker_enum)?)
 }
 
 async fn reap_supervised_child(
@@ -4538,7 +4635,15 @@ fn maybe_spawn_job(
     if jobs.contains_key(&key) {
         return Ok(());
     }
-    if persisted_worker_owns_slot(args, journal, job_id, &slot_id, generation)? {
+    let mut worker_enum: Option<prove::WorkerProcessEnumeration> = None;
+    if persisted_worker_owns_slot(
+        args,
+        journal,
+        job_id,
+        &slot_id,
+        generation,
+        &mut worker_enum,
+    )? {
         return Ok(());
     }
     let service_instance = std::fs::canonicalize(&args.state_dir)
@@ -5227,6 +5332,7 @@ mod tests {
             &jobs,
             &SlotId("velnor-1".to_owned()),
             Generation::INITIAL,
+            &mut None,
         )
         .unwrap());
         assert_eq!(
@@ -5754,19 +5860,34 @@ mod tests {
         let state = FleetState::default();
         let children = HashMap::new();
         assert_eq!(
-            fenced_slot_recovery_generation(&args, &journal, Some(&slot), &state, &children)
-                .unwrap(),
+            fenced_slot_recovery_generation(
+                &args,
+                &journal,
+                Some(&slot),
+                &state,
+                &children,
+                &mut None
+            )
+            .unwrap(),
             None,
         );
 
         slot.phase = SlotPhase2::Fenced;
         assert_eq!(
-            fenced_slot_recovery_generation(&args, &journal, Some(&slot), &state, &children)
-                .unwrap(),
+            fenced_slot_recovery_generation(
+                &args,
+                &journal,
+                Some(&slot),
+                &state,
+                &children,
+                &mut None
+            )
+            .unwrap(),
             Some(Generation(slot.generation.0 + 1)),
         );
         assert_eq!(
-            fenced_slot_recovery_generation(&args, &journal, None, &state, &children).unwrap(),
+            fenced_slot_recovery_generation(&args, &journal, None, &state, &children, &mut None)
+                .unwrap(),
             None,
         );
         std::fs::remove_dir_all(dir).ok();
@@ -5789,12 +5910,14 @@ mod tests {
             &state,
             &jobs,
             &slot.slot_id,
-            slot.generation
+            slot.generation,
+            &mut None,
         )
         .unwrap());
         slot.phase = SlotPhase2::Fenced;
         assert_eq!(
-            fenced_slot_recovery_generation(&args, &journal, Some(&slot), &state, &jobs).unwrap(),
+            fenced_slot_recovery_generation(&args, &journal, Some(&slot), &state, &jobs, &mut None)
+                .unwrap(),
             None,
             "a live waiter must not be skipped: it is why generation recovery deadlocks"
         );
@@ -5808,11 +5931,13 @@ mod tests {
             &state,
             &jobs,
             &slot.slot_id,
-            slot.generation
+            slot.generation,
+            &mut None,
         )
         .unwrap());
         assert_eq!(
-            fenced_slot_recovery_generation(&args, &journal, Some(&slot), &state, &jobs).unwrap(),
+            fenced_slot_recovery_generation(&args, &journal, Some(&slot), &state, &jobs, &mut None)
+                .unwrap(),
             Some(Generation(slot.generation.0 + 1)),
         );
         std::fs::remove_dir_all(dir).ok();
@@ -5838,7 +5963,8 @@ mod tests {
                 &state,
                 &jobs,
                 &slot.slot_id,
-                slot.generation
+                slot.generation,
+                &mut None,
             )
             .unwrap(),
             "a live unrelated PID must not be adopted as the waiter"
@@ -5847,7 +5973,8 @@ mod tests {
         assert!(cleanup::read_owned_pid(&dir, "wait-velnor-1", slot.generation.0).is_none());
         slot.phase = SlotPhase2::Fenced;
         assert_eq!(
-            fenced_slot_recovery_generation(&args, &journal, Some(&slot), &state, &jobs).unwrap(),
+            fenced_slot_recovery_generation(&args, &journal, Some(&slot), &state, &jobs, &mut None)
+                .unwrap(),
             Some(Generation(slot.generation.0 + 1)),
             "a reused PID must not block new-generation recovery"
         );
@@ -5893,7 +6020,8 @@ mod tests {
             "the waiter process itself must be gone, not just dropped from the map"
         );
         assert_eq!(
-            fenced_slot_recovery_generation(&args, &journal, Some(&slot), &state, &jobs).unwrap(),
+            fenced_slot_recovery_generation(&args, &journal, Some(&slot), &state, &jobs, &mut None)
+                .unwrap(),
             Some(Generation(slot.generation.0 + 1)),
         );
         std::fs::remove_dir_all(dir).ok();
@@ -6312,6 +6440,7 @@ mod tests {
             "job-1",
             &slot_id,
             Generation::INITIAL,
+            &mut None,
         )
         .unwrap());
         assert!(!persisted_worker_owns_slot(
@@ -6320,6 +6449,7 @@ mod tests {
             "wait-velnor-1",
             &slot_id,
             Generation::INITIAL,
+            &mut None,
         )
         .unwrap());
 
@@ -7319,7 +7449,7 @@ mod tests {
             lifecycle: None,
         };
         let mut jobs = HashMap::new();
-        spawn_ready_waiters(&args, &journal, &mut jobs).unwrap();
+        spawn_ready_waiters(&args, &journal, &mut jobs, &mut None).unwrap();
         assert!(
             jobs.is_empty(),
             "an in-flight lease is physical occupancy; Ready is not enough to spawn"
@@ -7345,7 +7475,7 @@ mod tests {
             lifecycle: None,
         };
         let mut jobs = HashMap::new();
-        spawn_ready_waiters(&args, &journal, &mut jobs).unwrap();
+        spawn_ready_waiters(&args, &journal, &mut jobs, &mut None).unwrap();
         assert!(
             jobs.is_empty(),
             "a live waiter pid after controller restart must keep the slot unspawnable"

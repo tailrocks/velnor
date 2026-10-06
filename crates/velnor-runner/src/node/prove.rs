@@ -325,21 +325,21 @@ pub fn job_worker_process_proof(
     }
 }
 
-/// Find an already-launched waiter/job worker by its complete command identity.
-/// This recovers the spawn-to-marker crash window: the controller writes the
-/// marker after `Command::spawn`, while the worker also publishes it at entry.
-/// A matching live child is adopted; an unprovable process identity fails
-/// closed instead of issuing a replacement launch nonce.
-#[allow(clippy::too_many_arguments)]
-pub fn discover_job_worker_processes(
-    state_dir: &Path,
-    job_id: &str,
-    slot_id: &SlotId,
-    generation: Generation,
-    scope: &str,
-    launch_nonce: Option<&str>,
-) -> anyhow::Result<Vec<(u32, JobWorkerProcessProof)>> {
-    let mut found = Vec::new();
+/// One process-table enumeration shared by every worker-ownership scan in a
+/// reconcile cycle. Enumerating (a `ps` fork on macOS, a /proc walk on
+/// Linux) once per cycle instead of once per slot keeps idle supervision
+/// bounded; each scan only re-proves processes whose cached argv already
+/// matches the wanted worker identity.
+#[derive(Debug, Default)]
+pub struct WorkerProcessEnumeration {
+    entries: Vec<(u32, Option<Vec<String>>)>,
+}
+
+/// Enumerate slot-service processes once: pid plus observed argv (`None`
+/// when argv was unreadable at enumeration time, which still gets a fresh
+/// proof attempt per scan so unreadable processes fail closed as before).
+pub fn enumerate_worker_processes() -> anyhow::Result<WorkerProcessEnumeration> {
+    let mut entries = Vec::new();
 
     #[cfg(target_os = "linux")]
     {
@@ -377,25 +377,8 @@ pub fn discover_job_worker_processes(
                     .skip(1)
                     .map(|argument| String::from_utf8_lossy(argument).into_owned()),
             );
-            if classify_job_worker_argv(&argv, state_dir, job_id, slot_id, generation, scope, None)
-                == JobWorkerProcessProof::OtherProcess
-            {
-                continue;
-            }
-            let proof = job_worker_process_proof(
-                pid,
-                state_dir,
-                job_id,
-                slot_id,
-                generation,
-                scope,
-                launch_nonce,
-            );
-            if proof != JobWorkerProcessProof::OtherProcess {
-                found.push((pid, proof));
-            }
+            entries.push((pid, Some(argv)));
         }
-        Ok(found)
     }
 
     #[cfg(target_os = "macos")]
@@ -424,30 +407,85 @@ pub fn discover_job_worker_processes(
             if !slot_service_executable_name(executable_name) {
                 continue;
             }
-            let proof = job_worker_process_proof(
-                pid,
-                state_dir,
-                job_id,
-                slot_id,
-                generation,
-                scope,
-                launch_nonce,
-            );
-            if proof != JobWorkerProcessProof::OtherProcess {
-                found.push((pid, proof));
-            }
+            entries.push((pid, macos_process_argv(pid)));
         }
-        Ok(found)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let _ = (state_dir, job_id, slot_id, generation, scope, launch_nonce);
+        let _ = &mut entries;
         anyhow::bail!("cannot recover an unmarked worker on this platform")
     }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Ok(WorkerProcessEnumeration { entries })
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+/// Find an already-launched waiter/job worker using a shared enumeration.
+/// The cached argv prefilters candidates (the Linux scan's established
+/// pattern); only argv-matching or argv-unreadable processes get the full
+/// fresh proof, so a steady cycle with no workers costs no per-process
+/// syscalls per slot.
+#[allow(clippy::too_many_arguments)]
+pub fn discover_cached_worker_processes(
+    enumeration: &WorkerProcessEnumeration,
+    state_dir: &Path,
+    job_id: &str,
+    slot_id: &SlotId,
+    generation: Generation,
+    scope: &str,
+    launch_nonce: Option<&str>,
+) -> Vec<(u32, JobWorkerProcessProof)> {
+    let mut found = Vec::new();
+    for (pid, argv) in &enumeration.entries {
+        if let Some(argv) = argv
+            && classify_job_worker_argv(argv, state_dir, job_id, slot_id, generation, scope, None)
+                == JobWorkerProcessProof::OtherProcess
+        {
+            continue;
+        }
+        let proof = job_worker_process_proof(
+            *pid,
+            state_dir,
+            job_id,
+            slot_id,
+            generation,
+            scope,
+            launch_nonce,
+        );
+        if proof != JobWorkerProcessProof::OtherProcess {
+            found.push((*pid, proof));
+        }
+    }
+    found
+}
+
+/// Find an already-launched waiter/job worker by its complete command identity.
+/// This recovers the spawn-to-marker crash window: the controller writes the
+/// marker after `Command::spawn`, while the worker also publishes it at entry.
+/// A matching live child is adopted; an unprovable process identity fails
+/// closed instead of issuing a replacement launch nonce.
+#[allow(clippy::too_many_arguments)]
+pub fn discover_job_worker_processes(
+    state_dir: &Path,
+    job_id: &str,
+    slot_id: &SlotId,
+    generation: Generation,
+    scope: &str,
+    launch_nonce: Option<&str>,
+) -> anyhow::Result<Vec<(u32, JobWorkerProcessProof)>> {
+    let enumeration = enumerate_worker_processes()?;
+    Ok(discover_cached_worker_processes(
+        &enumeration,
+        state_dir,
+        job_id,
+        slot_id,
+        generation,
+        scope,
+        launch_nonce,
+    ))
+}
+
 fn classify_job_worker_argv(
     argv: &[String],
     state_dir: &Path,
@@ -818,7 +856,6 @@ fn unix_slot_process_matches_command_line(
 /// control-plane binary that implements the same `slot`/`job` surface.
 /// Restricting the liveness check to `velnor-runner` made every heartbeat
 /// look stale when launchd had to exec an allowed `velnor-host` identity.
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn slot_service_executable_name(name: &str) -> bool {
     name == "velnor-runner"
         || name == "velnorctl"
