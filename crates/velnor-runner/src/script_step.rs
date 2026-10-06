@@ -1215,13 +1215,26 @@ fn shell_single_quote(value: &str) -> String {
 )]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_step_dir() -> PathBuf {
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("velnor-step-test-{}-{}", std::process::id(), id))
+        // One private level between the system temp dir and the fixture:
+        // step-file staging requires its parent to be user-owned and not
+        // group/other-writable, which never holds for /tmp itself.
+        let scope = std::env::temp_dir().join("velnor-step-tests");
+        std::fs::create_dir_all(&scope).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&scope, std::fs::Permissions::from_mode(0o700)).unwrap();
+        scope.join(format!(
+            "velnor-step-test-{}-{}",
+            std::process::id(),
+            id
+        ))
     }
 
     fn sample_step() -> ScriptStep {
