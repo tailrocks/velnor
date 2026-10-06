@@ -3193,14 +3193,17 @@ fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorErro
             )));
         }
         declared_outputs.push(file);
-        if !is_contained_repository_path(source) {
-            return Err(GeneratorError::usage(format!(
-                "[[static_file]] source must be a repository-relative path, found `{source}`"
-            )));
-        }
+        // The `.github/` matcher skips `.` segments, so check it before the
+        // hardened containment check rejects `./`-prefixed spellings: the
+        // outside-`.github/` message is the contract tests assert here.
         if starts_with_generated_github_tree(source) {
             return Err(GeneratorError::usage(format!(
                 "[[static_file]] source must stay outside `.github/`, found `{source}`"
+            )));
+        }
+        if !is_contained_repository_path(source) {
+            return Err(GeneratorError::usage(format!(
+                "[[static_file]] source must be a repository-relative path, found `{source}`"
             )));
         }
         let duplicate = rows
@@ -3228,14 +3231,22 @@ pub(crate) fn resolve_static_file_source(
     root: &Path,
     source: &str,
 ) -> Result<PathBuf, GeneratorError> {
-    if !is_contained_repository_path(source) {
+    // Report scanner-pruned spellings with the prune error even though the
+    // hardened containment check below also rejects dot-directories: the
+    // pruned-directory message is the contract tests assert for these paths.
+    if let Some(directory) = scanner_pruned_directory(root, Path::new(source)) {
         return Err(GeneratorError::usage(format!(
-            "[[static_file]] source must be a repository-relative path, found `{source}`"
+            "[[static_file]] source must stay inside the scanner input: `{source}` is under pruned directory `{directory}`"
         )));
     }
     if starts_with_generated_github_tree(source) {
         return Err(GeneratorError::usage(format!(
             "[[static_file]] source must stay outside `.github/`, found `{source}`"
+        )));
+    }
+    if !is_contained_repository_path(source) {
+        return Err(GeneratorError::usage(format!(
+            "[[static_file]] source must be a repository-relative path, found `{source}`"
         )));
     }
 
