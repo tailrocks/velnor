@@ -1,0 +1,7 @@
+REST run head_sha: 057ed827ab487a8b7b818ab95a4b3c24dff4fe69
+Job: 106023966065; immutable checkout evidence follows.
+2026-09-20T04:54:07.3613911Z Uses: tailrocks/velnor/.github/workflows/ci-unit-rust.yml@refs/pull/968/merge (11735f0e88450122e281dc90311ec10917d29891)
+2026-09-20T04:54:09.2171527Z [command]/usr/bin/git checkout --progress --force 11735f0e88450122e281dc90311ec10917d29891
+2026-09-20T04:54:09.3388415Z HEAD is now at 11735f0 Merge 057ed827ab487a8b7b818ab95a4b3c24dff4fe69 into 89f82dd8b287f46a3cf4c0920f341f6ca6c736db
+2026-09-20T04:54:09.3455895Z [command]/usr/bin/git log -1 --format=%H
+2026-09-20T04:54:09.3486202Z 11735f0e88450122e281dc90311ec10917d29891

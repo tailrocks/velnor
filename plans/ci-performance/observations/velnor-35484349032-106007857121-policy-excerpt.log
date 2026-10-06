@@ -1,0 +1,7 @@
+2026-09-20T02:35:04.5970388Z   HEAD_SHA: f0fb1c012adc2b7e604eaab332785eb5bf780caa
+2026-09-20T02:35:06.6080947Z [36;1mdeadline=$((SECONDS + 900))[0m
+2026-09-20T02:35:06.6091908Z [36;1m[[ -n "$run_id" ]] || { echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }[0m
+2026-09-20T02:35:06.6147154Z   HEAD_SHA: f0fb1c012adc2b7e604eaab332785eb5bf780caa
+2026-09-20T02:35:06.6147805Z   BASE_PIN: 0dc79895ff1c5e88be7c3822c437e1c5b5282e12
+2026-09-20T02:50:09.4239821Z ##[error]no candidate product velnor-workflow-candidate-b510e2700de75668-Linux-X64 was published within 15 minutes
+2026-09-20T02:50:09.4248484Z ##[error]Process completed with exit code 1.

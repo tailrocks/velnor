@@ -1,0 +1,32 @@
+{
+  "repository": "tailrocks/velnor",
+  "source_sha": "9e5c0eb215d4169578d6f064806e89fe4c793e85",
+  "main_run": {
+    "id": 35504500738,
+    "conclusion": "success"
+  },
+  "preview_run": {
+    "id": 35504500719,
+    "conclusion": "failure"
+  },
+  "failures": [
+    {
+      "job_id": 106063528246,
+      "platform": "aarch64-unknown-linux-gnu",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "step": "Build release runner binary",
+      "evidence": "cc-rs: failed to find tool aarch64-linux-gnu-gcc; openssl-sys custom build failed",
+      "next": "Inspect actual native ARM/cross-toolchain declarations and current PR960/962 diffs; do not drop ARM packaging."
+    },
+    {
+      "job_id": 106063528303,
+      "platform": "x86_64",
+      "step": "Build release runner binary",
+      "evidence": "velnor-runner/build.rs:181 preview-build: refusing to embed identity from a dirty tree (1 changed path(s))",
+      "next": "Identify changed path from actual workflow at sourceSHA; inspect release-input PR960/962; preserve clean identity enforcement."
+    }
+  ],
+  "interpretation": "Main CI success does not prove preview distribution. Failed preview is not a successful performance baseline."
+}

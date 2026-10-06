@@ -1,0 +1,5 @@
+2026-09-20T01:37:00.1103753Z   digest-mismatch: error
+2026-09-20T01:37:17.3396846Z #9 ERROR: pull access denied, repository does not exist or may require authorization: server message: insufficient_scope: authorization failed
+2026-09-20T01:37:17.5396366Z ERROR: failed to build: failed to solve: parallax-checkout: pull access denied, repository does not exist or may require authorization: server message: insufficient_scope: authorization failed
+2026-09-20T01:37:17.5411922Z error: CI command failed for unit docker-crates-parallax-sentry-proxy with exit status: 1
+2026-09-20T01:37:17.5505750Z ##[error]Process completed with exit code 1.

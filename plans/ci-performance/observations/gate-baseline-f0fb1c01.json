@@ -1,0 +1,59 @@
+{
+  "baseline_sha": "f0fb1c012adc2b7e604eaab332785eb5bf780caa",
+  "workflow": ".github/workflows/ci-main.yml",
+  "script_sha256": "8ce52cda7cd188669ca6e81fc4b41072db53d0f8c174964b0db295ce39159b3a",
+  "method": "execute exact generated required-gate script with synthetic needs; controls successful, all unit callers skipped; local correctness experiment, not CI timing",
+  "results": [
+    {
+      "case": "empty",
+      "selected_units": [],
+      "exit_code": 0,
+      "elapsed_seconds": 0.334923667,
+      "stdout": "verdict binds plan digest synthetic-plan-digest\n",
+      "stderr": ""
+    },
+    {
+      "case": "unknown-unit",
+      "selected_units": [
+        {
+          "unit_id": "not-a-declared-unit",
+          "providers": [
+            "github-hosted"
+          ]
+        }
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.356954708,
+      "stdout": "verdict binds plan digest synthetic-plan-digest\n",
+      "stderr": ""
+    },
+    {
+      "case": "unknown-provider",
+      "selected_units": [
+        {
+          "unit_id": "rust-velnor-runner",
+          "providers": [
+            "not-a-declared-provider"
+          ]
+        }
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.45227149999999994,
+      "stdout": "verdict binds plan digest synthetic-plan-digest\n",
+      "stderr": ""
+    },
+    {
+      "case": "empty-providers",
+      "selected_units": [
+        {
+          "unit_id": "rust-velnor-runner",
+          "providers": []
+        }
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.4380300829999999,
+      "stdout": "verdict binds plan digest synthetic-plan-digest\n",
+      "stderr": ""
+    }
+  ]
+}

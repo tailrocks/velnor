@@ -1,0 +1,231 @@
+---
+title: "Configuration reference"
+---
+
+# Configuration reference
+
+Velnor uses separate runner identity, operator configuration, native execution
+backend, optional Scale Set lane, and secret files. Packaged Debian
+installations use the paths below.
+
+## Debian files
+
+| File | Purpose |
+| --- | --- |
+| `/etc/velnor/velnor.env` | Non-secret runner, GitHub, scope, label, slot, and resource settings |
+| `/etc/velnor/secrets.env` | Operator credentials and referenced Scale Set auth variables, mode `0600` |
+| `/etc/velnor/execution.toml` | Required native-lane backend selection |
+| `/etc/velnor/scaleset.toml` | Optional Scale Set lane and auth references |
+| `/var/lib/velnor` | Durable state, runner identity, journals, caches, and release data |
+| `/var/lib/velnor/work` | Job workspaces |
+| `/run/velnor` | Runtime sockets, health files, and package transaction lock |
+
+The package may migrate a valid `GITHUB_TOKEN` from `velnor.env` into
+`secrets.env`. Put new credentials directly in the secret file. Tokens never
+belong in command arguments.
+
+Example:
+
+```dotenv
+VELNOR_URL=https://github.com/OWNER/REPO
+VELNOR_NAME=velnor
+VELNOR_LABELS=self-hosted,velnor,velnor-target-mvp
+VELNOR_SLOTS=2
+VELNOR_CAPABILITY_VALIDATION=strict
+# Optional Scale Set lane; unset keeps this service native-only.
+# VELNOR_SCALE_SET_CONFIG=/etc/velnor/scaleset.toml
+# Optional explicit host-wide capacity settings.
+# Use the same values and ledger path in every daemon scope environment file.
+# VELNOR_MAX_JOBS=16
+# VELNOR_PERMIT_LEDGER=/var/lib/velnor/permit-ledger.db
+```
+
+```dotenv
+GITHUB_TOKEN=replace-with-a-token
+```
+
+```toml
+[execution]
+backend = "docker"
+```
+
+Use `microvm` only when Kernel-based Virtual Machine (KVM), verified guest
+artifacts, jailer, and production guest transport are installed and validated.
+
+## Configuration precedence
+
+For the runner identity/config directory, the first available source wins:
+
+1. `--config-dir`;
+2. `VELNOR_CONFIG_DIR`;
+3. systemd `STATE_DIRECTORY` plus `runner`;
+4. `VELNOR_STORAGE_ROOT` plus `lib/velnor/runner`;
+5. the XDG state directory plus `velnor/runner`.
+
+Do not assume `$HOME/.velnor`. Packaged services use explicit system paths.
+Configuration directories are private (`0700`), files are private (`0600`),
+and replacements are atomic.
+
+For native execution backend configuration, Velnor checks the explicitly
+configured path, then the config directory, then
+`/etc/velnor/execution.toml`. The file must select `docker` or `microvm`;
+missing or invalid selection is an error.
+
+## Important settings
+
+| Setting | Meaning |
+| --- | --- |
+| `VELNOR_URL` | Repository, organization, or enterprise target |
+| `VELNOR_NAME` | Base runner identity; slots derive unique names |
+| `VELNOR_LABELS` | Labels used by GitHub matching |
+| `VELNOR_SLOTS` | Concurrent native daemon slots |
+| `VELNOR_MAX_JOBS` | Host-wide permit limit shared by Native and Scale Set; an explicit positive value configures `N` |
+| `VELNOR_PERMIT_LEDGER` | Optional path to the single host-wide permit ledger; every daemon scope must resolve the same file |
+| `VELNOR_SCALE_SET_CONFIG` | Optional Scale Set TOML path; unset disables the Scale Set lane |
+| `VELNOR_QUEUE_WAIT_SECS` | Maximum wait for an unassigned slot |
+| `VELNOR_CAPACITY_WAIT_SECS` | Maximum wait for disk/capacity reservation |
+| `VELNOR_CAPABILITY_VALIDATION` | Must be `strict` |
+| `VELNOR_POOL_ID` / `VELNOR_POOL_NAME` | Native GitHub runner group selection; a runner group is GitHub's named access-control boundary for runners |
+| `VELNOR_STORAGE_ROOT` | Root for Velnor state when not supplied by systemd |
+| `VELNOR_WORK_DIR` | Workspace root |
+| `routing_policy_file` | Optional exact routing-policy override |
+
+## Optional Scale Set lane
+
+Fresh package installation leaves fleet services disabled and stopped. Package
+upgrades require fleet units stopped before unpacking and leave them stopped;
+existing systemd enablement is preserved. When enabled,
+`velnor-daemon.service` and `velnor-daemon@NAME.service` load their environment
+files but do not set `VELNOR_SCALE_SET_CONFIG` themselves. The Scale Set lane
+is therefore disabled by default; the daemon runs native slots only. To enable
+it, set `VELNOR_SCALE_SET_CONFIG` in the service's environment file
+(`/etc/velnor/velnor.env` for the default service, or
+`/etc/velnor/NAME.env` for a named service) to a Scale Set TOML file. When
+enabled, the adapter runs beside native slots and uses the same host-wide
+`VELNOR_MAX_JOBS` permit limit and ledger. The Scale Set TOML has no per-lane
+ledger setting; all daemon scopes must resolve the same `VELNOR_PERMIT_LEDGER`
+path and use the same explicit `VELNOR_MAX_JOBS` value if set.
+
+Fatal Scale Set startup errors in registration reconciliation, adoption-state
+setup, or session creation reach the supervised daemon loop, which retries the
+pass in-process with backoff. A per-worker adoption tick error is logged while
+the worker stays tracked; the Scale Set message path retries that tick.
+systemd restarts only after the daemon process exits. Velnor does not silently
+start native-only when an opted-in lane fails.
+
+The TOML selects a GitHub scope, owner, runner group, and Scale Set. It can
+adopt a set by ID or get-or-create it by name; exactly one of `set_id` and
+`set_name` is required. Choose either `group_id` or `group_name`; if both are
+present, the ID wins. Configure labels and optional state, worker-directory,
+readiness, retry, and polling overrides as needed.
+
+```toml
+scope_url = "https://github.com/OWNER"
+owner = "OWNER"
+group_name = "velnor-runners"
+set_name = "velnor"
+labels = ["self-hosted", "linux", "x64"]
+
+[auth.app]
+client_id = "GITHUB_APP_CLIENT_ID"
+installation_id = 12345678
+private_key_env = "VELNOR_SCALE_SET_APP_PRIVATE_KEY"
+```
+
+Authentication must use exactly one of `[auth.app]` or `[auth.pat]`. For an
+App, provide `client_id`, `installation_id`, and exactly one of
+`private_key_file` or `private_key_env`. For a PAT, provide exactly one of
+`token_file` or `token_env`. These fields name a file path or environment
+variable; they do not contain the credential. Put referenced environment
+variables in the service's mode-`0600` secrets file: use
+`/etc/velnor/secrets.env` for the default service and
+`/etc/velnor/NAME.secrets.env` for a named service instance. Secret files must
+be private (`0600` or stricter). `GITHUB_TOKEN` is not automatically used for
+the Scale Set lane; reference it explicitly with `token_env` if that is
+intended. Inline secrets and unknown TOML fields are rejected.
+
+The lane inherits the daemon's shared permit ledger. It cannot configure a
+second ledger path, so native and Scale Set jobs remain under the same host
+capacity limit. For a single daemon, the slot count initializes an unset `N`;
+later daemon starts adopt that stored value. A positive `VELNOR_MAX_JOBS`
+explicitly resizes the shared limit. The poll header is clamped to its signed
+32-bit range: `X-ScaleSetMaxCapacity = min(i32::MAX, max(0, N - occupied))`,
+where `N` is parsed as `u32` and occupancy comes from shared permits. If the
+final free-capacity lookup returns no value or an error, Velnor sends `0`.
+Failure to open the shared ledger aborts Scale Set startup; supervised daemon
+runs retry that startup with backoff, while one-shot runs return the error.
+Generation-read or reconciliation errors abort the listener iteration before
+its message poll, then the listener backs off and retries. These earlier
+failures do not send a zero-capacity poll. Velnor does not read a
+GitHub-configured Velnor runner cap. GitHub's assigned-demand statistics
+(`totalAssignedJobs`) determine how many workers Velnor should acquire;
+upstream calls the poll value a client-reported maximum.
+
+If the Scale Set TOML sets a custom `state_db`, provision that file before
+startup and list its path in `/etc/velnor/permit-ledger.sources` as both
+`state-db /absolute/path` and `demand-db /absolute/path`. Startup requires the
+complete roster to include the `permit-ledger` entry, all daemon state
+databases, all Scale Set demand databases, and every native-slot marker root.
+The roster must be root-owned, readable, and regular, with no group/world
+write permission; the configured database must exist as a file.
+
+`VELNOR_SLOTS` controls native slots. Scale Set polling reports free shared
+permit headroom, while GitHub assigned-demand statistics drive its worker
+target. Either lane's capacity may be lower than the host-wide `N` ceiling.
+Labels for native runners are sorted and deduplicated. Empty native labels
+become `self-hosted,velnor`.
+Native target-MVP labels add `hetzner-sentry-ci`, `ubuntu-latest`, and
+`velnor-target-mvp`; `ubuntu-24.04` is reserved for GitHub-hosted workflow
+selection and is rejected on Velnor self-hosted runners. The ARM option adds
+`ubuntu-24.04-arm`. macOS labels are rejected; local execution is Linux-only.
+
+## Native scope and registration
+
+Repository scope targets one repository. Organization and enterprise scope
+requires an explicit runner group; it must not silently use GitHub's Default
+group. The desired repository/workflow policy is generated locally or supplied
+through `routing_policy_file`. Live GitHub membership is evidence, not an
+implicit allowlist.
+
+Register or configure with `velnorctl configure`, supplying the GitHub URL,
+personal access token (PAT), runner name, labels, and, for organization or
+enterprise scope, pool name/ID. Registration creates per-slot
+[just-in-time (JIT) runner](/concepts/glossary) credentials. Registration
+and routing checks require exact agreement between desired group, repositories,
+labels, and trust scope.
+
+GitHub JSON requests use the explicit `VELNOR_GITHUB_HTTP_TRANSPORT` setting:
+`native` is the packaged/default Linux path, and `curl` uses the host `curl`
+executable for macOS hosts where native TLS stalls. The curl path uses bounded
+requests with no automatic retry; there is no implicit transport fallback.
+
+## Validation and operations
+
+```sh
+velnorctl capabilities export
+velnorctl capabilities check JOB_MESSAGE.json
+velnorctl preflight --config-dir /etc/velnor --work-dir /var/lib/velnor/work
+velnorctl status --json
+```
+
+Capability validation is always strict; bypass or non-strict settings fail
+startup. Backend preflight also fails if its isolation prerequisites are not
+available. There is no backend fallback.
+
+## Limits
+
+- Configuration and runner identity are private local files; the operator PAT
+  is separate from per-job GitHub credentials.
+- `VELNOR_SLOTS` controls native runner slots, not Scale Set capacity or GitHub scheduling.
+- Native jobs use the explicitly selected Docker or microVM backend. Scale Set jobs use the official runner image and its private per-worker DinD daemon.
+- MicroVM supports a narrower action and cache surface than Docker.
+- In production, query, log, and storage projections fail closed with
+  `Unsupported` / HTTP 501 until durable adapters are wired. The in-memory
+  test service may still return successful empty projections after reopening;
+  that behavior is test-only and is not a production recovery guarantee.
+- Control/admin mutation routes, diagnostics bundles, and storage maintenance
+  operations are currently unavailable to operators.
+- No APT signing-key bootstrap URL or APT repository setup metadata is included
+  in this repository; installation requires a package source provided
+  separately. Fresh package installs remain disabled until configured and
+  started.

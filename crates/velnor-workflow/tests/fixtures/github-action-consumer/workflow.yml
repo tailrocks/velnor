@@ -1,0 +1,194 @@
+name: generic action consumer
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+jobs:
+  success-and-output:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: __VELNOR_CHECKOUT_ACTION__
+        with:
+          persist-credentials: false
+      - id: action
+        uses: __VELNOR_ACTION_PATH__
+        env:
+          ACTION_CONSUMER_ENV: success
+        with:
+          mode: success
+          skip-build: 'false'
+          marker: action-consumer.log
+      - id: action-success
+        if: ${{ always() }}
+        shell: bash
+        run: test "${{ steps.action.outcome }}" = success
+      - id: downstream
+        if: ${{ always() }}
+        shell: bash
+        env:
+          ACTION_RESULT: ${{ steps.action.outputs.result }}
+        run: |
+          test "$ACTION_RESULT" = downloaded
+          test -s action-consumer.log
+          grep -Fx hadolint action-consumer.log
+          grep -Fx buildx action-consumer.log
+      - if: ${{ always() }}
+        shell: bash
+        run: test "${{ steps.downstream.outcome }}" = success
+
+  expected-download-failure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: __VELNOR_CHECKOUT_ACTION__
+        with:
+          persist-credentials: false
+      - id: action
+        continue-on-error: true
+        uses: __VELNOR_ACTION_PATH__
+        env:
+          ACTION_CONSUMER_ENV: failure
+        with:
+          mode: download-failure
+          skip-build: 'false'
+          marker: action-download-failure.log
+      - id: downstream
+        if: ${{ steps.action.outcome == 'success' }}
+        shell: bash
+        run: exit 97
+      - if: ${{ always() }}
+        shell: bash
+        run: |
+          test "${{ steps.action.outcome }}" = failure
+          test -s action-download-failure.log
+          test "${{ steps.downstream.outcome }}" = skipped
+
+  skip-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: __VELNOR_CHECKOUT_ACTION__
+        with:
+          persist-credentials: false
+      - id: action
+        uses: __VELNOR_ACTION_PATH__
+        env:
+          ACTION_CONSUMER_ENV: skip-build
+        with:
+          mode: success
+          skip-build: 'true'
+          marker: action-skip-build.log
+      - id: action-success
+        if: ${{ always() }}
+        shell: bash
+        run: test "${{ steps.action.outcome }}" = success
+      - id: downstream
+        if: ${{ always() }}
+        shell: bash
+        env:
+          ACTION_RESULT: ${{ steps.action.outputs.result }}
+        run: |
+          test "$ACTION_RESULT" = downloaded
+          test -s action-skip-build.log
+          ! grep -Fx hadolint action-skip-build.log
+          ! grep -Fx buildx action-skip-build.log
+      - if: ${{ always() }}
+        shell: bash
+        run: test "${{ steps.downstream.outcome }}" = success
+
+  expected-validator-failure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: __VELNOR_CHECKOUT_ACTION__
+        with:
+          persist-credentials: false
+      - id: action
+        continue-on-error: true
+        uses: __VELNOR_ACTION_PATH__
+        with:
+          mode: validate-failure
+          skip-build: 'false'
+          marker: action-validator-failure.log
+      - id: downstream
+        if: ${{ steps.action.outcome == 'success' }}
+        shell: bash
+        run: exit 97
+      - if: ${{ always() }}
+        shell: bash
+        run: |
+          test "${{ steps.action.outcome }}" = failure
+          test -s action-validator-failure.log
+          test "${{ steps.downstream.outcome }}" = skipped
+
+  expected-hadolint-failure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: __VELNOR_CHECKOUT_ACTION__
+        with:
+          persist-credentials: false
+      - id: action
+        continue-on-error: true
+        uses: __VELNOR_ACTION_PATH__
+        with:
+          mode: hadolint-failure
+          skip-build: 'false'
+          marker: action-hadolint-failure.log
+      - id: downstream
+        if: ${{ steps.action.outcome == 'success' }}
+        shell: bash
+        run: exit 97
+      - if: ${{ always() }}
+        shell: bash
+        run: |
+          test "${{ steps.action.outcome }}" = failure
+          test -s action-hadolint-failure.log
+          test "${{ steps.downstream.outcome }}" = skipped
+
+  expected-buildx-failure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: __VELNOR_CHECKOUT_ACTION__
+        with:
+          persist-credentials: false
+      - id: action
+        continue-on-error: true
+        uses: __VELNOR_ACTION_PATH__
+        with:
+          mode: buildx-failure
+          skip-build: 'false'
+          marker: action-buildx-failure.log
+      - id: downstream
+        if: ${{ steps.action.outcome == 'success' }}
+        shell: bash
+        run: exit 97
+      - if: ${{ always() }}
+        shell: bash
+        run: |
+          test "${{ steps.action.outcome }}" = failure
+          test -s action-buildx-failure.log
+          test "${{ steps.downstream.outcome }}" = skipped
+
+  expected-downstream-failure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: __VELNOR_CHECKOUT_ACTION__
+        with:
+          persist-credentials: false
+      - id: action
+        continue-on-error: true
+        uses: __VELNOR_ACTION_PATH__
+        with:
+          mode: downstream-failure
+          skip-build: 'false'
+          marker: action-downstream-failure.log
+      - id: downstream
+        if: ${{ steps.action.outcome == 'success' }}
+        shell: bash
+        run: exit 97
+      - if: ${{ always() }}
+        shell: bash
+        run: |
+          test "${{ steps.action.outcome }}" = failure
+          test -s action-downstream-failure.log
+          test "${{ steps.downstream.outcome }}" = skipped
+
