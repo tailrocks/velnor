@@ -586,27 +586,18 @@ fn read_blobs(source: &Path, entries: &[SourceEntry]) -> Result<BTreeMap<String,
         .stderr(Stdio::piped())
         .spawn()
         .context("start Git object reader")?;
-    {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .context("open Git object reader input")?;
-        for entry in entries {
-            writeln!(stdin, "{}", entry.oid)?;
-        }
-    }
-    let output = child
-        .wait_with_output()
-        .context("wait for Git object reader")?;
-    ensure!(
-        output.status.success(),
-        "Git object reader failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-
-    let mut reader = BufReader::new(output.stdout.as_slice());
+    let mut stdin = child.stdin.take().context("open Git object reader input")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("open Git object reader output")?;
+    let mut reader = BufReader::new(stdout);
     let mut blobs = BTreeMap::new();
+    // Interleave each query with its response. Writing every query before
+    // reading any response deadlocks once either pipe buffer fills: the
+    // parent blocks writing stdin while Git blocks writing stdout.
     for entry in entries {
+        writeln!(stdin, "{}", entry.oid)?;
         let mut header = Vec::new();
         reader.read_until(b'\n', &mut header)?;
         ensure!(
@@ -641,9 +632,18 @@ fn read_blobs(source: &Path, entries: &[SourceEntry]) -> Result<BTreeMap<String,
         ensure!(separator[0] == b'\n', "Git blob response is not terminated");
         blobs.entry(entry.oid.clone()).or_insert(contents);
     }
+    drop(stdin);
     let mut trailing = Vec::new();
     reader.read_to_end(&mut trailing)?;
     ensure!(trailing.is_empty(), "Git returned unexpected extra objects");
+    let output = child
+        .wait_with_output()
+        .context("wait for Git object reader")?;
+    ensure!(
+        output.status.success(),
+        "Git object reader failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
     Ok(blobs)
 }
 
