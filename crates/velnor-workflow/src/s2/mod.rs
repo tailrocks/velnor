@@ -9589,11 +9589,12 @@ fn validate_output_path_relations(
             }
         }
         if let Some(recorded) = recorded {
-            // A case-only rename may read as the same preimage on a
-            // case-insensitive filesystem, while the old spelling is still
-            // classified as unknown and force-removable. Refuse only when
-            // both spellings resolve to the same on-disk file; a stale
-            // ownership row alone does not prove an alias.
+            // A case-only rename collides on case-insensitive checkouts
+            // even when this machine's filesystem keeps both spellings, so
+            // spelling-level aliases always refuse. Other overlaps still
+            // need the on-disk proof below: a stale ownership row alone
+            // does not prove the old file still occupies the path, and such
+            // rows stay classified as unknown and force-removable.
             let Some(left_text) = left.to_str() else {
                 return Err(GeneratorError::usage(
                     "generated output paths must be valid UTF-8".to_owned(),
@@ -9609,7 +9610,17 @@ fn validate_output_path_relations(
                     ));
                 };
                 if crate::path_spellings_overlap(left_text, previous_text) {
-                    if !crate::filesystem_files_alias_on_disk(root, left, previous)? {
+                    // Case-only spellings collide on case-insensitive
+                    // checkouts no matter the local filesystem, so a live
+                    // prior file rejects on spelling alone. A missing prior
+                    // is a stale row (force-plannable), and other shape
+                    // overlaps still need the on-disk proof below.
+                    if !crate::recorded_output_exists_on_disk(root, previous) {
+                        continue;
+                    }
+                    if !crate::path_spellings_alias(left_text, previous_text)
+                        && !crate::filesystem_files_alias_on_disk(root, left, previous)?
+                    {
                         continue;
                     }
                     return Err(GeneratorError::usage(format!(
