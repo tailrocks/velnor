@@ -254,13 +254,18 @@ fn guardian_completes_a_cycle_without_job_execution() {
 fn packaged_units_have_no_controller_partof_to_workers() {
     let controller = include_str!("../debian/velnor-controller@.service");
     let slot = include_str!("../debian/velnor-slot@.service");
-    let job = include_str!("../debian/velnor-job@.service");
+    // No packaged per-job unit: workers run as transient units under the
+    // jobs slice, so no packaged file may reappear.
+    let job_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("debian/velnor-job@.service");
+    assert!(
+        !job_path.exists(),
+        "packaged velnor-job@.service must stay deleted"
+    );
     assert!(!controller.lines().any(|line| line.starts_with("PartOf=")));
     assert!(!slot.lines().any(|line| line.starts_with("PartOf=")));
-    assert!(!job.lines().any(|line| line.starts_with("PartOf=")));
     assert!(slot.contains("velnor-runner slot"));
     assert!(slot.contains("--generation 1"));
-    assert!(job.contains("KillMode=control-group"));
     assert!(include_str!("../debian/velnor-guardian.service").contains("velnor-runner guardian"));
     assert!(!include_str!("../debian/velnor-guardian.service")
         .lines()
@@ -321,10 +326,6 @@ fn packaged_units_have_no_controller_partof_to_workers() {
         "job process is the transitional executor"
     );
     assert!(!daemon_src_has_args_json());
-    assert!(
-        !job.contains("--once"),
-        "packaged job unit must not pass --once: {job}"
-    );
     let postinst = include_str!("../debian/postinst");
     assert!(
         postinst.contains("NEVER") && postinst.contains("restart"),

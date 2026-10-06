@@ -11770,9 +11770,7 @@ fn display_paths<'a>(paths: impl Iterator<Item = &'a PathBuf>) -> String {
 /// `relative`. Missing state records nothing: every unknown entry is then
 /// a foreign body.
 fn recorded_outputs_contain(ownership: Option<&OwnershipState>, relative: &Path) -> bool {
-    ownership
-        .map(|state| state.outputs.contains_key(relative))
-        .unwrap_or(false)
+    ownership.is_some_and(|state| state.outputs.contains_key(relative))
 }
 
 /// Every path the unknown walk excuses: current renderer outputs, the

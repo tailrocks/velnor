@@ -3335,19 +3335,15 @@ fn string_token_literal(value: &Value) -> Option<String> {
     let Value::Object(object) = value else {
         return None;
     };
-    match template_token_type(value).ok().flatten()? {
-        0 => {
-            if clr_object_member(object, "type").is_none() {
-                return None;
-            }
-            Some(
-                clr_object_member(object, "lit")
-                    .and_then(|value| clr_string_value(value).ok().flatten())
-                    .unwrap_or_default(),
-            )
-        }
-        _ => None,
+    if template_token_type(value).ok().flatten() != Some(0) {
+        return None;
     }
+    clr_object_member(object, "type")?;
+    Some(
+        clr_object_member(object, "lit")
+            .and_then(|value| clr_string_value(value).ok().flatten())
+            .unwrap_or_default(),
+    )
 }
 
 fn template_token_is_null(value: &Value) -> bool {

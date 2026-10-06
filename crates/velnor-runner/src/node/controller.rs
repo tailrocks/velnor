@@ -2952,6 +2952,7 @@ fn capture_recorded_owner_death_proof(
     Ok(proof)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn teardown_recorded_job_with_death_proof(
     args: &ControllerArgs,
     slot_dir: &Path,

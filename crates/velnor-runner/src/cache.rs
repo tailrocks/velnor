@@ -4736,7 +4736,7 @@ mod tests {
         let report = reclaim_for_disk_pressure_on_device(
             &work_root,
             ReclaimGoal::AvailableFloor(100),
-            &[work_root.clone()],
+            std::slice::from_ref(&work_root),
             &layout,
             None,
             pin.device_id(),
@@ -4814,7 +4814,7 @@ mod tests {
         let report = reclaim_for_disk_pressure_on_device(
             &work_root,
             ReclaimGoal::Amount(1),
-            &[work_root.clone()],
+            std::slice::from_ref(&work_root),
             &layout,
             None,
             pin.device_id(),
