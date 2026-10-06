@@ -3743,7 +3743,7 @@ mod tests {
             &layout.run_root,
             trust_scope,
             &repository_key,
-            "job-operator-scope",
+            "11111111-1111-4111-8111-111111111111",
         )
         .expect_err("prepare must not adopt an operator-created scope");
         assert!(error
