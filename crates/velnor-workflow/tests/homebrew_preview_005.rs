@@ -1175,10 +1175,17 @@ fn assert_build_step_order(fixture: &Fixture) {
         "attested artifact identity is bound to verified source SHA and current attempt"
     );
     assert_eq!(
-        named_step(fixture.publish_job(), "Download verified package handoff")["with"]["name"]
+        named_step(fixture.publish_job(), "Download verified package handoff")["with"]
+            ["artifact-ids"]
             .as_str(),
-        Some("${{ format('package-release-attested-{0}-{1}-{2}', needs.attest.outputs.source_commit, github.run_id, github.run_attempt) }}"),
-        "publisher downloads only the exact attested artifact from the current attempt"
+        Some("${{ needs.attest.outputs.artifact_id }}"),
+        "publisher downloads only the exact attested artifact by immutable ID"
+    );
+    assert!(
+        named_step(fixture.publish_job(), "Download verified package handoff")["with"]
+            .get("name")
+            .is_none(),
+        "publisher download carries no name fallback beside the immutable ID"
     );
 }
 
@@ -2234,6 +2241,26 @@ fn evaluate_artifact_selector(expression: &str, event: &EventContext) -> String 
     resolved
 }
 
+/// The publisher binds the same run's attested artifact by immutable ID
+/// rather than by name, so no cross-attempt name can resolve there.
+fn assert_publish_retry_isolation(fixture: &Fixture) {
+    assert_eq!(
+        fixture.attest_job()["outputs"]["artifact_id"].as_str(),
+        Some("${{ steps.upload-attested.outputs.artifact-id }}"),
+        "signer exposes the attested upload artifact ID"
+    );
+    let publish_download = named_step(fixture.publish_job(), "Download verified package handoff");
+    assert_eq!(
+        publish_download["with"]["artifact-ids"].as_str(),
+        Some("${{ needs.attest.outputs.artifact_id }}"),
+        "publisher downloads the same-run attested artifact by immutable ID"
+    );
+    assert!(
+        publish_download["with"].get("name").is_none(),
+        "publisher download carries no attempt-bound name to confuse across retries"
+    );
+}
+
 fn assert_retry_artifact_isolation() {
     let fixture = Fixture::new("retry-artifact-isolation", "dist");
     let source_sha = fixture.initial_sha.as_str();
@@ -2256,15 +2283,8 @@ fn assert_retry_artifact_isolation() {
             "stale verified bytes",
             "retry verified bytes",
         ),
-        (
-            named_step(fixture.attest_job(), "Upload attested package handoff"),
-            named_step(fixture.publish_job(), "Download verified package handoff"),
-            "${{ format('package-release-attested-{0}-{1}-{2}', needs.verify.outputs.source_commit, github.run_id, github.run_attempt) }}",
-            "${{ format('package-release-attested-{0}-{1}-{2}', needs.attest.outputs.source_commit, github.run_id, github.run_attempt) }}",
-            "stale attested bytes",
-            "retry attested bytes",
-        ),
     ];
+    assert_publish_retry_isolation(&fixture);
 
     for (
         upload_step,

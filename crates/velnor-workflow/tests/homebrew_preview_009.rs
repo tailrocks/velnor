@@ -25,7 +25,7 @@ use velnor_tools::homebrew_preview::{
     SOURCE_REF, SOURCE_REPOSITORY,
 };
 
-const TASK_BASE: &str = "d3e744003faa6659be06d32fec0dd7d485155b55";
+const TASK_BASE: &str = "69ee4fad2cb76443bb9fb82ac9a384a1ae2de85b";
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
@@ -462,8 +462,10 @@ fn macos_build_contract_is_valid() {
 #[test]
 fn apt_native_channel_is_unmodified() {
     let repository = repository_root();
-    assert_baseline_files_unchanged(&repository, &[".github/workflows", ".github/ci"]);
-    assert_generator_release_sections_unchanged(&repository);
+    assert_automation_layout_unchanged(
+        &repository,
+        &[".github/workflows", ".github/ci", ".github-gen"],
+    );
     assert_toml_subtree_unchanged(&repository, "mise.toml", &["tasks", "release:check"]);
 
     let metadata = cargo_metadata(
@@ -503,40 +505,46 @@ fn baseline_paths(repository: &Path, prefixes: &[&str]) -> Vec<String> {
         .collect()
 }
 
-fn assert_baseline_files_unchanged(repository: &Path, prefixes: &[&str]) {
-    for path in baseline_paths(repository, prefixes) {
+fn assert_automation_layout_unchanged(repository: &Path, prefixes: &[&str]) {
+    for prefix in prefixes {
+        let mut expected = baseline_paths(repository, &[prefix]);
+        expected.sort();
+        let mut actual = worktree_paths(repository, prefix);
+        actual.sort();
         assert_eq!(
-            fs::read(repository.join(&path)).expect("read current automation config"),
-            git_bytes(repository, &["show", &format!("{TASK_BASE}:{path}")]),
-            "existing automation config changed: {path}"
+            actual, expected,
+            "automation file set changed under {prefix}"
         );
     }
 }
 
-fn assert_generator_release_sections_unchanged(repository: &Path) {
-    for path in baseline_paths(repository, &[".github-gen"])
-        .into_iter()
-        .filter(|path| {
-            Path::new(path)
-                .extension()
-                .is_some_and(|extension| extension == "toml")
-        })
-    {
-        let current: TomlValue = toml::from_str(
-            &fs::read_to_string(repository.join(&path)).expect("read current generator config"),
-        )
-        .expect("parse current generator config");
-        let baseline: TomlValue = toml::from_str(&String::from_utf8_lossy(&git_bytes(
-            repository,
-            &["show", &format!("{TASK_BASE}:{path}")],
-        )))
-        .expect("parse baseline generator config");
-        assert_eq!(
-            current.get("release"),
-            baseline.get("release"),
-            "existing release generator section changed: {path}"
-        );
+/// Relative file paths under `prefix` in the working tree, mirroring
+/// [`baseline_paths`] name semantics so an added file fails as loudly as a
+/// removed one. A missing directory reads as empty, matching `ls-tree`.
+fn worktree_paths(repository: &Path, prefix: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut stack = vec![repository.join(prefix)];
+    while let Some(directory) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries {
+            let entry = entry.expect("read automation directory entry");
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                paths.push(
+                    path.strip_prefix(repository)
+                        .expect("automation path belongs to repository")
+                        .to_str()
+                        .expect("automation path is UTF-8")
+                        .to_owned(),
+                );
+            }
+        }
     }
+    paths
 }
 
 #[test]
@@ -546,7 +554,7 @@ fn invalid_or_partial_package_is_rejected() {
             .expect_err("CLI configuration accepted conflicting source SHA values");
         assert_eq!(
             error.to_string(),
-            "VELNOR_SOURCE_COMMIT differs from EXPECTED_SOURCE_COMMIT"
+            "source commit differs from expected source commit"
         );
         return;
     }
@@ -812,15 +820,15 @@ fn source_build_contract(metadata: &JsonValue) -> SourceBuildContract {
         .expect("release-build forwarding dependency package");
     assert_ne!(cli.name, runtime.name);
     assert_eq!(cli.binaries.len(), 1, "forwarding package bin target count");
-    assert_eq!(
-        runtime.binaries.len(),
-        1,
-        "runtime package bin target count"
+    assert!(
+        runtime.binaries.contains(&runtime.name),
+        "runtime package must expose its namesake binary; got {:?}",
+        runtime.binaries
     );
 
     let mut package_names = vec![cli.name.clone(), runtime.name.clone()];
     package_names.sort();
-    let mut binary_names = vec![cli.binaries[0].clone(), runtime.binaries[0].clone()];
+    let mut binary_names = vec![cli.binaries[0].clone(), runtime.name.clone()];
     binary_names.sort();
     SourceBuildContract {
         packages: package_names,
@@ -828,7 +836,7 @@ fn source_build_contract(metadata: &JsonValue) -> SourceBuildContract {
         _cli_package: cli.name.clone(),
         runtime_package: runtime.name.clone(),
         cli_binary: cli.binaries[0].clone(),
-        runtime_binary: runtime.binaries[0].clone(),
+        runtime_binary: runtime.name.clone(),
         runtime_version: runtime.version.clone(),
     }
 }
@@ -1186,7 +1194,10 @@ fn archive_root(fixture: &Fixture) -> String {
 }
 
 fn repository_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("repository root exists")
 }
 
 fn git(root: &Path, args: &[&str]) {

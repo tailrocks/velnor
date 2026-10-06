@@ -23,6 +23,8 @@ static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 const REPOSITORY: &str = "example/preview-source";
 const SOURCE_REF: &str = "refs/heads/main";
 const ZERO_SHA: &str = "0000000000000000000000000000000000000000";
+const RESULT_RUN_ID: &str = "preview-admission-fixture";
+const RESULT_RUN_ATTEMPT: &str = "1";
 
 struct GitFixture {
     root: PathBuf,
@@ -189,18 +191,71 @@ impl GitFixture {
 
     fn aggregate_ci_results(&self, before: &str, head: &str, results: &str) -> Output {
         let expected_work_path = self.expected_work_path();
+        let expected_work = fs::read_to_string(&expected_work_path)
+            .expect("planner writes its expected-work handoff");
+        let expected_work: Value =
+            serde_json::from_str(&expected_work).expect("expected-work handoff is JSON");
+        let plan_digest = expected_work["plan_digest"]
+            .as_str()
+            .expect("strict expected-work carries its plan digest");
         let results_path = self.root.join("ci-no-work-results.json");
         fs::write(&results_path, results).expect("write aggregate results fixture");
         Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
             .current_dir(&self.root)
             .env("BASE_SHA", before)
             .env("HEAD_SHA", head)
+            .env("VELNOR_RESULT_REPOSITORY", REPOSITORY)
+            .env("VELNOR_RESULT_RUN_ID", RESULT_RUN_ID)
+            .env("VELNOR_RESULT_RUN_ATTEMPT", RESULT_RUN_ATTEMPT)
+            .env("VELNOR_RESULT_PLAN_DIGEST", plan_digest)
             .args(["aggregate", "--expected"])
             .arg(expected_work_path)
             .arg("--results")
             .arg(results_path)
             .output()
             .expect("run required CI aggregate for a no-work plan")
+    }
+
+    /// Strict schema-2 success results covering every planned (unit, lane):
+    /// the identity each verify job would record through `record-result`.
+    fn strict_success_results(&self, before: &str, head: &str) -> String {
+        let expected_work = fs::read_to_string(self.expected_work_path())
+            .expect("planner writes its expected-work handoff");
+        let expected_work: Value =
+            serde_json::from_str(&expected_work).expect("expected-work handoff is JSON");
+        let plan_digest = expected_work["plan_digest"]
+            .as_str()
+            .expect("strict expected-work carries its plan digest");
+        let mut results = Vec::new();
+        for unit in expected_work["units"]
+            .as_array()
+            .expect("expected-work units array")
+        {
+            let id = unit["id"].as_str().expect("expected unit id");
+            let platform = unit["platform"].as_str().expect("expected unit platform");
+            let command_digest = unit["command_digest"]
+                .as_str()
+                .expect("expected unit command digest");
+            for lane in unit["lanes"].as_array().expect("expected unit lanes") {
+                let lane = lane.as_str().expect("expected lane name");
+                results.push(serde_json::json!({
+                    "unit": id,
+                    "lane": lane,
+                    "outcome": "success",
+                    "repository": REPOSITORY,
+                    "base_sha": before,
+                    "head_sha": head,
+                    "run_id": RESULT_RUN_ID,
+                    "run_attempt": RESULT_RUN_ATTEMPT,
+                    "plan_digest": plan_digest,
+                    "provider": lane,
+                    "platform": platform,
+                    "command_digest": command_digest,
+                }));
+            }
+        }
+        serde_json::to_string(&serde_json::json!({"schema": 2, "results": results}))
+            .expect("serialize strict results fixture")
     }
 
     fn aggregate_ci_no_work(&self, before: &str, head: &str) -> Output {
@@ -210,7 +265,7 @@ impl GitFixture {
             serde_json::from_str(&expected_work).expect("expected-work handoff is JSON");
         assert_eq!(expected_work["planned_no_work"], true);
         assert_eq!(expected_work["units"].as_array().map(Vec::len), Some(0));
-        self.aggregate_ci_results(before, head, "{\"results\":[]}\n")
+        self.aggregate_ci_results(before, head, "{\"schema\":2,\"results\":[]}\n")
     }
 
     fn render_preview_workflow(&self) -> serde_yaml::Value {
@@ -296,7 +351,7 @@ repository = "{REPOSITORY}"
 providers = ["github-hosted"]
 automatic_providers = ["github-hosted"]
 default_branch = "main"
-files = ["ci-pr.yml", "ci-main.yml", "preview.yml"]
+files = ["ci-pr.yml", "ci-main.yml", "preview.yml", "ci-policy.yml"]
 
 [workflow.selectors.github-hosted]
 runs_on = ["ubuntu-24.04"]
@@ -647,11 +702,11 @@ fn assert_preview_publication_dag(workflow: &serde_yaml::Value) {
     );
     assert_eq!(
         job_step(verify, "Download untrusted package candidate")["with"]["name"].as_str(),
-        Some("${{ format('package-release-candidate-{0}', needs.admission.outputs.head_sha) }}")
+        Some("${{ format('package-release-candidate-{0}-{1}-{2}', needs.admission.outputs.head_sha, github.run_id, github.run_attempt) }}")
     );
     assert_eq!(
         job_step(verify, "Upload verified package handoff")["with"]["name"].as_str(),
-        Some("${{ format('package-release-{0}', steps.verify.outputs.source_commit) }}")
+        Some("${{ format('package-release-{0}-{1}-{2}', steps.verify.outputs.source_commit, github.run_id, github.run_attempt) }}")
     );
 
     let attest = &workflow["jobs"]["attest"];
@@ -683,11 +738,11 @@ fn assert_preview_publication_dag(workflow: &serde_yaml::Value) {
     );
     assert_eq!(
         job_step(attest, "Download verified package handoff")["with"]["name"].as_str(),
-        Some("${{ format('package-release-{0}', needs.verify.outputs.source_commit) }}")
+        Some("${{ format('package-release-{0}-{1}-{2}', needs.verify.outputs.source_commit, github.run_id, github.run_attempt) }}")
     );
     assert_eq!(
         job_step(attest, "Upload attested package handoff")["with"]["name"].as_str(),
-        Some("${{ format('package-release-attested-{0}', needs.verify.outputs.source_commit) }}")
+        Some("${{ format('package-release-attested-{0}-{1}-{2}', needs.verify.outputs.source_commit, github.run_id, github.run_attempt) }}")
     );
 
     let publish = &workflow["jobs"]["publish"];
@@ -707,9 +762,14 @@ fn assert_preview_publication_dag(workflow: &serde_yaml::Value) {
         publish["env"]["EXPECTED_SOURCE_COMMIT"].as_str(),
         Some("${{ needs.attest.outputs.source_commit }}")
     );
+    let download = job_step(publish, "Download verified package handoff");
     assert_eq!(
-        job_step(publish, "Download verified package handoff")["with"]["name"].as_str(),
-        Some("${{ format('package-release-attested-{0}', needs.attest.outputs.source_commit) }}")
+        download["with"]["artifact-ids"].as_str(),
+        Some("${{ needs.attest.outputs.artifact_id }}")
+    );
+    assert!(
+        download["with"].get("name").is_none(),
+        "publisher downloads by immutable artifact ID, never by name"
     );
 
     let verify_published = &workflow["jobs"]["verify_published"];
@@ -1073,7 +1133,7 @@ fn assert_tests_only_skip_but_run_ci() {
     let tests_required = tests.aggregate_ci_results(
         &tests_before,
         &tests_head,
-        "{\"results\":[{\"unit\":\"test-contract\",\"lane\":\"github-hosted\",\"outcome\":\"success\"}]}\n",
+        &tests.strict_success_results(&tests_before, &tests_head),
     );
     assert!(
         tests_required.status.success(),
