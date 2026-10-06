@@ -523,8 +523,8 @@ pub struct RecordingCommands {
     /// Default Docker contract fixture: a systemd-backed cgroup-v2 daemon.
     /// Set to `None` or a failing result when testing admission failures.
     pub docker_cgroup_probe: Option<CommandResult>,
-    /// Default slice contract fixture: the job slice loaded with no
-    /// CPU/RAM ceiling (`infinity` on every ceiling property).
+    /// Default slice contract fixture: the job slice loaded with no resource
+    /// ceiling (`infinity` on every ceiling property).
     pub docker_slice_state: Option<CommandResult>,
     pub next_pid: u32,
     pub fail_spawn: Option<String>,
@@ -559,7 +559,7 @@ impl Default for RecordingCommands {
             }),
             docker_slice_state: Some(CommandResult {
                 code: 0,
-                stdout: "LoadState=loaded\nCPUQuotaPerSecUSec=infinity\nMemoryMax=infinity\nMemoryHigh=infinity\n"
+                stdout: "LoadState=loaded\nCPUQuotaPerSecUSec=infinity\nMemoryHigh=infinity\nMemoryMax=infinity\nMemorySwapMax=infinity\nTasksMax=infinity\n"
                     .into(),
                 stderr: String::new(),
             }),
@@ -672,12 +672,14 @@ impl CommandRunner for RecordingCommands {
             }
         } else if program == "systemctl"
             && args.first().is_some_and(|arg| arg == "show")
-            && args.len() == 6
+            && args.len() == 8
             && args[1] == "--property=LoadState"
             && args[2] == "--property=CPUQuotaPerSecUSec"
-            && args[3] == "--property=MemoryMax"
-            && args[4] == "--property=MemoryHigh"
-            && args[5] == crate::docker_lease::JOB_CGROUP_PARENT
+            && args[3] == "--property=MemoryHigh"
+            && args[4] == "--property=MemoryMax"
+            && args[5] == "--property=MemorySwapMax"
+            && args[6] == "--property=TasksMax"
+            && args[7] == crate::docker_lease::JOB_CGROUP_PARENT
             && let Some(state) = &self.docker_slice_state
         {
             result = state.clone();

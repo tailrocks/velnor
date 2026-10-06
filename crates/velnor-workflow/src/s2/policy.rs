@@ -3240,6 +3240,7 @@ fn canonical_api_step_findings(
             velnor_policy.default_branch.as_str()
         };
         let rendered = super::policy_job(&super::PolicyJobSpec {
+            #[cfg(test)]
             candidate_artifact_wiring: true,
             name: "Policy",
             revision: &revision,
@@ -4103,13 +4104,6 @@ fn static_local_provider(job: &Mapping, velnor_policy: &VelnorPolicyContract) ->
     }
     let provider = velnor_policy.provider_for_labels(&labels)?;
     VelnorPolicyContract::is_local_provider(provider).then(|| provider.to_owned())
-}
-
-/// A GitHub-owned execution label: inherently hosted, never a trust fact.
-/// Selectors for local capacity are caller-managed and never carry these
-/// prefixes.
-fn is_github_owned_label(label: &str) -> bool {
-    label.starts_with("ubuntu-") || label.starts_with("macos-") || label.starts_with("windows-")
 }
 
 fn has_safe_runner_gate(
@@ -5067,7 +5061,7 @@ fn is_approved_dynamic_runner(label: &str) -> bool {
 /// equals a declared selector's whole set is that provider; anything else
 /// static is foreign. Label substrings are never consulted.
 fn classify_static_label(label: &str, velnor_policy: &VelnorPolicyContract) -> RunnerAnalysis {
-    if is_github_owned_label(label) {
+    if super::provider::is_github_owned_label(label) {
         return RunnerAnalysis::default();
     }
     match velnor_policy.provider_for_labels(&[label]) {

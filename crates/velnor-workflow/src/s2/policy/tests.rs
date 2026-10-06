@@ -1143,6 +1143,22 @@ fn velnor_entrypoint_is_gated_and_never_builds_the_pin() {
 /// tree's own routing, matched by set equality against `runs-on`.
 const VELNOR_SELECTOR: &str = "example-velnor";
 
+#[test]
+fn unknown_github_style_runner_labels_are_foreign() {
+    let policy = VelnorPolicyContract::default();
+
+    for label in ["ubuntu-private", "macos-custom", "windows-private"] {
+        assert!(
+            classify_static_label(label, &policy).foreign,
+            "undeclared runner label `{label}` was treated as GitHub-hosted"
+        );
+    }
+    assert!(
+        !classify_static_label("ubuntu-24.04", &policy).foreign,
+        "documented GitHub-hosted label was rejected"
+    );
+}
+
 fn velnor_tree(name: &str, pr_workflow: &str) -> PathBuf {
     let root = temporary_directory(name);
     write(

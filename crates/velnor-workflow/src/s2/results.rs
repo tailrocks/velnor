@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 
 use crate::s2::planner::{Exclusion, Execution};
 use crate::s2::provider::{
-    evaluate_verdict, ObservedResult, ProviderId, RunIdentity, VerdictFailure,
+    evaluate_verdict, ObservedOutcome, ObservedResult, ProviderId, RunIdentity, VerdictFailure,
 };
 use crate::s2::GeneratorError;
 
@@ -97,6 +97,30 @@ impl ExpectedSet {
     pub(crate) fn passes(&self, observed: &[ObservedResult], run: &RunIdentity) -> bool {
         self.verdict(observed, run).is_empty()
     }
+}
+
+/// Validate live-result identity independently from outcome policy. The
+/// aggregate owns planned skips and failure semantics; this helper projects
+/// every observed outcome to success so stale, foreign, duplicate, provider,
+/// platform, and command mismatches cannot be hidden by a skipped result.
+#[must_use]
+pub(crate) fn identity_failures(
+    expected: &BTreeSet<(String, ProviderId)>,
+    observed: &[ObservedResult],
+    run: &RunIdentity,
+) -> Vec<VerdictFailure> {
+    let identity_only = observed
+        .iter()
+        .cloned()
+        .map(|mut result| {
+            result.outcome = ObservedOutcome::Success;
+            result
+        })
+        .collect::<Vec<_>>();
+    evaluate_verdict(expected, &identity_only, run)
+        .into_iter()
+        .filter(|failure| !matches!(failure, VerdictFailure::Missing { .. }))
+        .collect()
 }
 
 /// Matrix policy for qualification: fail-fast is always disabled so every
@@ -206,6 +230,11 @@ mod tests {
         let plan = fanout(&[planned("rust-a")], None, &universe(), &selectors(), true).unwrap();
         let plan_digest = plan.digest.clone();
         let digests = plan.command_digests();
+        let platforms = plan
+            .executions
+            .iter()
+            .map(|execution| (execution.unit_id.clone(), execution.platform))
+            .collect();
         let frozen = ExpectedSet::freeze(&plan.executions, plan.exclusions);
         let run = RunIdentity {
             repository_id: "123".to_owned(),
@@ -214,6 +243,7 @@ mod tests {
             run_attempt: "1".to_owned(),
             plan_digest,
             command_digests: digests,
+            platforms,
         };
         (frozen, run)
     }
@@ -370,6 +400,11 @@ mod tests {
         .unwrap();
         let plan_digest = plan.digest.clone();
         let digests = plan.command_digests();
+        let platforms = plan
+            .executions
+            .iter()
+            .map(|execution| (execution.unit_id.clone(), execution.platform))
+            .collect();
         let frozen = ExpectedSet::freeze(&plan.executions, plan.exclusions);
         let run = RunIdentity {
             repository_id: "123".to_owned(),
@@ -378,6 +413,7 @@ mod tests {
             run_attempt: "1".to_owned(),
             plan_digest,
             command_digests: digests,
+            platforms,
         };
         // A local lane claims the hosted-only unit: wrong provider, and the
         // expected hosted record is missing.
