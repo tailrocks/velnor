@@ -597,6 +597,10 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             release(&arguments[1..])?;
             Ok(true)
         }
+        "release-admission" => {
+            run_release_admission(&arguments[1..])?;
+            Ok(true)
+        }
         "version" => {
             print_version(arguments.get(1..).unwrap_or_default())?;
             Ok(true)
@@ -704,6 +708,36 @@ fn verify_action_command(arguments: &[OsString]) -> Result<bool, GeneratorError>
         .ok_or_else(|| GeneratorError::usage("verify-action needs --path PATH".to_owned()))?;
     super::scan::action::verify_action(&root, metadata)?;
     Ok(true)
+}
+
+fn run_release_admission(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "repository",
+            "ref",
+            "event",
+            "before",
+            "head",
+            "replay-from",
+        ],
+    )?;
+    let required = |name: &str| {
+        options.get(name).ok_or_else(|| {
+            GeneratorError::usage(format!("release-admission requires --{name} VALUE"))
+        })
+    };
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    super::primitives::release_admission_command(
+        &root,
+        required("repository")?,
+        required("ref")?,
+        required("event")?,
+        required("before")?,
+        required("head")?,
+        options.get("replay-from").map(Path::new),
+    )
 }
 
 /// Dispatch the slice-C subcommands (`aggregate`, `select`, `fingerprint`,

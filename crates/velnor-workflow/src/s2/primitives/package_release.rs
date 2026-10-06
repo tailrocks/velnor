@@ -1,15 +1,20 @@
-//! Typed rolling package-release handoff.
+//! Typed source-bound package-release publication and consumer handoff.
 //
 // The producer task remains repository-owned: it builds the package bytes and
 // writes the declared verified directory. Velnor owns the boundary around
 // that directory: exact manifest/identity binding, payload checksums,
-// attestation verification, serialized rolling publication, and the explicit
-// consumer updater invocation. No consumer repository or product name is
-// embedded here.
+// attestation verification, immutable publication, optional rolling refresh,
+// and explicit consumer updater inputs. No consumer repository or product
+// name is embedded here.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::io::Write;
 use std::path::Path;
+use std::process::{Command, Stdio};
+
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+use serde::{Deserialize, Serialize};
 
 use super::{Args, Primitive, RenderCtx, Rendered, PACKAGE_RELEASE};
 use crate::s2::provider::ProviderId;
@@ -33,6 +38,8 @@ struct PackageReleaseSpec {
     supporting_assets: Vec<String>,
     channel: String,
     release_tag: String,
+    consumer_tag_mode: ConsumerTagMode,
+    refresh_rolling_release: bool,
     github_release_type: String,
     publish_environment: String,
     release_title_prefix: String,
@@ -42,6 +49,82 @@ struct PackageReleaseSpec {
     updater_token_secret: String,
     update_commit_message: String,
     concurrency_group: String,
+    release_inputs: ReleaseInputRules,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConsumerTagMode {
+    Immutable,
+    Legacy,
+}
+
+/// Repository-owned positive and negative path declarations for source-head
+/// preview admission. Unknown paths intentionally remain production-capable:
+/// an incomplete path inventory may publish an unnecessary preview, but it
+/// must never silently suppress a required one.
+///
+/// These globs classify paths, not Rust semantics. Inline Rust tests live in
+/// production `src/` files, so edits there conservatively admit a preview even
+/// when the edit only changes an inline test. A path-only classifier cannot
+/// claim semantic test-only precision.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseInputRules {
+    production_inputs: BTreeMap<String, Vec<String>>,
+    production_dependencies: BTreeMap<String, Vec<String>>,
+    non_production_inputs: BTreeMap<String, Vec<String>>,
+}
+
+/// A path matched by a named rule. Paths are recorded so an operator can
+/// explain and replay the exact decision without consulting current main.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AdmissionMatch {
+    id: String,
+    path: String,
+}
+
+/// Full path-level result of one push admission decision.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AdmissionPath {
+    path: String,
+    previous: Option<String>,
+    status: String,
+}
+
+/// Source-head release admission evidence. The result has no timestamp or
+/// mutable-main lookup, so replay of the same explicit source tuple and rules
+/// is byte-stable.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseAdmission {
+    schema: String,
+    repository: String,
+    /// Ref named by the triggering event, retained so a replay is tied to it.
+    source_ref: String,
+    /// Repository-configured source ref that is allowed to publish previews.
+    configured_source_ref: String,
+    before_sha: String,
+    head_sha: String,
+    head_tree: String,
+    changed_paths: Vec<AdmissionPath>,
+    matched_rules: Vec<AdmissionMatch>,
+    matched_dependencies: Vec<AdmissionMatch>,
+    matched_non_production: Vec<AdmissionMatch>,
+    disposition: String,
+    reason: String,
+    rules_digest: String,
+}
+
+struct AdmissionEvent<'a> {
+    repository: &'a str,
+    event_ref: &'a str,
+    configured_source_ref: &'a str,
+    event_name: &'a str,
+    before_sha: &'a str,
+    head_sha: &'a str,
+    head_tree: &'a str,
 }
 
 pub(crate) struct PackageRelease;
@@ -60,6 +143,7 @@ impl Primitive for PackageRelease {
             "channel",
             "concurrency_group",
             "consumer_branch",
+            "consumer_tag_mode",
             "consumer_repository",
             "github_release_type",
             "manifest_schema",
@@ -68,6 +152,10 @@ impl Primitive for PackageRelease {
             "publish_environment",
             "release_tag",
             "release_title_prefix",
+            "refresh_rolling_release",
+            "production_inputs",
+            "production_dependencies",
+            "non_production_inputs",
             "source_ref",
             "source_repository",
             "supporting_assets",
@@ -239,6 +327,500 @@ fn validate_mise_tasks(root: &Path, key: &str, tasks: &[String]) -> Result<(), G
             )));
         }
     }
+    Ok(())
+}
+
+fn valid_rule_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_".contains(&byte))
+}
+
+fn compile_release_groups(
+    key: &str,
+    groups: &BTreeMap<String, Vec<String>>,
+    required: bool,
+) -> Result<Vec<(String, GlobSet)>, GeneratorError> {
+    if required && groups.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "package-release {key} must declare at least one named path group"
+        )));
+    }
+    let mut compiled = Vec::with_capacity(groups.len());
+    for (id, patterns) in groups {
+        if !valid_rule_id(id) {
+            return Err(GeneratorError::usage(format!(
+                "package-release {key} group id {id:?} must use lowercase letters, digits, `-`, or `_`"
+            )));
+        }
+        if patterns.is_empty() {
+            return Err(GeneratorError::usage(format!(
+                "package-release {key} group {id} must contain at least one path glob"
+            )));
+        }
+        let mut seen = BTreeSet::new();
+        let mut builder = GlobSetBuilder::new();
+        for pattern in patterns {
+            if pattern.is_empty()
+                || pattern.starts_with('/')
+                || pattern.contains(['\\', '\0', '\n', '\r'])
+                || pattern.split('/').any(|part| matches!(part, "." | ".."))
+                || !seen.insert(pattern)
+            {
+                return Err(GeneratorError::usage(format!(
+                    "package-release {key} group {id} has an unsafe or duplicate repository-relative glob: {pattern:?}"
+                )));
+            }
+            let glob = GlobBuilder::new(pattern)
+                .literal_separator(true)
+                .build()
+                .map_err(|error| {
+                    GeneratorError::usage(format!(
+                        "package-release {key} group {id} has invalid glob {pattern:?}: {error}"
+                    ))
+                })?;
+            builder.add(glob);
+        }
+        let set = builder.build().map_err(|error| {
+            GeneratorError::usage(format!(
+                "package-release {key} group {id} has invalid glob set: {error}"
+            ))
+        })?;
+        compiled.push((id.clone(), set));
+    }
+    Ok(compiled)
+}
+
+fn parse_release_input_rules(args: &Args<'_>) -> Result<ReleaseInputRules, GeneratorError> {
+    let production_inputs = args.string_tables("production_inputs")?;
+    let production_inputs_declared = production_inputs.is_some();
+    let production_dependencies = args
+        .string_tables("production_dependencies")?
+        .unwrap_or_default();
+    let non_production_inputs = args
+        .string_tables("non_production_inputs")?
+        .unwrap_or_default();
+
+    let rules = ReleaseInputRules {
+        production_inputs: production_inputs.unwrap_or_default(),
+        production_dependencies,
+        non_production_inputs,
+    };
+    // Declarations predating release admission omit this table. Keep them
+    // valid; their unmatched changes are admitted conservatively below. An
+    // explicitly present table remains a strict contract, including when it
+    // is empty.
+    compile_release_groups(
+        "production_inputs",
+        &rules.production_inputs,
+        production_inputs_declared,
+    )?;
+    compile_release_groups(
+        "production_dependencies",
+        &rules.production_dependencies,
+        false,
+    )?;
+    compile_release_groups("non_production_inputs", &rules.non_production_inputs, false)?;
+
+    for patterns in rules
+        .production_inputs
+        .values()
+        .chain(rules.production_dependencies.values())
+    {
+        for pattern in patterns {
+            if rules
+                .non_production_inputs
+                .values()
+                .flatten()
+                .any(|skip| skip == pattern)
+            {
+                return Err(GeneratorError::usage(format!(
+                    "package-release path glob {pattern:?} is declared as both production and non-production input"
+                )));
+            }
+        }
+    }
+    Ok(rules)
+}
+
+fn git_output(root: &Path, args: &[&str], operation: &str) -> Result<Vec<u8>, GeneratorError> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .map_err(|error| {
+            GeneratorError::usage(format!(
+                "run git {operation} for release admission: {error}"
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(GeneratorError::usage(format!(
+            "git {operation} failed for release admission: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(output.stdout)
+}
+
+fn full_sha(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn empty_tree_sha(root: &Path) -> Result<String, GeneratorError> {
+    let mut child = Command::new("git")
+        .args(["hash-object", "-t", "tree", "--stdin"])
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            GeneratorError::usage(format!(
+                "start empty-tree identity computation for release admission: {error}"
+            ))
+        })?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| GeneratorError::usage("git empty-tree stdin unavailable"))?
+        .write_all(&[])
+        .map_err(|error| {
+            GeneratorError::usage(format!(
+                "write empty-tree input for release admission: {error}"
+            ))
+        })?;
+    let output = child.wait_with_output().map_err(|error| {
+        GeneratorError::usage(format!(
+            "read empty-tree identity for release admission: {error}"
+        ))
+    })?;
+    if !output.status.success() {
+        return Err(GeneratorError::usage(format!(
+            "git empty-tree identity computation failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let tree = String::from_utf8(output.stdout)
+        .map_err(|_| GeneratorError::usage("git returned a non-UTF-8 empty-tree identity"))?
+        .trim()
+        .to_owned();
+    if !full_sha(&tree) {
+        return Err(GeneratorError::usage(
+            "git returned an invalid empty-tree identity",
+        ));
+    }
+    Ok(tree)
+}
+
+fn compiled_groups(
+    key: &str,
+    groups: &BTreeMap<String, Vec<String>>,
+) -> Result<Vec<(String, GlobSet)>, GeneratorError> {
+    compile_release_groups(key, groups, false)
+}
+
+fn match_groups(
+    groups: &[(String, GlobSet)],
+    paths: &[String],
+) -> (Vec<AdmissionMatch>, BTreeSet<String>) {
+    let mut matches = BTreeSet::new();
+    let mut matched_paths = BTreeSet::new();
+    for path in paths {
+        for (id, globs) in groups {
+            if globs.is_match(path) {
+                matches.insert(AdmissionMatch {
+                    id: id.clone(),
+                    path: path.clone(),
+                });
+                matched_paths.insert(path.clone());
+            }
+        }
+    }
+    (matches.into_iter().collect(), matched_paths)
+}
+
+fn admission_path(change: &crate::s2::reuse::ChangedPath) -> AdmissionPath {
+    let status = match change.status {
+        crate::s2::reuse::ChangeKind::Added => "added",
+        crate::s2::reuse::ChangeKind::Modified => "modified",
+        crate::s2::reuse::ChangeKind::Deleted => "deleted",
+        crate::s2::reuse::ChangeKind::Renamed => "renamed",
+    };
+    AdmissionPath {
+        path: change.path.clone(),
+        previous: change.previous.clone(),
+        status: status.to_owned(),
+    }
+}
+
+fn evaluate_release_admission(
+    event: &AdmissionEvent<'_>,
+    rules: &ReleaseInputRules,
+    changes: &[crate::s2::reuse::ChangedPath],
+) -> Result<ReleaseAdmission, GeneratorError> {
+    let production = compiled_groups("production_inputs", &rules.production_inputs)?;
+    let dependencies = compiled_groups("production_dependencies", &rules.production_dependencies)?;
+    let non_production = compiled_groups("non_production_inputs", &rules.non_production_inputs)?;
+    let changed_paths = changes.iter().map(admission_path).collect::<Vec<_>>();
+    let effective_paths = crate::s2::reuse::effective_paths(changes);
+    let (matched_rules, production_paths) = match_groups(&production, &effective_paths);
+    let (matched_dependencies, dependency_paths) = match_groups(&dependencies, &effective_paths);
+    let (matched_non_production, non_production_paths) =
+        match_groups(&non_production, &effective_paths);
+    let mut all_known = production_paths.clone();
+    all_known.extend(dependency_paths.iter().cloned());
+    all_known.extend(non_production_paths.iter().cloned());
+    let unknown_paths = effective_paths
+        .iter()
+        .filter(|path| !all_known.contains(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let (disposition, reason) = if event.event_name != "push" {
+        (
+            "skip".to_owned(),
+            format!("event {:?} is not a qualifying push", event.event_name),
+        )
+    } else if event.event_ref != event.configured_source_ref {
+        (
+            "skip".to_owned(),
+            format!(
+                "push ref {:?} does not match configured source ref {:?}",
+                event.event_ref, event.configured_source_ref
+            ),
+        )
+    } else if !matched_rules.is_empty() || !matched_dependencies.is_empty() {
+        let first = matched_rules
+            .first()
+            .map(|entry| format!("production rule {} matched {}", entry.id, entry.path))
+            .or_else(|| {
+                matched_dependencies.first().map(|entry| {
+                    format!("production dependency {} matched {}", entry.id, entry.path)
+                })
+            })
+            .unwrap_or_else(|| "declared production input matched".to_owned());
+        ("admit".to_owned(), first)
+    } else if !unknown_paths.is_empty() {
+        (
+            "admit".to_owned(),
+            format!(
+                "{} changed path(s) have no non-production declaration; admitting conservatively",
+                unknown_paths.len()
+            ),
+        )
+    } else if changed_paths.is_empty() {
+        (
+            "skip".to_owned(),
+            "push changed no paths between its recorded before and head SHAs".to_owned(),
+        )
+    } else {
+        (
+            "skip".to_owned(),
+            format!(
+                "all {} changed path(s) match declared non-production inputs",
+                changed_paths.len()
+            ),
+        )
+    };
+    let rules_digest = hex_sha256(&serde_json::to_vec(rules).map_err(|error| {
+        GeneratorError::usage(format!("serialize release input rules: {error}"))
+    })?);
+    Ok(ReleaseAdmission {
+        schema: "homebrew-source-release-admission/v1".to_owned(),
+        repository: event.repository.to_owned(),
+        source_ref: event.event_ref.to_owned(),
+        configured_source_ref: event.configured_source_ref.to_owned(),
+        before_sha: event.before_sha.to_owned(),
+        head_sha: event.head_sha.to_owned(),
+        head_tree: event.head_tree.to_owned(),
+        changed_paths,
+        matched_rules,
+        matched_dependencies,
+        matched_non_production,
+        disposition,
+        reason,
+        rules_digest,
+    })
+}
+
+const RELEASE_DIGEST_HEX: &[u8; 16] = b"0123456789abcdef";
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(char::from(RELEASE_DIGEST_HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(RELEASE_DIGEST_HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn package_release_spec(root: &Path) -> Result<PackageReleaseSpec, GeneratorError> {
+    let config_path = root.join(crate::s2::config::GENERATION_CONFIG_PATH);
+    let config = crate::s2::config::load(&config_path)?;
+    let rows = config
+        .declare()
+        .iter()
+        .filter(|row| row.primitive() == super::PACKAGE_RELEASE)
+        .collect::<Vec<_>>();
+    if rows.len() != 1 {
+        return Err(GeneratorError::usage(format!(
+            "release-admission requires exactly one package-release declaration; found {}",
+            rows.len()
+        )));
+    }
+    parse_spec(&Args(rows[0].args()))
+}
+
+fn checked_source_head_tree(root: &Path, head_sha: &str) -> Result<String, GeneratorError> {
+    let head_commit = String::from_utf8(git_output(
+        root,
+        &["rev-parse", "HEAD^{commit}"],
+        "rev-parse",
+    )?)
+    .map_err(|_| GeneratorError::usage("git returned a non-UTF-8 checkout HEAD"))?
+    .trim()
+    .to_owned();
+    if head_commit != head_sha {
+        return Err(GeneratorError::usage(format!(
+            "release-admission checkout HEAD {head_commit} does not match event head {head_sha}"
+        )));
+    }
+    let head_tree = String::from_utf8(git_output(
+        root,
+        &["rev-parse", "HEAD^{tree}"],
+        "rev-parse tree",
+    )?)
+    .map_err(|_| GeneratorError::usage("git returned a non-UTF-8 checkout tree"))?
+    .trim()
+    .to_owned();
+    if !full_sha(&head_tree) {
+        return Err(GeneratorError::usage(
+            "git returned an invalid source head tree identity",
+        ));
+    }
+    Ok(head_tree)
+}
+
+fn release_changed_paths(
+    root: &Path,
+    before_sha: &str,
+    head_sha: &str,
+    qualifying_push: bool,
+) -> Result<Vec<crate::s2::reuse::ChangedPath>, GeneratorError> {
+    if !qualifying_push {
+        return Ok(Vec::new());
+    }
+    let base = if before_sha.bytes().all(|byte| byte == b'0') {
+        empty_tree_sha(root)?
+    } else {
+        if git_output(
+            root,
+            &["cat-file", "-e", &format!("{before_sha}^{{commit}}")],
+            "cat-file before commit",
+        )
+        .is_err()
+        {
+            return Err(GeneratorError::usage(format!(
+                "release-admission before commit {before_sha} is unavailable; fetch or restore that exact history and replay the recorded event, never substitute current main"
+            )));
+        }
+        let ancestry = Command::new("git")
+            .args(["merge-base", "--is-ancestor", before_sha, head_sha])
+            .current_dir(root)
+            .output()
+            .map_err(|error| {
+                GeneratorError::usage(format!("run git merge-base for release admission: {error}"))
+            })?;
+        if !ancestry.status.success() {
+            return Err(GeneratorError::usage(format!(
+                "release-admission before commit {before_sha} is not an ancestor of event head {head_sha}; force-pushed or unrelated history cannot be substituted"
+            )));
+        }
+        before_sha.to_owned()
+    };
+    let diff = git_output(
+        root,
+        &[
+            "diff",
+            "--name-status",
+            "--find-renames=50%",
+            "-z",
+            &base,
+            head_sha,
+        ],
+        "diff",
+    )?;
+    crate::s2::reuse::parse_name_status_nul(&diff).ok_or_else(|| {
+        GeneratorError::usage(
+            "release-admission could not parse the complete NUL-delimited Git diff; refusing a skip",
+        )
+    })
+}
+
+fn verify_replay_receipt(path: &Path, result: &ReleaseAdmission) -> Result<(), GeneratorError> {
+    let recorded = std::fs::read(path).map_err(|error| {
+        GeneratorError::io("read release admission replay evidence", path, &error)
+    })?;
+    let expected: ReleaseAdmission = serde_json::from_slice(&recorded).map_err(|error| {
+        GeneratorError::usage(format!("parse release admission replay evidence: {error}"))
+    })?;
+    if expected != *result {
+        return Err(GeneratorError::usage(
+            "release-admission replay evidence does not match the exact repository/ref/before/head/tree, rules, complete diff, or disposition",
+        ));
+    }
+    Ok(())
+}
+
+/// Run the source-specific admission command against explicit event inputs.
+/// The source checkout must already be pinned at `head`; the command never
+/// reads a branch tip or queries GitHub's path-filter API.
+pub(crate) fn release_admission_command(
+    root: &Path,
+    repository: &str,
+    event_ref: &str,
+    event: &str,
+    before_sha: &str,
+    head_sha: &str,
+    replay_from: Option<&Path>,
+) -> Result<(), GeneratorError> {
+    let spec = package_release_spec(root)?;
+    if repository != spec.source_repository {
+        return Err(GeneratorError::usage(format!(
+            "release-admission repository {repository:?} does not match configured source {}",
+            spec.source_repository
+        )));
+    }
+    if !full_sha(head_sha) || !full_sha(before_sha) {
+        return Err(GeneratorError::usage(
+            "release-admission before and head must be full 40-character lowercase commit SHAs",
+        ));
+    }
+    let head_tree = checked_source_head_tree(root, head_sha)?;
+    let qualifying_push = event == "push" && event_ref == spec.source_ref;
+    let changes = release_changed_paths(root, before_sha, head_sha, qualifying_push)?;
+    let event = AdmissionEvent {
+        repository: &spec.source_repository,
+        event_ref,
+        configured_source_ref: &spec.source_ref,
+        event_name: event,
+        before_sha,
+        head_sha,
+        head_tree: &head_tree,
+    };
+    let result = evaluate_release_admission(&event, &spec.release_inputs, &changes)?;
+    if let Some(path) = replay_from {
+        verify_replay_receipt(path, &result)?;
+    }
+    let json = serde_json::to_string(&result)
+        .map_err(|error| GeneratorError::usage(format!("serialize release admission: {error}")))?;
+    println!("{json}");
     Ok(())
 }
 
@@ -418,6 +1000,33 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
             "package-release release_tag must be a portable tag token",
         ));
     }
+    let consumer_tag_mode = match args
+        .string("consumer_tag_mode")?
+        .as_deref()
+        .unwrap_or("legacy")
+    {
+        "immutable" => ConsumerTagMode::Immutable,
+        "legacy" => ConsumerTagMode::Legacy,
+        _ => {
+            return Err(GeneratorError::usage(
+                "package-release consumer_tag_mode must be `immutable` or `legacy`",
+            ));
+        }
+    };
+    let refresh_rolling_release = match args.0.get("refresh_rolling_release") {
+        None => true,
+        Some(toml::Value::Boolean(value)) => *value,
+        Some(_) => {
+            return Err(GeneratorError::usage(
+                "package-release refresh_rolling_release must be a boolean",
+            ));
+        }
+    };
+    if consumer_tag_mode == ConsumerTagMode::Legacy && !refresh_rolling_release {
+        return Err(GeneratorError::usage(
+            "package-release legacy consumer_tag_mode requires refresh_rolling_release = true",
+        ));
+    }
     let github_release_type = required_string(args, "github_release_type")?;
     if !matches!(github_release_type.as_str(), "prerelease" | "release") {
         return Err(GeneratorError::usage(
@@ -463,6 +1072,7 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "package-release-preview".to_owned());
     validate_one_line("concurrency_group", &concurrency_group)?;
+    let release_inputs = parse_release_input_rules(args)?;
 
     Ok(PackageReleaseSpec {
         build_tasks,
@@ -477,6 +1087,8 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
         supporting_assets,
         channel,
         release_tag,
+        consumer_tag_mode,
+        refresh_rolling_release,
         github_release_type,
         publish_environment,
         release_title_prefix,
@@ -486,6 +1098,7 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
         updater_token_secret,
         update_commit_message,
         concurrency_group,
+        release_inputs,
     })
 }
 
@@ -549,6 +1162,171 @@ fn render_verification_task_step(
     )
 }
 
+#[allow(clippy::too_many_lines)]
+fn package_build_script(tasks: &[String]) -> String {
+    let mut script = String::from(
+        r#"set -Eeuo pipefail
+workspace="$GITHUB_WORKSPACE"
+workspace_real="$(cd -- "$workspace" && pwd -P)"
+expected_handoff="$workspace/$PACKAGE_DIR"
+expected_handoff_real="$workspace_real/$PACKAGE_DIR"
+if [[ "$VELNOR_VERIFIED_PACKAGE_DIR" != "$expected_handoff" ]]; then
+  echo "::error::verified package path differs from the declared workspace handoff" >&2
+  exit 1
+fi
+IFS='/' read -r -a handoff_segments <<< "$PACKAGE_DIR"
+last_segment=$((${#handoff_segments[@]} - 1))
+handoff_parent="$workspace_real"
+for index in "${!handoff_segments[@]}"; do
+  candidate="$handoff_parent/${handoff_segments[$index]}"
+  if [[ -L "$candidate" ]]; then
+    echo "::error::package handoff path contains a symlink" >&2
+    exit 1
+  fi
+  if [[ -e "$candidate" ]]; then
+    if [[ ! -d "$candidate" ]]; then
+      echo "::error::package handoff path contains a non-directory entry" >&2
+      exit 1
+    fi
+    if (( index == last_segment )); then
+      echo "::error::package handoff already exists; refusing stale output" >&2
+      exit 1
+    fi
+    resolved_parent="$(cd -- "$candidate" && pwd -P)"
+    case "$resolved_parent/" in
+      "$workspace_real/"*) ;;
+      *) echo "::error::package handoff parent escapes the workspace" >&2; exit 1 ;;
+    esac
+  else
+    mkdir -- "$candidate"
+  fi
+  handoff_parent="$candidate"
+done
+if ! git -C "$VELNOR_SOURCE_CHECKOUT_DIR" check-ignore -q -- "$PACKAGE_DIR"; then
+  echo "::error::declared package handoff must be ignored by the source checkout" >&2
+  exit 1
+fi
+
+actual_commit="$(git -C "$VELNOR_SOURCE_CHECKOUT_DIR" rev-parse HEAD^{commit})"
+if [[ "$actual_commit" != "$EXPECTED_SOURCE_COMMIT" ]]; then
+  echo "::error::source checkout commit differs from the admitted event commit" >&2
+  exit 1
+fi
+actual_tree="$(git -C "$VELNOR_SOURCE_CHECKOUT_DIR" rev-parse HEAD^{tree})"
+if [[ "$actual_tree" != "$EXPECTED_SOURCE_TREE" ]]; then
+  echo "::error::source checkout tree differs from the admitted event tree" >&2
+  exit 1
+fi
+source_status="$(git -C "$VELNOR_SOURCE_CHECKOUT_DIR" status --porcelain=v1 --untracked-files=all -- . ":(exclude)$PACKAGE_DIR")"
+if [[ -n "$source_status" ]]; then
+  echo "::error::source checkout is dirty before package production" >&2
+  printf '%s\n' "$source_status" >&2
+  exit 1
+fi
+
+runner_temp="$RUNNER_TEMP"
+runner_temp_real="$(cd -- "$runner_temp" && pwd -P)"
+case "$runner_temp_real/" in
+  "$workspace_real/"*) echo "::error::package scratch must be outside the source checkout" >&2; exit 1 ;;
+esac
+[[ "${GITHUB_RUN_ID:-}" =~ ^[0-9]+$ && "${GITHUB_RUN_ATTEMPT:-}" =~ ^[1-9][0-9]*$ ]] || {
+  echo "::error::package scratch requires numeric run and attempt identities" >&2
+  exit 1
+}
+expected_scratch="$runner_temp/package-release-scratch-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+if [[ "$PACKAGE_RELEASE_SCRATCH_DIR" != "$expected_scratch" ]]; then
+  echo "::error::package scratch path differs from the run-owned runner-temp path" >&2
+  exit 1
+fi
+if [[ -e "$PACKAGE_RELEASE_SCRATCH_DIR" || -L "$PACKAGE_RELEASE_SCRATCH_DIR" ]]; then
+  echo "::error::package scratch path already exists; refusing to remove a pre-existing path" >&2
+  exit 1
+fi
+mkdir -m 700 -- "$PACKAGE_RELEASE_SCRATCH_DIR"
+scratch_owned=1
+CARGO_TARGET_DIR="$PACKAGE_RELEASE_SCRATCH_DIR/target"
+cleanup_package_scratch() {
+  local status=$?
+  trap - EXIT
+  if (( scratch_owned )); then
+    if ! rm -rf -- "$PACKAGE_RELEASE_SCRATCH_DIR"; then
+      status=1
+    fi
+  fi
+  exit "$status"
+}
+trap cleanup_package_scratch EXIT
+
+write_source_inventory() {
+  local output_file="$1"
+  local path
+  {
+    git -C "$VELNOR_SOURCE_CHECKOUT_DIR" ls-files --others --exclude-standard -z -- .
+    git -C "$VELNOR_SOURCE_CHECKOUT_DIR" ls-files --others --ignored --exclude-standard -z -- .
+  } | LC_ALL=C sort -zu | while IFS= read -r -d '' path; do
+    if [[ "$path" == "$PACKAGE_DIR" || "$path" == "$PACKAGE_DIR/"* ]]; then
+      continue
+    fi
+    printf '%s\0' "$path"
+  done > "$output_file"
+}
+print_source_inventory() {
+  local path
+  while IFS= read -r -d '' path; do
+    printf '  %q\n' "$path" >&2
+  done < "$1"
+}
+source_inventory_before="$PACKAGE_RELEASE_SCRATCH_DIR/source-inventory-before"
+source_inventory_after="$PACKAGE_RELEASE_SCRATCH_DIR/source-inventory-after"
+write_source_inventory "$source_inventory_before"
+if [[ -s "$source_inventory_before" ]]; then
+  echo "::error::source checkout has stale ignored or untracked inputs before package production" >&2
+  print_source_inventory "$source_inventory_before"
+  exit 1
+fi
+export PACKAGE_DIR VELNOR_VERIFIED_PACKAGE_DIR VELNOR_SOURCE_CHECKOUT_DIR CARGO_TARGET_DIR
+export VELNOR_SOURCE_COMMIT VELNOR_SOURCE_REF PACKAGE_RELEASE_SCRATCH_DIR
+"#,
+    );
+    for task in tasks {
+        let _ = writeln!(script, "mise run {}", shell_quote(task));
+    }
+    script.push_str(
+        r#"
+handoff_parent="$workspace_real"
+for segment in "${handoff_segments[@]}"; do
+  candidate="$handoff_parent/$segment"
+  if [[ -L "$candidate" || ! -d "$candidate" ]]; then
+    echo "::error::package producer returned a missing or symlinked handoff component" >&2
+    exit 1
+  fi
+  handoff_parent="$candidate"
+done
+resolved_handoff="$(cd -- "$expected_handoff" && pwd -P)"
+if [[ "$resolved_handoff" != "$expected_handoff_real" ]]; then
+  echo "::error::package producer changed the resolved handoff path" >&2
+  exit 1
+fi
+write_source_inventory "$source_inventory_after"
+if ! cmp -s "$source_inventory_before" "$source_inventory_after"; then
+  echo "::error::package producer changed ignored or untracked source inputs outside the declared handoff" >&2
+  echo "before:" >&2
+  print_source_inventory "$source_inventory_before"
+  echo "after:" >&2
+  print_source_inventory "$source_inventory_after"
+  exit 1
+fi
+source_status="$(git -C "$VELNOR_SOURCE_CHECKOUT_DIR" status --porcelain=v1 --untracked-files=all -- . ":(exclude)$PACKAGE_DIR")"
+if [[ -n "$source_status" ]]; then
+  echo "::error::package producer changed tracked or untracked source files outside the declared handoff" >&2
+  printf '%s\n' "$source_status" >&2
+  exit 1
+fi
+"#,
+    );
+    script
+}
+
 /// The verified-directory boundary shared by the producer and publisher jobs.
 /// It intentionally checks the downloaded directory again: an artifact or
 /// release may never be trusted merely because its producer job passed.
@@ -557,7 +1335,52 @@ fn verification_script(spec: &PackageReleaseSpec) -> String {
     let mut script = String::from(
         r#"set -euo pipefail
 dir="$VELNOR_VERIFIED_PACKAGE_DIR"
-test -d "$dir"
+if [[ ! -d "$dir" || -L "$dir" ]]; then
+  echo "::error::verified package directory is missing or a symlink" >&2
+  exit 1
+fi
+workspace="$GITHUB_WORKSPACE"
+expected_root="${PACKAGE_HANDOFF_ROOT:-$workspace}"
+expected_relative="${PACKAGE_HANDOFF_RELATIVE:-$PACKAGE_DIR}"
+handoff_source_commit="${PACKAGE_HANDOFF_SOURCE_COMMIT:-$EXPECTED_SOURCE_COMMIT}"
+if [[ "$expected_root" != /* || -z "$expected_relative" || "$expected_relative" == /* || "$expected_relative" == */ || "$expected_relative" == *//* ]]; then
+  echo "::error::verified package handoff root must be absolute and relative path must be normalized" >&2
+  exit 1
+fi
+if [[ ! "$handoff_source_commit" =~ ^[0-9a-f]{40}$ || "$handoff_source_commit" != "$EXPECTED_SOURCE_COMMIT" ]]; then
+  echo "::error::verified package handoff path is not bound to the expected source commit" >&2
+  exit 1
+fi
+expected_dir="$expected_root/$expected_relative"
+if [[ "$dir" != "$expected_dir" ]]; then
+  echo "::error::verified package path differs from the declared handoff" >&2
+  exit 1
+fi
+expected_root_real="$(cd -- "$expected_root" && pwd -P)"
+IFS='/' read -r -a verified_segments <<< "$expected_relative"
+verified_parent="$expected_root_real"
+for segment in "${verified_segments[@]}"; do
+  if [[ -z "$segment" || "$segment" == . || "$segment" == .. ]]; then
+    echo "::error::verified package relative path contains an invalid component" >&2
+    exit 1
+  fi
+  candidate="$verified_parent/$segment"
+  if [[ -L "$candidate" ]]; then
+    echo "::error::verified package path contains a symlink component" >&2
+    exit 1
+  fi
+  if [[ ! -d "$candidate" ]]; then
+    echo "::error::verified package path contains a missing or non-directory component" >&2
+    exit 1
+  fi
+  verified_parent="$candidate"
+done
+resolved_dir="$(cd -- "$dir" && pwd -P)"
+expected_dir_real="$expected_root_real/$expected_relative"
+if [[ "$resolved_dir" != "$expected_dir_real" ]]; then
+  echo "::error::verified package path does not resolve to the declared handoff" >&2
+  exit 1
+fi
 manifest="$dir/release-manifest.json"
 identity="$dir/identity.json"
 test -s "$manifest"
@@ -569,7 +1392,9 @@ actual_names="$(mktemp)"
 checksum_names="$(mktemp)"
 expected_supporting_names="$(mktemp)"
 actual_supporting_names="$(mktemp)"
-trap 'rm -f -- "$expected_files" "$actual_files" "$expected_names" "$actual_names" "$checksum_names" "$expected_supporting_names" "$actual_supporting_names"' EXIT
+source_inventory_raw="$(mktemp)"
+source_inventory_filtered="$(mktemp)"
+trap 'rm -f -- "$expected_files" "$actual_files" "$expected_names" "$actual_names" "$checksum_names" "$expected_supporting_names" "$actual_supporting_names" "$source_inventory_raw" "$source_inventory_filtered"' EXIT
 {
   printf '%s\n' "release-manifest.json" "identity.json"
 "#,
@@ -593,6 +1418,11 @@ if ! cmp -s "$expected_files" "$actual_files"; then
   exit 1
 fi
 source_checkout="${VELNOR_SOURCE_CHECKOUT_DIR:-$GITHUB_WORKSPACE}"
+source_checkout_real="$(cd -- "$source_checkout" && pwd -P)"
+source_handoff_relative=""
+case "$expected_dir_real/" in
+  "$source_checkout_real/"*) source_handoff_relative="${expected_dir_real#"$source_checkout_real"/}" ;;
+esac
 actual_source_commit="$(git -C "$source_checkout" rev-parse HEAD)"
 [[ "$actual_source_commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::source checkout HEAD is not 40 lowercase hex" >&2; exit 1; }
 [ "$actual_source_commit" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::source checkout HEAD does not match the expected source commit" >&2; exit 1; }
@@ -605,6 +1435,35 @@ case "$source_remote" in
 esac
 actual_source_repository="${actual_source_repository%.git}"
 [ "$actual_source_repository" = "$EXPECTED_SOURCE_REPOSITORY" ] || { echo "::error::source checkout repository does not match the declared repository" >&2; exit 1; }
+source_status_pathspecs=(.)
+if [[ -n "$source_handoff_relative" ]]; then
+  source_status_pathspecs+=(":(exclude)$source_handoff_relative")
+fi
+source_status="$(git -C "$source_checkout" status --porcelain=v1 --untracked-files=all -- "${source_status_pathspecs[@]}")"
+if [[ -n "$source_status" ]]; then
+  echo "::error::source checkout has changes outside the declared package handoff" >&2
+  printf '%s\n' "$source_status" >&2
+  exit 1
+fi
+{
+  git -C "$source_checkout" ls-files --others --exclude-standard -z -- .
+  git -C "$source_checkout" ls-files --others --ignored --exclude-standard -z -- .
+} | LC_ALL=C sort -zu > "$source_inventory_raw"
+while IFS= read -r -d '' path; do
+  if [[ -n "$source_handoff_relative" ]]; then
+    if [[ "$path" == "$source_handoff_relative" || "$path" == "$source_handoff_relative/"* ]]; then
+      continue
+    fi
+  fi
+  printf '%s\0' "$path"
+done < "$source_inventory_raw" > "$source_inventory_filtered"
+if [[ -s "$source_inventory_filtered" ]]; then
+  echo "::error::source checkout has ignored or untracked files outside the declared package handoff" >&2
+  while IFS= read -r -d '' path; do
+    printf '  %q\n' "$path" >&2
+  done < "$source_inventory_filtered"
+  exit 1
+fi
 source_commit="$(jq -er '.source_commit | strings' "$manifest")"
 version="$(jq -er '.version | strings' "$manifest")"
 [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::manifest source_commit is not 40 lowercase hex" >&2; exit 1; }
@@ -729,7 +1588,7 @@ done
   NF == 2 {
     name = $2
     sub(/^\*/, "", name)
-    if (length($1) != 64 || $1 !~ /^[0-9a-f]+$/ || name == "" || name ~ /[\\/[:space:]]/) {
+    if (length($1) != 64 || $1 !~ /^[0-9a-f]+$/ || name == "" || index(name, "\\") || name ~ /[[:space:]]/) {
       exit 1
     }
     print name
@@ -811,6 +1670,95 @@ printf 'source_commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
     script
 }
 
+fn artifact_signer_validation_script(spec: &PackageReleaseSpec) -> String {
+    let mut script = String::from(
+        r#"set -euo pipefail
+dir="$VELNOR_VERIFIED_PACKAGE_DIR"
+[[ "$EXPECTED_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::expected source commit is invalid" >&2; exit 1; }
+if [[ "$PACKAGE_DIR" != package || "$dir" != "$GITHUB_WORKSPACE/package" || ! -d "$dir" || -L "$dir" ]]; then
+  echo "::error::attestation input is not the fixed package directory" >&2
+  exit 1
+fi
+expected_files="$(mktemp)"
+actual_files="$(mktemp)"
+trap 'rm -f -- "$expected_files" "$actual_files"' EXIT
+{
+"#,
+    );
+    for name in release_asset_names(spec) {
+        let _ = writeln!(script, "  printf '%s\\n' {}", shell_quote(&name));
+    }
+    script.push_str(
+        r#"} | LC_ALL=C sort > "$expected_files"
+find "$dir" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort > "$actual_files"
+if find "$dir" -mindepth 1 -maxdepth 1 ! -type f -print -quit | grep -q .; then
+  echo "::error::attestation input contains a non-file entry" >&2
+  exit 1
+fi
+if ! cmp -s "$expected_files" "$actual_files"; then
+  echo "::error::attestation input contains an undeclared or missing file" >&2
+  exit 1
+fi
+manifest="$dir/release-manifest.json"
+identity="$dir/identity.json"
+test -s "$manifest"
+test -s "$identity"
+if ! jq -e \
+  --arg schema "$EXPECTED_MANIFEST_SCHEMA" \
+  --arg repository "$EXPECTED_SOURCE_REPOSITORY" \
+  --arg source_ref "$EXPECTED_SOURCE_REF" \
+  --arg commit "$EXPECTED_SOURCE_COMMIT" \
+  'keys == ["assets","schema","source_commit","source_ref","source_repository","supporting_assets","version"] and
+   .schema == $schema and .source_repository == $repository and
+   .source_ref == $source_ref and .source_commit == $commit and
+   (.assets | type == "array" and all(.[]; type == "object" and keys == ["name","sha256"] and (.sha256 | strings | test("^[0-9a-f]{64}$")))) and
+   (.supporting_assets | type == "array" and all(.[]; type == "object" and keys == ["name","sha256"] and (.sha256 | strings | test("^[0-9a-f]{64}$"))))' "$manifest" >/dev/null; then
+  echo "::error::attestation manifest does not match admitted source identity" >&2
+  exit 1
+fi
+if ! jq -e \
+  --arg repository "$EXPECTED_SOURCE_REPOSITORY" \
+  --arg source_ref "$EXPECTED_SOURCE_REF" \
+  --arg commit "$EXPECTED_SOURCE_COMMIT" \
+  --slurpfile package_manifest "$manifest" \
+  'keys == ["manifest","source_digest","source_ref","source_repository"] and
+   .source_repository == $repository and .source_ref == $source_ref and
+   .source_digest == $commit and .manifest == $package_manifest[0]' "$identity" >/dev/null; then
+  echo "::error::attestation identity does not match manifest and admitted source" >&2
+  exit 1
+fi
+version="$(jq -er '.version | strings' "$manifest")"
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-([A-Za-z0-9_-]+)\.[0-9]+\+[0-9a-f]{7}$ ]] || { echo "::error::attestation input version is not source-bound" >&2; exit 1; }
+[[ "${BASH_REMATCH[1]}" == "$VELNOR_PACKAGE_CHANNEL" ]] || { echo "::error::attestation input channel does not match policy" >&2; exit 1; }
+[[ "${version##*+}" == "${EXPECTED_SOURCE_COMMIT:0:7}" ]] || { echo "::error::attestation input version does not bind the admitted SHA" >&2; exit 1; }
+printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+printf 'source_commit=%s\n' "$EXPECTED_SOURCE_COMMIT" >> "$GITHUB_OUTPUT"
+"#,
+    );
+    for (field, assets) in [
+        ("assets", &spec.payloads),
+        ("supporting_assets", &spec.supporting_assets),
+    ] {
+        let expected = assets
+            .iter()
+            .map(|name| shell_quote(name))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let _ = writeln!(
+            script,
+            "jq -r '.{field}[].name' \"$manifest\" | LC_ALL=C sort > \"$actual_files\"\nprintf '%s\\n' {expected} | LC_ALL=C sort > \"$expected_files\"\nif ! cmp -s \"$expected_files\" \"$actual_files\"; then echo \"::error::{field} names differ from declaration\" >&2; exit 1; fi"
+        );
+        for name in assets {
+            let _ = writeln!(
+                script,
+                "name={}\nexpected=\"$(jq -er --arg name \"$name\" '[.{field}[] | select(.name == $name)] | select(length == 1) | .[0].sha256 | select(test(\"^[0-9a-f]{{64}}$\"))' \"$manifest\")\"\nactual=\"$(sha256sum -- \"$dir/$name\" | awk '{{print $1}}')\"\n[[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::attestation input digest mismatch: $name\" >&2; exit 1; }}",
+                shell_quote(name)
+            );
+        }
+    }
+    script
+}
+
 fn release_asset_names(spec: &PackageReleaseSpec) -> Vec<String> {
     let mut names = vec![
         "release-manifest.json".to_owned(),
@@ -819,6 +1767,38 @@ fn release_asset_names(spec: &PackageReleaseSpec) -> Vec<String> {
     names.extend(spec.payloads.iter().cloned());
     names.extend(spec.supporting_assets.iter().cloned());
     names
+}
+
+fn render_admission_job(
+    spec: &PackageReleaseSpec,
+    runner: &str,
+    checkout: &str,
+    upload: &str,
+    runtime_setup: &str,
+) -> String {
+    let repository_expr = github_expression("github.repository");
+    let ref_expr = github_expression("github.ref");
+    let event_expr = github_expression("github.event_name");
+    let before_expr = github_expression("github.event.before || github.sha");
+    let head_expr = github_expression("github.sha");
+    let runner_temp_expr = github_expression("runner.temp");
+    let expected_repository = crate::s2::yaml_scalar(&spec.source_repository);
+    let expected_ref = crate::s2::yaml_scalar(&spec.source_ref);
+    let mut output = String::new();
+    let _ = writeln!(
+        output,
+        "  admission:\n    name: Admit production release inputs\n    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'\n    runs-on: {runner}\n    timeout-minutes: 10\n    permissions:\n      contents: read\n    outputs:\n      disposition: {}\n      head_sha: {}\n      head_tree: {}\n    steps:\n      - name: Checkout exact event head and full history\n        uses: {checkout}\n        with:\n          ref: {head_expr}\n          fetch-depth: 0\n          persist-credentials: false\n",
+        github_expression("steps.admit.outputs.disposition"),
+        github_expression("steps.admit.outputs.head_sha"),
+        github_expression("steps.admit.outputs.head_tree"),
+    );
+    output.push_str(runtime_setup);
+    let _ = writeln!(
+        output,
+        "      - name: Classify complete source push diff\n        id: admit\n        env:\n          EVENT_REPOSITORY: {repository_expr}\n          EVENT_REF: {ref_expr}\n          EVENT_NAME: {event_expr}\n          BEFORE_SHA: {before_expr}\n          HEAD_SHA: {head_expr}\n          EXPECTED_SOURCE_REPOSITORY: {expected_repository}\n          EXPECTED_SOURCE_REF: {expected_ref}\n        run: |\n          set -euo pipefail\n          result_file=\"$RUNNER_TEMP/package-release-admission.json\"\n          velnor-workflow release-admission \\\n            --repository \"$EVENT_REPOSITORY\" \\\n            --ref \"$EVENT_REF\" \\\n            --event \"$EVENT_NAME\" \\\n            --before \"$BEFORE_SHA\" \\\n            --head \"$HEAD_SHA\" > \"$result_file\"\n          [[ \"$(jq -er '.repository' \"$result_file\")\" == \"$EXPECTED_SOURCE_REPOSITORY\" ]]\n          [[ \"$(jq -er '.source_ref' \"$result_file\")\" == \"$EVENT_REF\" ]]
+          [[ \"$(jq -er '.configured_source_ref' \"$result_file\")\" == \"$EXPECTED_SOURCE_REF\" ]]\n          disposition=\"$(jq -er '.disposition' \"$result_file\")\"\n          case \"$disposition\" in admit|skip) ;; *) echo \"::error::invalid release admission disposition: $disposition\" >&2; exit 1;; esac\n          printf 'disposition=%s\\n' \"$disposition\" >> \"$GITHUB_OUTPUT\"\n          printf 'head_sha=%s\\n' \"$(jq -er '.head_sha' \"$result_file\")\" >> \"$GITHUB_OUTPUT\"\n          printf 'head_tree=%s\\n' \"$(jq -er '.head_tree' \"$result_file\")\" >> \"$GITHUB_OUTPUT\"\n          jq -cr '\"admission=\" + .disposition + \" reason=\" + .reason + \" changed_paths=\" + (.changed_paths|length|tostring)' \"$result_file\"\n      - name: Retain source admission evidence\n        uses: {upload}\n        with:\n          name: source-release-admission-{head_expr}\n          path: {runner_temp_expr}/package-release-admission.json\n          if-no-files-found: error\n          retention-days: 30\n"
+    );
+    output
 }
 
 #[allow(clippy::too_many_lines)]
@@ -837,45 +1817,72 @@ fn render_workflow(
     } else {
         String::new()
     };
-    let publish_runtime_setup = if provider == ProviderId::GithubHosted {
-        workflow_runtime_setup_at_checkout_path(
-            ProviderId::GithubHosted,
-            &config.repository,
-            &config.workflow_revision,
-            "source",
-        )
-    } else {
-        String::new()
-    };
+    let publish_runtime_setup = workflow_runtime_setup_at_checkout_path(
+        ProviderId::GithubHosted,
+        &config.repository,
+        &config.workflow_revision,
+        "source",
+    );
+    let verification_runtime_setup = workflow_runtime_setup_at_checkout_path(
+        ProviderId::GithubHosted,
+        &config.repository,
+        &config.workflow_revision,
+        "source",
+    );
     let checkout = ActionPin::Checkout.reference();
     let upload = ActionPin::UploadArtifact.reference();
     let download = ActionPin::DownloadArtifact.reference();
     let mise = ActionPin::Mise.reference();
+    let verification_task_setup = if spec.verify_tasks.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "{verification_runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked package verification tools\n        working-directory: source\n        run: mise --yes install --locked --include-task-tools\n"
+        )
+    };
+    let handoff_verify_tasks = render_verification_task_step(
+        "Run handoff package verification tasks",
+        &spec.verify_tasks,
+        None,
+    );
     let attest = ActionPin::Attest.reference();
-    let source_commit_expr = github_expression("github.sha");
-    let publish_source_commit_expr = github_expression("needs.build.outputs.source_commit");
-    let publish_artifact_id_expr = github_expression("needs.build.outputs.artifact_id");
-    let artifact_name = format!(
-        "package-release-{}-{}",
-        github_expression("github.run_id"),
-        github_expression("github.run_attempt")
+    let source_commit_expr = github_expression("needs.admission.outputs.head_sha");
+    let source_tree_expr = github_expression("needs.admission.outputs.head_tree");
+    let build_runtime_setup = format!(
+        "{runtime_setup}      - name: Verify admitted source tree\n        run: |\n          set -euo pipefail\n          actual_commit=\"$(git rev-parse HEAD^{{commit}})\"\n          if [[ \"$actual_commit\" != \"$EXPECTED_SOURCE_COMMIT\" ]]; then echo \"::error::checked out source commit differs from admitted event commit\" >&2; exit 1; fi\n          actual_tree=\"$(git rev-parse HEAD^{{tree}})\"\n          if [[ \"$actual_tree\" != \"$EXPECTED_SOURCE_TREE\" ]]; then echo \"::error::checked out source tree differs from admitted event tree\" >&2; exit 1; fi\n          source_status=\"$(git status --porcelain=v1 --untracked-files=all -- . \":(exclude)$PACKAGE_DIR\")\"\n          if [[ -n \"$source_status\" ]]; then echo \"::error::checked out source is dirty before package production\" >&2; printf '%s\\n' \"$source_status\" >&2; exit 1; fi\n"
+    );
+    let publish_source_commit_expr = github_expression("needs.attest.outputs.source_commit");
+    let publish_artifact_id_expr = github_expression("needs.attest.outputs.artifact_id");
+    // Artifact identity is retry-specific so a rerun cannot select files
+    // left by an earlier attempt. Release identity below remains source-SHA-derived.
+    let candidate_artifact_name_expr = github_expression(
+        "format('package-release-candidate-{0}-{1}-{2}', needs.admission.outputs.head_sha, github.run_id, github.run_attempt)",
+    );
+    let verified_artifact_name_expr = github_expression(
+        "format('package-release-{0}-{1}-{2}', steps.verify.outputs.source_commit, github.run_id, github.run_attempt)",
+    );
+    let verified_artifact_download_name_expr = github_expression(
+        "format('package-release-{0}-{1}-{2}', needs.verify.outputs.source_commit, github.run_id, github.run_attempt)",
+    );
+    let attested_artifact_name_expr = github_expression(
+        "format('package-release-attested-{0}-{1}-{2}', needs.verify.outputs.source_commit, github.run_id, github.run_attempt)",
     );
     let workspace_expr = github_expression("github.workspace");
-    let build_verify = indent_script(&verification_script(spec), 10);
     let publish_verify = indent_script(&verification_script(spec), 10);
     let build_verify_tasks = render_verification_task_step(
         "Run repository package verification tasks",
         &spec.verify_tasks,
         None,
     );
-    let updater_token_expr = github_expression(&format!("secrets.{}", spec.updater_token_secret));
     let github_token_expr = github_expression("github.token");
     let build_if = github_expression(&format!(
-        "github.ref == 'refs/heads/{}'",
+        "needs.admission.outputs.disposition == 'admit' && github.ref == '{}'",
         spec.source_ref
-            .strip_prefix("refs/heads/")
-            .unwrap_or("main")
     ));
+    let verify_source_check = indent_script(
+        "set -euo pipefail\nactual_commit=\"$(git -C \"$VELNOR_SOURCE_CHECKOUT_DIR\" rev-parse HEAD^{commit})\"\nif [[ \"$actual_commit\" != \"$EXPECTED_SOURCE_COMMIT\" ]]; then echo \"::error::checked out source commit differs from admitted event commit\" >&2; exit 1; fi\nactual_tree=\"$(git -C \"$VELNOR_SOURCE_CHECKOUT_DIR\" rev-parse HEAD^{tree})\"\nif [[ \"$actual_tree\" != \"$EXPECTED_SOURCE_TREE\" ]]; then echo \"::error::checked out source tree differs from admitted event tree\" >&2; exit 1; fi\nsource_status=\"$(git -C \"$VELNOR_SOURCE_CHECKOUT_DIR\" status --porcelain=v1 --untracked-files=all -- .)\"\nif [[ -n \"$source_status\" ]]; then echo \"::error::checked out source is dirty before package verification\" >&2; printf '%s\\n' \"$source_status\" >&2; exit 1; fi\n",
+        10,
+    );
     let package_dir_yaml = crate::s2::yaml_scalar(&spec.package_dir);
     let package_dir = spec.package_dir.as_str();
     let channel_yaml = crate::s2::yaml_scalar(&spec.channel);
@@ -884,21 +1891,20 @@ fn render_workflow(
     let schema_yaml = crate::s2::yaml_scalar(&spec.manifest_schema);
     let tag_yaml = crate::s2::yaml_scalar(&spec.release_tag);
     let title_yaml = crate::s2::yaml_scalar(&spec.release_title_prefix);
-    let consumer_repository_yaml = crate::s2::yaml_scalar(&spec.consumer_repository);
-    let consumer_branch_yaml = crate::s2::yaml_scalar(&spec.consumer_branch);
-    let updater_yaml = crate::s2::yaml_scalar(&spec.updater);
-    let message_yaml = crate::s2::yaml_scalar(&spec.update_commit_message);
     let concurrency_yaml = crate::s2::yaml_scalar(&spec.concurrency_group);
     let source_shell = shell_quote(&spec.source_ref);
+    let package_scratch_expr = format!(
+        "{}/package-release-scratch-{}-{}",
+        github_expression("runner.temp"),
+        github_expression("github.run_id"),
+        github_expression("github.run_attempt")
+    );
     let run_name = format!(
         "Package release · {} · {}",
         github_expression("github.event_name"),
         github_expression("github.ref_name")
     );
-    let mut tasks = String::new();
-    for task in &spec.build_tasks {
-        let _ = writeln!(tasks, "          mise run {}", shell_quote(task));
-    }
+    let build_script = indent_script(&package_build_script(&spec.build_tasks), 10);
     let mut attestation_subjects = String::new();
     let mut attested_assets = spec.payloads.clone();
     attested_assets.extend(spec.supporting_assets.iter().cloned());
@@ -907,7 +1913,7 @@ fn render_workflow(
     for name in &attested_assets {
         let _ = writeln!(
             attestation_subjects,
-            "            {workspace_expr}/{package_dir}/{name}"
+            "            {workspace_expr}/package/{name}"
         );
     }
     let mut artifact_upload_paths = String::new();
@@ -915,6 +1921,13 @@ fn render_workflow(
         let _ = writeln!(
             artifact_upload_paths,
             "            {workspace_expr}/{package_dir}/{name}"
+        );
+    }
+    let mut verified_artifact_upload_paths = String::new();
+    for name in release_asset_names(spec) {
+        let _ = writeln!(
+            verified_artifact_upload_paths,
+            "            {workspace_expr}/package/{name}"
         );
     }
     let mut publish_attestation_targets = String::new();
@@ -947,36 +1960,58 @@ fn render_workflow(
                 .unwrap_or("main")
         )
     );
+    let _ = writeln!(output, "permissions:\n  contents: read\n");
+    output.push_str("jobs:\n");
+    output.push_str(&render_admission_job(
+        spec,
+        &runner,
+        checkout,
+        upload,
+        &runtime_setup,
+    ));
+    output.push('\n');
     let _ = writeln!(
         output,
-        "concurrency:\n  group: {concurrency_yaml}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n"
+        "  build:\n    name: Build untrusted package candidate\n    needs: admission\n    if: {build_if}\n    runs-on: {runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n    env:\n      PACKAGE_DIR: {package_dir_yaml}\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/{package_dir}\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n      EXPECTED_SOURCE_TREE: {source_tree_expr}\n"
     );
     let _ = writeln!(
         output,
-        "jobs:\n  build:\n    name: Verify package release\n    if: {build_if}\n    runs-on: {runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    outputs:\n      version: {}\n      source_commit: {}\n      artifact_id: {}\n    env:\n      PACKAGE_DIR: {package_dir_yaml}\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/{package_dir}\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n",
+        "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{build_runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build package candidate\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n          PACKAGE_RELEASE_SCRATCH_DIR: {package_scratch_expr}\n        run: |\n{build_script}{build_verify_tasks}      - name: Upload untrusted package candidate\n        uses: {upload}\n        with:\n          name: {candidate_artifact_name_expr}\n          path: |\n{artifact_upload_paths}          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n"
+    );
+    output.push('\n');
+    let _ = writeln!(
+        output,
+        "  verify:\n    name: Verify package candidate on a fresh runner\n    needs: [admission, build]\n    if: {build_if}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 30\n    permissions:\n      contents: read\n    outputs:\n      version: {}\n      source_commit: {}\n    env:\n      PACKAGE_DIR: package\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/package\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}/source\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n      EXPECTED_SOURCE_TREE: {source_tree_expr}\n    steps:\n      - name: Checkout admitted source\n        uses: {checkout}\n        with:\n          repository: {source_repository_yaml}\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          path: source\n          persist-credentials: false\n      - name: Verify admitted source tree\n        run: |\n{verify_source_check}      - name: Require empty package candidate destination\n        run: |\n          set -euo pipefail\n          destination=\"$GITHUB_WORKSPACE/package\"\n          if [[ -e \"$destination\" || -L \"$destination\" ]]; then echo \"::error::package candidate destination already exists\" >&2; exit 1; fi\n      - name: Download untrusted package candidate\n        uses: {download}\n        with:\n          name: {candidate_artifact_name_expr}\n          path: package\n          merge-multiple: true\n      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{publish_verify}{verification_task_setup}{handoff_verify_tasks}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: {verified_artifact_name_expr}\n          path: |\n{verified_artifact_upload_paths}          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n",
         github_expression("steps.verify.outputs.version"),
         github_expression("steps.verify.outputs.source_commit"),
-        github_expression("steps.upload-package.outputs.artifact-id"),
     );
+    output.push('\n');
+    let signer_validation = indent_script(&artifact_signer_validation_script(spec), 10);
+    let signer_source_commit_expr = github_expression("needs.admission.outputs.head_sha");
+    let signer_if = github_expression(&format!(
+        "needs.admission.outputs.disposition == 'admit' && github.ref == '{}'",
+        spec.source_ref
+    ));
     let _ = writeln!(
         output,
-        "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build verified package directory\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n        run: |\n          set -euo pipefail\n          mkdir -p \"$VELNOR_VERIFIED_PACKAGE_DIR\"\n{tasks}      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{build_verify}{build_verify_tasks}      - name: Attest declared package assets\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload verified package handoff\n        id: upload-package\n        uses: {upload}\n        with:\n          name: {artifact_name}\n          path: |\n{artifact_upload_paths}          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n",
+        "  attest:\n    name: Attest verified package bytes\n    needs: [admission, verify]\n    if: {signer_if}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    outputs:\n      version: {}\n      source_commit: {}\n      artifact_id: {}\n    env:\n      PACKAGE_DIR: package\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/package\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {signer_source_commit_expr}\n    steps:\n      - name: Require empty verified package destination\n        run: |\n          set -euo pipefail\n          destination=\"$GITHUB_WORKSPACE/package\"\n          if [[ -e \"$destination\" || -L \"$destination\" ]]; then echo \"::error::verified package destination already exists\" >&2; exit 1; fi\n      - name: Download verified package handoff\n        uses: {download}\n        with:\n          name: {verified_artifact_download_name_expr}\n          path: package\n          merge-multiple: true\n      - name: Recheck source-bound package bytes\n        id: verify\n        run: |\n{signer_validation}      - name: Attest declared package assets\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload attested package handoff\n        id: upload-attested\n        uses: {upload}\n        with:\n          name: {attested_artifact_name_expr}\n          path: |\n{verified_artifact_upload_paths}          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n",
+        github_expression("steps.verify.outputs.version"),
+        github_expression("steps.verify.outputs.source_commit"),
+        github_expression("steps.upload-attested.outputs.artifact-id"),
     );
     output.push('\n');
     output.push_str(&render_publish_job(
         spec,
-        &runner,
+        "ubuntu-24.04",
         checkout,
         download,
         &publish_verify,
         &publish_runtime_setup,
         mise,
-        &spec.verify_tasks,
         &spec.pre_publish_tasks,
         &publish_attestation_targets,
         &attestation_flags,
         &workspace_expr,
-        &updater_token_expr,
         &github_token_expr,
         &publish_source_commit_expr,
         &channel_yaml,
@@ -985,12 +2020,30 @@ fn render_workflow(
         &schema_yaml,
         &tag_yaml,
         &title_yaml,
-        &consumer_repository_yaml,
-        &consumer_branch_yaml,
-        &updater_yaml,
-        &message_yaml,
         &concurrency_yaml,
         &publish_artifact_id_expr,
+    ));
+    output.push('\n');
+    output.push_str(&render_published_verification_job(
+        spec,
+        checkout,
+        mise,
+        &verification_runtime_setup,
+        &publish_verify,
+        &publish_attestation_targets,
+        &attestation_flags,
+        &workspace_expr,
+        &verify_source_check,
+    ));
+    output.push('\n');
+    output.push_str(&render_consumer_job(
+        spec,
+        checkout,
+        &publish_verify,
+        &publish_attestation_targets,
+        &attestation_flags,
+        &workspace_expr,
+        &verify_source_check,
     ));
     output
 }
@@ -998,6 +2051,236 @@ fn render_workflow(
 struct PublishVerification<'a> {
     script: &'a str,
     attestation_flags: &'a str,
+}
+
+fn render_consumer_identity_check_script() -> &'static str {
+    r#"set -euo pipefail
+[[ "$VELNOR_PACKAGE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::verified package source commit is invalid" >&2; exit 1; }
+[ "$VELNOR_PACKAGE_SOURCE_COMMIT" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::verified package source commit differs from the admitted source" >&2; exit 1; }
+expected_asset_tag="$RELEASE_TAG-$VELNOR_PACKAGE_SOURCE_COMMIT"
+[ "$VELNOR_PACKAGE_ASSET_TAG" = "$expected_asset_tag" ] || { echo "::error::immutable package asset tag does not bind to its source commit" >&2; exit 1; }
+manifest="$VELNOR_VERIFIED_PACKAGE_DIR/release-manifest.json"
+identity="$VELNOR_VERIFIED_PACKAGE_DIR/identity.json"
+test -s "$manifest"
+test -s "$identity"
+jq -e \
+  --arg repository "$VELNOR_PACKAGE_SOURCE_REPOSITORY" \
+  --arg source_ref "$VELNOR_PACKAGE_SOURCE_REF" \
+  --arg commit "$VELNOR_PACKAGE_SOURCE_COMMIT" \
+  --arg version "$VELNOR_PACKAGE_VERSION" \
+  '.source_repository == $repository and .source_ref == $source_ref and
+   .source_commit == $commit and .version == $version' "$manifest" >/dev/null
+jq -e \
+  --arg repository "$VELNOR_PACKAGE_SOURCE_REPOSITORY" \
+  --arg source_ref "$VELNOR_PACKAGE_SOURCE_REF" \
+  --arg commit "$VELNOR_PACKAGE_SOURCE_COMMIT" \
+  --slurpfile package_manifest "$manifest" \
+  'keys == ["manifest","source_digest","source_ref","source_repository"] and
+   .source_repository == $repository and .source_ref == $source_ref and
+   .source_digest == $commit and .manifest == $package_manifest[0]' "$identity" >/dev/null
+    "#
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_published_verification_job(
+    spec: &PackageReleaseSpec,
+    checkout: &str,
+    mise: &str,
+    runtime_setup: &str,
+    publish_verify: &str,
+    publish_attestation_targets: &str,
+    attestation_flags: &str,
+    workspace_expr: &str,
+    source_check: &str,
+) -> String {
+    let channel_yaml = crate::s2::yaml_scalar(&spec.channel);
+    let source_repository_yaml = crate::s2::yaml_scalar(&spec.source_repository);
+    let source_ref_yaml = crate::s2::yaml_scalar(&spec.source_ref);
+    let schema_yaml = crate::s2::yaml_scalar(&spec.manifest_schema);
+    let tag_yaml = crate::s2::yaml_scalar(&spec.release_tag);
+    let source_commit_expr = github_expression("needs.admission.outputs.head_sha");
+    let source_tree_expr = github_expression("needs.admission.outputs.head_tree");
+    let release_tag_expr = github_expression("needs.publish.outputs.release_tag");
+    let task_setup = if spec.verify_tasks.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "{runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked package verification tools\n        working-directory: source\n        run: mise --yes install --locked --include-task-tools\n"
+        )
+    };
+    let task_step = render_verification_task_step(
+        "Run published package verification tasks",
+        &spec.verify_tasks,
+        Some(&format!("{workspace_expr}/published-package")),
+    );
+
+    let mut output = String::new();
+    let _ = writeln!(
+        output,
+        "  verify_published:\n    name: Verify immutable publication on a fresh runner\n    needs: [admission, publish]\n    if: {}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 30\n    permissions:\n      contents: read\n      attestations: read\n    outputs:\n      version: {}\n      source_commit: {}\n      source_tree: {}\n      release_tag: {}\n    env:\n      PACKAGE_DIR: published-package\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/published-package\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}/source\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      RELEASE_TAG: {tag_yaml}\n      RELEASE_ASSET_TAG: {release_tag_expr}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n      EXPECTED_SOURCE_TREE: {source_tree_expr}\n    steps:\n      - name: Checkout admitted source\n        uses: {checkout}\n        with:\n          repository: {source_repository_yaml}\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          path: source\n          persist-credentials: false\n      - name: Verify admitted source tree\n        run: |\n{source_check}      - name: Require empty published package destination\n        run: |\n          set -euo pipefail\n          destination=\"$GITHUB_WORKSPACE/published-package\"\n          if [[ -e \"$destination\" || -L \"$destination\" ]]; then echo \"::error::published package destination already exists\" >&2; exit 1; fi\n      - name: Download immutable published release\n        env:\n          GH_TOKEN: {}\n          RELEASE_ASSET_TAG: {release_tag_expr}\n        run: |\n          set -euo pipefail\n          mkdir -- \"$GITHUB_WORKSPACE/published-package\"\n          gh release download \"$RELEASE_ASSET_TAG\" --repo \"$GITHUB_REPOSITORY\" --dir \"$GITHUB_WORKSPACE/published-package\"\n      - name: Re-verify immutable published release\n        id: verify\n        run: |\n{publish_verify}      - name: Verify published release attestations\n        env:\n          GH_TOKEN: {}\n          RELEASE_ASSET_TAG: {release_tag_expr}\n        run: |\n          set -euo pipefail\n          for payload in \\\n{publish_attestation_targets}          do\n            gh attestation verify \"$payload\" {attestation_flags}\n          done\n{task_setup}{task_step}",
+        github_expression(&format!(
+            "github.event_name == 'push' && github.ref == '{}' && needs.admission.outputs.disposition == 'admit'",
+            spec.source_ref
+        )),
+        github_expression("steps.verify.outputs.version"),
+        github_expression("steps.verify.outputs.source_commit"),
+        source_tree_expr,
+        release_tag_expr,
+        github_expression("github.token"),
+        github_expression("github.token"),
+    );
+    output
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_consumer_update_script(immutable_tag: bool) -> String {
+    let mut script = String::from(
+        r#"set -euo pipefail
+cd consumer
+git config user.name "github-actions[bot]"
+git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+stale_branch="automation/package-release-$RELEASE_TAG"
+automation_branch="automation/package-release-$RELEASE_ASSET_TAG"
+while IFS= read -r stale_pr_url; do
+  if [ -n "$stale_pr_url" ]; then
+    gh pr close "$stale_pr_url" --repo "$CONSUMER_REPOSITORY" --comment "Superseded by immutable package release $RELEASE_ASSET_TAG"
+  fi
+done < <(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$stale_branch" --base "$CONSUMER_BRANCH" --state open --json url --jq '.[].url')
+if ! remote_branch_refs="$(git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" ls-remote origin "refs/heads/$automation_branch")"; then
+  echo "::error::consumer automation branch lookup failed; refusing branch mutation" >&2
+  exit 1
+fi
+if ! remote_branch_sha="$(awk 'NF >= 2 {print $1; exit}' <<<"$remote_branch_refs")"; then
+  echo "::error::consumer automation branch response could not be parsed; refusing branch mutation" >&2
+  exit 1
+fi
+if [ -n "$remote_branch_sha" ] && ! [[ "$remote_branch_sha" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "::error::consumer automation branch response contained an invalid object ID" >&2
+  exit 1
+fi
+if [ -n "$remote_branch_sha" ]; then
+  git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" fetch origin "refs/heads/$automation_branch:refs/remotes/origin/$automation_branch"
+  git switch --detach "origin/$automation_branch"
+else
+  git switch --create "$automation_branch" "origin/$CONSUMER_BRANCH"
+fi
+"#,
+    );
+    if immutable_tag {
+        script.push_str("unset RELEASE_TAG\n");
+    }
+    script.push_str(
+        r#"bash -c "$UPDATER"
+untracked_files="$(git ls-files --others --exclude-standard)"
+if [ -n "$untracked_files" ]; then
+  echo "::notice::consumer updater produced untracked files; staging them"
+  printf '%s\n' "$untracked_files"
+fi
+git add -A
+git diff --cached --check
+if [ -z "$(git status --porcelain --untracked-files=all)" ]; then
+  echo "consumer already references the verified release"
+else
+  if [ -n "$remote_branch_sha" ]; then
+    echo "::error::immutable consumer branch already exists and would need rewriting; refusing to mutate it" >&2
+    exit 1
+  fi
+  git commit -s -m "$UPDATE_COMMIT_MESSAGE"
+  git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" push origin "HEAD:refs/heads/$automation_branch"
+fi
+pr_url="$(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$automation_branch" --base "$CONSUMER_BRANCH" --state open --json url --jq '.[0].url // empty')"
+if [ -z "$pr_url" ] && ! git diff --quiet HEAD "origin/$CONSUMER_BRANCH"; then
+  pr_url="$(gh pr create --repo "$CONSUMER_REPOSITORY" --head "$automation_branch" --base "$CONSUMER_BRANCH" --title "$UPDATE_COMMIT_MESSAGE ($RELEASE_ASSET_TAG)" --body "Automated verified package update. Review and merge this PR; the publisher never merges consumer changes.")"
+fi
+printf 'pr_url=%s\n' "$pr_url" >> "$GITHUB_OUTPUT"
+if [ -n "$pr_url" ]; then echo "::notice::Consumer update PR: $pr_url"; else echo "::notice::Consumer update PR: none"; fi
+"#,
+    );
+    script
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_consumer_job(
+    spec: &PackageReleaseSpec,
+    checkout: &str,
+    publish_verify: &str,
+    publish_attestation_targets: &str,
+    attestation_flags: &str,
+    workspace_expr: &str,
+    source_check: &str,
+) -> String {
+    let source_commit_expr = github_expression("needs.verify_published.outputs.source_commit");
+    let source_tree_expr = github_expression("needs.verify_published.outputs.source_tree");
+    let release_tag_expr = github_expression("needs.verify_published.outputs.release_tag");
+    let source_repository_yaml = crate::s2::yaml_scalar(&spec.source_repository);
+    let source_ref_yaml = crate::s2::yaml_scalar(&spec.source_ref);
+    let channel_yaml = crate::s2::yaml_scalar(&spec.channel);
+    let schema_yaml = crate::s2::yaml_scalar(&spec.manifest_schema);
+    let consumer_repository_yaml = crate::s2::yaml_scalar(&spec.consumer_repository);
+    let consumer_branch_yaml = crate::s2::yaml_scalar(&spec.consumer_branch);
+    let updater_yaml = crate::s2::yaml_scalar(&spec.updater);
+    let message_yaml = crate::s2::yaml_scalar(&spec.update_commit_message);
+    let tag_yaml = crate::s2::yaml_scalar(&spec.release_tag);
+    let publish_environment_yaml = crate::s2::yaml_scalar(&spec.publish_environment);
+    let updater_token_expr = github_expression(&format!("secrets.{}", spec.updater_token_secret));
+    let verification = indent_script(publish_verify, 10);
+    let consumer_update = indent_script(
+        &render_consumer_update_script(spec.consumer_tag_mode == ConsumerTagMode::Immutable),
+        10,
+    );
+    let mut output = String::new();
+    let _ = writeln!(
+        output,
+        "  consumer:\n    name: Update consumer from verified immutable release\n    needs: verify_published\n    if: needs.verify_published.result == 'success'\n    runs-on: ubuntu-24.04\n    timeout-minutes: 30\n    environment: {publish_environment_yaml}\n    permissions:\n      contents: read\n      attestations: read\n    outputs:\n      consumer_pr_url: {}\n    env:\n      PACKAGE_DIR: consumer-package\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/consumer-package\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}/source\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n      EXPECTED_SOURCE_TREE: {source_tree_expr}\n      CONSUMER_REPOSITORY: {consumer_repository_yaml}\n      CONSUMER_BRANCH: {consumer_branch_yaml}\n      UPDATER: {updater_yaml}\n      UPDATE_COMMIT_MESSAGE: {message_yaml}\n      RELEASE_TAG: {tag_yaml}\n      RELEASE_ASSET_TAG: {release_tag_expr}\n    steps:\n      - name: Checkout admitted source\n        uses: {checkout}\n        with:\n          repository: {source_repository_yaml}\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          path: source\n          persist-credentials: false\n      - name: Verify admitted source tree\n        run: |\n{source_check}      - name: Require empty consumer package destination\n        run: |\n          set -euo pipefail\n          destination=\"$GITHUB_WORKSPACE/consumer-package\"\n          if [[ -e \"$destination\" || -L \"$destination\" ]]; then echo \"::error::consumer package destination already exists\" >&2; exit 1; fi\n      - name: Download immutable release for consumer\n        env:\n          GH_TOKEN: {}\n          RELEASE_ASSET_TAG: {release_tag_expr}\n        run: |\n          set -euo pipefail\n          mkdir -- \"$GITHUB_WORKSPACE/consumer-package\"\n          gh release download \"$RELEASE_ASSET_TAG\" --repo \"$GITHUB_REPOSITORY\" --dir \"$GITHUB_WORKSPACE/consumer-package\"\n      - name: Re-verify immutable release for consumer\n        id: verify\n        run: |\n{verification}      - name: Verify consumer release attestations\n        env:\n          GH_TOKEN: {}\n          RELEASE_ASSET_TAG: {release_tag_expr}\n        run: |\n          set -euo pipefail\n          for payload in \\\n{publish_attestation_targets}          do\n            gh attestation verify \"$payload\" {attestation_flags}\n          done\n      - name: Verify immutable consumer package identity\n        env:\n          VELNOR_PACKAGE_ASSET_TAG: {release_tag_expr}\n          VELNOR_PACKAGE_VERSION: {}\n          VELNOR_PACKAGE_SOURCE_COMMIT: {}\n          VELNOR_PACKAGE_SOURCE_REPOSITORY: {source_repository_yaml}\n          VELNOR_PACKAGE_SOURCE_REF: {source_ref_yaml}\n          VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n          VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/consumer-package\n",
+        github_expression("steps.consumer-pr.outputs.pr_url"),
+        github_expression("github.token"),
+        github_expression("github.token"),
+        github_expression("steps.verify.outputs.version"),
+        github_expression("steps.verify.outputs.source_commit"),
+    );
+    if spec.consumer_tag_mode == ConsumerTagMode::Legacy {
+        let _ = writeln!(output, "          VELNOR_PACKAGE_RELEASE_TAG: {tag_yaml}");
+    }
+    output.push_str("        run: |\n");
+    output.push_str(&indent_script(render_consumer_identity_check_script(), 10));
+    output.push_str("      - name: Checkout consumer repository\n        uses: ");
+    output.push_str(checkout);
+    output.push_str("\n        with:\n          repository: ");
+    output.push_str(&consumer_repository_yaml);
+    output.push_str("\n          ref: ");
+    output.push_str(&consumer_branch_yaml);
+    output.push_str("\n          token: ");
+    output.push_str(&updater_token_expr);
+    output.push_str("\n          path: consumer\n          persist-credentials: false\n");
+    output.push_str("      - name: Run updater and create or update consumer PR\n        id: consumer-pr\n        env:\n          RELEASE_ASSET_TAG: ");
+    output.push_str(&release_tag_expr);
+    output.push_str("\n          GH_TOKEN: ");
+    output.push_str(&updater_token_expr);
+    output.push_str("\n          UPDATER_TOKEN: ");
+    output.push_str(&updater_token_expr);
+    output.push_str("\n          VELNOR_PACKAGE_ASSET_TAG: ");
+    output.push_str(&release_tag_expr);
+    output.push_str("\n          VELNOR_PACKAGE_VERSION: ");
+    output.push_str(&github_expression("steps.verify.outputs.version"));
+    output.push_str("\n          VELNOR_PACKAGE_SOURCE_COMMIT: ");
+    output.push_str(&github_expression("steps.verify.outputs.source_commit"));
+    output.push_str("\n          VELNOR_PACKAGE_SOURCE_REPOSITORY: ");
+    output.push_str(&source_repository_yaml);
+    output.push_str("\n          VELNOR_PACKAGE_SOURCE_REF: ");
+    output.push_str(&source_ref_yaml);
+    output.push_str("\n          VELNOR_PACKAGE_CHANNEL: ");
+    output.push_str(&channel_yaml);
+    output.push_str("\n          VELNOR_VERIFIED_PACKAGE_DIR: ");
+    output.push_str(workspace_expr);
+    output.push_str("/consumer-package");
+    if spec.consumer_tag_mode == ConsumerTagMode::Legacy {
+        output.push_str("\n          VELNOR_PACKAGE_RELEASE_TAG: ");
+        output.push_str(&tag_yaml);
+    }
+    output.push('\n');
+    output.push_str("        run: |\n");
+    output.push_str(&consumer_update);
+    output
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1263,6 +2546,13 @@ rolling_tag="$RELEASE_TAG"
 staged_tag="$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT"
 published_dir="$GITHUB_WORKSPACE/published-package"
 transaction_dir="$(mktemp -d)"
+[[ "$EXPECTED_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "::error::rolling handoff requires a lowercase source commit identity" >&2
+  exit 1
+}
+rolling_handoff_relative="$EXPECTED_SOURCE_COMMIT/rolling-published"
+rolling_handoff_root="$transaction_dir/$EXPECTED_SOURCE_COMMIT"
+rolling_published_dir="$rolling_handoff_root/rolling-published"
 rolling_response="$transaction_dir/rolling-response"
 rolling_body="$transaction_dir/rolling.json"
 expected_assets="$transaction_dir/expected-assets"
@@ -1940,6 +3230,7 @@ if ! assert_publication_lock; then
   echo "::error::Velnor publication lock could not be verified; refusing release validation and mutation" >&2
   exit 1
 fi
+clear_publication_lock_retain
 
 {
 "#,
@@ -2188,10 +3479,13 @@ if ! cmp -s "$expected_assets" "$rolling_published_assets"; then
   echo "::error::rolling release asset set is not exact after publication" >&2
   false
 fi
-rm -rf -- "$transaction_dir/rolling-published"
-mkdir -p "$transaction_dir/rolling-published"
-gh release download "$rolling_tag" --repo "$GITHUB_REPOSITORY" --dir "$transaction_dir/rolling-published" --clobber
-export VELNOR_VERIFIED_PACKAGE_DIR="$transaction_dir/rolling-published"
+mkdir -- "$rolling_handoff_root"
+mkdir -- "$rolling_published_dir"
+gh release download "$rolling_tag" --repo "$GITHUB_REPOSITORY" --dir "$rolling_published_dir" --clobber
+export VELNOR_VERIFIED_PACKAGE_DIR="$rolling_published_dir"
+export PACKAGE_HANDOFF_ROOT="$transaction_dir"
+export PACKAGE_HANDOFF_RELATIVE="$rolling_handoff_relative"
+export PACKAGE_HANDOFF_SOURCE_COMMIT="$EXPECTED_SOURCE_COMMIT"
 "#,
     );
     // Execute the verifier as a foreground Bash child. Its temporary-file
@@ -2205,7 +3499,7 @@ export VELNOR_VERIFIED_PACKAGE_DIR="$transaction_dir/rolling-published"
     );
     script.push_str("\nfor payload in \\\n");
     script.push_str(payload_names);
-    script.push_str("do\n  gh attestation verify \"$transaction_dir/rolling-published/$payload\" ");
+    script.push_str("do\n  gh attestation verify \"$rolling_published_dir/$payload\" ");
     script.push_str(verification.attestation_flags);
     script.push_str(
         "\ndone\nif ! assert_rolling_ownership \"$owner_draft\" \"$EXPECTED_SOURCE_COMMIT\" \"$owner_name\" \"$owner_body\" \"$owner_source_commit\"; then\n  echo \"::error::rolling preview ownership changed before lock release; refusing to release the publication lock\" >&2\n  false\nfi\n# Every rolling byte, attestation, and final ownership check is verified. The\n# lock is safe to release; failures before this point retain it for recovery.\nclear_publication_lock_retain\n# cleanup_publication releases the exact lock only after rollback or successful completion.\n",
@@ -2477,12 +3771,10 @@ fn render_publish_job(
     publish_verify: &str,
     runtime_setup: &str,
     mise: &str,
-    verify_tasks: &[String],
     pre_publish_tasks: &[String],
     publish_attestation_targets: &str,
     attestation_flags: &str,
     workspace_expr: &str,
-    updater_token_expr: &str,
     github_token_expr: &str,
     publish_source_commit_expr: &str,
     channel_yaml: &str,
@@ -2491,10 +3783,6 @@ fn render_publish_job(
     schema_yaml: &str,
     tag_yaml: &str,
     title_yaml: &str,
-    consumer_repository_yaml: &str,
-    consumer_branch_yaml: &str,
-    updater_yaml: &str,
-    message_yaml: &str,
     concurrency_yaml: &str,
     publish_artifact_id_expr: &str,
 ) -> String {
@@ -2540,19 +3828,21 @@ fn render_publish_job(
         script: publish_verify,
         attestation_flags,
     };
-    let rolling_refresh = indent_script(
-        &render_rolling_refresh_script(
-            &published_assets,
-            &expected_asset_names,
-            &payload_names,
-            &verification,
-        ),
-        10,
-    );
+    let rolling_refresh = spec.refresh_rolling_release.then(|| {
+        indent_script(
+            &render_rolling_refresh_script(
+                &published_assets,
+                &expected_asset_names,
+                &payload_names,
+                &verification,
+            ),
+            10,
+        )
+    });
     let mut output = String::new();
     let _ = writeln!(output, "  publish:");
-    output.push_str("    name: Publish immutable package and update consumer\n");
-    output.push_str("    needs: build\n");
+    output.push_str("    name: Publish immutable package release\n");
+    output.push_str("    needs: attest\n");
     output.push_str("    if: ");
     output.push_str(&github_expression(&format!(
         "github.event_name == 'push' && github.ref == '{}'",
@@ -2564,13 +3854,22 @@ fn render_publish_job(
     output.push_str("\n    timeout-minutes: 30\n    environment: ");
     output.push_str(&publish_environment_yaml);
     output.push('\n');
-    output.push_str(
-        "    permissions:\n      contents: write\n      pull-requests: write\n      attestations: read\n",
-    );
+    if pre_publish_tasks.is_empty() {
+        output.push_str("    permissions:\n      contents: write\n      attestations: read\n");
+    } else {
+        output.push_str(
+            "    permissions:\n      contents: write\n      pull-requests: write\n      attestations: read\n",
+        );
+    }
     output.push_str("    outputs:\n      release_tag: ");
     output.push_str(&github_expression("steps.publish.outputs.immutable_tag"));
-    output.push_str("\n      consumer_pr_url: ");
-    output.push_str(&github_expression("steps.consumer-pr.outputs.pr_url"));
+    output.push_str("\n      rolling_refresh_outcome: ");
+    let rolling_refresh_outcome = if spec.refresh_rolling_release {
+        github_expression("steps.rolling-refresh.outcome")
+    } else {
+        github_expression("'not-requested'")
+    };
+    output.push_str(&rolling_refresh_outcome);
     output.push_str("\n    env:\n      PACKAGE_DIR: package\n      VELNOR_VERIFIED_PACKAGE_DIR: ");
     output.push_str(workspace_expr);
     output.push_str("/package\n      VELNOR_PACKAGE_CHANNEL: ");
@@ -2594,14 +3893,6 @@ fn render_publish_job(
     output.push_str(&release_prerelease_yaml);
     output.push_str("\n      RELEASE_TITLE_PREFIX: ");
     output.push_str(title_yaml);
-    output.push_str("\n      CONSUMER_REPOSITORY: ");
-    output.push_str(consumer_repository_yaml);
-    output.push_str("\n      CONSUMER_BRANCH: ");
-    output.push_str(consumer_branch_yaml);
-    output.push_str("\n      UPDATER: ");
-    output.push_str(updater_yaml);
-    output.push_str("\n      UPDATE_COMMIT_MESSAGE: ");
-    output.push_str(message_yaml);
     // This is the required repository-wide writer lock for every generated
     // publication job; all generated publication writers must share its group.
     // Keep cancellation disabled so a writer can finish rollback and release
@@ -2618,13 +3909,18 @@ fn render_publish_job(
     output.push_str(publish_source_commit_expr);
     output.push_str("\n          fetch-depth: 0\n          path: source\n          persist-credentials: false\n");
 
-    output.push_str(runtime_setup);
-    output.push_str("      - name: Set up Mise\n        uses: ");
-    output.push_str(mise);
-    output.push_str(
-        "\n        with:\n          install: false\n      - name: Install locked package verification tools\n        working-directory: source\n        run: mise --yes install --locked --include-task-tools\n",
-    );
+    if !pre_publish_tasks.is_empty() {
+        output.push_str(runtime_setup);
+        output.push_str("      - name: Set up Mise\n        uses: ");
+        output.push_str(mise);
+        output.push_str(
+            "\n        with:\n          install: false\n      - name: Install locked pre-publish task tools\n        working-directory: source\n        run: mise --yes install --locked --include-task-tools\n",
+        );
+    }
 
+    output.push_str(
+        "      - name: Require empty package handoff destination\n        run: |\n          set -euo pipefail\n          destination=\"$GITHUB_WORKSPACE/package\"\n          if [[ -e \"$destination\" || -L \"$destination\" ]]; then echo \"::error::package handoff destination already exists\" >&2; exit 1; fi\n",
+    );
     output.push_str("      - name: Validate producer artifact ID\n        env:\n          PACKAGE_ARTIFACT_ID: ");
     output.push_str(publish_artifact_id_expr);
     output.push_str("\n        run: |\n          set -euo pipefail\n          [[ \"$PACKAGE_ARTIFACT_ID\" =~ ^[1-9][0-9]*$ ]] || { echo \"::error::package build did not produce a valid artifact ID\" >&2; exit 1; }\n");
@@ -2637,11 +3933,6 @@ fn render_publish_job(
         "      - name: Re-verify downloaded handoff\n        id: verify\n        run: |\n",
     );
     output.push_str(publish_verify);
-    output.push_str(&render_verification_task_step(
-        "Run handoff package verification tasks",
-        verify_tasks,
-        None,
-    ));
 
     output.push_str("      - name: Verify build attestations\n        env:\n          GH_TOKEN: ");
     output.push_str(github_token_expr);
@@ -2684,17 +3975,12 @@ fn render_publish_job(
     let immutable_tag_output = github_expression("steps.publish.outputs.immutable_tag");
     output.push_str("      - name: Download and re-verify published release\n        env:\n          GH_TOKEN: ");
     output.push_str(github_token_expr);
-    output.push_str("\n          RELEASE_ASSET_TAG: ");
+    output.push_str("\n          PACKAGE_DIR: published-package\n          RELEASE_ASSET_TAG: ");
     output.push_str(&immutable_tag_output);
     output.push_str(
-        "\n        run: |\n          set -euo pipefail\n          rm -rf published-package\n          mkdir -p published-package\n          gh release download \"$RELEASE_ASSET_TAG\" --repo \"$GITHUB_REPOSITORY\" --dir published-package\n          export VELNOR_VERIFIED_PACKAGE_DIR=\"$GITHUB_WORKSPACE/published-package\"\n",
+        "\n        run: |\n          set -euo pipefail\n          published_dir=\"$GITHUB_WORKSPACE/published-package\"\n          if [[ -e \"$published_dir\" || -L \"$published_dir\" ]]; then echo \"::error::published package handoff destination already exists\" >&2; exit 1; fi\n          mkdir -- \"$published_dir\"\n          gh release download \"$RELEASE_ASSET_TAG\" --repo \"$GITHUB_REPOSITORY\" --dir \"$published_dir\"\n          export VELNOR_VERIFIED_PACKAGE_DIR=\"$published_dir\"\n          export PACKAGE_HANDOFF_ROOT=\"$GITHUB_WORKSPACE\"\n          export PACKAGE_HANDOFF_RELATIVE=\"published-package\"\n          export PACKAGE_HANDOFF_SOURCE_COMMIT=\"$EXPECTED_SOURCE_COMMIT\"\n",
     );
     output.push_str(publish_verify);
-    output.push_str(&render_verification_task_step(
-        "Run published package verification tasks",
-        verify_tasks,
-        Some(&format!("{workspace_expr}/published-package")),
-    ));
 
     output.push_str(
         "      - name: Verify published release attestations\n        env:\n          GH_TOKEN: ",
@@ -2708,12 +3994,24 @@ fn render_publish_job(
     output.push_str(attestation_flags);
     output.push_str("\n          done\n");
 
-    output.push_str(
-        "      - name: Refresh rolling preview release\n        env:\n          GH_TOKEN: ",
-    );
-    output.push_str(github_token_expr);
-    output.push_str("\n        run: |\n");
-    output.push_str(&rolling_refresh);
+    if !spec.refresh_rolling_release {
+        output.push_str(
+            "      - name: Release immutable-only publication lock after verification\n        if: success()\n        run: |\n          printf 'VELNOR_PUBLICATION_LOCK_RETAIN=0\\n' >> \"$GITHUB_ENV\"\n",
+        );
+    }
+
+    if let Some(rolling_refresh) = rolling_refresh.as_deref() {
+        output.push_str(
+            "      - name: Refresh rolling preview release\n        id: rolling-refresh\n",
+        );
+        if spec.consumer_tag_mode == ConsumerTagMode::Immutable {
+            output.push_str("        continue-on-error: true\n");
+        }
+        output.push_str("        env:\n          GH_TOKEN: ");
+        output.push_str(github_token_expr);
+        output.push_str("\n        run: |\n");
+        output.push_str(rolling_refresh);
+    }
     output.push_str(
         "      - name: Finalize package publication lock\n        if: ${{ always() }}\n        env:\n          GH_TOKEN: ",
     );
@@ -2723,80 +4021,7 @@ fn render_publish_job(
         &render_publication_lock_finalizer_script(),
         10,
     ));
-    output.push_str("      - name: Checkout consumer repository\n        uses: ");
-    output.push_str(checkout);
-    output.push_str("\n        with:\n          repository: ");
-    output.push_str(consumer_repository_yaml);
-    output.push_str("\n          ref: ");
-    output.push_str(consumer_branch_yaml);
-    output.push_str("\n          token: ");
-    output.push_str(updater_token_expr);
-    output.push_str("\n          path: consumer\n          persist-credentials: false\n");
 
-    output.push_str("      - name: Run updater and create or update consumer PR\n        id: consumer-pr\n        env:\n          RELEASE_ASSET_TAG: ");
-    output.push_str(&immutable_tag_output);
-    output.push_str("\n          GH_TOKEN: ");
-    output.push_str(updater_token_expr);
-    output.push_str("\n          UPDATER_TOKEN: ");
-    output.push_str(updater_token_expr);
-    output.push_str(
-        r#"
-        run: |
-          set -euo pipefail
-          cd consumer
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          stale_branch="automation/package-release-$RELEASE_TAG"
-          automation_branch="automation/package-release-$RELEASE_ASSET_TAG"
-          while IFS= read -r stale_pr_url; do
-            if [ -n "$stale_pr_url" ]; then
-              gh pr close "$stale_pr_url" --repo "$CONSUMER_REPOSITORY" --comment "Superseded by immutable package release $RELEASE_ASSET_TAG"
-            fi
-          done < <(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$stale_branch" --base "$CONSUMER_BRANCH" --state open --json url --jq '.[].url')
-          if ! remote_branch_refs="$(git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" ls-remote origin "refs/heads/$automation_branch")"; then
-            echo "::error::consumer automation branch lookup failed; refusing branch mutation" >&2
-            exit 1
-          fi
-          if ! remote_branch_sha="$(awk 'NF >= 2 {print $1; exit}' <<<"$remote_branch_refs")"; then
-            echo "::error::consumer automation branch response could not be parsed; refusing branch mutation" >&2
-            exit 1
-          fi
-          if [ -n "$remote_branch_sha" ] && ! [[ "$remote_branch_sha" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::consumer automation branch response contained an invalid object ID" >&2
-            exit 1
-          fi
-          if [ -n "$remote_branch_sha" ]; then
-            git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" fetch origin "refs/heads/$automation_branch:refs/remotes/origin/$automation_branch"
-            git switch --detach "origin/$automation_branch"
-          else
-            git switch --create "$automation_branch" "origin/$CONSUMER_BRANCH"
-          fi
-          VELNOR_PACKAGE_CHANNEL="$VELNOR_PACKAGE_CHANNEL" VELNOR_PACKAGE_RELEASE_TAG="$RELEASE_TAG" VELNOR_VERIFIED_PACKAGE_DIR="$GITHUB_WORKSPACE/published-package" bash -c "$UPDATER"
-          untracked_files="$(git ls-files --others --exclude-standard)"
-          if [ -n "$untracked_files" ]; then
-            echo "::notice::consumer updater produced untracked files; staging them"
-            printf '%s\n' "$untracked_files"
-          fi
-          git add -A
-          git diff --cached --check
-          if [ -z "$(git status --porcelain --untracked-files=all)" ]; then
-            echo "consumer already references the verified release"
-          else
-            if [ -n "$remote_branch_sha" ]; then
-              echo "::error::immutable consumer branch already exists and would need rewriting; refusing to mutate it" >&2
-              exit 1
-            fi
-            git commit -s -m "$UPDATE_COMMIT_MESSAGE"
-            git -c "http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN" push origin "HEAD:refs/heads/$automation_branch"
-          fi
-          pr_url="$(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$automation_branch" --base "$CONSUMER_BRANCH" --state open --json url --jq '.[0].url // empty')"
-          if [ -z "$pr_url" ] && ! git diff --quiet HEAD "origin/$CONSUMER_BRANCH"; then
-            pr_url="$(gh pr create --repo "$CONSUMER_REPOSITORY" --head "$automation_branch" --base "$CONSUMER_BRANCH" --title "$UPDATE_COMMIT_MESSAGE ($RELEASE_ASSET_TAG)" --body "Automated verified package update. Review and merge this PR; the publisher never merges consumer changes.")"
-          fi
-          printf 'pr_url=%s\n' "$pr_url" >> "$GITHUB_OUTPUT"
-          if [ -n "$pr_url" ]; then echo "::notice::Consumer update PR: $pr_url"; else echo "::notice::Consumer update PR: none"; fi
-"#,
-    );
     output
 }
 
@@ -2829,9 +4054,72 @@ updater = "./scripts/package-update.sh"
 updater_token_secret = "TAP_TOKEN"
 update_commit_message = "chore: update verified preview"
 concurrency_group = "package-release-preview"
+
+[production_inputs]
+application = ["crates/app/src/**", "Cargo.lock"]
+
+[production_dependencies]
+engine = ["crates/engine/**"]
+
+[non_production_inputs]
+documentation = ["README.md", "docs/**"]
+contract_fixture = ["tests/contract-fixtures/**"]
 "#,
         )
         .expect("fixture args")
+    }
+
+    #[test]
+    fn legacy_release_declarations_without_input_tables_parse_render_and_admit_unknown_changes() {
+        let mut values = args();
+        for key in [
+            "production_inputs",
+            "production_dependencies",
+            "non_production_inputs",
+        ] {
+            values.remove(key);
+        }
+
+        let spec = parse_spec(&Args(&values)).expect("legacy declaration remains valid");
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        assert!(workflow.contains("name: Admit production release inputs"));
+
+        let changes = [crate::s2::reuse::ChangedPath {
+            path: "crates/sample-cli/src/new_module.rs".to_owned(),
+            previous: None,
+            status: crate::s2::reuse::ChangeKind::Added,
+        }];
+        let admission = evaluate_release_admission(
+            &AdmissionEvent {
+                repository: "example/project",
+                event_ref: "refs/heads/main",
+                configured_source_ref: "refs/heads/main",
+                event_name: "push",
+                before_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                head_tree: "cccccccccccccccccccccccccccccccccccccccc",
+            },
+            &spec.release_inputs,
+            &changes,
+        )
+        .expect("legacy unknown path classification");
+        assert_eq!(admission.disposition, "admit");
+        assert!(admission.reason.contains("admitting conservatively"));
+    }
+
+    #[test]
+    fn explicitly_empty_production_inputs_table_remains_invalid() {
+        let mut values = args();
+        values.insert(
+            "production_inputs".to_owned(),
+            toml::Value::Table(toml::map::Map::new()),
+        );
+
+        let error = parse_release_input_rules(&Args(&values))
+            .expect_err("explicit empty production inputs must fail closed");
+        assert!(error
+            .to_string()
+            .contains("must declare at least one named path group"));
     }
 
     #[test]
@@ -2878,6 +4166,16 @@ updater = "./scripts/package-update.sh"
 updater_token_secret = "TAP_TOKEN"
 update_commit_message = "chore: update verified preview"
 concurrency_group = "package-release-preview"
+
+[declare.args.production_inputs]
+application = ["crates/app/src/**", "Cargo.lock"]
+
+[declare.args.production_dependencies]
+engine = ["crates/engine/**"]
+
+[declare.args.non_production_inputs]
+documentation = ["README.md", "docs/**"]
+contract_fixture = ["tests/contract-fixtures/**"]
 "#,
         )
         .expect("schema 2 package declaration must parse");
@@ -2969,16 +4267,16 @@ concurrency_group = "package-release-preview"
         let document = serde_yaml::from_str::<serde_yaml::Value>(&workflow)
             .expect("rendered workflow is YAML");
 
-        let build = &document["jobs"]["build"];
+        let attest = &document["jobs"]["attest"];
         assert_eq!(
-            build["outputs"]["artifact_id"].as_str(),
-            Some("${{ steps.upload-package.outputs.artifact-id }}")
+            attest["outputs"]["artifact_id"].as_str(),
+            Some("${{ steps.upload-attested.outputs.artifact-id }}")
         );
-        let build_steps = build["steps"].as_sequence().expect("build steps");
-        let upload = build_steps
+        let attest_steps = attest["steps"].as_sequence().expect("attest steps");
+        let upload = attest_steps
             .iter()
             .find(|step| {
-                step.get("id").and_then(serde_yaml::Value::as_str) == Some("upload-package")
+                step.get("id").and_then(serde_yaml::Value::as_str) == Some("upload-attested")
             })
             .expect("package upload step");
         assert_eq!(
@@ -2987,11 +4285,11 @@ concurrency_group = "package-release-preview"
         );
         assert_eq!(
             upload["with"]["name"].as_str(),
-            Some("package-release-${{ github.run_id }}-${{ github.run_attempt }}")
+            Some("${{ format('package-release-attested-{0}-{1}-{2}', needs.verify.outputs.source_commit, github.run_id, github.run_attempt) }}")
         );
 
         let publish = &document["jobs"]["publish"];
-        assert_eq!(publish["needs"].as_str(), Some("build"));
+        assert_eq!(publish["needs"].as_str(), Some("attest"));
         let publish_steps = publish["steps"].as_sequence().expect("publish steps");
         let step = |name: &str| {
             publish_steps
@@ -3011,7 +4309,7 @@ concurrency_group = "package-release-preview"
         assert!(index(validate) < index(download) && index(download) < index(reverify));
         assert_eq!(
             validate["env"]["PACKAGE_ARTIFACT_ID"].as_str(),
-            Some("${{ needs.build.outputs.artifact_id }}")
+            Some("${{ needs.attest.outputs.artifact_id }}")
         );
         assert!(validate["run"]
             .as_str()
@@ -3023,7 +4321,7 @@ concurrency_group = "package-release-preview"
         );
         assert_eq!(
             download["with"]["artifact-ids"].as_str(),
-            Some("${{ needs.build.outputs.artifact_id }}")
+            Some("${{ needs.attest.outputs.artifact_id }}")
         );
         assert!(download["with"].get("name").is_none());
     }
@@ -3688,7 +4986,7 @@ test "$publication_lock_retain" -eq 1
             mise_lock_backends: BTreeMap::new(),
             mise_install_deps: crate::s2::config::MiseInstallDeps::default(),
             github_cache: crate::s2::config::CacheGithubSection::default(),
-            velnor_host_cache: crate::s2::config::CacheVelnorSection::default(),
+            host_cache: crate::s2::config::CacheHostSection::default(),
         }
     }
 
@@ -4062,6 +5360,141 @@ gh() {{
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rolling_verifier_accepts_source_bound_transaction_handoff_outside_workspace() {
+        use std::process::Command;
+
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let verifier = verification_script(&spec);
+        let path_check_end = verifier
+            .find("manifest=\"$dir/release-manifest.json\"")
+            .expect("verified handoff path preflight");
+        let path_check = &verifier[..path_check_end];
+        let verification = PublishVerification {
+            script: path_check,
+            attestation_flags: "",
+        };
+        let rolling = render_rolling_refresh_script("", "", "", &verification);
+        let handoff_assignments = rolling
+            .find("rolling_handoff_relative=\"$EXPECTED_SOURCE_COMMIT/rolling-published\"")
+            .expect("source-bound rolling path assignment");
+        let assignments_end = rolling[handoff_assignments..]
+            .find("\nrolling_response=")
+            .map(|offset| handoff_assignments + offset)
+            .expect("rolling transaction assignments");
+        let assignments = &rolling[handoff_assignments..assignments_end];
+        let fragment_start = rolling
+            .find("\nmkdir -- \"$rolling_handoff_root\"")
+            .expect("owned rolling handoff creation");
+        let fragment_end = rolling[fragment_start..]
+            .find("\n\nfor payload")
+            .map(|offset| fragment_start + offset)
+            .expect("rolling verifier call end");
+        let fragment = &rolling[fragment_start..fragment_end];
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-rolling-transaction-handoff-{}",
+            crate::unique_suffix()
+        ));
+        let workspace = root.join("workspace");
+        let transaction_dir = root.join("runner-temp").join("transaction");
+        std::fs::create_dir_all(&workspace).expect("create rolling workspace");
+        std::fs::create_dir_all(&transaction_dir).expect("create owned transaction root");
+        let commit = "a".repeat(40);
+        let harness = format!(
+            r#"set -Eeuo pipefail
+GITHUB_WORKSPACE="$TEST_TMPDIR/workspace"
+transaction_dir="$TEST_TMPDIR/runner-temp/transaction"
+EXPECTED_SOURCE_COMMIT={commit}
+rolling_tag=preview
+GITHUB_REPOSITORY=example/project
+PACKAGE_DIR=package
+export GITHUB_WORKSPACE EXPECTED_SOURCE_COMMIT PACKAGE_DIR
+gh() {{ return 0; }}
+rollback() {{ exit "$1"; }}
+{assignments}
+{fragment}
+test -d "$rolling_published_dir"
+"#
+        );
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(harness)
+            .env("TEST_TMPDIR", &root)
+            .output()
+            .expect("run source-bound rolling verifier handoff");
+        assert!(
+            output.status.success(),
+            "rolling handoff verifier rejected its generated transaction path:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(transaction_dir
+            .join(&commit)
+            .join("rolling-published")
+            .is_dir());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_checksum_name_verifier_runs_with_host_awk() {
+        use std::process::Command;
+
+        let spec = parse_spec(&Args(&args())).expect("valid checksum fixture");
+        let script = verification_script(&spec);
+        let checker_start = script
+            .find("if ! awk '\n  NF == 2 {\n    name = $2")
+            .expect("generated SHA256SUMS awk checker");
+        let checker_end = checker_start
+            + script[checker_start..]
+                .find("\nif ! (cd \"$dir\" && sha256sum --check --strict SHA256SUMS)")
+                .expect("checksum byte verification boundary");
+        let checker = &script[checker_start..checker_end];
+        let shell = format!(
+            r#"set -euo pipefail
+dir="$TEST_TMPDIR/package"
+checksum_names="$TEST_TMPDIR/checksum-names"
+expected_names="$TEST_TMPDIR/expected-names"
+{checker}
+"#
+        );
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-host-awk-{}",
+            crate::unique_suffix()
+        ));
+        let package_dir = root.join("package");
+        std::fs::create_dir_all(&package_dir).expect("create host awk fixture");
+        std::fs::write(root.join("expected-names"), "a.tar.gz\n")
+            .expect("write expected checksum names");
+
+        let run_checker = |line: &str| {
+            std::fs::write(package_dir.join("SHA256SUMS"), line).expect("write SHA256SUMS fixture");
+            Command::new("bash")
+                .arg("-c")
+                .arg(&shell)
+                .env("TEST_TMPDIR", &root)
+                .output()
+                .expect("run generated checksum checker with host awk")
+        };
+        let digest = "a".repeat(64);
+        let valid = run_checker(&format!("{digest}  a.tar.gz\n"));
+        assert!(
+            valid.status.success(),
+            "generated SHA256SUMS check rejected a valid entry under host awk:\n{}{}",
+            String::from_utf8_lossy(&valid.stdout),
+            String::from_utf8_lossy(&valid.stderr)
+        );
+
+        let unsafe_name = run_checker(&format!("{digest}  a\\b.tar.gz\n"));
+        assert!(
+            !unsafe_name.status.success(),
+            "generated SHA256SUMS check accepted a path containing a backslash"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn release_asset_set_contains_metadata_payloads_and_supporting_provenance() {
         let spec = parse_spec(&Args(&args())).expect("valid fixture");
@@ -4084,7 +5517,7 @@ gh() {{
     }
 
     #[test]
-    fn rendered_workflow_runs_repository_verification_tasks_at_all_boundaries() {
+    fn rendered_workflow_runs_repository_verification_tasks_outside_writer() {
         let spec = parse_spec(&Args(&args())).expect("valid fixture");
         let workflow = render_workflow(&render_config(), &spec, "preview.yml");
         assert_eq!(
@@ -4094,7 +5527,7 @@ gh() {{
             3
         );
         let producer = workflow
-            .find("Build verified package directory")
+            .find("Build package candidate")
             .expect("producer step");
         let producer_verify = workflow
             .find("Run repository package verification tasks")
@@ -4102,27 +5535,87 @@ gh() {{
         let handoff = workflow
             .find("Re-verify downloaded handoff")
             .expect("handoff step");
+        let fresh_verify = workflow
+            .find("Verify manifest, identity, checksums, and exact file set")
+            .expect("fresh package verifier step");
+        let signer = workflow.find("  attest:").expect("attestation job");
+        let publisher = workflow.find("\n  publish:").expect("publisher job");
+        let verifier = workflow
+            .find("\n  verify_published:")
+            .expect("fresh published verifier job");
+        let consumer = workflow.find("\n  consumer:").expect("consumer job");
         let handoff_verify = workflow
             .find("Run handoff package verification tasks")
             .expect("handoff verification task step");
+        let handoff_upload = workflow
+            .find("Upload verified package handoff")
+            .expect("verified package upload step");
+        let published_verify = workflow
+            .find("Run published package verification tasks")
+            .expect("published verification task step");
         let immutable = workflow
             .find("Download and re-verify published release")
             .expect("immutable download step");
-        let immutable_verify = workflow
-            .find("Run published package verification tasks")
-            .expect("immutable verification task step");
         let rolling = workflow
             .find("Refresh rolling preview release")
             .expect("rolling update step");
         assert!(producer < producer_verify);
-        assert!(producer_verify < handoff);
-        assert!(handoff < handoff_verify);
-        assert!(handoff_verify < immutable);
-        assert!(immutable < immutable_verify);
-        assert!(immutable_verify < rolling);
+        assert!(producer_verify < fresh_verify);
+        assert!(fresh_verify < handoff_verify);
+        assert!(handoff_verify < handoff_upload);
+        assert!(handoff_upload < signer);
+        assert!(signer < publisher);
+        assert!(handoff < immutable);
+        assert!(immutable < rolling);
+        assert!(publisher < verifier);
+        assert!(verifier < published_verify);
+        assert!(published_verify < consumer);
+        let publisher_workflow = &workflow[publisher..verifier];
+        assert!(!publisher_workflow.contains("mise run 'verify-preview-package'"));
+        assert!(!publisher_workflow.contains("Run handoff package verification tasks"));
+        assert!(!publisher_workflow.contains("Run published package verification tasks"));
+        assert!(!workflow[consumer..].contains("verify-preview-package"));
         assert!(workflow
             .contains("VELNOR_VERIFIED_PACKAGE_DIR: ${{ github.workspace }}/published-package"));
         assert!(!workflow.contains("verify-preview-package --"));
+    }
+
+    #[test]
+    fn privileged_jobs_use_fresh_hosted_runners_for_local_producer() {
+        let mut config = render_config();
+        config.providers = BTreeSet::from([ProviderId::Velnor]);
+        config.automatic_providers = BTreeSet::from([ProviderId::Velnor]);
+        config.selectors = BTreeMap::from([(
+            ProviderId::Velnor,
+            crate::s2::provider::ProviderSelector {
+                runs_on: vec!["self-hosted".to_owned(), "synthetic-target".to_owned()],
+            },
+        )]);
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let workflow = render_workflow(&config, &spec, "preview.yml");
+        let document = serde_yaml::from_str::<serde_yaml::Value>(&workflow)
+            .expect("rendered workflow is YAML");
+        assert_eq!(
+            document["jobs"]["build"]["runs-on"],
+            serde_yaml::Value::Sequence(vec![
+                serde_yaml::Value::String("self-hosted".to_owned()),
+                serde_yaml::Value::String("synthetic-target".to_owned()),
+            ]),
+            "producer follows the configured local runner selector"
+        );
+        for job in [
+            "verify",
+            "attest",
+            "publish",
+            "verify_published",
+            "consumer",
+        ] {
+            assert_eq!(
+                document["jobs"][job]["runs-on"].as_str(),
+                Some("ubuntu-24.04"),
+                "job {job} must not share a self-hosted runner with source-controlled producer work"
+            );
+        }
     }
 
     #[test]
@@ -4131,9 +5624,26 @@ gh() {{
         let spec = parse_spec(&Args(&args())).expect("valid fixture");
         let workflow = render_workflow(&render_config(), &spec, "preview.yml");
         assert!(
+            workflow.contains("          published_dir=\"$GITHUB_WORKSPACE/published-package\""),
+            "{workflow}"
+        );
+        assert!(
             workflow.contains(
-                "          export VELNOR_VERIFIED_PACKAGE_DIR=\"$GITHUB_WORKSPACE/published-package\""
+                "          if [[ -e \"$published_dir\" || -L \"$published_dir\" ]]; then"
             ),
+            "{workflow}"
+        );
+        assert!(
+            workflow.contains("          mkdir -- \"$published_dir\""),
+            "{workflow}"
+        );
+        assert!(
+            workflow.contains("          export VELNOR_VERIFIED_PACKAGE_DIR=\"$published_dir\""),
+            "{workflow}"
+        );
+        assert!(!workflow.contains("rm -rf published-package"), "{workflow}");
+        assert!(
+            !workflow.contains("mkdir -p published-package"),
             "{workflow}"
         );
         assert!(
@@ -4158,8 +5668,7 @@ gh() {{
             "{workflow}"
         );
         assert!(
-            workflow
-                .contains("contents: write\n      pull-requests: write\n      attestations: read"),
+            workflow.contains("contents: write\n      attestations: read"),
             "{workflow}"
         );
         assert!(workflow.contains("tag=\"$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT\""));
@@ -4228,6 +5737,14 @@ gh() {{
         let workflow = render_workflow(&render_config(), &spec, "preview.yml");
         let document = serde_yaml::from_str::<serde_yaml::Value>(&workflow)
             .expect("rendered workflow is YAML");
+        assert!(
+            document.get("concurrency").is_none(),
+            "workflow-level lock would overlap the publisher job lock"
+        );
+        assert_eq!(
+            workflow.matches("group: package-release-preview").count(),
+            1
+        );
         let publish = document
             .get("jobs")
             .and_then(serde_yaml::Value::as_mapping)
@@ -4248,7 +5765,8 @@ gh() {{
             permissions
                 .get("pull-requests")
                 .and_then(serde_yaml::Value::as_str),
-            Some("write")
+            Some("write"),
+            "the explicit pre-publish migration retains its established GitHub token scope"
         );
         assert_eq!(
             permissions
@@ -4272,8 +5790,6 @@ gh() {{
         let migration = step("Run pre-publish migration tasks");
         let immutable = step("Publish immutable source-bound release");
         let published = step("Download and re-verify published release");
-        let consumer_checkout = step("Checkout consumer repository");
-        let consumer_update = step("Run updater and create or update consumer PR");
         let index = |target: &serde_yaml::Value| {
             steps
                 .iter()
@@ -4285,6 +5801,11 @@ gh() {{
         assert!(index(lock) < index(migration));
         assert!(index(migration) < index(immutable));
         assert!(index(immutable) < index(published));
+        assert_eq!(
+            publish.get("runs-on").and_then(serde_yaml::Value::as_str),
+            Some("ubuntu-24.04"),
+            "writer runs on a fresh GitHub-hosted runner even when the producer is local"
+        );
 
         let migration_env = migration
             .get("env")
@@ -4326,6 +5847,34 @@ gh() {{
                 .and_then(serde_yaml::Value::as_str),
             Some("${{ github.token }}")
         );
+        let jobs = document
+            .get("jobs")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("workflow jobs");
+        let consumer = jobs
+            .get("consumer")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("isolated consumer job");
+        assert_eq!(
+            consumer.get("needs").and_then(serde_yaml::Value::as_str),
+            Some("verify_published")
+        );
+        assert_eq!(
+            consumer.get("runs-on").and_then(serde_yaml::Value::as_str),
+            Some("ubuntu-24.04")
+        );
+        let consumer_steps = consumer
+            .get("steps")
+            .and_then(serde_yaml::Value::as_sequence)
+            .expect("consumer steps");
+        let consumer_step = |name: &str| {
+            consumer_steps
+                .iter()
+                .find(|step| step.get("name").and_then(serde_yaml::Value::as_str) == Some(name))
+                .expect("missing consumer step")
+        };
+        let consumer_checkout = consumer_step("Checkout consumer repository");
+        let consumer_update = consumer_step("Run updater and create or update consumer PR");
         let consumer_checkout_with = consumer_checkout
             .get("with")
             .and_then(serde_yaml::Value::as_mapping)
@@ -4357,6 +5906,9 @@ gh() {{
             .and_then(serde_yaml::Value::as_mapping)
             .expect("publish job environment");
         assert!(!publish_job_env.contains_key("UPDATER_TOKEN"));
+        assert!(!serde_yaml::to_string(publish)
+            .expect("serialize writer job")
+            .contains("TAP_TOKEN"));
         assert_eq!(workflow.matches("${{ secrets.TAP_TOKEN }}").count(), 3);
         assert_eq!(
             workflow
@@ -4373,7 +5925,7 @@ gh() {{
             .and_then(serde_yaml::Value::as_sequence)
             .expect("build steps");
         for name in [
-            "Build verified package directory",
+            "Build package candidate",
             "Run repository package verification tasks",
         ] {
             let script = build_steps
@@ -4386,16 +5938,21 @@ gh() {{
                 .expect("missing build step");
             assert!(!script.contains("migrate-preview-legacy"), "{name}");
         }
-        for name in [
-            "Run handoff package verification tasks",
-            "Run published package verification tasks",
-        ] {
-            let script = step(name)
-                .get("run")
-                .and_then(serde_yaml::Value::as_str)
-                .unwrap_or("");
-            assert!(!script.contains("migrate-preview-legacy"), "{name}");
-        }
+        let producer_verification = build_steps
+            .iter()
+            .find(|candidate| {
+                candidate.get("name").and_then(serde_yaml::Value::as_str)
+                    == Some("Run repository package verification tasks")
+            })
+            .and_then(|candidate| candidate.get("run"))
+            .and_then(serde_yaml::Value::as_str)
+            .expect("producer verification task");
+        assert!(producer_verification.contains("mise run 'verify-preview-package'"));
+        let publisher_yaml =
+            serde_yaml::to_string(publish).expect("serialize credentialed publisher");
+        assert!(!publisher_yaml.contains("verify-preview-package"));
+        assert!(!publisher_yaml.contains("Run handoff package verification tasks"));
+        assert!(!publisher_yaml.contains("Run published package verification tasks"));
         let lock_run = lock
             .get("run")
             .and_then(serde_yaml::Value::as_str)
@@ -4436,12 +5993,18 @@ gh() {{
         assert!(workflow.contains("automation/package-release-$RELEASE_ASSET_TAG"));
         assert!(workflow.contains("gh pr close \"$stale_pr_url\""));
         assert!(workflow.contains("git switch --detach \"origin/$automation_branch\""));
-        assert!(workflow
-            .contains("VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_TAG\" VELNOR_VERIFIED_PACKAGE_DIR"));
-        assert!(!workflow.contains("git switch --force-create \"$automation_branch\""));
-        assert!(!workflow.contains(
-            "VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_ASSET_TAG\" VELNOR_VERIFIED_PACKAGE_DIR"
+        assert!(workflow.contains(
+            "VELNOR_PACKAGE_ASSET_TAG: ${{ needs.verify_published.outputs.release_tag }}"
         ));
+        assert!(workflow.contains("VELNOR_PACKAGE_RELEASE_TAG: preview"));
+        assert!(workflow.contains("VELNOR_PACKAGE_VERSION: ${{ steps.verify.outputs.version }}"));
+        assert!(workflow
+            .contains("VELNOR_PACKAGE_SOURCE_COMMIT: ${{ steps.verify.outputs.source_commit }}"));
+        assert!(workflow.contains("VELNOR_PACKAGE_SOURCE_REPOSITORY: \"example/project\""));
+        assert!(workflow.contains("VELNOR_PACKAGE_SOURCE_REF: \"refs/heads/main\""));
+        assert!(workflow
+            .contains("VELNOR_VERIFIED_PACKAGE_DIR: ${{ github.workspace }}/consumer-package"));
+        assert!(!workflow.contains("git switch --force-create \"$automation_branch\""));
         assert!(workflow.contains("git ls-files --others --exclude-standard"));
         assert!(workflow.contains("git status --porcelain --untracked-files=all"));
         assert!(workflow.contains("consumer updater produced untracked files; staging them"));
@@ -4459,6 +6022,8 @@ gh() {{
         assert!(!workflow
             .contains("if [ -n \"$(git status --porcelain --untracked-files=all)\" ]; then"));
         assert!(workflow.contains("bash -c \"$UPDATER\""));
+        assert!(workflow.contains("immutable package asset tag does not bind to its source commit"));
+        assert!(!workflow.contains("unset RELEASE_TAG"));
         let workflow_lower = workflow.to_ascii_lowercase();
         assert!(!workflow_lower.contains("formula"));
         assert!(!workflow_lower.contains("homebrew"));
@@ -4494,6 +6059,208 @@ gh() {{
             .expect("consumer commit");
         assert!(branch_rewrite_guard < consumer_commit);
         serde_yaml::from_str::<serde_yaml::Value>(&workflow).expect("rendered workflow is YAML");
+    }
+
+    #[test]
+    fn immutable_consumer_uses_verified_source_tag_without_rolling_alias() {
+        let mut configured = args();
+        configured.insert(
+            "consumer_tag_mode".to_owned(),
+            toml::Value::String("immutable".to_owned()),
+        );
+        configured.insert(
+            "refresh_rolling_release".to_owned(),
+            toml::Value::Boolean(false),
+        );
+        let spec = parse_spec(&Args(&configured)).expect("valid immutable-only fixture");
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        let document = serde_yaml::from_str::<serde_yaml::Value>(&workflow)
+            .expect("rendered workflow is YAML");
+        let publish = &document["jobs"]["publish"];
+        assert!(publish["outputs"]["rolling_refresh_outcome"]
+            .as_str()
+            .is_some_and(|value| value.contains("not-requested")));
+        assert!(!workflow.contains("Refresh rolling preview release"));
+        assert!(workflow.contains("Verify immutable consumer package identity"));
+        let consumer = &document["jobs"]["consumer"];
+        assert_eq!(consumer["needs"].as_str(), Some("verify_published"));
+        let steps = consumer["steps"].as_sequence().expect("consumer steps");
+        let download_index = steps
+            .iter()
+            .position(|step| {
+                step["name"].as_str() == Some("Re-verify immutable release for consumer")
+            })
+            .expect("consumer fixed verifier step");
+        let identity_index = steps
+            .iter()
+            .position(|step| {
+                step["name"].as_str() == Some("Verify immutable consumer package identity")
+            })
+            .expect("identity check step");
+        let checkout_index = steps
+            .iter()
+            .position(|step| step["name"].as_str() == Some("Checkout consumer repository"))
+            .expect("consumer checkout step");
+        assert!(identity_index < checkout_index);
+        let updater = steps
+            .iter()
+            .find(|step| {
+                step["name"].as_str() == Some("Run updater and create or update consumer PR")
+            })
+            .expect("consumer updater step");
+        let env = updater["env"].as_mapping().expect("updater environment");
+        let env_value = |key: &str| env.get(key).and_then(serde_yaml::Value::as_str);
+        assert_eq!(
+            env_value("VELNOR_PACKAGE_ASSET_TAG"),
+            Some("${{ needs.verify_published.outputs.release_tag }}")
+        );
+        assert_eq!(
+            env_value("VELNOR_PACKAGE_SOURCE_COMMIT"),
+            Some("${{ steps.verify.outputs.source_commit }}")
+        );
+        assert_eq!(
+            env_value("VELNOR_PACKAGE_VERSION"),
+            Some("${{ steps.verify.outputs.version }}")
+        );
+        assert_eq!(
+            env_value("VELNOR_VERIFIED_PACKAGE_DIR"),
+            Some("${{ github.workspace }}/consumer-package")
+        );
+        assert!(env_value("VELNOR_PACKAGE_RELEASE_TAG").is_none());
+        let updater_script = updater["run"].as_str().expect("consumer updater script");
+        let unset_legacy_tag = updater_script
+            .find("unset RELEASE_TAG")
+            .expect("immutable updater hides the legacy rolling tag");
+        let updater_execution = updater_script
+            .find("bash -c \"$UPDATER\"")
+            .expect("consumer updater execution");
+        assert!(download_index < identity_index);
+        assert!(identity_index < checkout_index);
+        assert!(unset_legacy_tag < updater_execution);
+    }
+
+    #[test]
+    fn immutable_consumer_refresh_failure_does_not_skip_tap_update() {
+        let mut configured = args();
+        configured.insert(
+            "consumer_tag_mode".to_owned(),
+            toml::Value::String("immutable".to_owned()),
+        );
+        configured.insert(
+            "refresh_rolling_release".to_owned(),
+            toml::Value::Boolean(true),
+        );
+        let spec = parse_spec(&Args(&configured)).expect("valid immutable refresh fixture");
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        let document = serde_yaml::from_str::<serde_yaml::Value>(&workflow)
+            .expect("rendered workflow is YAML");
+        let publish = &document["jobs"]["publish"];
+        let steps = publish["steps"].as_sequence().expect("publish steps");
+        let refresh = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Refresh rolling preview release"))
+            .expect("rolling refresh step");
+        assert_eq!(refresh["continue-on-error"].as_bool(), Some(true));
+        let consumer = &document["jobs"]["consumer"];
+        assert_eq!(consumer["needs"].as_str(), Some("verify_published"));
+        assert_eq!(
+            consumer["if"].as_str(),
+            Some("needs.verify_published.result == 'success'")
+        );
+        assert!(consumer["steps"]
+            .as_sequence()
+            .expect("consumer steps")
+            .iter()
+            .any(|step| {
+                step["name"].as_str() == Some("Run updater and create or update consumer PR")
+            }));
+        assert!(publish["outputs"]["rolling_refresh_outcome"]
+            .as_str()
+            .is_some_and(|value| value.contains("steps.rolling-refresh.outcome")));
+    }
+
+    #[test]
+    fn immutable_only_lock_releases_after_published_assets_are_verified() {
+        let mut configured = args();
+        configured.insert(
+            "consumer_tag_mode".to_owned(),
+            toml::Value::String("immutable".to_owned()),
+        );
+        configured.insert(
+            "refresh_rolling_release".to_owned(),
+            toml::Value::Boolean(false),
+        );
+        let spec = parse_spec(&Args(&configured)).expect("valid immutable-only fixture");
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        let verified_release = workflow
+            .find("Verify published release attestations")
+            .expect("published release attestation step");
+        let release_lock = workflow
+            .find("Release immutable-only publication lock after verification")
+            .expect("immutable-only lock release step");
+        let finalizer = workflow
+            .find("Finalize package publication lock")
+            .expect("publication lock finalizer");
+        let consumer_checkout = workflow
+            .find("Checkout consumer repository")
+            .expect("consumer checkout");
+        assert!(verified_release < release_lock);
+        assert!(release_lock < finalizer);
+        assert!(finalizer < consumer_checkout);
+        assert!(workflow.contains("VELNOR_PUBLICATION_LOCK_RETAIN=0"));
+    }
+
+    #[test]
+    fn rolling_refresh_preflight_releases_inherited_retention_before_mutation() {
+        let verification = PublishVerification {
+            script: "set -euo pipefail",
+            attestation_flags: "--repo example/project",
+        };
+        let script = render_rolling_refresh_script("", "", "", &verification);
+        let lock_verified = script
+            .find(
+                "publication lock could not be verified; refusing release validation and mutation",
+            )
+            .expect("lock ownership check");
+        let retention_cleared = script
+            .find("\nclear_publication_lock_retain\n")
+            .expect("preflight retention release");
+        let first_mutation = script
+            .find("mutated=1\n  mark_publication_lock_retain")
+            .expect("retention restored before rolling mutation");
+        assert!(lock_verified < retention_cleared);
+        assert!(retention_cleared < first_mutation);
+    }
+
+    #[test]
+    fn legacy_consumer_requires_rolling_refresh() {
+        let mut configured = args();
+        configured.insert(
+            "consumer_tag_mode".to_owned(),
+            toml::Value::String("legacy".to_owned()),
+        );
+        configured.insert(
+            "refresh_rolling_release".to_owned(),
+            toml::Value::Boolean(false),
+        );
+        assert!(parse_spec(&Args(&configured)).is_err());
+    }
+
+    #[test]
+    fn consumer_tag_mode_and_rolling_refresh_types_fail_closed() {
+        let mut invalid_mode = args();
+        invalid_mode.insert(
+            "consumer_tag_mode".to_owned(),
+            toml::Value::String("latest".to_owned()),
+        );
+        assert!(parse_spec(&Args(&invalid_mode)).is_err());
+
+        let mut invalid_refresh = args();
+        invalid_refresh.insert(
+            "refresh_rolling_release".to_owned(),
+            toml::Value::String("false".to_owned()),
+        );
+        assert!(parse_spec(&Args(&invalid_refresh)).is_err());
     }
 
     #[test]
@@ -4594,9 +6361,10 @@ gh() {{
         assert!(
             workflow.contains("gh release download \"$rolling_tag\" --repo \"$GITHUB_REPOSITORY\"")
         );
+        assert!(workflow.contains("gh attestation verify \"$rolling_published_dir/$payload\""));
         assert!(workflow
-            .contains("gh attestation verify \"$transaction_dir/rolling-published/$payload\""));
-        assert!(workflow.contains("VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_TAG\""));
+            .contains("rolling_handoff_relative=\"$EXPECTED_SOURCE_COMMIT/rolling-published\""));
+        assert!(workflow.contains("VELNOR_PACKAGE_RELEASE_TAG: preview"));
         assert!(!workflow.contains("gh release delete"));
         assert!(!workflow.contains("HEAD:$CONSUMER_BRANCH"));
     }
@@ -5382,6 +7150,12 @@ trap 'cleanup_publication "$?"' EXIT
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )
             .env("VELNOR_VERIFIED_PACKAGE_DIR", &verified_package)
+            .env("GITHUB_WORKSPACE", &root)
+            .env("PACKAGE_DIR", "verified-package")
+            .env(
+                "EXPECTED_SOURCE_COMMIT",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
             .env(
                 "TEST_SPAWN_VERIFIER_CHILD",
                 if signal_group { "1" } else { "0" },
@@ -6571,8 +8345,8 @@ fi
         let workflow = render_workflow(&render_config(), &spec, "preview.yml");
         assert!(workflow.contains("include-hidden-files: true"));
         let upload_step = workflow
-            .find("Upload verified package handoff")
-            .expect("artifact upload step");
+            .find("Upload untrusted package candidate")
+            .expect("candidate artifact upload step");
         let upload_paths = workflow[upload_step..]
             .split("          include-hidden-files: true")
             .next()
