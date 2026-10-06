@@ -1,0 +1,10 @@
+[Unit]
+Description=Velnor fleet health probe (every 10 minutes)
+
+[Timer]
+OnCalendar=*:0/10
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target
