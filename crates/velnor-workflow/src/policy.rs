@@ -5000,8 +5000,8 @@ fn has_safe_runner_gate(
     }
     // Dual-lane automatic Velnor jobs admit same-repository pull_request plus
     // the default-branch push/schedule (and merge_group when emitted) plus a
-    // lane-selecting dispatch from the configured default branch.
-    // The generated gate must match the same policy in all callers.
+    // lane-selecting dispatch on any ref: dispatch needs write access on a
+    // ref of this repository, the authorship the runner already trusts
     // (`TrustClass::derive`, `velnor_dispatch_selection_expression`).
     // That generated shape is trusted even when the advisory checkout lacks
     // `.github/ci/project.toml` and only carries `.github-gen`.
@@ -5244,10 +5244,19 @@ fn is_generated_velnor_pr_gate(value: &str, default_branch: &str) -> bool {
     // `TrustClass::Trusted` without consulting the ref
     // (`velnor_dispatch_selection_expression` states the argument). The
     // ref-gated shapes above stay accepted for older rendered trees.
+    let explicit_dispatch_any_ref =
+        "(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'))";
+    let default_dispatch_any_ref =
+        "(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'||github.event.inputs.runner==''))";
     [automatic.as_str(), automatic_merge_group.as_str()]
         .into_iter()
         .any(|automatic| {
-            for dispatch in [explicit_dispatch.as_str(), default_dispatch.as_str()] {
+            for dispatch in [
+                explicit_dispatch.as_str(),
+                default_dispatch.as_str(),
+                explicit_dispatch_any_ref,
+                default_dispatch_any_ref,
+            ] {
                 let combined = format!("{automatic}||{dispatch}");
                 if value == combined || value == format!("({combined})") {
                     return true;

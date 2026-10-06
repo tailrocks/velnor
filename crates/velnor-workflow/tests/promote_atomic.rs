@@ -433,7 +433,7 @@ fn promote_refuses_a_symlinked_generation_config() {
         "promotion through a symlinked config must fail"
     );
     assert!(
-        stderr.contains("symlinked generation config"),
+        stderr.contains("non-regular generation config"),
         "the refusal names the link: {stderr}"
     );
     let pin = fs::read_to_string(&outside).unwrap();

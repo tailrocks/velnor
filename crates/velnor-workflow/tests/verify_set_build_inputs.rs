@@ -25,6 +25,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
+/// Live-result identity the strict schema-2 aggregate binds: the harness
+/// stamps these into the results and the aggregate child verifies them
+/// against the same values from its own environment, independent of the
+/// outer CI environment.
+const RESULT_REPOSITORY: &str = "example/verify-set";
+const RESULT_RUN_ID: &str = "verify-set-run";
+const RESULT_RUN_ATTEMPT: &str = "1";
+
 const CONFIG_S1: &str = r#"
 schema = 2
 repository = "example/verify-set"
@@ -299,10 +307,28 @@ impl Fixture {
         let results_path = self.root.join("agg-results.json");
         fs::write(&expected_path, expected)?;
         fs::write(&results_path, results)?;
+        // The strict schema-2 aggregate binds live identity from its own
+        // environment; legacy files ignore these. Set every one explicitly
+        // so ambient CI variables (notably `GITHUB_SHA`) cannot override
+        // the fixture identity through the documented fallbacks.
+        let plan_digest = serde_json::from_str::<serde_json::Value>(expected)
+            .ok()
+            .and_then(|document| {
+                document
+                    .get("plan_digest")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_default();
         let output = Self::binary()
             .current_dir(&self.root)
             .env("BASE_SHA", &self.base)
             .env("HEAD_SHA", &self.head)
+            .env("VELNOR_RESULT_REPOSITORY", RESULT_REPOSITORY)
+            .env("VELNOR_RESULT_SOURCE_SHA", &self.head)
+            .env("VELNOR_RESULT_RUN_ID", RESULT_RUN_ID)
+            .env("VELNOR_RESULT_RUN_ATTEMPT", RESULT_RUN_ATTEMPT)
+            .env("VELNOR_RESULT_PLAN_DIGEST", plan_digest)
             .args([
                 "aggregate",
                 "--expected",
@@ -338,8 +364,15 @@ fn csv_set(value: &str) -> Vec<String> {
 }
 
 /// All-success results covering every (unit, lane) the expected-work file
-/// names: the verdict the verify jobs would report.
+/// names: the verdict the verify jobs would report. An identity-bearing
+/// expected-work file (schema 2) selects the strict aggregate, so those
+/// results carry the same live identity the `record-result` producer
+/// stamps; legacy files keep the legacy shape.
 fn success_results_for(expected: &serde_json::Value) -> Result<String, Box<dyn Error>> {
+    let strict = expected
+        .get("plan_digest")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|digest| !digest.is_empty());
     let mut results = Vec::new();
     let units = expected
         .get("units")
@@ -356,16 +389,41 @@ fn success_results_for(expected: &serde_json::Value) -> Result<String, Box<dyn E
             .ok_or("expected lanes")?;
         for lane in lanes {
             let lane = lane.as_str().ok_or("lane string")?;
-            results.push(serde_json::json!({
+            let mut result = serde_json::json!({
                 "unit": id,
                 "lane": lane,
                 "outcome": "success",
-            }));
+            });
+            if strict {
+                let platform = unit
+                    .get("platform")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or("expected unit platform")?;
+                let command_digest = unit
+                    .get("command_digest")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or("expected unit command digest")?;
+                result["repository"] = serde_json::json!(RESULT_REPOSITORY);
+                result["base_sha"] = expected.get("base_sha").cloned().ok_or("expected base_sha")?;
+                result["head_sha"] = expected.get("head_sha").cloned().ok_or("expected head_sha")?;
+                result["run_id"] = serde_json::json!(RESULT_RUN_ID);
+                result["run_attempt"] = serde_json::json!(RESULT_RUN_ATTEMPT);
+                result["plan_digest"] = expected
+                    .get("plan_digest")
+                    .cloned()
+                    .ok_or("expected plan_digest")?;
+                result["provider"] = serde_json::json!(lane);
+                result["platform"] = serde_json::json!(platform);
+                result["command_digest"] = serde_json::json!(command_digest);
+            }
+            results.push(result);
         }
     }
-    Ok(serde_json::to_string(
-        &serde_json::json!({ "results": results }),
-    )?)
+    let mut document = serde_json::json!({ "results": results });
+    if strict {
+        document["schema"] = serde_json::json!(2);
+    }
+    Ok(serde_json::to_string(&document)?)
 }
 
 fn scheduled_ids(plan: &PlanOutputs) -> Vec<String> {

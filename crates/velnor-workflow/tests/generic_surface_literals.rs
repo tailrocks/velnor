@@ -85,6 +85,17 @@ const RUNNER_SELECTOR_FIXTURE_PATH: &str = "src/s2/policy/tests.rs";
 const RUNNER_SELECTOR_FIXTURE_LITERAL: &str = "velnor-target-mvp";
 const RUNNER_SELECTOR_FIXTURE_LINE: &str = r#"            "\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"velnor-target-mvp\"]\n","#;
 
+/// The owner-bootstrap transport fixture names the generator's own
+/// repository: the owner repo is the subject under test, not a consumer.
+/// Admit only those exact fixture lines; every other bare slug occurrence
+/// remains pinned to the regeneration marker.
+const OWNER_BOOTSTRAP_FIXTURE_PATH: &str = "tests/bootstrap_transport.rs";
+const OWNER_BOOTSTRAP_SLUG_LINES: &[&str] = &[
+    "const REPOSITORY: &str = \"tailrocks/velnor\";",
+    "        \"repository = \\\"tailrocks/velnor\\\"\\nvisibility = \\\"public\\\"\\n\",",
+    "repository = \"tailrocks/velnor\"",
+];
+
 /// The `termrock` toolkit enters the crate as a dev-dependency of the TUI; the
 /// dependency URL is generator identity, the same class as the generator's own
 /// distribution paths. Everything else in the manifest is scanned like code.
@@ -156,17 +167,28 @@ fn normalized_text(source: &str) -> String {
 }
 
 /// Phase 1 collapsed verify jobs use a generic trusted-lane id that happens to
-/// contain the retired estate runner label as a substring.
+/// contain the retired estate runner label as a substring. The owner bootstrap
+/// names its Rust unit for the generator's own crate the same way (`rust-` +
+/// `velnor-workflow`), which contains the retired estate unit id `rust-velnor`
+/// as a substring.
 fn normalized_for_deny_scan(source: &str) -> String {
-    normalized_text(source).replace("verify-velnor-trusted", "verify-trusted-lane")
+    normalized_text(source)
+        .replace("verify-velnor-trusted", "verify-trusted-lane")
+        .replace("rust-velnor-workflow", "rust-generator-owned-unit")
 }
 
 fn is_admitted_literal_site(literal: &str, line: &str) -> bool {
     literal == "velnor-trusted" && line.contains("verify-velnor-trusted")
+        || literal == "rust-velnor" && line.contains("rust-velnor-workflow")
 }
 
 fn is_admitted_runner_selector_line(root: &Path, path: &Path, line: &str) -> bool {
     path == root.join(RUNNER_SELECTOR_FIXTURE_PATH) && line == RUNNER_SELECTOR_FIXTURE_LINE
+}
+
+fn is_admitted_owner_bootstrap_slug_line(root: &Path, path: &Path, line: &str) -> bool {
+    path == root.join(OWNER_BOOTSTRAP_FIXTURE_PATH)
+        && OWNER_BOOTSTRAP_SLUG_LINES.contains(&line)
 }
 
 /// The Velnor policy fixtures need its canonical selector to pass config
@@ -276,10 +298,25 @@ fn generic_modules_never_name_a_repository() {
                     ));
                 }
             }
-            if line.contains("tailrocks/velnor") && !is_generator_path(line) {
+            if line.contains("tailrocks/velnor")
+                && !is_generator_path(line)
+                && !is_admitted_owner_bootstrap_slug_line(root, &path, line)
+            {
                 bare_slug_sites.push(format!("{}:{}", path.display(), number + 1));
             }
         }
+    }
+    let bootstrap_fixture =
+        std::fs::read_to_string(root.join(OWNER_BOOTSTRAP_FIXTURE_PATH)).unwrap_or_default();
+    for line in OWNER_BOOTSTRAP_SLUG_LINES {
+        assert_eq!(
+            bootstrap_fixture
+                .lines()
+                .filter(|candidate| candidate == line)
+                .count(),
+            1,
+            "the admitted owner-bootstrap slug line must stay exact: {line}"
+        );
     }
     assert!(
         offenders.is_empty(),
