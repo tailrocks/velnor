@@ -1,0 +1,1 @@
+{"name":"fixture","private":true,"scripts":{"lint":"echo lint","test":"echo test"}}

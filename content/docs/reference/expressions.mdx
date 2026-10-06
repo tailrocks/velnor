@@ -1,0 +1,130 @@
+---
+title: "Expressions and conditions"
+---
+
+# Expressions and conditions
+
+Velnor evaluates `${{ }}` expressions and step/job `if:` conditions with its own
+engine. Every semantic decision is transcribed from `actions/runner` v2.337.0
+under `src/Sdk/DTExpressions2/Expressions2/`, so a workflow that behaves one way
+on a GitHub-hosted runner behaves the same way here.
+
+The engine is a lexer, a shunting-yard parser, and an evaluator over a typed
+AST. There is no string rewriting anywhere in the path: an expression either
+parses or fails with a typed error.
+
+## The rule most people get wrong
+
+An `if:` condition that does **not** itself name a status function is compiled
+as `success() && (<CONDITION>)`. This is upstream behavior
+(`PipelineTemplateConverter.cs:657-658`), and it is the single most surprising
+thing about Actions conditions.
+
+The consequence:
+
+```yaml
+- name: Never runs on a cancelled job
+  if: job.status == 'cancelled'
+  run: ./collect-diagnostics.sh
+```
+
+That step is skipped when the job is cancelled. The condition became
+`success() && (job.status == 'cancelled')`, and `success()` is false on a
+cancelled job, so the right-hand side is never reached.
+
+Write it as a status function instead:
+
+```yaml
+- name: Runs on a cancelled job
+  if: cancelled()
+  run: ./collect-diagnostics.sh
+
+- name: Runs on cancellation, for one branch only
+  if: cancelled() && github.ref == 'refs/heads/main'
+  run: ./collect-diagnostics.sh
+```
+
+The four status functions that suppress the implicit `success() &&` are
+`success()`, `failure()`, `always()`, and `cancelled()`. Suppression is decided
+by walking the parsed tree, not by matching text, so `if: env.MODE ==
+'always()'` is a string comparison and still gets the implicit `success() &&`.
+`hashFiles()` is not a status function and does not suppress it.
+
+## Defaults
+
+| Condition | Effective behavior |
+| --- | --- |
+| No `if:` on a step | `success()` |
+| Empty or whitespace-only `if:` | `success()` |
+| An `if:` naming no status function | `success() && (<CONDITION>)` |
+| An `if:` naming any status function | evaluated as written |
+| No condition on a `pre`/`post` action step | always runs |
+
+`success()` is true when the job is not cancelled and the enclosing status
+scope holds no failure. A condition that cannot be evaluated is a typed error
+and fails the step closed; it does not silently run.
+
+## Functions
+
+Implemented, with upstream arity:
+
+| Function | Arity |
+| --- | --- |
+| `contains(a, b)` | 2 |
+| `startsWith(a, b)` | 2 |
+| `endsWith(a, b)` | 2 |
+| `format(fmt, ...)` | 1–255 |
+| `join(array[, sep])` | 1–2 |
+| `toJSON(value)` | 1 |
+| `fromJSON(value)` | 1 |
+| `case(...)` | 3–255 |
+| `success()` | 0 |
+| `failure()` | 0 |
+| `always()` | 0 |
+| `cancelled()` | 0 |
+| `hashFiles(pattern, ...)` | 1–255 |
+
+`toJSON` reproduces upstream's pretty-printed layout. `hashFiles` accepts
+`--follow-symbolic-links`, but the flag is parsed and ignored. Any other
+function name is an `Unrecognized function` error.
+
+## Contexts
+
+The recognized root contexts are `github`, `env`, `job`, `jobs`, `runner`,
+`steps`, `secrets`, `strategy`, `matrix`, `needs`, `inputs`, and `vars`. An
+unrecognized root is a parse error, never a silent null.
+
+`github`, `env`, `runner`, `steps`, and `job` are built by the runner. The rest
+come from the acquired job message's context data. `env` lookups are
+case-sensitive; every other object is case-insensitive, matching upstream.
+
+Velnor renders expressions twice — once when a plan is built from the job
+message, and again at step time. Anything reading a runtime context (`env`,
+`steps`, `job`, `jobs`, `runner`, or any status function) is deferred to step
+time rather than frozen into the plan.
+
+## Value semantics
+
+These follow upstream `EvaluationResult` exactly, and they are not intuitive:
+
+- Only the empty string is a falsy string. `'0'` and `'false'` are truthy.
+- The number `0` and `NaN` are falsy; every other number is truthy.
+- An array or object is always truthy, including an empty one.
+- `null` becomes `""` as a string and `0` as a number, so `env.UNSET == ''` is
+  true for an unset variable.
+- String comparison — equality, `startsWith`, `endsWith`, and ordering — is
+  ordinal case-insensitive.
+- Comparing a number with a non-numeric string is false in both directions:
+  `1 > 'a'` and `1 < 'a'` are both false.
+- `>=` is `equal || greater-than`, so `null >= 0` is true.
+- `&&` and `||` return the operand, not a boolean.
+- Objects and arrays are never coerced; they compare by reference identity.
+
+## Limits
+
+Expressions are bounded at depth 50 and 21,000 characters.
+
+`${{ }}` interpolation outside a condition is **not** fail-closed: an
+expression that fails to evaluate leaves its raw `${{ ... }}` span in the
+rendered text rather than failing the step. Conditions are fail-closed;
+interpolation is not.

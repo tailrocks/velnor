@@ -1,0 +1,7 @@
+schema = 1
+
+[generator]
+repository = "example/synthetic-workspace"
+
+[workflow]
+velnor_labels = ["self-hosted", "example-lane"]
