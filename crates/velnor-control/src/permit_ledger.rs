@@ -2266,6 +2266,54 @@ impl PermitLedger {
         Ok(())
     }
 
+    /// Record a cleanup failure the owning lane already journaled: the exact
+    /// attempt's permit becomes `uncertain` (visible, still counted) even
+    /// when it holds an active `cleaning` claim. Unlike
+    /// [`Self::retain_uncertain_owned`], which preserves an unrecorded
+    /// cleaner's claim for crash resume, this call proves the holder itself
+    /// ran cleanup and could not confirm it — there is no active cleaner
+    /// left to protect, so the claim demotes instead of sticking.
+    pub fn retain_recorded_failure_uncertain_owned(
+        &mut self,
+        holder: &str,
+        generation: u64,
+        attempt_token: &str,
+    ) -> Result<(), LedgerError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current: i64 = tx.query_row(
+            "SELECT generation FROM permit_meta WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        if current.max(0) as u64 != generation {
+            return Err(LedgerError::StaleGeneration {
+                expected: current.max(0) as u64,
+                seen: generation,
+            });
+        }
+        read_owned_attempt_state(&tx, holder, attempt_token)?;
+        let now = i64::try_from(unix_now()).unwrap_or(i64::MAX);
+        tx.execute(
+            "UPDATE permits SET state = 'uncertain', updated_unix = ?1, generation = ?2
+             WHERE holder = ?3 AND attempt_token = ?4",
+            params![
+                now,
+                i64::try_from(generation).unwrap_or(i64::MAX),
+                holder,
+                attempt_token,
+            ],
+        )?;
+        tx.execute(
+            "UPDATE permit_demands SET state = 'terminal', updated_unix = ?1
+             WHERE holder = ?2 AND state IN ('eligible', 'granted')",
+            params![now, holder],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Reconcile durable occupancy against exact-token observations, and mark
     /// this epoch reconciled so capacity may be advertised.
     ///

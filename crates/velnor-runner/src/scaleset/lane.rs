@@ -1026,7 +1026,8 @@ impl DaemonWorkerLane {
         self.refresh_generation()?;
         self.opportunistic_sweep();
         let key = self.terminal_key(request_id)?;
-        self.drive_terminal(&key, attempt_token)
+        // A cancel observation is GitHub's verdict: converge the demand.
+        self.drive_terminal(&key, attempt_token, true)
             .map_err(|error| LaneError::new("drive worker terminal", error))
     }
 
@@ -1960,19 +1961,23 @@ impl DaemonWorkerLane {
     /// Retain worker occupancy and close its demand atomically after a
     /// cleanup failure. Retry one generation race; never turn an unknown
     /// holder into false free capacity.
-    fn retain_uncertain(&mut self, holder: &str, attempt_token: &str) -> Result<()> {
+    fn retain_recorded_failure_uncertain(
+        &mut self,
+        holder: &str,
+        attempt_token: &str,
+    ) -> Result<()> {
         for _ in 0..2 {
             let generation = self.ledger.generation()?;
             match self
                 .ledger
-                .retain_uncertain(holder, generation, attempt_token)
+                .retain_recorded_failure_uncertain(holder, generation, attempt_token)
             {
                 Ok(()) => return Ok(()),
                 Err(error) if SharedLedger::is_stale_generation(&error) => continue,
                 Err(error) => return Err(error.into()),
             }
         }
-        anyhow::bail!("ledger epoch moved twice while retaining uncertain holder {holder:?}")
+        anyhow::bail!("ledger epoch moved twice while retaining recorded-failure holder {holder:?}")
     }
 
     /// Recorded state of one tracked worker.
@@ -2162,7 +2167,11 @@ impl DaemonWorkerLane {
             }
         }
         if matches!(outcome, SupervisionOutcome::WorkerFailed { .. }) {
-            self.drive_terminal(key, &attempt_token)
+            // Locally detected death: fail explicitly (diagnostics +
+            // cleanup + permit release) but never complete the demand.
+            // GitHub owns the job outcome; its completion observation
+            // converges the demand row.
+            self.drive_terminal(key, &attempt_token, false)
                 .map_err(|error| LaneError::new("fail worker", error))?;
         }
         Ok(outcome)
@@ -2189,8 +2198,11 @@ impl DaemonWorkerLane {
                         );
                         continue;
                     };
+                    // Retry resumes cleanup only; demand converges on the
+                    // GitHub observation, never on the sweep.
                     if terminal_side(row.worker_state)
-                        && let Err(error) = self.drive_terminal(&row.ownership_id, attempt_token)
+                        && let Err(error) =
+                            self.drive_terminal(&row.ownership_id, attempt_token, false)
                     {
                         tracing::warn!(
                             worker = row.ownership_id.as_str(),
@@ -2232,8 +2244,18 @@ impl DaemonWorkerLane {
     /// released). A failed cleanup vetoes the ACK (the caller maps this
     /// error into the lane error): the message redelivers and the terminal
     /// path retries until cleanup confirms — durable cleanup before ACK.
-    fn drive_terminal(&mut self, key: &str, attempt_token: &str) -> Result<()> {
-        let outcome = self.drive_terminal_inner(key, attempt_token)?;
+    /// Drive one worker's terminal path. `complete_demand` is true only when
+    /// a GitHub completion/cancel observation backs this drive: locally
+    /// detected death (ticks, sweeps, adoption, shutdown) cleans up and
+    /// releases the permit but never completes the demand — GitHub owns the
+    /// job outcome, and its later observation converges the demand row.
+    fn drive_terminal(
+        &mut self,
+        key: &str,
+        attempt_token: &str,
+        complete_demand: bool,
+    ) -> Result<()> {
+        let outcome = self.drive_terminal_inner(key, attempt_token, complete_demand)?;
         match outcome {
             TerminalOutcome::Released | TerminalOutcome::AlreadyReleased => {
                 self.workers.remove(key);
@@ -2247,7 +2269,16 @@ impl DaemonWorkerLane {
         }
     }
 
-    fn drive_terminal_inner(&mut self, key: &str, attempt_token: &str) -> Result<TerminalOutcome> {
+    fn drive_terminal_inner(
+        &mut self,
+        key: &str,
+        attempt_token: &str,
+        complete_demand: bool,
+    ) -> Result<TerminalOutcome> {
+        // Observation-backed drives converge the demand row; local-death
+        // drives release worker + permit only (`None` skips the demand
+        // write in the staged release below).
+        let terminal_demand = complete_demand.then_some(DemandState::Terminal);
         // Unknown worker: nothing provisioned, only the permit (if held)
         // needs releasing. The Processor moved it to `cleaning` before
         // calling; the release below finishes it.
@@ -2264,7 +2295,7 @@ impl DaemonWorkerLane {
                     request_id,
                     attempt_token,
                     velnor_control::permit_ledger::DemandState::Terminal,
-                    Some(DemandState::Terminal),
+                    terminal_demand,
                     None,
                 )?;
             }
@@ -2296,7 +2327,7 @@ impl DaemonWorkerLane {
                     request_id,
                     attempt_token,
                     velnor_control::permit_ledger::DemandState::Terminal,
-                    Some(DemandState::Terminal),
+                    terminal_demand,
                     Some(&row.ownership_id),
                 )?;
             }
@@ -2398,7 +2429,7 @@ impl DaemonWorkerLane {
                 request_id,
                 attempt_token,
                 velnor_control::permit_ledger::DemandState::Terminal,
-                Some(DemandState::Terminal),
+                terminal_demand,
                 Some(&row.ownership_id),
             )?;
         } else if let Some(holder) = holder_for_key(self.config.scale_set_id, key) {
@@ -2444,7 +2475,10 @@ impl DaemonWorkerLane {
                 .permit_attempt_token
                 .as_deref()
                 .context("cleanup failure row has no permit attempt token")?;
-            self.retain_uncertain(&holder, attempt_token)?;
+            // A journaled failure demotes even an active `cleaning` claim:
+            // the holder itself proved no cleaner remains. An unrecorded
+            // crash still preserves the claim via the reconcile retain path.
+            self.retain_recorded_failure_uncertain(&holder, attempt_token)?;
         }
         tracing::warn!(
             worker = key,
@@ -2535,8 +2569,9 @@ impl DaemonWorkerLane {
                 // Crash during cleanup: resume the terminal path now. A
                 // still-failing cleanup must not fail adoption (that would
                 // wedge daemon startup): the worker stays tracked at
-                // `owned_cleanup` and the message path retries it.
-                if let Err(error) = self.drive_terminal(&key, &attempt_token) {
+                // `owned_cleanup` and the message path retries it. Adoption
+                // never writes demand.
+                if let Err(error) = self.drive_terminal(&key, &attempt_token, false) {
                     tracing::warn!(
                         worker = key.as_str(),
                         error = format!("{error:#}"),
@@ -3139,7 +3174,8 @@ impl WorkerLane for DaemonWorkerLane {
             let request_id = crate::scaleset::demand::resolve_job_request_id(&completed.base);
             self.terminal_key(request_id)?
         };
-        self.drive_terminal(&key, attempt_token)
+        // A completion observation is GitHub's verdict: converge the demand.
+        self.drive_terminal(&key, attempt_token, true)
             .map_err(|error| LaneError::new("drive worker terminal", error))
     }
 
@@ -3161,6 +3197,16 @@ impl WorkerLane for DaemonWorkerLane {
             .map_err(|error| LaneError::new("read worker row", error))?
             .is_some();
         Ok(owned)
+    }
+
+    fn worker_released_pending_observation(&self, request_id: i64) -> Result<bool, Self::Error> {
+        let key = self.terminal_key(request_id)?;
+        let released = self
+            .registry
+            .get(&key)
+            .map_err(|error| LaneError::new("read worker row", error))?
+            .is_some_and(|row| row.worker_state == ScaleSetWorkerState::PermitReleased);
+        Ok(released)
     }
 }
 
@@ -4261,7 +4307,9 @@ mod tests {
         let first_runner =
             CleanupRunner::fail_runner_remove(identity.runner_container(), first_seen.clone());
         let mut first_lane = test_lane(&db, &ledger, &state_root, Box::new(first_runner));
-        assert!(first_lane.drive_terminal(&key, &attempt_token).is_err());
+        assert!(first_lane
+            .drive_terminal(&key, &attempt_token, true)
+            .is_err());
         let row = first_lane.registry.get(&key).unwrap().unwrap();
         assert_eq!(row.worker_state, ScaleSetWorkerState::OwnedCleanup);
         assert!(state_dir.join("raw-job.log").exists());
@@ -4290,7 +4338,9 @@ mod tests {
         let replay_runner =
             CleanupRunner::missing(identity.runner_container(), replay_seen.clone());
         let mut replay_lane = test_lane(&db, &ledger, &state_root, Box::new(replay_runner));
-        replay_lane.drive_terminal(&key, &attempt_token).unwrap();
+        replay_lane
+            .drive_terminal(&key, &attempt_token, true)
+            .unwrap();
         assert!(state_dir.join("raw-job.log").is_file());
         assert!(
             state_dir.join("diagnostics/capture.complete").is_file(),
@@ -4304,7 +4354,9 @@ mod tests {
 
         // A duplicate terminal observation is idempotent and performs no
         // Docker work after the durable release checkpoint.
-        replay_lane.drive_terminal(&key, &attempt_token).unwrap();
+        replay_lane
+            .drive_terminal(&key, &attempt_token, true)
+            .unwrap();
         assert_eq!(replay_seen.lock().unwrap().len(), calls_after_release);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4390,7 +4442,7 @@ mod tests {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let runner = CleanupRunner::missing(identity.runner_container(), seen.clone());
         let mut lane = test_lane(&db, &ledger, &state_root, Box::new(runner));
-        lane.drive_terminal(&key, &attempt_token).unwrap();
+        lane.drive_terminal(&key, &attempt_token, true).unwrap();
 
         let calls = seen.lock().unwrap();
         let diagnostic_calls = calls

@@ -198,12 +198,13 @@ fn owned_release<L: CapacityLedger>(
 
 /// Reconcile-before-advertise: run once at adapter start (and after every
 /// epoch bump) before the first poll advertises capacity.
-pub fn startup<L: CapacityLedger>(
+pub fn startup<L: CapacityLedger, W: WorkerLane>(
     ledger: &mut L,
     demand: &mut DemandStore,
     batches: &mut AcquireBatchStore,
     scale_set_id: i32,
     metrics: &Metrics,
+    lane: &W,
 ) -> Result<StartupReport> {
     let generation = ledger
         .generation()
@@ -381,9 +382,17 @@ pub fn startup<L: CapacityLedger>(
             }
             confirmed.push(holder.clone());
         } else if state != DemandState::Granted {
-            anyhow::bail!(
-                "active demand {holder:?} has no permit row; refusing holder-only adoption"
-            );
+            // An explicitly released worker keeps its demand open until
+            // GitHub's observation converges it. The released worker row
+            // proves this is a pending observation, not a lost permit.
+            let released = lane
+                .worker_released_pending_observation(request_id)
+                .map_err(|error| anyhow::anyhow!("read worker release state: {error}"))?;
+            if !released {
+                anyhow::bail!(
+                    "active demand {holder:?} has no permit row; refusing holder-only adoption"
+                );
+            }
         }
         if matches!(
             state,
@@ -925,7 +934,15 @@ mod tests {
         demand
             .set_state(11, DemandState::Acquired, None, 0)
             .unwrap();
-        let error = startup(&mut ledger, &mut demand, &mut batches, 7, &metrics).unwrap_err();
+        let error = startup(
+            &mut ledger,
+            &mut demand,
+            &mut batches,
+            7,
+            &metrics,
+            &OwnershipLane { owned: true },
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("no permit row"), "{error:#}");
         assert_eq!(ledger.occupied().unwrap(), 0);
         assert_eq!(ledger.advertised_free().unwrap(), None);
@@ -951,7 +968,15 @@ mod tests {
             .unwrap();
         ledger.set_test_holder_pid(&holder, Some(u32::MAX));
 
-        let report = startup(&mut ledger, &mut demand, &mut batches, 7, &metrics).unwrap();
+        let report = startup(
+            &mut ledger,
+            &mut demand,
+            &mut batches,
+            7,
+            &metrics,
+            &OwnershipLane { owned: true },
+        )
+        .unwrap();
         assert_eq!(report.unbatched_acquire_intents_recovered, 1);
         assert_eq!(report.batches_orphaned, 0);
         assert_eq!(
@@ -962,7 +987,15 @@ mod tests {
         assert_eq!(ledger.occupied().unwrap(), 0);
 
         // Restart replay is idempotent after the reservation was freed.
-        let replay = startup(&mut ledger, &mut demand, &mut batches, 7, &metrics).unwrap();
+        let replay = startup(
+            &mut ledger,
+            &mut demand,
+            &mut batches,
+            7,
+            &metrics,
+            &OwnershipLane { owned: true },
+        )
+        .unwrap();
         assert_eq!(replay.unbatched_acquire_intents_recovered, 0);
         assert_eq!(
             demand.get(12).unwrap().unwrap().state,
@@ -999,7 +1032,15 @@ mod tests {
             .record_intended("acq-orphan", 7, &[21], &holders, &[attempt_token], 0)
             .unwrap();
 
-        let report = startup(&mut ledger, &mut demand, &mut batches, 7, &metrics).unwrap();
+        let report = startup(
+            &mut ledger,
+            &mut demand,
+            &mut batches,
+            7,
+            &metrics,
+            &OwnershipLane { owned: true },
+        )
+        .unwrap();
         assert_eq!(report.batches_orphaned, 1);
         assert_eq!(
             batches.get("acq-orphan").unwrap().unwrap().state,

@@ -723,6 +723,7 @@ async fn stale_generation_seed_resets_and_regrants_with_age_kept() {
         &mut batches,
         seed.scale_set_id,
         &metrics,
+        &RecordedLane::default(),
     )
     .unwrap();
     assert_eq!(report.stale_grants_reset, 2);
@@ -753,6 +754,19 @@ async fn reordered_batch_folds_order_independently() {
         .unwrap();
     demand
         .set_state(4250, DemandState::Acquired, None, 0)
+        .unwrap();
+    demand
+        .set_permit_attempt_token(4250, None, "attempt-4250")
+        .unwrap();
+    let ledger = listener.processor_mut().ledger_mut();
+    let generation = ledger.generation().unwrap();
+    ledger
+        .acquire_with_attempt_token(
+            &format!("scaleset/{SCALE_SET_ID}/4250"),
+            velnor_runner::scaleset::LedgerPermitState::Reserved,
+            generation,
+            "attempt-4250",
+        )
         .unwrap();
 
     Mock::given(method("GET"))

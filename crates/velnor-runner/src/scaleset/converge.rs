@@ -88,6 +88,17 @@ pub trait WorkerLane {
     fn owns_terminal_cleanup(&self, _request_id: i64) -> Result<bool, Self::Error> {
         Ok(true)
     }
+
+    /// Whether the lane explicitly released `request_id`'s worker while
+    /// its demand row stays open: locally detected death drove cleanup
+    /// and freed the permit, but no GitHub observation has converged the
+    /// demand yet. Reconcile tolerates the resulting
+    /// open-demand-without-permit instead of failing closed; the pending
+    /// completion converges the demand when it arrives. Defaults to
+    /// false: lanes that track no workers never produce this state.
+    fn worker_released_pending_observation(&self, _request_id: i64) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
 }
 
 /// Image digests pinned for one provision. d1b owns the pin values; the

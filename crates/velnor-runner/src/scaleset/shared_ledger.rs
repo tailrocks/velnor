@@ -191,6 +191,19 @@ impl SharedLedger {
         self.inner
             .retain_uncertain_owned(holder, generation, attempt_token)
     }
+
+    /// Record a lane-journaled cleanup failure: demote even an active
+    /// `cleaning` claim to `uncertain`, since the holder itself proved no
+    /// cleaner is left to protect.
+    pub fn retain_recorded_failure_uncertain(
+        &mut self,
+        holder: &str,
+        generation: u64,
+        attempt_token: &str,
+    ) -> Result<(), ControlError> {
+        self.inner
+            .retain_recorded_failure_uncertain_owned(holder, generation, attempt_token)
+    }
 }
 
 impl CapacityLedger for SharedLedger {
