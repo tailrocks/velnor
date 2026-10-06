@@ -1867,19 +1867,73 @@ impl NoFollowDestinationDir {
                 self.display_path.display()
             );
         }
-        let file = rustix::fs::openat(
-            &self.file,
-            name,
-            rustix::fs::OFlags::RDWR
-                | rustix::fs::OFlags::CREATE
-                | rustix::fs::OFlags::NOFOLLOW
-                | rustix::fs::OFlags::NONBLOCK
-                | rustix::fs::OFlags::NOCTTY
-                | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::from_raw_mode(0o600),
-        )
-        .map_err(std::io::Error::from)
-        .with_context(|| format!("open lock file {}", self.display_path.join(name).display()))?;
+        let open_lock = || {
+            rustix::fs::openat(
+                &self.file,
+                name,
+                rustix::fs::OFlags::RDWR
+                    | rustix::fs::OFlags::CREATE
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::NONBLOCK
+                    | rustix::fs::OFlags::NOCTTY
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::from_raw_mode(0o600),
+            )
+        };
+        let file = match open_lock() {
+            Ok(file) => file,
+            Err(error) if error == rustix::io::Errno::NOENT => {
+                // Concurrent creators can observe a transient lookup miss for
+                // a lock file that another thread is creating. Retry the
+                // create-open briefly; a genuinely missing parent still fails
+                // after the retries are exhausted.
+                let mut last = error;
+                let mut opened = None;
+                for attempt in 0..100 {
+                    if attempt % 10 == 9 {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    } else {
+                        std::thread::yield_now();
+                    }
+                    match open_lock() {
+                        Ok(file) => {
+                            opened = Some(file);
+                            break;
+                        }
+                        Err(retry) if retry == rustix::io::Errno::NOENT => {
+                            last = retry;
+                        }
+                        Err(other) => {
+                            return Err(std::io::Error::from(other)).with_context(|| {
+                                format!(
+                                    "open lock file {}",
+                                    self.display_path.join(name).display()
+                                )
+                            });
+                        }
+                    }
+                }
+                match opened {
+                    Some(file) => file,
+                    None => {
+                        return Err(std::io::Error::from(last)).with_context(|| {
+                            format!(
+                                "open lock file {}",
+                                self.display_path.join(name).display()
+                            )
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(std::io::Error::from(error)).with_context(|| {
+                    format!(
+                        "open lock file {}",
+                        self.display_path.join(name).display()
+                    )
+                });
+            }
+        };
         let metadata = rustix::fs::fstat(&file)
             .map_err(std::io::Error::from)
             .context("inspect opened lock file")?;
