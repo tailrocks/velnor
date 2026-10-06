@@ -1570,6 +1570,21 @@ impl DaemonWorkerLane {
         next_demand_state: Option<DemandState>,
         worker_ownership_id: Option<&str>,
     ) -> Result<bool> {
+        // An adopted or legacy worker may have no demand projection at all;
+        // there is then no demand state to move, so release without one. The
+        // worker record and the exact ledger attempt token still fence the
+        // release below, and a present-but-mismatched demand still fails in
+        // staging. (Request IDs are GitHub-global, so the unscoped lookup is
+        // exact.)
+        let next_demand_state = match next_demand_state {
+            Some(_state) if self.demand.get(request_id)?.is_none() => {
+                eprintln!(
+                    "forensics.lifecycle: scaleset release for {holder:?} has no demand projection; releasing worker and permit only"
+                );
+                None
+            }
+            next => next,
+        };
         let stage = self.demand.stage_attempt_release(
             holder,
             self.config.scale_set_id,

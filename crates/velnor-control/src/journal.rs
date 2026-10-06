@@ -5269,8 +5269,12 @@ fn journal_is_provably_new_and_empty(conn: &Connection) -> StoreResult<bool> {
             return Ok(false);
         }
     }
+    // Lifecycle overlays (`drain`, `admission`) are process-lifecycle hints,
+    // not owned journal content: a supervised restart binds an unowned
+    // journal precisely to clear a leftover drain marker. The event/table
+    // counts and replay baseline above still prove no owned content exists.
     let ordinary_meta_rows: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM meta WHERE key NOT IN (?1, ?2)",
+        "SELECT COUNT(*) FROM meta WHERE key NOT IN (?1, ?2, 'drain', 'admission')",
         params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
         |row| row.get(0),
     )?;

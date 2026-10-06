@@ -394,6 +394,16 @@ pub fn startup<L: CapacityLedger>(
             anyhow::bail!("uncertain demand {holder:?} has no batch evidence");
         }
     }
+    // A provably empty ledger holds nothing in either lane, so adopting it
+    // marks nothing and unlocks advertisement without waiting for a global
+    // epoch that may never come in a fresh install. Anything held defers to
+    // the daemon startup's attested global reconcile. Adoption runs only
+    // after the projection validation above refused holder-only adoption.
+    if holders.is_empty() {
+        ledger
+            .reconcile_attempts(&[])
+            .map_err(|error| anyhow::anyhow!("adopt empty permit ledger: {error}"))?;
+    }
     metrics.inc_reconcile_runs();
     Ok(StartupReport {
         generation,

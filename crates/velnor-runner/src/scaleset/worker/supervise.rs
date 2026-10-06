@@ -30,7 +30,6 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::executor::{CommandResult, CommandRunner};
 use anyhow::{Context, Result};
 
 use super::ownership::WorkerIdentity;
@@ -586,10 +585,28 @@ pub(crate) fn teardown_owned_resources(
     runner: &mut dyn WorkerRunner,
     identity: &WorkerIdentity,
 ) -> Vec<String> {
+    teardown_owned_resources_with(runner, identity, remove_container)
+}
+
+/// Same removal sequence with raw name-based `rm`. The lane drives teardown
+/// under its worker record and permit attempt, where the cleanup call
+/// contract allows no inspect round trips.
+pub(crate) fn teardown_owned_resources_by_name(
+    runner: &mut dyn WorkerRunner,
+    identity: &WorkerIdentity,
+) -> Vec<String> {
+    teardown_owned_resources_with(runner, identity, remove_container_by_name)
+}
+
+fn teardown_owned_resources_with(
+    runner: &mut dyn WorkerRunner,
+    identity: &WorkerIdentity,
+    mut remove: impl FnMut(&mut dyn WorkerRunner, &str, &mut Vec<String>),
+) -> Vec<String> {
     let mut failures = Vec::new();
-    remove_container(runner, &identity.runner_container(), &mut failures);
+    remove(runner, &identity.runner_container(), &mut failures);
     stop_container(runner, &identity.dind_container(), &mut failures);
-    remove_container(runner, &identity.dind_container(), &mut failures);
+    remove(runner, &identity.dind_container(), &mut failures);
     remove_network(runner, &identity.network(), &mut failures);
     remove_volume(runner, &identity.workspace_volume(), &mut failures);
     remove_volume(runner, &identity.dind_data_volume(), &mut failures);
@@ -630,30 +647,91 @@ fn stop_container(runner: &mut dyn WorkerRunner, container: &str, failures: &mut
 }
 
 fn remove_container(runner: &mut dyn WorkerRunner, container: &str, failures: &mut Vec<String>) {
-    let result = {
-        let mut command_runner = WorkerRunnerCommandAdapter(runner);
-        crate::docker::Docker::job(&mut command_runner).container_remove(container, true, false)
+    // Lean resolve-then-remove: exactly one inspect plus one `rm`, deleting
+    // by immutable ID. The full typed client would add settle/quarantine
+    // probes the teardown call contract forbids; fencing here comes from the
+    // lane's worker record and permit attempt instead.
+    let id = match resolve_container_id(runner, container) {
+        Ok(Some(id)) => id,
+        Ok(None) => return,
+        Err(error) => {
+            failures.push(format!("remove {container}: {error:#}"));
+            return;
+        }
     };
-    match result {
-        Ok(_) => {}
-        Err(error) if crate::docker::client::is_not_found(&error) => {}
+    match runner.run(
+        "docker",
+        &crate::docker::client::container_remove_args(&id, true, false),
+    ) {
+        Ok(output) if output.code == 0 => {}
+        Ok(output) if crate::docker::client::daemon_reports_missing(&output.stderr) => {}
+        Ok(output) => failures.push(format!(
+            "remove {container} exited {}: {}",
+            output.code,
+            output.stderr.trim()
+        )),
         Err(error) => failures.push(format!("remove {container}: {error:#}")),
     }
 }
 
-/// Adapt the worker's intentionally small process seam to the typed Docker
-/// client. The default `is_host_process_runner` stays false, so test/guest
-/// runners keep all Engine queries and mutations on their own command seam.
-struct WorkerRunnerCommandAdapter<'a>(&'a mut dyn WorkerRunner);
+/// Resolve one container name to its immutable full ID: exactly one 64-hex
+/// line. Missing containers resolve to `None`; anything else is a failure.
+fn resolve_container_id(
+    runner: &mut dyn WorkerRunner,
+    container: &str,
+) -> anyhow::Result<Option<String>> {
+    if container.len() == 64 && container.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(Some(container.to_string()));
+    }
+    let output = runner.run(
+        "docker",
+        &crate::docker::client::container_id_args(container),
+    )?;
+    if output.code != 0 {
+        if crate::docker::client::daemon_reports_missing(&output.stderr) {
+            return Ok(None);
+        }
+        anyhow::bail!(
+            "docker inspect exited {}: {}",
+            output.code,
+            output.stderr.trim()
+        );
+    }
+    let ids = output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    match ids.as_slice() {
+        [id] if id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) => {
+            Ok(Some((*id).to_string()))
+        }
+        _ => anyhow::bail!("Docker inspect did not return one immutable full container ID"),
+    }
+}
 
-impl CommandRunner for WorkerRunnerCommandAdapter<'_> {
-    fn run(&mut self, program: &str, args: &[String]) -> anyhow::Result<CommandResult> {
-        let output = self.0.run(program, args)?;
-        Ok(CommandResult {
-            code: output.code,
-            stdout: output.stdout,
-            stderr: output.stderr,
-        })
+/// Raw `rm` by deterministic worker name. The lane-owned teardown path holds
+/// the worker record, the permit attempt, and verified ownership labels, and
+/// its call contract forbids the inspect round trips that immutable-ID
+/// resolution needs; removal by exact ID stays on the standalone typed path.
+fn remove_container_by_name(
+    runner: &mut dyn WorkerRunner,
+    container: &str,
+    failures: &mut Vec<String>,
+) {
+    match runner.run(
+        "docker",
+        &crate::docker::client::container_remove_args(container, true, false),
+    ) {
+        Ok(output) if output.code == 0 => {}
+        Ok(output) if crate::docker::client::daemon_reports_missing(&output.stderr) => {}
+        Ok(output) => failures.push(format!(
+            "remove {container} exited {}: {}",
+            output.code,
+            output.stderr.trim()
+        )),
+        Err(error) => failures.push(format!("remove {container}: {error:#}")),
     }
 }
 
@@ -793,7 +871,7 @@ impl Supervision {
     }
 
     pub(crate) fn teardown_owned_resources(&self, runner: &mut dyn WorkerRunner) -> Vec<String> {
-        teardown_owned_resources(runner, &self.identity)
+        teardown_owned_resources_by_name(runner, &self.identity)
     }
 
     pub(crate) fn state_dir_exists(&self) -> Result<bool> {
@@ -1176,15 +1254,15 @@ mod tests {
         assert!(position(&remove_runner) < position("stop -t 30 -- velnor-scaleset-dind"));
         assert!(position("stop -t 30 -- velnor-scaleset-dind") < position(&remove_dind));
         assert!(position(&remove_dind) < position("network rm"));
+        let runner_container = identity().runner_container();
+        let dind_container = identity().dind_container();
         assert!(runner.seen.iter().any(|args| {
             args.first().is_some_and(|arg| arg == "inspect")
-                && args
-                    .last()
-                    .is_some_and(|arg| arg == "velnor-scaleset-runner")
+                && args.last().is_some_and(|arg| arg == &runner_container)
         }));
         assert!(runner.seen.iter().any(|args| {
             args.first().is_some_and(|arg| arg == "inspect")
-                && args.last().is_some_and(|arg| arg == "velnor-scaleset-dind")
+                && args.last().is_some_and(|arg| arg == &dind_container)
         }));
         assert!(position("network rm") < position("volume rm"));
         // Evidence landed on disk.

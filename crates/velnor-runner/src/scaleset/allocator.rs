@@ -389,6 +389,20 @@ fn release_permit_target(
     attempt_token: &str,
     target: PermitDemandState,
 ) -> Result<OwnedReleaseOutcome, LedgerError> {
+    // A release must never fabricate the ledger it cannot find: creating a
+    // fresh empty ledger over an outage would mask the outage (later opens
+    // would see blank capacity instead of failing) and strand the durable
+    // attempt evidence elsewhere. Only the daemon's authoritative open may
+    // create; a release against a missing ledger fails without side effects.
+    if !ledger_path.is_file() {
+        return Err(LedgerError::Storage(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+            Some(format!(
+                "permit ledger missing for release of {holder}: {}",
+                ledger_path.display()
+            )),
+        )));
+    }
     let mut ledger = PermitLedger::open(ledger_path)?;
     ledger.release_scaleset_staged_owned(holder, attempt_token, target)
 }
