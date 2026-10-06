@@ -22,6 +22,7 @@ pub(crate) mod prepared_tools;
 mod regen;
 pub(crate) mod release;
 pub(crate) mod renovate;
+mod runner_guard;
 pub(crate) mod runtime_products;
 pub(crate) mod snapshot;
 pub(crate) mod watch;
