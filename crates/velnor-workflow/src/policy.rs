@@ -4777,7 +4777,7 @@ fn canonical_lanes_input_profile_runner(
         .unwrap_or(&velnor_policy.default_branch);
     let expected_runs_on = match runner {
         "github" => format!(
-            "${{{{ (github.ref=='refs/heads/{default_branch}'&&github.event_name=='workflow_dispatch'&&inputs.lanes=='velnor') && fromJSON('{labels_json}') || {} }}}}",
+            "${{{{ (github.ref == 'refs/heads/{default_branch}' && github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor') && fromJSON('{labels_json}') || {} }}}}",
             super::primitives::json_string(hosted_runner)
         ),
         "velnor" => format!(

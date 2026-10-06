@@ -2526,6 +2526,23 @@ fn read_claims_for_reaping(
     builder: &str,
     registry_root: Option<&Path>,
 ) -> Result<Option<BuilderClaims>, OwnershipReadError> {
+    // Stat before the hardened no-follow read: a wiped run directory (e.g.
+    // after a reboot) must follow the missing-claim owner-record branch
+    // below, not fail inside the reader. Only present files go through the
+    // hardened read, so its symlink/regular-file checks still apply to
+    // everything actually on disk.
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return missing_claim_owner_status(path, builder, registry_root);
+        }
+        Err(error) => {
+            return Err(OwnershipReadError::claims(
+                path,
+                anyhow::Error::new(error).context(format!("stat {}", path.display())),
+            ));
+        }
+    }
     if let Some(claims) = read_registered_claims(path, builder)
         .map_err(|source| OwnershipReadError::claims(path, source))?
     {
@@ -2540,16 +2557,17 @@ fn read_claims_for_reaping(
         }
         return Ok(Some(claims));
     }
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => return Ok(None),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(OwnershipReadError::claims(
-                path,
-                anyhow::Error::new(error).context(format!("stat {}", path.display())),
-            ));
-        }
-    }
+    Ok(None)
+}
+
+/// Ownership status when the runtime claim file is absent. A present durable
+/// owner record pins the builder: without the claim, nothing can prove it
+/// has no holders.
+fn missing_claim_owner_status(
+    path: &Path,
+    builder: &str,
+    registry_root: Option<&Path>,
+) -> Result<Option<BuilderClaims>, OwnershipReadError> {
     if is_current_domained_persistent_builder(builder)
         && let Some(registry_root) = registry_root
         && read_owner_record(registry_root, builder)
