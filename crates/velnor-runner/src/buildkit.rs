@@ -5259,10 +5259,6 @@ fn reap_idle_builders_with_domain(
     )
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "injected Docker operations keep destructive reaper paths hermetic in tests"
-)]
 fn report_legacy_builder_status(
     run_root: &Path,
     builder: &str,
@@ -5294,6 +5290,10 @@ fn report_legacy_builder_status(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "injected Docker operations keep destructive reaper paths hermetic in tests"
+)]
 fn reap_idle_builders_with_domain_and_volume_gate(
     run_root: &Path,
     registry_root: Option<&Path>,
