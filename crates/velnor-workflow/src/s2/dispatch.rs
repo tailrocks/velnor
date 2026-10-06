@@ -20,6 +20,7 @@ use std::path::{Component, Path, PathBuf};
 const RUNTIME_COMMANDS: &[&str] = &[
     "plan",
     "run",
+    "record-result",
     "verify-action",
     "test-crates",
     "policy",
@@ -669,5 +670,13 @@ mod tests {
                 "{command} routes as a binary-only runtime command"
             );
         }
+    }
+
+    #[test]
+    fn result_record_subcommand_routes_as_runtime_command() {
+        assert!(
+            RUNTIME_COMMANDS.contains(&"record-result"),
+            "schema-2 unit jobs must reach the result-record writer"
+        );
     }
 }
