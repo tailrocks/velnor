@@ -33,7 +33,51 @@ fn scratch(label: &str) -> PathBuf {
         "[execution]\nbackend = \"docker\"\n",
     )
     .unwrap();
+    std::fs::create_dir_all(path.join("_work")).unwrap();
+    // Controller permit admission requires a loadable daemon execution
+    // config plus pinnable pressure roots (disk_pressure_gate refuses
+    // slot permits without them).
+    std::fs::write(
+        path.join("daemon-exec.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "url": "https://github.com/o/r",
+            "name": "velnor",
+            "labels": [],
+            "target_mvp_labels": false,
+            "target_mvp_arm_label": false,
+            "replace": false,
+            "dry_run_registration": false,
+            "slots": 4,
+            "once": false,
+            "complete_noop": false,
+            "execute_scripts": false,
+            "dry_run_jobs": false,
+            "docker_image": "img",
+            "trust_scope": "trusted",
+            "emergency_reserve_bytes": 0,
+            "job_peak_bytes": 0,
+            "node_action_image": "img",
+            "skip_preflight": false,
+            "require_docker_socket": false
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     path
+}
+
+fn service_instance(dir: &Path) -> String {
+    std::fs::canonicalize(dir)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Open the scratch journal bound to its owning service instance, the way
+/// the controller opens it. Unbound priming leaves an unowned nonempty
+/// journal the controller can no longer bind (fail-closed).
+fn bound_journal(dir: &Path) -> Journal {
+    Journal::open_for_service_instance(dir.join("journal.db"), &service_instance(dir)).unwrap()
 }
 
 fn runner() -> &'static str {
@@ -110,7 +154,7 @@ fn github_down_health_is_not_ready_while_control_live() {
 #[test]
 fn slot_kill_drops_one_unit_of_capacity() {
     let dir = scratch("iso");
-    let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+    let mut journal = bound_journal(&dir);
     prime_two_ready(&mut journal);
     drop(journal);
 
@@ -465,7 +509,7 @@ fn direct_controller_capacity_is_exact_for_zero_one_and_four() {
 #[test]
 fn contaminated_capacity_fails_closed_across_controller_restart_reconcile() {
     let dir = scratch("legacy-restart-reconcile");
-    let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+    let mut journal = bound_journal(&dir);
     assert!(
         !journal
             .apply(Event::DesiredCapacity { ready: 2 })
@@ -685,6 +729,10 @@ fn wait_for_supervised_slots_with_timeout(
     let dir = guard.dir.clone();
     let scope = guard.scope.clone();
     let deadline = std::time::Instant::now() + timeout;
+    // One handle for the whole wait: reopening every poll takes a setup
+    // write transaction that starves the controller's per-cycle pressure
+    // writes (store.locked) now that the gate journals every cycle.
+    let mut journal = None;
     loop {
         if !guard.controller_is_running() {
             return Err(format!(
@@ -692,8 +740,12 @@ fn wait_for_supervised_slots_with_timeout(
                 cmd_err(&dir)
             ));
         }
-        if let Ok(state) =
-            Journal::open(dir.join("journal.db")).and_then(|journal| journal.load_state())
+        if journal.is_none() {
+            journal = Journal::open(dir.join("journal.db")).ok();
+        }
+        if let Some(state) = journal
+            .as_ref()
+            .and_then(|journal| journal.load_state().ok())
         {
             let pids = state
                 .slots
@@ -1245,7 +1297,7 @@ fn observe_slot_session_rejects_inert_live_pid() {
 #[test]
 fn controller_keeps_ready_when_exec_exists_without_assignment() {
     let dir = scratch("no-synth");
-    let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+    let mut journal = bound_journal(&dir);
     prime_named_ready(&mut journal, "own");
     drop(journal);
     std::fs::write(dir.join("daemon-exec.json"), b"not-json").unwrap();
@@ -1284,7 +1336,7 @@ fn controller_keeps_ready_when_exec_exists_without_assignment() {
 #[test]
 fn controller_does_not_assign_rest_queued_ids() {
     let dir = scratch("owned");
-    let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+    let mut journal = bound_journal(&dir);
     prime_named_ready(&mut journal, "own");
     drop(journal);
     velnor_runner::node::assign::write(
@@ -1386,7 +1438,7 @@ fn job_once_without_ownership_fails() {
 #[test]
 fn job_once_without_exec_persists_only_after_ownership() {
     let dir = scratch("job-own-once");
-    let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+    let mut journal = bound_journal(&dir);
     prime_named_ready(&mut journal, "jobown");
     use velnor_model::JobId;
     journal
@@ -1409,7 +1461,21 @@ fn job_once_without_exec_persists_only_after_ownership() {
             accepted_unix: 0,
         })
         .unwrap();
+    let nonce = journal
+        .issue_disk_pressure_launch(
+            &service_instance(&dir),
+            &SlotId("jobown-1".into()),
+            Generation::INITIAL,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
     drop(journal);
+    // The test name promises "without exec": keep the journal-owned lease
+    // but drop the daemon config so `job --once` takes the no-exec path.
+    std::fs::remove_file(dir.join("daemon-exec.json")).unwrap();
     let output = Command::new(runner())
         .args([
             "job",
@@ -1424,6 +1490,10 @@ fn job_once_without_exec_persists_only_after_ownership() {
             "jobown",
             "--slot-index",
             "1",
+            "--slot-id",
+            "jobown-1",
+            "--pressure-launch-nonce",
+            nonce.as_str(),
         ])
         .output()
         .unwrap();
@@ -1489,7 +1559,7 @@ fn daemon_acquisition_path_marks_job_running_at_start() {
 #[test]
 fn controller_sends_pending_completion_outbox() {
     let dir = scratch("outbox");
-    let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+    let mut journal = bound_journal(&dir);
     prime_named_ready(&mut journal, "out");
     use velnor_control::journal::payload_checksum;
     use velnor_model::JobId;
