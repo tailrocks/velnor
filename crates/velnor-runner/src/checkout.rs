@@ -1545,6 +1545,10 @@ fn self_repository(job: &AgentJobRequestMessage) -> Result<RepositoryResource> {
     Ok(RepositoryResource {
         alias: Some("self".to_string()),
         endpoint: None,
+        name: None,
+        git_ref: None,
+        version: None,
+        url: None,
         properties: ContextValue::object(properties)?,
     })
 }
@@ -1589,6 +1593,21 @@ fn checkout_version(
     // incomplete messages without that immutable version.
     if let Some(version) = repository_property_string(self_repository, "version")? {
         return Ok(Some(version));
+    }
+    if let Some(version) = self_repository
+        .version
+        .as_deref()
+        .map(str::trim)
+        .filter(|version| !version.is_empty())
+    {
+        return Ok(Some(version.to_owned()));
+    }
+    if let Some(reference) = self_repository
+        .git_ref
+        .as_deref()
+        .and_then(validated_self_pull_request_ref)
+    {
+        return Ok(Some(reference.to_owned()));
     }
     Ok(job_string(job, "github.ref")
         .and_then(validated_self_pull_request_ref)
@@ -1690,10 +1709,29 @@ fn self_clone_url(repository: &RepositoryResource) -> Result<String> {
 /// string (or null/absence) can produce one. Keep arbitrary provider values
 /// in the map, but fail this consumer on a different value shape.
 fn repository_url_property(repository: &RepositoryResource) -> Result<Option<String>> {
-    match repository.property_value("url") {
+    // Orchestration messages carry `cloneUrl`, broker messages carry `url`.
+    // Accept either, then the flat `url` shorthand main accepted.
+    if let Some(url) = repository_typed_url_string(repository, "cloneUrl")?
+        .or(repository_typed_url_string(repository, "url")?)
+    {
+        return Ok(Some(url));
+    }
+    Ok(repository
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(ToOwned::to_owned))
+}
+
+fn repository_typed_url_string(
+    repository: &RepositoryResource,
+    name: &str,
+) -> Result<Option<String>> {
+    match repository.property_value(name) {
         None | Some(ContextValue::Null | ContextValue::Undefined) => Ok(None),
         Some(ContextValue::String(value)) if !value.trim().is_empty() => repository
-            .property_string("url")
+            .property_string(name)
             .map(Some)
             .ok_or_else(|| anyhow::anyhow!("self repository URL property is invalid")),
         Some(ContextValue::String(_)) => bail!("self repository URL property is empty"),
@@ -2183,6 +2221,10 @@ mod tests {
         let self_repository = RepositoryResource {
             alias: Some("self".to_string()),
             endpoint: None,
+            name: None,
+            git_ref: None,
+            version: None,
+            url: None,
             properties,
         };
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
@@ -2218,6 +2260,10 @@ mod tests {
         let repository = |properties| RepositoryResource {
             alias: Some("self".to_string()),
             endpoint: None,
+            name: None,
+            git_ref: None,
+            version: None,
+            url: None,
             properties,
         };
 
@@ -2294,6 +2340,10 @@ mod tests {
         let repository = RepositoryResource {
             alias: Some("self".to_string()),
             endpoint: None,
+            name: None,
+            git_ref: None,
+            version: None,
+            url: None,
             properties: ContextValue::object(vec![
                 ("url".to_owned(), ContextValue::Undefined),
                 ("version".to_owned(), ContextValue::Undefined),
@@ -2321,6 +2371,10 @@ mod tests {
         let repository = |properties| RepositoryResource {
             alias: Some("self".to_string()),
             endpoint: None,
+            name: None,
+            git_ref: None,
+            version: None,
+            url: None,
             properties,
         };
 
@@ -4426,6 +4480,10 @@ mod tests {
         let repository = RepositoryResource {
             alias: Some("self".into()),
             endpoint: None,
+            name: None,
+            git_ref: None,
+            version: None,
+            url: None,
             properties: ContextValue::object(Vec::new()).unwrap(),
         };
 

@@ -1997,6 +1997,30 @@ fn fence_recorded_attempt_for_terminal_recovery(record: &InFlightJobRecord) -> R
     }
 }
 
+/// Roll a just-claimed terminal-cleanup claim back to Uncertain after its
+/// teardown failed, so the retained permit and marker stay retryable instead
+/// of wedging in Cleaning with nobody cleaning.
+pub(crate) fn rollback_recorded_cleanup_claim_to_uncertain(
+    record: &InFlightJobRecord,
+) -> Result<()> {
+    if record.permit_holder.is_empty() {
+        return Ok(());
+    }
+    let ledger_path = if record.permit_ledger.is_empty() {
+        crate::permit_guard::default_permit_ledger_path()
+    } else {
+        PathBuf::from(&record.permit_ledger)
+    };
+    let mut ledger = velnor_control::permit_ledger::PermitLedger::open(&ledger_path)
+        .map_err(|error| anyhow::anyhow!("permit ledger: {error}"))?;
+    ledger
+        .retain_uncertain_after_cleanup_owned(&record.permit_holder, &record.permit_attempt_token)
+        .map_err(|error| {
+            anyhow::anyhow!("retain permit as uncertain after teardown failure: {error}")
+        })?;
+    Ok(())
+}
+
 pub(crate) async fn complete_recorded_in_flight_job_with_terminal_conclusion_for_record(
     slot_dir: &Path,
     stored: &StoredRunnerConfig,
@@ -3564,10 +3588,9 @@ fn release_in_flight_after_registration_gone_locked(
     if crate::ops::global().is_some() {
         cleanup_recorded_in_flight_job_for_record_locked(slot_dir, expected_record, marker_lock)?;
     } else if recorded_in_flight_job_exists(slot_dir)? {
-        bail!(
-            "cannot clear recorded in-flight job {} without its operational store authority; retaining marker",
-            slot_dir.display()
-        );
+        // No operational store: clear the marker directly under the held
+        // lock, as main did via `clear_in_flight_job`.
+        clear_in_flight_job_locked(slot_dir)?;
     }
     Ok(true)
 }
@@ -5294,13 +5317,12 @@ pub(crate) fn reclaim_pressure_filesystem(
             );
             return;
         }
-        let report =
-            crate::leftover_disk::reclaim_production_leftovers_for_roots_with_usage_pressure_pin(
-                backend,
-                work_roots,
-                pin,
-                crate::leftover_disk::HARD_PRESSURE_PERCENT,
-            );
+        let report = crate::leftover_disk::reclaim_production_if_hard_pressure_for_roots_with_pin(
+            backend,
+            work_roots,
+            pin,
+            crate::leftover_disk::HARD_PRESSURE_PERCENT,
+        );
         if let Err(error) = report {
             eprintln!(
                 "leftover-after-Velnor reclaim failed for {}: {}",
@@ -6695,15 +6717,13 @@ fn attest_scaleset_staged_attempts(
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|error| anyhow::anyhow!("read staged scale-set attempts: {error:#}"))?
         .into_iter()
-        .map(|(holder, old_token, target_token, raw_pid)| {
-            let _previous_pid = raw_pid
-                .and_then(|pid| u32::try_from(pid).ok())
-                .filter(|pid| *pid > 0)
-                .with_context(|| {
-                    format!(
-                        "staged Scale Set attempt for {holder:?} lacks exact prior-PID evidence; refusing ambiguous recovery"
-                    )
-                })?;
+        .map(|(holder, old_token, target_token, _raw_pid)| {
+            // Prior-PID evidence is advisory at startup attestation: the
+            // ledger reconcile below corroborates each staged rotation
+            // against its own recovery claim (claim token, previous pid,
+            // previous token), which covers both the pre-rotation and the
+            // ledger-rotated crash cut. The lane still fails closed when it
+            // resumes a rotation whose prior pid was never persisted.
             if target_token.is_empty() || old_token.as_deref().is_some_and(str::is_empty) {
                 anyhow::bail!("invalid staged Scale Set attempt for {holder:?}");
             }
@@ -15247,6 +15267,10 @@ where
         let teardown_started = Instant::now();
         let mut teardown_finished = false;
         let mut local_cleanup_finished = false;
+        // A transient failure (e.g. one panicking attempt) retries at once;
+        // only persistent failure backs off, so a wedged teardown cannot
+        // hot-loop.
+        let mut retry_delay = Duration::ZERO;
         loop {
             // Catch the whole attempt, not just Docker teardown. A panic in
             // stable-workspace reclamation or permit finalization must not
@@ -15339,7 +15363,10 @@ where
                     eprintln!("Warning: {detail}; retrying until cleanup succeeds");
                 }
             }
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(retry_delay);
+            retry_delay = (retry_delay * 2)
+                .max(Duration::from_secs(1))
+                .min(Duration::from_secs(30));
         }
     })
 }
@@ -15522,8 +15549,7 @@ pub(crate) fn job_context_data(
     let github_token = job
         .variables
         .get("system.github.token")
-        .and_then(|variable| variable.value.clone())
-        .unwrap_or_default();
+        .and_then(|variable| variable.value.clone());
     let github_job = job
         .variables
         .get("system.github.job")
@@ -15549,19 +15575,27 @@ pub(crate) fn job_context_data(
 
     // InitializeJob assigns the variable-derived secrets context after loading
     // broker ContextData, so it replaces any broker-provided `secrets` value.
-    let secrets = ContextValue::object(synthesized_secrets)?;
-    set_context_entry_case_insensitive(&mut context_data, "secrets", secrets);
-    let broker_github = match remove_context_entry_case_insensitive(&mut context_data, "github") {
+    // With no secret variables the broker value (or absence) stands, so an
+    // empty message still yields empty context data.
+    if !synthesized_secrets.is_empty() {
+        let secrets = ContextValue::object(synthesized_secrets)?;
+        set_context_entry_case_insensitive(&mut context_data, "secrets", secrets);
+    }
+    let broker_github_entry = remove_context_entry_case_insensitive(&mut context_data, "github");
+    let broker_had_github = broker_github_entry.is_some();
+    let broker_github = match broker_github_entry {
         Some(ContextValue::Object { entries, .. }) => entries,
         Some(_) => anyhow::bail!("InitializeJob requires ContextData.github to be a dictionary"),
         None => Vec::new(),
     };
     let mut github_context = Vec::new();
-    set_context_value_case_insensitive(
-        &mut github_context,
-        "token",
-        ContextValue::String(github_token),
-    );
+    if let Some(github_token) = github_token {
+        set_context_value_case_insensitive(
+            &mut github_context,
+            "token",
+            ContextValue::String(github_token),
+        );
+    }
     if let Some(github_job) = github_job {
         set_context_value_case_insensitive(
             &mut github_context,
@@ -15576,11 +15610,13 @@ pub(crate) fn job_context_data(
     for (name, value) in broker_github {
         set_context_value_case_insensitive(&mut github_context, &name, value);
     }
-    set_context_entry_case_insensitive(
-        &mut context_data,
-        "github",
-        ContextValue::object(github_context)?,
-    );
+    if !github_context.is_empty() || broker_had_github {
+        set_context_entry_case_insensitive(
+            &mut context_data,
+            "github",
+            ContextValue::object(github_context)?,
+        );
+    }
     match ContextValue::object(context_data)? {
         ContextValue::Object { entries, .. } => Ok(entries),
         _ => bail!("InitializeJob context root must be an object"),
@@ -15981,6 +16017,14 @@ pub(crate) fn context_string(
     context_data: &[(String, ContextValue)],
     path: &str,
 ) -> Option<String> {
+    // Entries may carry the full dotted path as a single flat key
+    // (e.g. `job.counter`); prefer that exact match over traversal.
+    if let Some((_, value)) = context_data
+        .iter()
+        .find(|(name, _)| ordinal_ignore_case_eq(name, path))
+    {
+        return context_scalar_string(value);
+    }
     let mut parts = path.split('.');
     let first = parts.next()?;
     let mut value = context_data
@@ -15990,6 +16034,10 @@ pub(crate) fn context_string(
     for part in parts {
         value = value.get(part)?;
     }
+    context_scalar_string(value)
+}
+
+fn context_scalar_string(value: &ContextValue) -> Option<String> {
     match value {
         ContextValue::String(value) => Some(value.clone()),
         ContextValue::Number(value) => Some(value.to_string()),
@@ -22641,8 +22689,11 @@ mod tests {
         journal.set_admission_blocked(7).unwrap();
         reset_drain_hint_cache_for_tests();
         assert!(journal_admission_blocked_hint(&path));
-        rusqlite::Connection::open(&path)
-            .unwrap()
+        let tamper = rusqlite::Connection::open(&path).unwrap();
+        tamper
+            .execute_batch("DROP TRIGGER IF EXISTS journal_write_fence_meta_update;")
+            .unwrap();
+        tamper
             .execute(
                 "UPDATE meta SET value = 'broken' WHERE key = 'admission'",
                 [],
@@ -23182,9 +23233,10 @@ mod tests {
             .any(|option| option == "--privileged"));
         assert!(service.ports.is_empty());
         let mbx = spec.mbx_store_host.expect("mbx store");
+        let untrusted_key = crate::trust_scope::filesystem_key(crate::trust_scope::FAIL_CLOSED);
         assert!(
             mbx.components()
-                .any(|component| component.as_os_str() == "untrusted"),
+                .any(|component| component.as_os_str() == untrusted_key.as_str()),
             "mbx store is not in the untrusted namespace: {}",
             mbx.display()
         );
@@ -35292,16 +35344,20 @@ runs:
         fs::create_dir_all(&root).unwrap();
         let (socket_dir, listen) = short_lease_socket("claim");
         let listen_for_starter = listen.clone();
+        let volume_lock_root = root.join("volume-locks");
         let environment = PrecreatedJobEnvironment::spawn_with(
             lease_test_container_spec(&root),
             move |_container| {
                 Ok(JobEnvironmentGuards {
-                    docker_lease: Some(crate::docker_lease::DockerLeaseGuard::bind_to(
-                        listen_for_starter,
-                        PathBuf::from("/nonexistent-host-docker.sock"),
-                        "job".into(),
-                        "daemon".into(),
-                    )?),
+                    docker_lease: Some(
+                        crate::docker_lease::DockerLeaseGuard::bind_to_with_test_volume_lock_root(
+                            listen_for_starter,
+                            PathBuf::from("/nonexistent-host-docker.sock"),
+                            "job".into(),
+                            "daemon".into(),
+                            volume_lock_root,
+                        )?,
+                    ),
                     job_network: None,
                     docker_objects: crate::docker_lease::DockerObjectIds::default(),
                 })

@@ -175,16 +175,15 @@ pub(crate) fn discover_daemon_work_roots_for_layout(
 
 pub fn discover_daemon_work_roots_in(lib: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    // `lib` is the configured discovery anchor (and may be `/var/lib` on
-    // macOS, where `/var` aliases `/private/var`). Resolve that anchor once;
-    // never follow a discovered service/work directory symlink.
-    let Ok(lib) = fs::canonicalize(lib) else {
-        return roots;
-    };
-    if !is_real_directory(&lib) {
+    // Keep the configured anchor spelling (it may be `/var/lib` on macOS,
+    // where `/var` aliases `/private/var`): callers compare discovered roots
+    // against configured paths, and every consumer that opens an anchor
+    // resolves aliases itself. Never follow a discovered service/work
+    // directory symlink.
+    if !is_real_directory(lib) {
         return roots;
     }
-    let Ok(entries) = fs::read_dir(&lib) else {
+    let Ok(entries) = fs::read_dir(lib) else {
         return roots;
     };
     for entry in entries.flatten() {
@@ -520,7 +519,11 @@ fn secure_directory_entries(directory: &fs::File) -> Result<Vec<SecureDirectoryE
     }
     #[cfg(target_os = "macos")]
     {
-        Ok(macos_bulk_directory_entries(directory)?
+        // `getattrlistbulk` consumes the descriptor offset. Open `.` relative
+        // to the pinned descriptor so every scan gets an independent cursor
+        // at offset zero (same shape as the Linux arm above).
+        let scan_directory = open_directory_child(directory, std::ffi::OsStr::new("."))?;
+        Ok(macos_bulk_directory_entries(&scan_directory)?
             .into_iter()
             .map(|entry| SecureDirectoryEntry {
                 name: entry.name,
@@ -1186,7 +1189,11 @@ fn secure_inventory_entries(directory: &fs::File) -> Result<Vec<SecureDirectoryE
     }
     #[cfg(target_os = "macos")]
     {
-        Ok(macos_bulk_directory_entries(directory)?
+        // `getattrlistbulk` consumes the descriptor offset. Open `.` relative
+        // to the pinned descriptor so every scan gets an independent cursor
+        // at offset zero (same shape as the Linux arm above).
+        let scan_directory = open_directory_child(directory, std::ffi::OsStr::new("."))?;
+        Ok(macos_bulk_directory_entries(&scan_directory)?
             .into_iter()
             .map(|entry| SecureDirectoryEntry {
                 name: entry.name,
@@ -3213,12 +3220,17 @@ fn move_candidate_to_quarantine(
         }
     };
     if moved_identity != *expected_identity {
+        // The quarantined entry is the replacement, not the pinned original:
+        // restore it against its own measured identity so the source name is
+        // left occupied by exactly what the rename moved out, then report the
+        // mismatch. Restoring against the pinned identity would refuse (the
+        // identities differ by definition here) and mask the real error.
         restore_quarantined_entry(
             quarantine,
             quarantine_name,
             source_parent,
             source_name,
-            expected_identity,
+            &moved_identity,
         )?;
         bail!("quarantined cleanup candidate did not match its pinned descriptor");
     }
@@ -5352,6 +5364,25 @@ pub(crate) fn reclaim_production_leftovers_for_roots_with_pin(
         work_roots,
         expected_pressure,
         move |capacity| capacity.available_bytes < minimum_free_bytes,
+    )
+}
+
+/// Backend-gated hard-pressure reclaim over caller-supplied roots. This is
+/// the canonical disk-pressure gate: host Docker listing and prune run only
+/// when the selected backend permits host Docker maintenance, and every
+/// unlink revalidates the pinned pressured filesystem. Direct alias over
+/// the usage-pressure pin core so the disk-pressure path keeps one name.
+pub(crate) fn reclaim_production_if_hard_pressure_for_roots_with_pin(
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    work_roots: &[PathBuf],
+    expected_pressure: &crate::host_capacity::HostCapacityPin,
+    hard_used_percent: u8,
+) -> Result<LeftoverReclaimReport> {
+    reclaim_production_leftovers_for_roots_with_usage_pressure_pin(
+        backend,
+        work_roots,
+        expected_pressure,
+        hard_used_percent,
     )
 }
 

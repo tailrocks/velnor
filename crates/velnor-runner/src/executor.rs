@@ -8396,7 +8396,11 @@ pub(crate) fn github_backend_step_id(context_step_id: &str) -> String {
     if uuid::Uuid::parse_str(context_step_id).is_ok() {
         context_step_id.to_string()
     } else {
-        uuid::Uuid::new_v4().to_string()
+        // Deterministic: call sites mint the backend id when the main step
+        // log is emitted and re-derive it later to find that log again
+        // (e.g. post-cleanup reuses the masked main display name). A random
+        // id here would make every re-derivation miss.
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, context_step_id.as_bytes()).to_string()
     }
 }
 

@@ -76,7 +76,7 @@ toml = "1.0"
 # spawned through std::process.
 tokio = { version = "1.45.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 url = "2.5.4"
-uuid = { version = "1.18.1", features = ["v4"] }
+uuid = { version = "1.18.1", features = ["v4", "v5"] }
 unicode-normalization = "0.1.24"
 regex = "1.11.1"
 same-file = "1.0.6"

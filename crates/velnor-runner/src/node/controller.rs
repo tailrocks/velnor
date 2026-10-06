@@ -2928,7 +2928,7 @@ fn teardown_orphaned_job_under_marker_snapshot(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn teardown_recorded_job_with_death_proof(
+fn capture_recorded_owner_death_proof(
     args: &ControllerArgs,
     slot_dir: &Path,
     slot_id: &SlotId,
@@ -2936,7 +2936,6 @@ fn teardown_recorded_job_with_death_proof(
     job_id: &str,
     job_snapshot: Option<&velnor_control::journal::JobRecord>,
     marker_record: &crate::runner::InFlightJobRecord,
-    teardown: &mut impl FnMut(&str) -> anyhow::Result<()>,
 ) -> anyhow::Result<crate::node::controller::RecordedOwnerDeathProof> {
     let marker_lock = crate::runner::lock_in_flight_marker_snapshot(slot_dir, Some(marker_record))?;
     let proof = RecordedOwnerDeathProof::capture(
@@ -2950,6 +2949,28 @@ fn teardown_recorded_job_with_death_proof(
         marker_lock,
     )?;
     crate::runner::claim_recorded_attempt_for_terminal_recovery(marker_record, &proof)?;
+    Ok(proof)
+}
+
+fn teardown_recorded_job_with_death_proof(
+    args: &ControllerArgs,
+    slot_dir: &Path,
+    slot_id: &SlotId,
+    generation: Generation,
+    job_id: &str,
+    job_snapshot: Option<&velnor_control::journal::JobRecord>,
+    marker_record: &crate::runner::InFlightJobRecord,
+    teardown: &mut impl FnMut(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<crate::node::controller::RecordedOwnerDeathProof> {
+    let proof = capture_recorded_owner_death_proof(
+        args,
+        slot_dir,
+        slot_id,
+        generation,
+        job_id,
+        job_snapshot,
+        marker_record,
+    )?;
     teardown(job_id)?;
     proof.recheck_for_record(marker_record)?;
     Ok(proof)
@@ -3009,9 +3030,19 @@ async fn reclaim_orphaned_jobs_with_metrics(
         &mut docker,
         metrics,
         || {
-            crate::execution::load_execution_file(&args.state_dir, None)
-                .map(|execution| execution.backend())
-                .context("load execution backend for orphan recovery")
+            match crate::execution::load_execution_file(&args.state_dir, None) {
+                Ok(execution) => Ok(execution.backend()),
+                // No execution.toml anywhere: proceed with legacy hermetic
+                // recovery, which never touches host docker. (`backend` below
+                // feeds only `permits_host_docker_maintenance`, so MicroVm
+                // here encodes "proceed without docker", exactly as main's
+                // `.ok().map()` did with `None`. A present-but-unresolvable
+                // selection still fails closed and defers below.)
+                Err(error) if error.is_missing_file() => {
+                    Ok(velnor_model::ExecutionBackendKind::MicroVm)
+                }
+                Err(error) => Err(error).context("load execution backend for orphan recovery"),
+            }
         },
     )
     .await
@@ -3146,18 +3177,17 @@ async fn reclaim_orphaned_jobs_with_backend_policy(
         // RemoteAcked, a live same-incarnation owner remains a barrier until
         // it exits and local cleanup can safely take over.
         let waiter_id = format!("wait-{}", slot.slot_id.0);
-        // `persisted_worker_owns_slot` also discovers a child by command and
-        // launch nonce when its PID marker was never published. Let that
-        // proof path run before treating absent markers as a dead owner.
-        let worker_live = persisted_worker_owns_slot(
-            args,
-            journal,
-            &marker_job_id,
-            &slot.slot_id,
-            slot.generation,
-        )?;
-        let waiter_live =
-            persisted_worker_owns_slot(args, journal, &waiter_id, &slot.slot_id, slot.generation)?;
+        // Destructive teardown fails closed toward deferral: any live owner
+        // pid is a barrier, even when the strict command/nonce proof cannot
+        // verify it. A recycled pid merely delays this marker one tick, while
+        // tearing down a live owner would corrupt a running job. (The spawn
+        // path fails closed in the other direction and stays strict via
+        // `persisted_worker_owns_slot`.)
+        let worker_live =
+            cleanup::read_owned_pid(&args.state_dir, &marker_job_id, slot.generation.0)
+                .is_some_and(prove::pid_is_alive);
+        let waiter_live = cleanup::read_owned_pid(&args.state_dir, &waiter_id, slot.generation.0)
+            .is_some_and(prove::pid_is_alive);
         if worker_live || waiter_live {
             // The marker can legitimately exist between persistence and
             // journal admission. Never terminalize a live owner in that
@@ -3167,8 +3197,10 @@ async fn reclaim_orphaned_jobs_with_backend_policy(
         // Marker-only recovery follows a prior RemoteAcked event, so the
         // normal journal row no longer fences capacity. Recheck the absence
         // of a replacement journal attempt under the marker lock, claim the
-        // exact marker token, and only then remove Docker resources.
-        let owner_death = match teardown_recorded_job_with_death_proof(
+        // exact marker token, and only then remove Docker resources. A proof
+        // race defers one tick, but an infrastructure teardown failure
+        // propagates so stuck resources stay visible instead of warn-muted.
+        let owner_death = match capture_recorded_owner_death_proof(
             args,
             &slot_dir,
             &slot.slot_id,
@@ -3176,7 +3208,6 @@ async fn reclaim_orphaned_jobs_with_backend_policy(
             &marker_job_id,
             None,
             &marker_record,
-            &mut teardown,
         ) {
             Ok(proof) => proof,
             Err(error) => {
@@ -3187,6 +3218,17 @@ async fn reclaim_orphaned_jobs_with_backend_policy(
                 continue;
             }
         };
+        if let Err(error) = teardown(&marker_job_id) {
+            crate::runner::rollback_recorded_cleanup_claim_to_uncertain(&marker_record)?;
+            return Err(error);
+        }
+        if let Err(error) = owner_death.recheck_for_record(&marker_record) {
+            eprintln!(
+                "Warning: marker-only owner-death proof for job {} changed during teardown; retrying next cycle: {error:#}",
+                marker_job_id
+            );
+            continue;
+        }
         let remote_acked =
             journal.has_remote_terminal_ack(&JobId(marker_job_id.clone()), slot.generation)?;
         let cleaned = if remote_acked {
@@ -5463,6 +5505,10 @@ mod tests {
         // the caller still runs `drain_children` next — the same order as
         // the loop top. No marker was latched: the write failed.
         drain_edge(&mut journal, None);
+        rusqlite::Connection::open(dir.join("journal.db"))
+            .unwrap()
+            .execute_batch("DROP TRIGGER IF EXISTS drain_edge_test_block_meta_writes;")
+            .unwrap();
         assert!(!journal.materialized_state().unwrap().drain_active);
 
         let child = || Command::new("sleep").arg("30").spawn().unwrap();
@@ -6213,6 +6259,7 @@ mod tests {
         };
         let slot_id = SlotId("velnor-1".to_owned());
         let slot_dir = dir.join("slots").join("slot-1");
+        std::fs::create_dir_all(&slot_dir).unwrap();
         let marker_path = slot_dir.join("in-flight-job.json");
         let ledger_path = dir.join("permit-ledger.db");
         let holder = "native/request-1";
@@ -6380,6 +6427,7 @@ mod tests {
         };
         let job_snapshot = journal.materialized_state().unwrap().jobs[0].clone();
         let slot_dir = dir.join("slots").join("slot-1");
+        std::fs::create_dir_all(&slot_dir).unwrap();
         let marker_path = slot_dir.join("in-flight-job.json");
         let ledger_path = dir.join("permit-ledger.db");
         let holder = "native/request-paused-teardown";
