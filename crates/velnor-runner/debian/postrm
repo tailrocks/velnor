@@ -2,7 +2,6 @@
 set -e
 
 PACKAGE_TRANSACTION_LOCK=/run/velnor/package-transaction.lock
-WORKER_UNIT_GLOB=velnor-job@*.service
 JOBS_SLICE_DROPIN_DIR=/etc/systemd/system/velnor-jobs.slice.d
 JOBS_SLICE_DROPIN=$JOBS_SLICE_DROPIN_DIR/10-host-cpu.conf
 
@@ -44,14 +43,6 @@ require_package_transaction_lock() {
   fail "exclusive lock owner is not an apt-wrapper ancestor; aborting removal"
 }
 
-verify_worker_units_inactive() {
-  worker_units=$(systemctl list-units --type=service --all --no-legend --plain \
-    "$WORKER_UNIT_GLOB" 2>/dev/null) || return 1
-  active_workers=$(printf '%s\n' "$worker_units" \
-    | awk '$3 != "inactive" && $3 != "failed" {print $1 "(" $3 ")"}')
-  [ -z "$active_workers" ]
-}
-
 verify_jobs_slice_inactive() {
   load_state=$(systemctl show --property=LoadState --value velnor-jobs.slice 2>/dev/null) \
     || return 1
@@ -74,11 +65,53 @@ verify_jobs_slice_inactive() {
 }
 
 remove_stale_jobs_cpu_quota_dropin() {
+  # The package lock serializes cooperating package writes and /etc is
+  # root-owned, so unprivileged users cannot replace this path during the
+  # signature check and unlink. Independent privileged writers are outside
+  # this transaction's guarantee.
+  is_legacy_generated_jobs_cpu_quota_dropin() {
+    # Historical packages recorded no owner metadata. Match the full output
+    # language they generated; an operator edit within that language cannot be
+    # distinguished from the original file by content alone.
+    file="$1"
+    [ ! -L "$file" ] && [ -f "$file" ] \
+      || return 1
+    [ "$(tail -c 1 "$file" | od -An -t x1 | tr -d '[:space:]')" = 0a ] \
+      || return 1
+    awk '
+      function multiple_of_95(value, remainder, position, digit) {
+        remainder = 0
+        for (position = 1; position <= length(value); position++) {
+          digit = substr(value, position, 1)
+          remainder = (remainder * 10 + digit) % 95
+        }
+        return remainder == 0
+      }
+      BEGIN { valid = 1 }
+      NR == 1 { if ($0 != "[Slice]") valid = 0; next }
+      NR == 2 { if ($0 != "# Generated from the host online CPU count during package configuration.") valid = 0; next }
+      NR == 3 { if ($0 != "# CPUQuota is 95% of one CPU per online logical CPU.") valid = 0; next }
+      NR == 4 {
+        quota = $0
+        sub(/^CPUQuota=/, "", quota)
+        sub(/%$/, "", quota)
+        if ($0 !~ /^CPUQuota=[123456789][0123456789]*%$/ || !multiple_of_95(quota)) valid = 0
+        next
+      }
+      { valid = 0 }
+      END { if (NR != 4 || !valid) exit 1 }
+    ' "$file"
+  }
+
   # Older packages generated this exact host-scaled ceiling outside dpkg's
   # file list. Delete only that Velnor-owned file; preserve operator drop-ins.
-  if [ -e "$JOBS_SLICE_DROPIN" ]; then
-    rm -f "$JOBS_SLICE_DROPIN"
-    echo "Removed stale velnor-jobs.slice CPU quota drop-in $JOBS_SLICE_DROPIN."
+  if [ -e "$JOBS_SLICE_DROPIN" ] || [ -L "$JOBS_SLICE_DROPIN" ]; then
+    if is_legacy_generated_jobs_cpu_quota_dropin "$JOBS_SLICE_DROPIN"; then
+      rm -- "$JOBS_SLICE_DROPIN"
+      echo "Removed stale velnor-jobs.slice CPU quota drop-in $JOBS_SLICE_DROPIN."
+    else
+      echo "velnor-runner postrm: preserving unrecognized jobs-slice drop-in $JOBS_SLICE_DROPIN" >&2
+    fi
   fi
   rmdir "$JOBS_SLICE_DROPIN_DIR" 2>/dev/null || true
 }
@@ -92,8 +125,7 @@ case "$1" in
         || fail "cannot enumerate Velnor units; aborting removal"
 
       # Runtime masks close the activation race for every enumerated Velnor
-      # service and timer. They remain until systemd is reloaded and the
-      # final worker and slice proofs pass.
+      # service and timer. They remain through the final jobs-slice proof.
       for unit in $(printf '%s\n' "$all_units" | awk '{print $1}'); do
         systemctl mask --runtime "$unit" \
           || fail "cannot mask $unit; aborting removal"
@@ -117,9 +149,6 @@ case "$1" in
           || fail "cannot stop $unit; aborting removal"
       done
 
-      verify_worker_units_inactive \
-        || fail "Velnor job worker is active or activating; aborting removal"
-
       # This is intentionally immediately after the stop loop: a stale
       # pre-stop check permits a job started in the gap to outlive removal.
       verify_jobs_slice_inactive \
@@ -135,8 +164,6 @@ case "$1" in
       # of the exclusive package lock. Runtime masks leave no persistent file
       # and disappear on reboot; a same-boot reinstall must explicitly unmask
       # the removed fleet before operator-controlled activation.
-      verify_worker_units_inactive \
-        || fail "Velnor job worker became active or activating after daemon-reload"
       verify_jobs_slice_inactive \
         || fail "velnor-jobs.slice is not provably inactive after daemon-reload"
     fi

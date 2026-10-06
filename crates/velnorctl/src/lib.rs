@@ -639,9 +639,25 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
             ))
             .await
         }
-        Command::Daemon(args) => runtime::run_daemon((*args).clone())
-            .await
-            .map_err(|_| CommandError::operation("daemon.start_failed: unable to start daemon")),
+        Command::Daemon(args) => {
+            runtime::validate_daemon_host_mode(&args).map_err(|error| {
+                CommandError::new(
+                    ExitClass::Usage,
+                    "daemon.host_mode_invalid",
+                    error.to_string(),
+                )
+            })?;
+            let _package_guard = velnor_runner::package_execution_guard().map_err(|error| {
+                CommandError::new(
+                    ExitClass::Operation,
+                    "daemon.package_guard_failed",
+                    format!("cannot verify the active packaged release: {error:#}"),
+                )
+            })?;
+            runtime::run_daemon((*args).clone())
+                .await
+                .map_err(|_| CommandError::operation("daemon.start_failed: unable to start daemon"))
+        }
         Command::Slot(args) => {
             ensure_native_github_http_transport();
             velnor_runner::node::run_slot(*args)
@@ -1689,6 +1705,19 @@ mod tests {
 
         assert_eq!(error.class, ExitClass::Usage);
         assert_eq!(error.reason, "repo.selector_unsupported");
+    }
+
+    #[tokio::test]
+    async fn daemon_reports_missing_config_for_enabled_scale_set_mode() {
+        let cli = Cli::try_parse_from(["velnorctl", "daemon", "--host-mode", "both"]).unwrap();
+
+        let error = execute(cli)
+            .await
+            .expect_err("Scale Set modes must require config before startup");
+
+        assert_eq!(error.class, ExitClass::Usage);
+        assert_eq!(error.reason, "daemon.host_mode_invalid");
+        assert!(error.message.contains("requires --scale-set-config"));
     }
 
     #[test]
