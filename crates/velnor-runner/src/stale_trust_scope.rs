@@ -3615,7 +3615,7 @@ fn verify_no_live_runner_processes() -> Result<()> {
             }
             if let Some((expected_identity, expected_size, expected_digest)) = packaged_runner {
                 match File::open(entry.path().join("exe")) {
-                    Ok(mut file) => {
+                    Ok(file) => {
                         let metadata = file.metadata().with_context(|| {
                             format!("inspect executable identity for host process {pid}")
                         })?;
