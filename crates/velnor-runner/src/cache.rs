@@ -5148,7 +5148,11 @@ mod tests {
 
         assert!(report.deleted.is_empty());
         assert!(candidate.exists(), "cold cache candidate was evicted");
-        assert_eq!(measurements.get(), 5);
+        // Four samples: wrapper baseline, wrapper per-root check, fresh
+        // pinned baseline inside reclaim (meets the floor, so reclaim
+        // returns before the loop), wrapper final remeasure. The wrapper
+        // breaks on the stopped flag before any per-root remeasure.
+        assert_eq!(measurements.get(), 4);
         fs::remove_dir_all(root).unwrap();
     }
 

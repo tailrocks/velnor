@@ -1745,10 +1745,6 @@ fn generated_producer_keeps_upload_surface_after_build() {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "the producer test keeps platform and upload-contract proof adjacent"
-)]
 fn generated_producer_binds_runner_platform_and_upload_contract() {
     let fixture = TransportFixture::new();
     fixture.valid_artifact();
