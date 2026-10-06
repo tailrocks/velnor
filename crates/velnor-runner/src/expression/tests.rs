@@ -4,7 +4,7 @@
 //! (commit 397b032cbf865e9c3ddfab89d533ec19325e1273), not off intuition;
 //! each block cites the upstream file it was derived from.
 
-use super::eval::{from_serde_json, to_json};
+use super::eval::{from_context_value, from_serde_json, to_json};
 use super::value::{format_number, parse_number, ArrayValue, ObjectValue};
 use super::{evaluate, EvaluationContext, ExpressionError, ParseEnvironment, Value};
 
@@ -585,6 +585,65 @@ fn from_json_and_to_json() {
     assert_eq!(to_json(&Value::string("x")), "\"x\"");
     assert_eq!(to_json(&Value::Null), "null");
     assert_eq!(to_json(&array(&[])), "[]");
+}
+
+#[test]
+fn context_value_conversion_preserves_comparer_and_nonfinite_expression_semantics() {
+    let context_value = velnor_model::ContextValue::case_sensitive_object(vec![
+        (
+            "Path".into(),
+            velnor_model::ContextValue::String("first".into()),
+        ),
+        (
+            "path".into(),
+            velnor_model::ContextValue::String("second".into()),
+        ),
+    ])
+    .unwrap();
+    let Value::Object(object) = from_context_value(&context_value) else {
+        panic!("context object must remain an expression object");
+    };
+    assert!(matches!(
+        object.get("Path"),
+        Some(Value::String(value)) if value == "first"
+    ));
+    assert!(object.get("PATH").is_none());
+
+    let nan = from_context_value(&velnor_model::ContextValue::non_finite(
+        velnor_model::NonFinite::NaN,
+    ));
+    assert!(nan.is_falsy());
+    assert_eq!(nan.convert_to_string(), "NaN");
+    assert!(!nan.abstract_equal(&nan));
+}
+
+#[test]
+fn context_value_undefined_and_constructor_convert_to_null() {
+    use velnor_model::ContextValue;
+
+    assert!(matches!(
+        from_context_value(&ContextValue::Undefined),
+        Value::Null
+    ));
+    assert!(matches!(
+        from_context_value(&ContextValue::Constructor {
+            name: "DateTime".into(),
+            arguments: vec![ContextValue::String("2026-10-05".into())],
+        }),
+        Value::Null
+    ));
+    let Value::Array(values) = from_context_value(&ContextValue::Array(vec![
+        ContextValue::Undefined,
+        ContextValue::Constructor {
+            name: "DateTime".into(),
+            arguments: Vec::new(),
+        },
+    ])) else {
+        panic!("context array must remain an expression array");
+    };
+    assert_eq!(values.items().len(), 2);
+    assert!(matches!(&values.items()[0], Value::Null));
+    assert!(matches!(&values.items()[1], Value::Null));
 }
 
 /// `Sdk/Functions/Case.cs:10-42`.

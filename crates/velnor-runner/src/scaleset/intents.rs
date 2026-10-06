@@ -197,6 +197,12 @@ pub struct AcquireBatch {
     pub scale_set_id: i32,
     pub request_ids: Vec<i64>,
     pub holders: Vec<String>,
+    /// Owner token parallel to each request/holder. `None` marks a legacy
+    /// batch that cannot perform holder-owned recovery operations.
+    /// Per-request attempt token. `None` is allowed only for a recovered
+    /// legacy batch member whose demand is terminal/unowned and whose
+    /// permit row is absent; active members always require `Some(token)`.
+    pub attempt_tokens: Option<Vec<Option<String>>>,
     pub state: BatchState,
     pub uncertain: bool,
     pub generation: u64,
@@ -258,11 +264,24 @@ impl AcquireBatchStore {
             rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, error.into())
         })?;
         let generation_raw: i64 = row.get(6)?;
+        let attempt_tokens_raw: Option<String> = row.get(9)?;
+        let attempt_tokens = attempt_tokens_raw
+            .map(|encoded| {
+                serde_json::from_str(&encoded).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        9,
+                        rusqlite::types::Type::Text,
+                        error.into(),
+                    )
+                })
+            })
+            .transpose()?;
         Ok(AcquireBatch {
             batch_id: row.get(0)?,
             scale_set_id: row.get(1)?,
             request_ids,
             holders,
+            attempt_tokens,
             state,
             uncertain: row.get(5)?,
             generation: generation_raw.max(0) as u64,
@@ -279,18 +298,29 @@ impl AcquireBatchStore {
         scale_set_id: i32,
         request_ids: &[i64],
         holders: &[String],
+        attempt_tokens: &[String],
         generation: u64,
     ) -> Result<AcquireBatch> {
+        if request_ids.len() != holders.len() || request_ids.len() != attempt_tokens.len() {
+            anyhow::bail!("acquire batch requests, holders, and attempt tokens must align");
+        }
+        if attempt_tokens.iter().any(String::is_empty) {
+            anyhow::bail!("acquire batch attempt tokens cannot be empty");
+        }
         let now = Self::now_rfc3339();
         let request_json =
             serde_json::to_string(request_ids).context("encode acquire request ids")?;
         let holders_json = serde_json::to_string(holders).context("encode acquire holders")?;
+        let expected_tokens: Vec<Option<String>> =
+            attempt_tokens.iter().cloned().map(Some).collect();
+        let attempt_tokens_json =
+            serde_json::to_string(&expected_tokens).context("encode acquire attempt tokens")?;
         self.conn
             .execute(
                 "INSERT OR IGNORE INTO scaleset_acquire_batches
                  (batch_id, scale_set_id, request_ids_json, holders_json, state,
-                  uncertain, generation, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, 'intended', 0, ?5, ?6, ?7)",
+                  uncertain, generation, created_at, updated_at, attempt_tokens_json)
+                 VALUES (?1, ?2, ?3, ?4, 'intended', 0, ?5, ?6, ?7, ?8)",
                 params![
                     batch_id,
                     scale_set_id,
@@ -299,11 +329,17 @@ impl AcquireBatchStore {
                     i64::try_from(generation).unwrap_or(i64::MAX),
                     now,
                     now,
+                    attempt_tokens_json,
                 ],
             )
             .context("record acquire intent")?;
-        self.get(batch_id)?
-            .with_context(|| format!("acquire intent {batch_id:?} vanished after insert"))
+        let batch = self
+            .get(batch_id)?
+            .with_context(|| format!("acquire intent {batch_id:?} vanished after insert"))?;
+        if batch.attempt_tokens.as_deref() != Some(expected_tokens.as_slice()) {
+            anyhow::bail!("acquire intent {batch_id:?} belongs to a different permit attempt");
+        }
+        Ok(batch)
     }
 
     /// Fetch one batch by ID.
@@ -311,7 +347,7 @@ impl AcquireBatchStore {
         self.conn
             .query_row(
                 "SELECT batch_id, scale_set_id, request_ids_json, holders_json, state,
-                        uncertain, generation, created_at, updated_at
+                        uncertain, generation, created_at, updated_at, attempt_tokens_json
                  FROM scaleset_acquire_batches WHERE batch_id = ?1",
                 params![batch_id],
                 Self::row_to_batch,
@@ -343,6 +379,84 @@ impl AcquireBatchStore {
         Ok(())
     }
 
+    /// Replace the attempt token for a request in any batch that recorded it.
+    /// This is used only after the permit ledger has rotated ownership at a
+    /// serialized recovery boundary. CAS keeps a delayed recovery write from
+    /// replacing a newer batch token.
+    pub fn rotate_attempt_token(
+        &mut self,
+        scale_set_id: i32,
+        request_id: i64,
+        old_token: &str,
+        new_token: &str,
+    ) -> Result<()> {
+        if old_token.is_empty() || new_token.is_empty() || old_token == new_token {
+            anyhow::bail!("attempt token rotation requires distinct non-empty tokens");
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin acquire-batch token rotation")?;
+        let mut stmt = tx
+            .prepare(
+                "SELECT batch_id, request_ids_json, attempt_tokens_json
+                 FROM scaleset_acquire_batches
+                 WHERE scale_set_id = ?1 AND state IN ('intended', 'uncertain')",
+            )
+            .context("prepare acquire-batch token rotation")?;
+        let rows = stmt
+            .query_map(params![scale_set_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .context("query acquire-batch token rotation")?;
+        let mut updates = Vec::new();
+        for row in rows {
+            let (batch_id, request_ids_raw, tokens_raw) = row?;
+            let request_ids: Vec<i64> =
+                serde_json::from_str(&request_ids_raw).context("decode acquire batch ids")?;
+            let Some(index) = request_ids.iter().position(|id| *id == request_id) else {
+                continue;
+            };
+            let tokens_raw = tokens_raw
+                .context("acquire batch has no attempt token; refusing ownership rotation")?;
+            let mut tokens: Vec<Option<String>> =
+                serde_json::from_str(&tokens_raw).context("decode acquire batch tokens")?;
+            if tokens.len() != request_ids.len() {
+                anyhow::bail!("acquire batch {batch_id:?} has misaligned attempt tokens");
+            }
+            match tokens[index].as_deref() {
+                Some(token) if token == old_token => tokens[index] = Some(new_token.to_owned()),
+                Some(token) if token == new_token => continue,
+                None => {
+                    anyhow::bail!(
+                        "acquire batch {batch_id:?} has no owner token for request {request_id}"
+                    )
+                }
+                _ => {
+                    anyhow::bail!("acquire batch {batch_id:?} token for request {request_id} moved")
+                }
+            }
+            updates.push((batch_id, tokens_raw, serde_json::to_string(&tokens)?));
+        }
+        drop(stmt);
+        for (batch_id, previous, next) in updates {
+            let changed = tx.execute(
+                "UPDATE scaleset_acquire_batches SET attempt_tokens_json = ?1
+                 WHERE batch_id = ?2 AND attempt_tokens_json = ?3",
+                params![next, batch_id, previous],
+            )?;
+            if changed != 1 {
+                anyhow::bail!("acquire batch token changed during rotation");
+            }
+        }
+        tx.commit().context("commit acquire-batch token rotation")?;
+        Ok(())
+    }
+
     /// Batches still awaiting resolution (`intended` or `uncertain`), oldest
     /// first, bounded by `limit`. Crash recovery and idle reconcile work
     /// from this list.
@@ -351,7 +465,7 @@ impl AcquireBatchStore {
             .conn
             .prepare(
                 "SELECT batch_id, scale_set_id, request_ids_json, holders_json, state,
-                        uncertain, generation, created_at, updated_at
+                        uncertain, generation, created_at, updated_at, attempt_tokens_json
                  FROM scaleset_acquire_batches
                  WHERE scale_set_id = ?1 AND state IN ('intended', 'uncertain')
                  ORDER BY created_at, batch_id LIMIT ?2",
@@ -408,6 +522,9 @@ pub struct ProvisionIntent {
     pub runner_digest: String,
     pub dind_digest: String,
     pub jit_fingerprint: String,
+    /// Permit owner token captured when this acquired request was claimed.
+    /// Legacy intents keep `None` and cannot drive owner operations.
+    pub permit_attempt_token: Option<String>,
     pub generation: u64,
     pub created_at: String,
     pub updated_at: String,
@@ -446,6 +563,7 @@ impl ProvisionIntentStore {
             runner_digest: row.get(5)?,
             dind_digest: row.get(6)?,
             jit_fingerprint: row.get(7)?,
+            permit_attempt_token: row.get(11)?,
             generation: generation_raw.max(0) as u64,
             created_at: row.get(9)?,
             updated_at: row.get(10)?,
@@ -464,15 +582,20 @@ impl ProvisionIntentStore {
         runner_name: &str,
         runner_digest: &str,
         dind_digest: &str,
+        attempt_token: &str,
         generation: u64,
     ) -> Result<ProvisionIntent> {
+        if attempt_token.is_empty() {
+            anyhow::bail!("provision intent attempt token cannot be empty");
+        }
         let now = Self::now_rfc3339();
         self.conn
             .execute(
                 "INSERT OR IGNORE INTO scaleset_provision_intents
                  (operation_id, ownership_id, scale_set_id, request_id, runner_name,
-                  runner_digest, dind_digest, jit_fingerprint, generation, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', ?8, ?9, ?10)",
+                  runner_digest, dind_digest, jit_fingerprint, generation, created_at, updated_at,
+                  permit_attempt_token)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', ?8, ?9, ?10, ?11)",
                 params![
                     operation_id,
                     ownership_id,
@@ -484,11 +607,17 @@ impl ProvisionIntentStore {
                     i64::try_from(generation).unwrap_or(i64::MAX),
                     now,
                     now,
+                    attempt_token,
                 ],
             )
             .context("record provision intent")?;
-        self.get(operation_id)?
-            .with_context(|| format!("provision intent {operation_id:?} vanished after insert"))
+        let intent = self
+            .get(operation_id)?
+            .with_context(|| format!("provision intent {operation_id:?} vanished after insert"))?;
+        if intent.permit_attempt_token.as_deref() != Some(attempt_token) {
+            anyhow::bail!("provision intent {operation_id:?} belongs to another permit attempt");
+        }
+        Ok(intent)
     }
 
     /// Fetch one intent by operation ID.
@@ -496,7 +625,8 @@ impl ProvisionIntentStore {
         self.conn
             .query_row(
                 "SELECT operation_id, ownership_id, scale_set_id, request_id, runner_name,
-                        runner_digest, dind_digest, jit_fingerprint, generation, created_at, updated_at
+                        runner_digest, dind_digest, jit_fingerprint, generation, created_at,
+                        updated_at, permit_attempt_token
                  FROM scaleset_provision_intents WHERE operation_id = ?1",
                 params![operation_id],
                 Self::row_to_intent,
@@ -514,7 +644,8 @@ impl ProvisionIntentStore {
         self.conn
             .query_row(
                 "SELECT operation_id, ownership_id, scale_set_id, request_id, runner_name,
-                        runner_digest, dind_digest, jit_fingerprint, generation, created_at, updated_at
+                        runner_digest, dind_digest, jit_fingerprint, generation, created_at,
+                        updated_at, permit_attempt_token
                  FROM scaleset_provision_intents
                  WHERE scale_set_id = ?1 AND request_id = ?2
                  ORDER BY created_at DESC LIMIT 1",
@@ -532,7 +663,8 @@ impl ProvisionIntentStore {
             .conn
             .prepare(
                 "SELECT operation_id, ownership_id, scale_set_id, request_id, runner_name,
-                        runner_digest, dind_digest, jit_fingerprint, generation, created_at, updated_at
+                        runner_digest, dind_digest, jit_fingerprint, generation, created_at,
+                        updated_at, permit_attempt_token
                  FROM scaleset_provision_intents
                  WHERE scale_set_id = ?1 ORDER BY created_at ASC",
             )
@@ -557,6 +689,48 @@ impl ProvisionIntentStore {
             .context("record JIT fingerprint")?;
         if updated == 0 {
             anyhow::bail!("provision intent {operation_id:?} does not exist");
+        }
+        Ok(())
+    }
+
+    /// Update intents to the token returned by an authorized ledger adoption.
+    /// Historical mismatches fail closed; a repeated completed rotation is
+    /// idempotent.
+    pub fn rotate_attempt_token(
+        &mut self,
+        scale_set_id: i32,
+        request_id: i64,
+        old_token: &str,
+        new_token: &str,
+    ) -> Result<()> {
+        if old_token.is_empty() || new_token.is_empty() || old_token == new_token {
+            anyhow::bail!("attempt token rotation requires distinct non-empty tokens");
+        }
+        let latest: Option<(String, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT operation_id, permit_attempt_token FROM scaleset_provision_intents
+                 WHERE scale_set_id = ?1 AND request_id = ?2
+                 ORDER BY created_at DESC, operation_id DESC LIMIT 1",
+                params![scale_set_id, request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((operation_id, current)) = latest else {
+            return Ok(());
+        };
+        match current.as_deref() {
+            Some(current) if current == new_token => return Ok(()),
+            Some(current) if current == old_token => {}
+            _ => anyhow::bail!("provision intent token for request {request_id} moved"),
+        }
+        let changed = self.conn.execute(
+            "UPDATE scaleset_provision_intents SET permit_attempt_token = ?1
+             WHERE operation_id = ?2 AND permit_attempt_token = ?3",
+            params![new_token, operation_id, old_token],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("provision intent token for request {request_id} moved during rotation");
         }
         Ok(())
     }
@@ -656,14 +830,15 @@ mod tests {
         let path = temp_path("batch");
         let mut store = AcquireBatchStore::open(&path).unwrap();
         let holders = vec!["scaleset/7/1".to_owned(), "scaleset/7/2".to_owned()];
+        let attempt_tokens = vec!["attempt-1".to_owned(), "attempt-2".to_owned()];
         let batch = store
-            .record_intended("acq-1", 7, &[1, 2], &holders, 4)
+            .record_intended("acq-1", 7, &[1, 2], &holders, &attempt_tokens, 4)
             .unwrap();
         assert_eq!(batch.state, BatchState::Intended);
         assert!(!batch.uncertain);
         // Redelivered intent adopts the recorded row.
         let again = store
-            .record_intended("acq-1", 7, &[1, 2], &holders, 4)
+            .record_intended("acq-1", 7, &[1, 2], &holders, &attempt_tokens, 4)
             .unwrap();
         assert_eq!(again, batch);
         assert_eq!(store.open_batches(7, 10).unwrap().len(), 1);
@@ -688,6 +863,7 @@ mod tests {
                 "velnor-7-9",
                 "sha256:runner",
                 "sha256:dind",
+                "attempt-token",
                 4,
             )
             .unwrap();
@@ -700,6 +876,7 @@ mod tests {
                 "velnor-7-9",
                 "sha256:runner",
                 "sha256:dind",
+                "attempt-token",
                 4,
             )
             .unwrap();

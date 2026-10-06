@@ -270,6 +270,16 @@ struct PathsReport {
     artifacts: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedStoragePaths {
+    mode: String,
+    cache: PathBuf,
+    lib: PathBuf,
+    run: PathBuf,
+    log: PathBuf,
+    config: PathBuf,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct DockerReport {
@@ -998,75 +1008,95 @@ fn resolve_paths(
     let storage_root = env::var_os("VELNOR_STORAGE_ROOT")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
-    let (mode, cache, lib, run, log, config) = if let Some(prefix) = storage_root {
-        let run = if prefix == Path::new("/var") {
-            PathBuf::from("/run/velnor")
-        } else {
-            prefix.join("run/velnor")
-        };
-        (
-            "storage-root".to_owned(),
-            prefix.join("cache/velnor/v1"),
-            prefix.join("lib/velnor"),
-            run,
-            prefix.join("log/velnor"),
-            prefix.join("lib/velnor/runner"),
+    let config_env = env::var_os("VELNOR_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let user_storage_root = env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(|_| velnor_client::default_user_storage_root());
+    let storage = resolve_storage_paths(
+        storage_root.as_deref(),
+        explicit_config,
+        config_env.as_deref(),
+        user_storage_root.as_deref(),
+    )?;
+    Ok(paths_report(storage, explicit_work))
+}
+
+fn resolve_storage_paths(
+    storage_root: Option<&Path>,
+    explicit_config: Option<&Path>,
+    config_env: Option<&Path>,
+    user_storage_root: Option<&Path>,
+) -> Result<ResolvedStoragePaths, CommandError> {
+    if let Some(prefix) = storage_root {
+        return Ok(storage_paths_from_prefix(prefix, "storage-root"));
+    }
+    if let Some(config) = explicit_config {
+        return Ok(storage_paths_for_explicit_local(config));
+    }
+    if let Some(config) = config_env {
+        return Ok(storage_paths_for_explicit_local(config));
+    }
+    let prefix = user_storage_root.ok_or_else(|| {
+        CommandError::new(
+            ExitClass::Usage,
+            "config.home_missing",
+            "HOME is not set; pass --config-dir or set VELNOR_CONFIG_DIR or VELNOR_STORAGE_ROOT to resolve local paths",
         )
-    } else if let Some(config) = explicit_config {
-        (
-            "explicit-config".to_owned(),
-            config.join("cache"),
-            config.to_path_buf(),
-            config.join("run"),
-            config.join("log"),
-            config.to_path_buf(),
-        )
-    } else {
-        let home = env::var_os("HOME").ok_or_else(|| {
-            CommandError::new(
-                ExitClass::Usage,
-                "config.home_missing",
-                "HOME is not set; pass --config-dir to resolve local paths",
-            )
-        })?;
-        let home = PathBuf::from(home);
-        let state = env::var_os("XDG_STATE_HOME")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join("Library/Application Support"));
-        let cache = env::var_os("XDG_CACHE_HOME")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join("Library/Caches"));
-        let runtime = env::var_os("XDG_RUNTIME_DIR")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| env::temp_dir().join("velnor-run"));
-        let lib = state.join("velnor");
-        (
-            "xdg-user".to_owned(),
-            cache.join("velnor"),
-            lib.clone(),
-            runtime.join("velnor"),
-            lib.join("log"),
-            lib.join("runner"),
-        )
-    };
+    })?;
+    Ok(storage_paths_from_prefix(prefix, "user-storage-root"))
+}
+
+fn paths_report(storage: ResolvedStoragePaths, explicit_work: Option<&Path>) -> PathsReport {
     let work = explicit_work
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| config.join("_work"));
+        .unwrap_or_else(|| storage.config.join("_work"));
     let artifact_root = daemon_shared_root(work.clone()).join("_velnor_artifacts");
-    Ok(PathsReport {
-        mode,
-        cache,
+    PathsReport {
+        mode: storage.mode,
+        cache: storage.cache,
+        lib: storage.lib,
+        run: storage.run,
+        log: storage.log,
+        config: storage.config.clone(),
+        work,
+        runner_log: storage.config.join("logs"),
+        artifacts: artifact_root,
+    }
+}
+
+fn storage_paths_from_prefix(prefix: &Path, mode: &str) -> ResolvedStoragePaths {
+    let run = if prefix == Path::new("/var") {
+        PathBuf::from("/run/velnor")
+    } else {
+        prefix.join("run/velnor")
+    };
+    let lib = prefix.join("lib/velnor");
+    ResolvedStoragePaths {
+        mode: mode.to_owned(),
+        cache: prefix.join("cache/velnor/v1"),
+        config: lib.join("runner"),
         lib,
         run,
-        log,
-        config: config.clone(),
-        work,
-        runner_log: config.join("logs"),
-        artifacts: artifact_root,
-    })
+        log: prefix.join("log/velnor"),
+    }
+}
+
+fn storage_paths_for_explicit_local(config_dir: &Path) -> ResolvedStoragePaths {
+    let run_base = config_dir
+        .parent()
+        .filter(|parent| parent.file_name().is_some_and(|name| name == "slots"))
+        .and_then(Path::parent)
+        .unwrap_or(config_dir);
+    ResolvedStoragePaths {
+        mode: "explicit-config".to_owned(),
+        cache: config_dir.join("cache"),
+        lib: config_dir.to_path_buf(),
+        run: run_base.join("run"),
+        log: config_dir.join("logs"),
+        config: config_dir.to_path_buf(),
+    }
 }
 
 fn current_work_dir() -> PathBuf {
@@ -1934,6 +1964,71 @@ mod tests {
     fn daemon_shared_artifacts_lift_slot_work_root() {
         let root = PathBuf::from("/tmp/velnor/work/slot-3");
         assert_eq!(daemon_shared_root(root), PathBuf::from("/tmp/velnor/work"));
+    }
+
+    #[test]
+    fn prefix_storage_paths_match_canonical_runner_layout() {
+        let prefix = Path::new("/tmp/velnor-store");
+        let layout = storage_paths_from_prefix(prefix, "storage-root");
+        assert_eq!(layout.cache, prefix.join("cache/velnor/v1"));
+        assert_eq!(layout.lib, prefix.join("lib/velnor"));
+        assert_eq!(layout.run, prefix.join("run/velnor"));
+        assert_eq!(layout.log, prefix.join("log/velnor"));
+        assert_eq!(layout.config, prefix.join("lib/velnor/runner"));
+
+        let packaged = storage_paths_from_prefix(Path::new("/var"), "storage-root");
+        assert_eq!(packaged.run, PathBuf::from("/run/velnor"));
+    }
+
+    #[test]
+    fn explicit_local_paths_match_the_runner_config_layout() {
+        let config = Path::new("/tmp/velnor/slots/slot-2");
+        let paths = storage_paths_for_explicit_local(config);
+        assert_eq!(paths.mode, "explicit-config");
+        assert_eq!(paths.cache, config.join("cache"));
+        assert_eq!(paths.lib, config);
+        assert_eq!(paths.run, PathBuf::from("/tmp/velnor/run"));
+        assert_eq!(paths.log, config.join("logs"));
+        assert_eq!(paths.config, config);
+
+        let standalone = storage_paths_for_explicit_local(Path::new("/tmp/velnor/config"));
+        assert_eq!(standalone.run, PathBuf::from("/tmp/velnor/config/run"));
+    }
+
+    #[test]
+    fn local_paths_use_explicit_or_config_env_without_storage_root_or_home() {
+        let explicit = Path::new("/tmp/velnor/explicit-config");
+        let environment = Path::new("/tmp/velnor/environment-config");
+
+        let explicit_paths = resolve_storage_paths(None, Some(explicit), Some(environment), None)
+            .expect("explicit config must resolve without HOME or storage root");
+        assert_eq!(explicit_paths, storage_paths_for_explicit_local(explicit));
+
+        let environment_paths = resolve_storage_paths(None, None, Some(environment), None)
+            .expect("VELNOR_CONFIG_DIR must resolve without HOME or storage root");
+        assert_eq!(
+            environment_paths,
+            storage_paths_for_explicit_local(environment)
+        );
+    }
+
+    #[test]
+    fn explicit_work_override_changes_work_only_and_keeps_artifacts_shared() {
+        let storage = storage_paths_for_explicit_local(Path::new("/tmp/velnor/slots/slot-2"));
+        let default = paths_report(storage.clone(), None);
+        let overridden = paths_report(storage, Some(Path::new("/tmp/velnor/work/slot-2")));
+
+        assert_ne!(overridden.work, default.work);
+        assert_eq!(overridden.cache, default.cache);
+        assert_eq!(overridden.lib, default.lib);
+        assert_eq!(overridden.run, default.run);
+        assert_eq!(overridden.log, default.log);
+        assert_eq!(overridden.config, default.config);
+        assert_eq!(overridden.runner_log, default.runner_log);
+        assert_eq!(
+            overridden.artifacts,
+            PathBuf::from("/tmp/velnor/work/_velnor_artifacts")
+        );
     }
 
     #[test]

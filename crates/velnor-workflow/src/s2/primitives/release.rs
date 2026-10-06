@@ -3769,7 +3769,7 @@ fn render_release_unit_cache_restore(
 fn render_release_selection_plan_step(output: &mut String, head_sha: &str) {
     let _ = writeln!(
         output,
-        "      - name: Plan full release selection\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: {head_sha}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: |\n          set -euo pipefail\n          mkdir -p .velnor-ci-selection\n          velnor-workflow plan --config .github/ci/project.toml\n",
+        "      - name: Plan full release selection\n        env:\n          CI_SCOPE_OVERRIDE: full\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: {head_sha}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: |\n          set -euo pipefail\n          mkdir -p .velnor-ci-selection\n          velnor-workflow plan --config .github/ci/project.toml\n",
     );
 }
 
@@ -6513,6 +6513,7 @@ cp "$record" "$out"
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         }
     }
 
@@ -6729,7 +6730,7 @@ cp "$record" "$out"
             mise_lock_backends: BTreeMap::new(),
             mise_install_deps: crate::s2::config::MiseInstallDeps::default(),
             github_cache: crate::s2::config::CacheGithubSection::default(),
-            velnor_host_cache: crate::s2::config::CacheVelnorSection::default(),
+            host_cache: crate::s2::config::CacheHostSection::default(),
         }
     }
 

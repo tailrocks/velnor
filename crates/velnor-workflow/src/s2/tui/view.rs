@@ -734,6 +734,7 @@ mod tests {
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         };
         let config = crate::s2::ProjectConfig {
             repository: "example/project".to_owned(),
@@ -787,7 +788,7 @@ mod tests {
             mise_lock_backends: BTreeMap::new(),
             mise_install_deps: crate::s2::config::MiseInstallDeps::default(),
             github_cache: crate::s2::config::CacheGithubSection::default(),
-            velnor_host_cache: crate::s2::config::CacheVelnorSection::default(),
+            host_cache: crate::s2::config::CacheHostSection::default(),
         };
         let id = "workspace-with-a-long-name".to_owned();
         let mut selector = termrock::widgets::ListState::new(Some(id.clone()));
@@ -935,7 +936,6 @@ mod tests {
                 },
             ],
             changed: Vec::new(),
-            stale: vec![PathBuf::from(".github/workflows/old.yml")],
             unknown: Vec::new(),
             conflicts: Vec::new(),
             ownership_present: true,

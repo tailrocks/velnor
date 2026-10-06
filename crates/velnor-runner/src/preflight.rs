@@ -512,17 +512,21 @@ mod tests {
                 "systemd 2\n"
             } else if program == "systemctl"
                 && args.first().is_some_and(|arg| arg == "show")
-                && args.len() == 6
+                && args.len() == 8
                 && args.get(1).is_some_and(|arg| arg == "--property=LoadState")
                 && args
                     .get(2)
                     .is_some_and(|arg| arg == "--property=CPUQuotaPerSecUSec")
-                && args.get(3).is_some_and(|arg| arg == "--property=MemoryMax")
                 && args
-                    .get(4)
+                    .get(3)
                     .is_some_and(|arg| arg == "--property=MemoryHigh")
+                && args.get(4).is_some_and(|arg| arg == "--property=MemoryMax")
+                && args
+                    .get(5)
+                    .is_some_and(|arg| arg == "--property=MemorySwapMax")
+                && args.get(6).is_some_and(|arg| arg == "--property=TasksMax")
             {
-                "LoadState=loaded\nCPUQuotaPerSecUSec=infinity\nMemoryMax=infinity\nMemoryHigh=infinity\n"
+                "LoadState=loaded\nCPUQuotaPerSecUSec=infinity\nMemoryHigh=infinity\nMemoryMax=infinity\nMemorySwapMax=infinity\nTasksMax=infinity\n"
             } else {
                 ""
             };

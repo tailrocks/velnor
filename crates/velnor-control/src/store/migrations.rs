@@ -9,7 +9,7 @@ use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 23;
+pub const LATEST_SCHEMA_VERSION: u32 = 29;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -627,6 +627,84 @@ const SCHEMA_V23: &str = "
 ALTER TABLE scaleset_demand ADD COLUMN event_name TEXT NOT NULL DEFAULT '';
 ";
 
+/// Persist the permit attempt owner token through demand, acquire, provision,
+/// and worker recovery. Historical rows stay NULL: their permit owner cannot
+/// be inferred safely from a holder string.
+const SCHEMA_V24: &str = "
+ALTER TABLE scaleset_demand ADD COLUMN permit_attempt_token TEXT;
+ALTER TABLE scaleset_acquire_batches ADD COLUMN attempt_tokens_json TEXT;
+ALTER TABLE scaleset_provision_intents ADD COLUMN permit_attempt_token TEXT;
+ALTER TABLE scaleset_workers ADD COLUMN permit_attempt_token TEXT;
+";
+
+/// A cross-database permit-token rotation is staged here before the host
+/// permit ledger changes. Startup can finish the durable state-database
+/// half after a crash without minting or guessing ownership.
+const SCHEMA_V25: &str = "
+CREATE TABLE IF NOT EXISTS scaleset_attempt_rotations (
+    holder TEXT PRIMARY KEY,
+    scale_set_id INTEGER NOT NULL,
+    request_id INTEGER NOT NULL,
+    ownership_id TEXT NOT NULL,
+    old_attempt_token TEXT,
+    new_attempt_token TEXT NOT NULL CHECK (new_attempt_token != ''),
+    created_at TEXT NOT NULL,
+    UNIQUE (scale_set_id, request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_scaleset_attempt_rotations_request
+    ON scaleset_attempt_rotations (scale_set_id, request_id);
+";
+
+/// Journal token-fenced permit releases so a crash between the host permit
+/// ledger and Scale Set state projections can finish the state half safely.
+const SCHEMA_V26: &str = "
+CREATE TABLE IF NOT EXISTS scaleset_attempt_releases (
+    holder TEXT PRIMARY KEY,
+    scale_set_id INTEGER NOT NULL,
+    request_id INTEGER NOT NULL,
+    attempt_token TEXT NOT NULL CHECK (attempt_token != ''),
+    ledger_demand_state TEXT NOT NULL CHECK (ledger_demand_state IN ('eligible', 'cancelled', 'terminal')),
+    next_demand_state TEXT CHECK (next_demand_state IN ('eligible', 'canceled_done', 'terminal')),
+    worker_ownership_id TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE (scale_set_id, request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_scaleset_attempt_releases_request
+    ON scaleset_attempt_releases (scale_set_id, request_id);
+";
+
+/// Journal fresh Scale Set acquisition tokens before touching the separate
+/// host permit database. Startup can attest an absent or exact-token row and
+/// finish the local token projection after a cross-database crash.
+const SCHEMA_V27: &str = "
+CREATE TABLE IF NOT EXISTS scaleset_attempt_acquires (
+    holder TEXT PRIMARY KEY,
+    scale_set_id INTEGER NOT NULL,
+    request_id INTEGER NOT NULL,
+    previous_attempt_token TEXT,
+    target_attempt_token TEXT NOT NULL CHECK (target_attempt_token != ''),
+    created_at TEXT NOT NULL,
+    UNIQUE (scale_set_id, request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_scaleset_attempt_acquires_request
+    ON scaleset_attempt_acquires (scale_set_id, request_id);
+";
+
+/// Journal acquire-batch resolution alongside a staged member release. A
+/// missing-ID release can commit its permit and demand projections before
+/// the batch result; this sidecar lets that same state-DB transaction close
+/// the exact batch before dropping the release stage.
+const SCHEMA_V28: &str = "
+CREATE TABLE IF NOT EXISTS scaleset_attempt_release_batches (
+    holder TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    resolve_uncertain INTEGER NOT NULL CHECK (resolve_uncertain IN (0, 1)),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_scaleset_attempt_release_batches_batch
+    ON scaleset_attempt_release_batches (batch_id);
+";
+
 const SCHEMA_V6_REPLAY: &str = "
 CREATE TABLE IF NOT EXISTS lifecycle_operations (
     instance_slug TEXT NOT NULL,
@@ -641,6 +719,17 @@ CREATE TABLE IF NOT EXISTS lifecycle_operations (
     created_at TEXT NOT NULL,
     PRIMARY KEY (instance_slug, idempotency_key),
     UNIQUE (operation_id)
+);
+";
+
+/// Preserve the exact permit PID observed before each cross-database token
+/// rotation. Existing pending stages have no such evidence and stay
+/// unresolved; recovery rejects them instead of inferring a prior owner.
+const SCHEMA_V29: &str = "
+CREATE TABLE IF NOT EXISTS scaleset_attempt_rotation_priors (
+    holder TEXT PRIMARY KEY,
+    previous_pid INTEGER NOT NULL CHECK (previous_pid > 0),
+    created_at TEXT NOT NULL
 );
 ";
 
@@ -773,6 +862,36 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "scaleset-demand-event",
         sql: SCHEMA_V23,
     },
+    Migration {
+        version: 24,
+        name: "scaleset-permit-attempt-ownership",
+        sql: SCHEMA_V24,
+    },
+    Migration {
+        version: 25,
+        name: "scaleset-staged-attempt-rotation",
+        sql: SCHEMA_V25,
+    },
+    Migration {
+        version: 26,
+        name: "scaleset-staged-attempt-release",
+        sql: SCHEMA_V26,
+    },
+    Migration {
+        version: 27,
+        name: "scaleset-staged-attempt-acquire",
+        sql: SCHEMA_V27,
+    },
+    Migration {
+        version: 28,
+        name: "scaleset-staged-release-batch-resolution",
+        sql: SCHEMA_V28,
+    },
+    Migration {
+        version: 29,
+        name: "scaleset-staged-rotation-prior-pid",
+        sql: SCHEMA_V29,
+    },
 ];
 
 const META_TABLES_SQL: &str = "
@@ -823,13 +942,13 @@ pub(crate) fn current_version(conn: &Connection) -> StoreResult<u32> {
             "stored schema version {version} is newer than supported schema version {LATEST_SCHEMA_VERSION}; upgrade Velnor before opening this database"
         )));
     }
-    if version >= LATEST_SCHEMA_VERSION && !v23_schema_complete(conn)? {
+    if version >= LATEST_SCHEMA_VERSION && !v29_schema_complete(conn)? {
         return Err(StoreError::new(
             ExitClass::Operation,
             "store.schema.incomplete",
         )
         .with_remediation(
-            "schema version 23 is recorded but its scale-set demand event column or predecessor schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
+            "schema version 29 is recorded but staged scale-set prior-PID recovery evidence or predecessor schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
         ));
     }
     Ok(version)
@@ -1031,6 +1150,24 @@ pub(crate) fn apply_pending(
             migration.version == 20 && has_column(&transaction, "jobs", "execution_backend")?;
         let demand_event_column_exists =
             migration.version == 23 && has_column(&transaction, "scaleset_demand", "event_name")?;
+        let permit_attempt_columns = if migration.version == 24 {
+            [
+                has_column(&transaction, "scaleset_demand", "permit_attempt_token")?,
+                has_column(
+                    &transaction,
+                    "scaleset_acquire_batches",
+                    "attempt_tokens_json",
+                )?,
+                has_column(
+                    &transaction,
+                    "scaleset_provision_intents",
+                    "permit_attempt_token",
+                )?,
+                has_column(&transaction, "scaleset_workers", "permit_attempt_token")?,
+            ]
+        } else {
+            [false; 4]
+        };
         if migration.version == 16
             && slot_lifecycle_columns.iter().any(|exists| *exists)
             && !slot_lifecycle_columns.iter().all(|exists| *exists)
@@ -1054,6 +1191,18 @@ pub(crate) fn apply_pending(
                 "v12 exact lifecycle-event identity is partial; both transition_id and reconciliation_id must be present before the schema version can advance",
             ));
         }
+        if migration.version == 24
+            && permit_attempt_columns.iter().any(|exists| *exists)
+            && !permit_attempt_columns.iter().all(|exists| *exists)
+        {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v24 permit-attempt ownership columns are partial; demand, acquire-batch, provision-intent, and worker ownership columns must all be present before the schema version can advance",
+            ));
+        }
         if migration.version == 16 {
             transaction.execute_batch(SCHEMA_V16_NORMALIZE_LEGACY_SLOTS)?;
         }
@@ -1065,7 +1214,8 @@ pub(crate) fn apply_pending(
                 && !trust_class_column_exists
                 && !lifecycle_expected_version_exists
                 && !execution_backend_column_exists
-                && !demand_event_column_exists)
+                && !demand_event_column_exists
+                && !permit_attempt_columns.iter().all(|exists| *exists))
         {
             let sql = if lifecycle_columns_exist {
                 SCHEMA_V6_REPLAY
@@ -1188,6 +1338,60 @@ pub(crate) fn apply_pending(
             )
             .with_remediation(
                 "v23 scale-set demand event column did not converge transactionally; the schema version remains unchanged",
+            ));
+        }
+        if migration.version == 24 && !v24_schema_complete(&transaction)? {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v24 scale-set permit-attempt ownership columns did not converge transactionally; the schema version remains unchanged",
+            ));
+        }
+        if migration.version == 25 && !v25_schema_complete(&transaction)? {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v25 staged scale-set attempt rotation table did not converge transactionally; the schema version remains unchanged",
+            ));
+        }
+        if migration.version == 26 && !v26_schema_complete(&transaction)? {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v26 staged scale-set attempt release table did not converge transactionally; the schema version remains unchanged",
+            ));
+        }
+        if migration.version == 27 && !v27_schema_complete(&transaction)? {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v27 staged scale-set attempt acquire table did not converge transactionally; the schema version remains unchanged",
+            ));
+        }
+        if migration.version == 28 && !v28_schema_complete(&transaction)? {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v28 staged scale-set release batch table did not converge transactionally; the schema version remains unchanged",
+            ));
+        }
+        if migration.version == 29 && !v29_schema_complete(&transaction)? {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v29 staged scale-set prior-PID table did not converge transactionally; the schema version remains unchanged",
             ));
         }
         if let Some(hook) = hook {
@@ -1517,6 +1721,166 @@ fn v23_schema_complete(conn: &Connection) -> StoreResult<bool> {
     )
 }
 
+fn v24_schema_complete(conn: &Connection) -> StoreResult<bool> {
+    if !v23_schema_complete(conn)? {
+        return Ok(false);
+    }
+    for table in [
+        "scaleset_demand",
+        "scaleset_provision_intents",
+        "scaleset_workers",
+    ] {
+        if !column_definition_matches(conn, table, "permit_attempt_token", "TEXT", false, None)? {
+            return Ok(false);
+        }
+    }
+    column_definition_matches(
+        conn,
+        "scaleset_acquire_batches",
+        "attempt_tokens_json",
+        "TEXT",
+        false,
+        None,
+    )
+}
+
+fn v25_schema_complete(conn: &Connection) -> StoreResult<bool> {
+    if !v24_schema_complete(conn)? {
+        return Ok(false);
+    }
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table'
+                       AND name = 'scaleset_attempt_rotations')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(false);
+    }
+    let expected_table = SCHEMA_V25
+        .split(';')
+        .next()
+        .unwrap_or(SCHEMA_V25)
+        .replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE");
+    if !table_definition_matches(conn, "scaleset_attempt_rotations", &expected_table)? {
+        return Ok(false);
+    }
+    has_index_columns(
+        conn,
+        "idx_scaleset_attempt_rotations_request",
+        "scaleset_attempt_rotations",
+        &["scale_set_id", "request_id"],
+    )
+}
+
+fn v26_schema_complete(conn: &Connection) -> StoreResult<bool> {
+    if !v25_schema_complete(conn)? {
+        return Ok(false);
+    }
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table'
+                       AND name = 'scaleset_attempt_releases')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(false);
+    }
+    let expected_table = SCHEMA_V26
+        .split(';')
+        .next()
+        .unwrap_or(SCHEMA_V26)
+        .replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE");
+    if !table_definition_matches(conn, "scaleset_attempt_releases", &expected_table)? {
+        return Ok(false);
+    }
+    has_index_columns(
+        conn,
+        "idx_scaleset_attempt_releases_request",
+        "scaleset_attempt_releases",
+        &["scale_set_id", "request_id"],
+    )
+}
+
+fn v27_schema_complete(conn: &Connection) -> StoreResult<bool> {
+    if !v26_schema_complete(conn)? {
+        return Ok(false);
+    }
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table'
+                       AND name = 'scaleset_attempt_acquires')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(false);
+    }
+    let expected_table = SCHEMA_V27
+        .split(';')
+        .next()
+        .unwrap_or(SCHEMA_V27)
+        .replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE");
+    if !table_definition_matches(conn, "scaleset_attempt_acquires", &expected_table)? {
+        return Ok(false);
+    }
+    has_index_columns(
+        conn,
+        "idx_scaleset_attempt_acquires_request",
+        "scaleset_attempt_acquires",
+        &["scale_set_id", "request_id"],
+    )
+}
+
+fn v28_schema_complete(conn: &Connection) -> StoreResult<bool> {
+    if !v27_schema_complete(conn)? {
+        return Ok(false);
+    }
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table'
+                       AND name = 'scaleset_attempt_release_batches')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(false);
+    }
+    let expected_table = SCHEMA_V28
+        .split(';')
+        .next()
+        .unwrap_or(SCHEMA_V28)
+        .replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE");
+    if !table_definition_matches(conn, "scaleset_attempt_release_batches", &expected_table)? {
+        return Ok(false);
+    }
+    has_index_columns(
+        conn,
+        "idx_scaleset_attempt_release_batches_batch",
+        "scaleset_attempt_release_batches",
+        &["batch_id"],
+    )
+}
+
+fn v29_schema_complete(conn: &Connection) -> StoreResult<bool> {
+    if !v28_schema_complete(conn)? {
+        return Ok(false);
+    }
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table'
+                       AND name = 'scaleset_attempt_rotation_priors')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(false);
+    }
+    let expected_table = SCHEMA_V29
+        .split(';')
+        .next()
+        .unwrap_or(SCHEMA_V29)
+        .replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE");
+    table_definition_matches(conn, "scaleset_attempt_rotation_priors", &expected_table)
+}
+
 fn v22_schema_complete(conn: &Connection) -> StoreResult<bool> {
     if !v21_schema_complete(conn)? {
         return Ok(false);
@@ -1730,6 +2094,25 @@ fn table_sql_contains(conn: &Connection, table: &str, fragment: &str) -> StoreRe
             |row| row.get::<_, String>(0),
         )?
         .contains(fragment))
+}
+
+fn table_definition_matches(
+    conn: &Connection,
+    table: &str,
+    expected_sql: &str,
+) -> StoreResult<bool> {
+    let actual: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(actual) = actual else {
+        return Ok(false);
+    };
+    let normalize = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    Ok(normalize(&actual) == normalize(expected_sql))
 }
 
 fn trigger_sql_contains(conn: &Connection, trigger: &str, fragment: &str) -> StoreResult<bool> {
@@ -2467,12 +2850,12 @@ mod tests {
     }
 
     #[test]
-    fn recorded_v22_without_loop_intent_tables_fails_closed() {
+    fn latest_schema_without_loop_intent_tables_fails_closed() {
         let temp = TempDb::new("incomplete-v22-tables");
         let store = Store::open(&temp.path).expect("initial migration");
         assert_eq!(
             current_version(&store.lock_conn().expect("store lock")).unwrap(),
-            23
+            LATEST_SCHEMA_VERSION
         );
         let connection = store.lock_conn().expect("store lock");
         connection
@@ -2517,6 +2900,7 @@ mod tests {
         release_lock(&conn, "v22-v23-test").unwrap();
 
         assert!(v23_schema_complete(&conn).unwrap());
+        assert!(v24_schema_complete(&conn).unwrap());
         assert_eq!(current_version(&conn).unwrap(), LATEST_SCHEMA_VERSION);
         let event: String = conn
             .query_row(
@@ -2526,5 +2910,257 @@ mod tests {
             )
             .unwrap();
         assert_eq!(event, "");
+    }
+
+    #[test]
+    fn partial_v24_permit_attempt_columns_fail_closed_before_replay_ddl() {
+        let temp = TempDb::new("partial-v24-attempt-token-columns");
+        let mut conn = Connection::open(&temp.path).expect("open v23 database");
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        ensure_meta_tables(&conn).unwrap();
+        for migration in MIGRATIONS.iter().take(23) {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "UPDATE schema_version SET version = ?1, updated_at = ?2 WHERE singleton = 0",
+                rusqlite::params![migration.version, "1970-01-01T00:00:00Z"],
+            )
+            .unwrap();
+        }
+        conn.execute_batch("ALTER TABLE scaleset_demand ADD COLUMN permit_attempt_token TEXT;")
+            .unwrap();
+
+        acquire_lock(&conn, "partial-v24-test", Duration::from_secs(1)).unwrap();
+        let error = apply_pending(&mut conn, "partial-v24-test", None).unwrap_err();
+        assert_eq!(error.envelope.reason, "store.schema.incomplete");
+        assert_eq!(current_version(&conn).unwrap(), 23);
+        for (table, column, expected) in [
+            ("scaleset_demand", "permit_attempt_token", true),
+            ("scaleset_acquire_batches", "attempt_tokens_json", false),
+            ("scaleset_provision_intents", "permit_attempt_token", false),
+            ("scaleset_workers", "permit_attempt_token", false),
+        ] {
+            assert_eq!(
+                has_column_connection(&conn, table, column).unwrap(),
+                expected,
+                "unexpected migration replay change to {table}.{column}"
+            );
+        }
+        release_lock(&conn, "partial-v24-test").unwrap();
+    }
+
+    #[test]
+    fn populated_v23_active_scale_set_rows_stay_tokenless_until_proven_recovery() {
+        let temp = TempDb::new("v23-v28-scale-set-attempts");
+        let mut conn = Connection::open(&temp.path).expect("open v23 database");
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        ensure_meta_tables(&conn).unwrap();
+        for migration in MIGRATIONS.iter().take(23) {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "UPDATE schema_version SET version = ?1, updated_at = ?2 WHERE singleton = 0",
+                rusqlite::params![migration.version, "1970-01-01T00:00:00Z"],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO scaleset_demand
+             (request_id, scale_set_id, first_seen_at, sequence, state, decline_reason,
+              repo_owner, repo_name, job_id, labels_hash, generation, updated_at, event_name)
+             VALUES (101, 7, '2026-09-17T00:00:00Z', 1, 'provision_intent', NULL,
+                     'tailrocks', 'velnor', 501, 'hash', 4, '2026-09-17T00:00:00Z', 'push')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scaleset_acquire_batches
+             (batch_id, scale_set_id, request_ids_json, holders_json, state, uncertain,
+              generation, created_at, updated_at)
+             VALUES ('batch-legacy', 7, '[101]', '[\"scaleset/7/101\"]', 'uncertain', 1,
+                     4, '2026-09-17T00:00:00Z', '2026-09-17T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scaleset_provision_intents
+             (operation_id, ownership_id, scale_set_id, request_id, runner_name,
+              runner_digest, dind_digest, jit_fingerprint, generation, created_at, updated_at)
+             VALUES ('op-legacy', '7/runner-legacy', 7, 101, 'runner-legacy',
+                     'runner-digest', 'dind-digest', '', 4,
+                     '2026-09-17T00:00:00Z', '2026-09-17T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scaleset_workers
+             (ownership_id, operation_id, request_id, runner_name, runner_digest, dind_digest,
+              worker_state, generation, created_at, updated_at)
+             VALUES ('7/runner-legacy', 'op-legacy', 101, 'runner-legacy',
+                     'runner-digest', 'dind-digest', 'running', 4,
+                     '2026-09-17T00:00:00Z', '2026-09-17T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        acquire_lock(&conn, "v23-v28-test", Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            apply_pending(&mut conn, "v23-v28-test", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        release_lock(&conn, "v23-v28-test").unwrap();
+
+        assert!(v24_schema_complete(&conn).unwrap());
+        assert!(v25_schema_complete(&conn).unwrap());
+        assert!(v28_schema_complete(&conn).unwrap());
+        assert_eq!(current_version(&conn).unwrap(), LATEST_SCHEMA_VERSION);
+        for (table, column) in [
+            ("scaleset_demand", "permit_attempt_token"),
+            ("scaleset_acquire_batches", "attempt_tokens_json"),
+            ("scaleset_provision_intents", "permit_attempt_token"),
+            ("scaleset_workers", "permit_attempt_token"),
+        ] {
+            let row_predicate = if table == "scaleset_demand" {
+                "request_id = 101"
+            } else {
+                "rowid = 1"
+            };
+            let value: Option<String> = conn
+                .query_row(
+                    &format!("SELECT {column} FROM {table} WHERE {row_predicate}"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(value, None, "{table}.{column} must not infer ownership");
+        }
+        let rotations: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM scaleset_attempt_rotations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rotations, 0, "migration must not mint recovery authority");
+    }
+
+    #[test]
+    fn malformed_v25_rotation_table_does_not_advance_schema_version() {
+        let temp = TempDb::new("malformed-v25-rotation-table");
+        let mut conn = Connection::open(&temp.path).expect("open migration database");
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        ensure_meta_tables(&conn).unwrap();
+        for migration in MIGRATIONS.iter().take(24) {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "UPDATE schema_version SET version = ?1, updated_at = ?2 WHERE singleton = 0",
+                rusqlite::params![migration.version, "1970-01-01T00:00:00Z"],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "CREATE TABLE scaleset_attempt_rotations (
+                 holder TEXT NOT NULL,
+                 scale_set_id INTEGER NOT NULL,
+                 request_id INTEGER NOT NULL,
+                 ownership_id TEXT NOT NULL,
+                 old_attempt_token TEXT,
+                 new_attempt_token TEXT NOT NULL,
+                 created_at TEXT NOT NULL
+             );
+             CREATE INDEX idx_scaleset_attempt_rotations_request
+                 ON scaleset_attempt_rotations (scale_set_id, request_id);",
+        )
+        .unwrap();
+        assert!(!v25_schema_complete(&conn).unwrap());
+
+        acquire_lock(&conn, "malformed-v25-test", Duration::from_secs(1)).unwrap();
+        assert!(apply_pending(&mut conn, "malformed-v25-test", None).is_err());
+        release_lock(&conn, "malformed-v25-test").unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 24);
+        assert!(!v25_schema_complete(&conn).unwrap());
+    }
+
+    #[test]
+    fn malformed_v26_through_v28_stage_tables_do_not_advance_schema_version() {
+        for (version, table_sql, index_sql, expected_version) in [
+            (
+                26,
+                "CREATE TABLE scaleset_attempt_releases (
+                     holder TEXT NOT NULL,
+                     scale_set_id INTEGER NOT NULL,
+                     request_id INTEGER NOT NULL,
+                     attempt_token TEXT NOT NULL,
+                     ledger_demand_state TEXT NOT NULL,
+                     next_demand_state TEXT,
+                     worker_ownership_id TEXT,
+                     created_at TEXT NOT NULL
+                 )",
+                "CREATE INDEX idx_scaleset_attempt_releases_request
+                     ON scaleset_attempt_releases (scale_set_id, request_id)",
+                25,
+            ),
+            (
+                27,
+                "CREATE TABLE scaleset_attempt_acquires (
+                     holder TEXT NOT NULL,
+                     scale_set_id INTEGER NOT NULL,
+                     request_id INTEGER NOT NULL,
+                     previous_attempt_token TEXT,
+                     target_attempt_token TEXT NOT NULL,
+                     created_at TEXT NOT NULL
+                 )",
+                "CREATE INDEX idx_scaleset_attempt_acquires_request
+                     ON scaleset_attempt_acquires (scale_set_id, request_id)",
+                26,
+            ),
+            (
+                28,
+                "CREATE TABLE scaleset_attempt_release_batches (
+                     holder TEXT NOT NULL,
+                     batch_id TEXT NOT NULL,
+                     resolve_uncertain INTEGER NOT NULL,
+                     created_at TEXT NOT NULL
+                 )",
+                "CREATE INDEX idx_scaleset_attempt_release_batches_batch
+                     ON scaleset_attempt_release_batches (batch_id)",
+                27,
+            ),
+        ] {
+            let temp = TempDb::new(&format!("malformed-v{version}-stage-table"));
+            let mut conn = Connection::open(&temp.path).expect("open migration database");
+            conn.busy_timeout(Duration::from_secs(5)).unwrap();
+            ensure_meta_tables(&conn).unwrap();
+            for migration in MIGRATIONS.iter().take(expected_version as usize) {
+                conn.execute_batch(migration.sql).unwrap();
+                conn.execute(
+                    "UPDATE schema_version SET version = ?1, updated_at = ?2 WHERE singleton = 0",
+                    rusqlite::params![migration.version, "1970-01-01T00:00:00Z"],
+                )
+                .unwrap();
+            }
+            conn.execute_batch(&format!("{table_sql}; {index_sql};"))
+                .unwrap();
+
+            acquire_lock(
+                &conn,
+                &format!("malformed-v{version}-test"),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            assert!(
+                apply_pending(&mut conn, &format!("malformed-v{version}-test"), None).is_err(),
+                "malformed v{version} stage table must fail closed"
+            );
+            release_lock(&conn, &format!("malformed-v{version}-test")).unwrap();
+            assert_eq!(current_version(&conn).unwrap(), expected_version);
+            assert!(
+                match version {
+                    26 => !v26_schema_complete(&conn).unwrap(),
+                    27 => !v27_schema_complete(&conn).unwrap(),
+                    28 => !v28_schema_complete(&conn).unwrap(),
+                    _ => unreachable!(),
+                },
+                "malformed v{version} stage schema must remain incomplete"
+            );
+        }
     }
 }

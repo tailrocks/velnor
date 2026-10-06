@@ -22,6 +22,16 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTROL_PLANE_BLOCKING_THREADS: usize = 16;
 
 fn main() -> Result<()> {
+    if matches!(
+        std::env::args().nth(1).as_deref(),
+        Some("--version") | Some("-V")
+    ) {
+        println!(
+            "{}",
+            version_line(&velnor_runner::embedded_build_identity())
+        );
+        return Ok(());
+    }
     let runtime = build_runtime()?;
     let result = runtime.block_on(velnor_runner::service::execute());
     // Tokio waits forever for a started `spawn_blocking` task when Runtime is
@@ -29,6 +39,16 @@ fn main() -> Result<()> {
     // systemd daemon (and package upgrade) for hours.
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
     result
+}
+
+fn version_line(identity: &velnor_runner::EmbeddedIdentity) -> String {
+    if identity.source_sha == "development" {
+        return format!("{} development", identity.crate_version);
+    }
+    format!(
+        "{} {} {} {}",
+        identity.crate_version, identity.kind, identity.tag, identity.source_sha
+    )
 }
 
 fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
@@ -61,5 +81,30 @@ mod tests {
         let started = std::time::Instant::now();
         runtime.shutdown_timeout(Duration::from_millis(20));
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn version_line_renders_development_identity() {
+        let identity = velnor_runner::EmbeddedIdentity {
+            source_sha: "development".into(),
+            tag: String::new(),
+            kind: "development".into(),
+            crate_version: "0.1.0".into(),
+        };
+        assert_eq!(version_line(&identity), "0.1.0 development");
+    }
+
+    #[test]
+    fn version_line_renders_release_identity() {
+        let identity = velnor_runner::EmbeddedIdentity {
+            source_sha: "3f2ceb67abcdef0123456789abcdef0123456789".into(),
+            tag: "v0.1.274".into(),
+            kind: "release".into(),
+            crate_version: "0.1.274".into(),
+        };
+        assert_eq!(
+            version_line(&identity),
+            "0.1.274 release v0.1.274 3f2ceb67abcdef0123456789abcdef0123456789"
+        );
     }
 }

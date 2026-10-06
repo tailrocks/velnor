@@ -177,6 +177,7 @@ impl WorkerLane for RecordedLane {
     fn note_assigned(
         &mut self,
         _assigned: &velnor_model::ScaleSetJobAssigned,
+        _attempt_token: &str,
     ) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -184,6 +185,7 @@ impl WorkerLane for RecordedLane {
     fn note_started(
         &mut self,
         _started: &velnor_model::ScaleSetJobStarted,
+        _attempt_token: &str,
     ) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -191,6 +193,7 @@ impl WorkerLane for RecordedLane {
     fn note_terminal(
         &mut self,
         completed: &velnor_model::ScaleSetJobCompleted,
+        _attempt_token: &str,
     ) -> Result<(), Self::Error> {
         self.state
             .terminals

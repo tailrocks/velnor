@@ -10,6 +10,7 @@ use crate::action::{
 };
 use crate::args::{CapabilitiesArgs, CapabilitiesCommand};
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
+use velnor_model::ContextValue;
 
 // Plan 009 introduced v6 (action subpaths + reusable-workflow schema). Plan 010
 // adds source-SHA + crate-version identity to the exported manifest so a consumer
@@ -389,11 +390,11 @@ const BUILDX_INPUTS: &[InputRule] = &[
     InputRule::Any("name"),
     InputRule::Literal("driver", &["docker-container"]),
     InputRule::Literal("install", &["true", "false"]),
-    // Builders and their state volumes are job-scoped and mandatory teardown
-    // removes them. Until a stable trust/repository owner exists, admitting
-    // retention controls would claim persistence that Velnor cannot provide.
-    InputRule::Literal("cleanup", &["true"]),
-    InputRule::Literal("keep-state", &["false"]),
+    // Managed builders and their state volumes outlive an action invocation.
+    // Velnor's native post adapter releases the job claim; the guest action
+    // must not remove shared objects, so only these retention values are valid.
+    InputRule::Literal("cleanup", &["false"]),
+    InputRule::Literal("keep-state", &["true"]),
     InputRule::Literal(
         "buildkitd-config-inline",
         &["[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]"],
@@ -418,7 +419,7 @@ const BUILD_PUSH_INPUTS: &[InputRule] = &[
     InputRule::Literal("push", &["true", "false"]),
     InputRule::Literal("load", &["true", "false"]),
     InputRule::Literal("provenance", &["true", "false"]),
-    InputRule::Literal("sbom", &["true", "false"]),
+    InputRule::Any("sbom"),
 ];
 const TAILROCKS_VELNOR_INPUTS: &[InputRule] = &[
     // .github/actions/report-velnor-ci-outcomes inputs
@@ -1275,14 +1276,14 @@ pub fn violations(job: &AgentJobRequestMessage) -> Vec<CapabilityViolation> {
 
 pub fn violations_with_context(
     job: &AgentJobRequestMessage,
-    context_data: &[(String, serde_json::Value)],
+    context_data: &[(String, ContextValue)],
 ) -> Vec<CapabilityViolation> {
     violations_with_context_limited(job, context_data, None)
 }
 
 fn violations_with_context_limited(
     job: &AgentJobRequestMessage,
-    context_data: &[(String, serde_json::Value)],
+    context_data: &[(String, ContextValue)],
     limit: Option<usize>,
 ) -> Vec<CapabilityViolation> {
     if job.steps.len() > MAX_MANIFEST_STEPS {
@@ -1296,12 +1297,11 @@ fn violations_with_context_limited(
         )];
     }
     let mut violations = Vec::new();
-    for (index, step) in job
-        .steps
-        .iter()
-        .enumerate()
-        .filter(|(_, step)| step.enabled)
-    {
+    for (index, step) in job.steps.iter().enumerate().filter_map(|(index, step)| {
+        step.as_ref()
+            .filter(|step| step.enabled)
+            .map(|step| (index, step))
+    }) {
         if step.reference_type() != Some(ActionReferenceType::Repository) {
             continue;
         }
@@ -1441,25 +1441,34 @@ fn validate_attestation_permissions(
     job: &AgentJobRequestMessage,
     violations: &mut Vec<CapabilityViolation>,
 ) {
-    let uses_attestation = job.steps.iter().filter(|step| step.enabled).any(|step| {
-        step.reference
-            .as_ref()
-            .and_then(|reference| reference.name.as_deref())
-            .is_some_and(|repository| {
-                repository.eq_ignore_ascii_case("actions/attest-build-provenance")
-            })
-    });
+    let uses_attestation = job
+        .steps
+        .iter()
+        .flatten()
+        .filter(|step| step.enabled)
+        .any(|step| {
+            step.reference
+                .as_ref()
+                .and_then(|reference| reference.name.as_deref())
+                .is_some_and(|repository| {
+                    repository.eq_ignore_ascii_case("actions/attest-build-provenance")
+                })
+        });
     if !uses_attestation {
         return;
     }
-    let has_id_token_endpoint = job.system_connection().is_some_and(|endpoint| {
-        endpoint.data.iter().any(|(name, value)| {
-            matches!(
-                name.to_ascii_lowercase().replace(['-', '_'], "").as_str(),
-                "generateidtokenurl" | "actionsidtokenrequesturl"
-            ) && !value.trim().is_empty()
-        })
-    });
+    let has_id_token_endpoint = matches!(
+        job.system_connection_single_or_default(),
+        Ok(Some(endpoint))
+            if endpoint.data.iter().any(|(name, value)| {
+                matches!(
+                    name.to_ascii_lowercase().replace(['-', '_'], "").as_str(),
+                    "generateidtokenurl" | "actionsidtokenrequesturl"
+                ) && value
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+            })
+    );
     if !has_id_token_endpoint {
         violations.push(violation(
             "job preflight",
@@ -1528,11 +1537,16 @@ pub fn declares_mbx_opt_out(job: &AgentJobRequestMessage) -> bool {
             .job_container
             .as_ref()
             .is_some_and(container_sets_mbx_disable)
-        || job.steps.iter().filter(|step| step.enabled).any(|step| {
-            step.environment.as_ref().is_some_and(|environment| {
-                env_sets_mbx_disable(&crate::runtime_env::environment_token_pairs(environment))
+        || job
+            .steps
+            .iter()
+            .flatten()
+            .filter(|step| step.enabled)
+            .any(|step| {
+                step.environment.as_ref().is_some_and(|environment| {
+                    env_sets_mbx_disable(&crate::runtime_env::environment_token_pairs(environment))
+                })
             })
-        })
 }
 
 fn container_sets_mbx_disable(container: &serde_json::Value) -> bool {
@@ -1591,7 +1605,7 @@ fn compiler_cache_environment_names(job: &AgentJobRequestMessage) -> Vec<String>
         collect_environment_names(container, &mut names);
     }
     names.extend(job.variables.keys().cloned());
-    for step in job.steps.iter().filter(|step| step.enabled) {
+    for step in job.steps.iter().flatten().filter(|step| step.enabled) {
         if let Some(environment) = &step.environment {
             collect_environment_names(environment, &mut names);
         }
@@ -1809,7 +1823,7 @@ fn violation(
 
 pub fn validate_job_with_context(
     job: &AgentJobRequestMessage,
-    context_data: &[(String, serde_json::Value)],
+    context_data: &[(String, ContextValue)],
 ) -> Result<()> {
     if let Some(violation) = violations_with_context_limited(job, context_data, Some(1))
         .into_iter()
@@ -2037,6 +2051,28 @@ mod tests {
         assert_eq!(MANIFEST_VERSION, 15);
         assert_eq!(MANIFEST.version, 15);
         assert_manifest_integrity().expect("compiled manifest must pass integrity");
+    }
+
+    #[test]
+    fn build_push_sbom_accepts_generator_attributes() {
+        let mut violations = Vec::new();
+        let inputs = [(
+            "sbom".to_string(),
+            "generator=docker/scout-sbom-indexer:latest".to_string(),
+        )]
+        .into_iter()
+        .collect();
+
+        validate_inputs(
+            &mut violations,
+            "build",
+            "docker/build-push-action",
+            "v7.4.0",
+            BUILD_PUSH_INPUTS,
+            &inputs,
+        );
+
+        assert!(violations.is_empty(), "{violations:?}");
     }
 
     #[test]
@@ -3238,6 +3274,18 @@ mod tests {
     }
 
     #[test]
+    fn null_step_slots_do_not_renumber_capability_violations() {
+        let mut target = job("owner/unknown", Some("abc"), serde_json::json!({}));
+        let step = target.steps[0].as_mut().unwrap();
+        step.display_name = None;
+        step.name = None;
+        target.steps.insert(0, None);
+
+        let errors = violations(&target);
+        assert_eq!(errors[0].step, "step-1");
+    }
+
+    #[test]
     fn validate_job_accepts_exact_attestation_surface() {
         let errors = violations(&job(
             "actions/attest-build-provenance",
@@ -3292,6 +3340,23 @@ mod tests {
             serde_json::json!({"subject-path": "dist/*.tar.gz"}),
         );
         target.resources.endpoints.clear();
+        let errors = violations(&target);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field, "permissions.id-token");
+        assert_eq!(errors[0].received, "absent");
+    }
+
+    #[test]
+    fn validate_job_treats_null_attestation_endpoint_data_as_absent() {
+        let mut target = job(
+            "actions/attest-build-provenance",
+            Some("0f67c3f4856b2e3261c31976d6725780e5e4c373"),
+            serde_json::json!({"subject-path": "dist/*.tar.gz"}),
+        );
+        target.resources.endpoints[0]
+            .data
+            .insert("GenerateIdTokenUrl".to_owned(), None);
+
         let errors = violations(&target);
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].field, "permissions.id-token");
@@ -3574,32 +3639,38 @@ mod tests {
     }
 
     #[test]
-    fn validate_job_rejects_unrepresentable_buildx_retention_controls() {
+    fn validate_job_accepts_only_persistent_buildx_retention_controls() {
         let cleanup_errors = violations(&job(
             "docker/setup-buildx-action",
             Some("bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"),
-            serde_json::json!({"cleanup": false}),
+            serde_json::json!({"cleanup": true}),
         ));
         assert_eq!(cleanup_errors[0].field, "with.cleanup");
-        assert_eq!(cleanup_errors[0].accepted, ["true"]);
+        assert_eq!(cleanup_errors[0].accepted, ["false"]);
 
         let keep_state_errors = violations(&job(
             "docker/setup-buildx-action",
             Some("bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"),
-            serde_json::json!({"keep-state": true}),
+            serde_json::json!({"keep-state": false}),
         ));
         assert_eq!(keep_state_errors[0].field, "with.keep-state");
-        assert_eq!(keep_state_errors[0].accepted, ["false"]);
+        assert_eq!(keep_state_errors[0].accepted, ["true"]);
 
-        validate_job_with_context(
-            &job(
-                "docker/setup-buildx-action",
-                Some("bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"),
-                serde_json::json!({"cleanup": true, "keep-state": false}),
-            ),
-            &[],
-        )
-        .unwrap();
+        for inputs in [
+            serde_json::json!({"cleanup": false}),
+            serde_json::json!({"keep-state": true}),
+            serde_json::json!({"cleanup": false, "keep-state": true}),
+        ] {
+            validate_job_with_context(
+                &job(
+                    "docker/setup-buildx-action",
+                    Some("bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"),
+                    inputs,
+                ),
+                &[],
+            )
+            .unwrap();
+        }
     }
 
     #[test]
@@ -3644,7 +3715,7 @@ mod tests {
         );
         let context = vec![(
             "matrix".to_string(),
-            serde_json::json!({"package": "arbitrum"}),
+            ContextValue::from_json(serde_json::json!({"package": "arbitrum"})).unwrap(),
         )];
         validate_job_with_context(&job, &context).unwrap();
     }
@@ -3695,7 +3766,8 @@ mod tests {
         assert!(declares_mbx_opt_out(&target));
 
         let mut target = job("actions/checkout", Some("v7"), serde_json::json!({}));
-        target.steps[0].environment = Some(serde_json::json!({ "MBX_DISABLE": "true" }));
+        target.steps[0].as_mut().unwrap().environment =
+            Some(serde_json::json!({ "MBX_DISABLE": "true" }));
         assert!(declares_mbx_opt_out(&target));
 
         let mut target = job("actions/checkout", Some("v7"), serde_json::json!({}));
@@ -3718,8 +3790,9 @@ mod tests {
         }
         // A disabled step's environment never reaches the container.
         let mut target = job("actions/checkout", Some("v7"), serde_json::json!({}));
-        target.steps[0].enabled = false;
-        target.steps[0].environment = Some(serde_json::json!({ "MBX_DISABLE": "1" }));
+        target.steps[0].as_mut().unwrap().enabled = false;
+        target.steps[0].as_mut().unwrap().environment =
+            Some(serde_json::json!({ "MBX_DISABLE": "1" }));
         assert!(!declares_mbx_opt_out(&target));
         // Container spec keys are not environment.
         let mut target = job("actions/checkout", Some("v7"), serde_json::json!({}));

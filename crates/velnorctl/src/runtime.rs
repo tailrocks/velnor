@@ -68,6 +68,14 @@ pub struct DaemonArgs {
     pub dump_job_message: Option<PathBuf>,
     #[arg(long, default_value = "velnor/job-ubuntu:26.04")]
     pub docker_image: String,
+    /// Host execution topology. Defaults to native-only. Must match
+    /// `velnor_runner::service`.
+    #[arg(
+        long = "host-mode",
+        env = "VELNOR_HOST_MODE",
+        default_value_t = velnor_runner::args::HostMode::NativeOnly
+    )]
+    pub mode: velnor_runner::args::HostMode,
     /// Host-wide maximum concurrent jobs. Native and Scale Set lanes share
     /// one permit ledger capped at this N. Must match `velnor_runner::service`.
     #[arg(long, env = "VELNOR_MAX_JOBS")]
@@ -372,6 +380,7 @@ impl From<DaemonArgs> for velnor_runner::args::DaemonArgs {
             dry_run_jobs: args.dry_run_jobs,
             dump_job_message: args.dump_job_message,
             docker_image: args.docker_image,
+            mode: args.mode,
             max_jobs: args.max_jobs,
             permit_ledger: args.permit_ledger,
             scale_set_config: args.scale_set_config,

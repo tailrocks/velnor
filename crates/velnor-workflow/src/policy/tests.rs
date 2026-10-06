@@ -903,7 +903,7 @@ fn owner_entrypoint_pin_ignores_variable_references() {
         cache_backend: "github",
         trusted_gate: None,
         default_branch: "main",
-        declared_ruleset_contexts: "ci-required,Policy",
+        declared_ruleset_contexts: "ci-required,DCO,Policy",
     });
     assert!(job.contains("--rev=\"$pin\""), "{job}");
     assert!(
@@ -943,7 +943,7 @@ fn owner_policy_resolves_squash_merge_push_to_pr_head() {
         cache_backend: "github",
         trusted_gate: None,
         default_branch: "main",
-        declared_ruleset_contexts: "ci-required,Policy",
+        declared_ruleset_contexts: "ci-required,DCO,Policy",
     });
     assert!(
         job.contains("EVENT_NAME: ${{ github.event_name }}")
@@ -1013,7 +1013,7 @@ fn owner_policy_fails_closed_for_direct_push_without_merged_pr() {
         cache_backend: "github",
         trusted_gate: None,
         default_branch: "main",
-        declared_ruleset_contexts: "ci-required,Policy",
+        declared_ruleset_contexts: "ci-required,DCO,Policy",
     });
     assert!(
         job.contains(
@@ -1045,7 +1045,7 @@ fn owner_policy_rejects_merge_sha_wrong_head_repository_and_revision() {
         cache_backend: "github",
         trusted_gate: None,
         default_branch: "main",
-        declared_ruleset_contexts: "ci-required,Policy",
+        declared_ruleset_contexts: "ci-required,DCO,Policy",
     });
     assert!(
         job.contains("actions/workflows/ci-pr.yml/runs?head_sha=$CANDIDATE_SHA"),
@@ -1276,7 +1276,7 @@ fn velnor_entrypoint_is_gated_and_never_builds_the_pin() {
         cache_backend: "local",
         trusted_gate: Some(&crate::control_plane_trusted_gate("main")),
         default_branch: "main",
-        declared_ruleset_contexts: "ci-required,Policy",
+        declared_ruleset_contexts: "ci-required,DCO,Policy",
     });
     assert!(!job.contains("--pin-build"), "{job}");
     assert!(job.contains("    if: ${{ github.event_name == 'pull_request_target' ||"));
@@ -1746,7 +1746,7 @@ fn required_artifact_lanes_input_contract() {
             "github",
             "inputs.lanes != 'velnor'",
             "inputs.lanes == 'velnor'",
-            "${{ (github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor') && fromJSON('[\"self-hosted\",\"velnor\"]') || \"ubuntu-24.04\" }}",
+            "${{ (github.ref=='refs/heads/main'&&github.event_name=='workflow_dispatch'&&inputs.lanes=='velnor') && fromJSON('[\"self-hosted\",\"velnor\"]') || \"ubuntu-24.04\" }}",
         ),
         (
             "velnor",
@@ -3264,11 +3264,10 @@ fn policy_preflight_rejects_static_replacements_of_ci_pr_and_runtime_products() 
     let _ = fs::remove_dir_all(root);
 }
 
-/// The dual-lane Velnor gate admits a lane-selecting dispatch on any ref —
-/// dispatch authorship is write-authorized — and keeps admitting the older
-/// ref-gated dispatch shapes for trees rendered before lane admission.
+/// The dual-lane Velnor gate only admits dispatch from the configured
+/// default branch; any-ref dispatch shapes are rejected.
 #[test]
-fn velnor_pr_gate_admits_dispatch_on_any_ref() {
+fn velnor_pr_gate_requires_default_branch_dispatch() {
     let automatic = "github.event_name == 'pull_request' && \
         github.event.pull_request.head.repo.full_name == github.repository || \
         (github.ref == 'refs/heads/main' && (github.event_name == 'push' || \
@@ -3279,28 +3278,36 @@ fn velnor_pr_gate_admits_dispatch_on_any_ref() {
         "(github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && \
             (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || \
             github.event.inputs.runner == '')))",
+    ] {
+        let gate = format!("{}{{{{ ({automatic} || {dispatch}) }}}}", "$");
+        assert!(
+            is_generated_velnor_pr_gate(&gate, "main"),
+            "default-branch dispatch shape admitted: {dispatch}"
+        );
+    }
+    for dispatch in [
         "(github.event_name == 'workflow_dispatch' && \
             (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'))",
         "(github.event_name == 'workflow_dispatch' && \
             (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || \
             github.event.inputs.runner == ''))",
     ] {
-        let gate = format!("${{{{ ({automatic} || {dispatch}) }}}}");
+        let gate = format!("{}{{{{ ({automatic} || {dispatch}) }}}}", "$");
         assert!(
-            is_generated_velnor_pr_gate(&gate, "main"),
-            "dispatch shape admitted: {dispatch}"
+            !is_generated_velnor_pr_gate(&gate, "main"),
+            "dispatch outside the default branch must not be admitted: {dispatch}"
         );
     }
     let github_only = format!(
-        "${{{{ ({automatic} || (github.event_name == 'workflow_dispatch' && \
+        "{}{{{{ ({automatic} || (github.event_name == 'workflow_dispatch' && \
             (github.event.inputs.runner == 'github'))) }}}}",
+        "$"
     );
     assert!(
         !is_generated_velnor_pr_gate(&github_only, "main"),
         "a dispatch selecting only the hosted lane is not a Velnor gate",
     );
 }
-
 #[test]
 fn a_second_pull_request_target_workflow_is_refused() {
     let root = velnor_tree("semantic-prt", &gated_trusted_job());
@@ -4676,7 +4683,7 @@ fn rendered_entrypoints_pass_the_legacy_space_marker_scan() {
             cache_backend: "github",
             trusted_gate: None,
             default_branch: "main",
-            declared_ruleset_contexts: "ci-required,Policy",
+            declared_ruleset_contexts: "ci-required,DCO,Policy",
         });
         let mut values = Vec::new();
         for line in job.lines() {

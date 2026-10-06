@@ -16,6 +16,10 @@
 //! falls back to the direct child when validation fails. Every wait is
 //! bounded; there is no blocking `wait()` on any path.
 //!
+//! Callers currently expose no cooperative cancellation token. The wall
+//! deadline remains the cancellation boundary here; broader cancellation is
+//! deferred until runtime APIs can carry it end to end.
+//!
 //! Errors are plain messages: schema 1 and schema 2 carry distinct private
 //! `GeneratorError` types, so each caller wraps the message in its own.
 
@@ -59,6 +63,11 @@ const DRAIN_GRACE: Duration = Duration::from_secs(10);
 const DRAIN_IDLE_GRACE: Duration = Duration::from_secs(1);
 /// Grace after SIGTERM before SIGKILL, and the bound on each reap poll.
 const SIGNAL_GRACE: Duration = Duration::from_secs(10);
+
+#[cfg(unix)]
+type ProcessGroup = Option<rustix::process::Pid>;
+#[cfg(not(unix))]
+type ProcessGroup = ();
 
 /// Parse one limit override in seconds; missing, unparsable, or zero values
 /// fall back to the default.
@@ -120,6 +129,11 @@ fn spawn_grouped_command(root: &Path, command: &str) -> std::io::Result<Child> {
     let mut spawned = Command::new("bash");
     spawned
         .args(["-euo", "pipefail", "-c", command])
+        .envs([
+            ("MISE_AUTO_INSTALL", "false"),
+            ("MISE_EXEC_AUTO_INSTALL", "false"),
+            ("MISE_NOT_FOUND_AUTO_INSTALL", "false"),
+        ])
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -135,20 +149,25 @@ fn spawn_grouped_command(root: &Path, command: &str) -> std::io::Result<Child> {
 /// Poll for the child's exit until `grace` elapses; `None` on timeout.
 /// Reaps through `wait()`: `try_wait` only peeks (waitid/WNOWAIT) and a
 /// peeked-but-unreaped child would linger as a zombie.
-fn poll_exit(child: &mut Child, grace: Duration) -> Option<ExitStatus> {
+fn poll_exit(child: &mut Child, grace: Duration) -> Result<Option<ExitStatus>, String> {
     let deadline = Instant::now() + grace;
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => return child.wait().ok(),
+            Ok(Some(_)) => {
+                return child
+                    .wait()
+                    .map(Some)
+                    .map_err(|error| format!("reap failed: {error}"));
+            }
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    return None;
+                    return Ok(None);
                 }
                 thread::sleep(
                     EXIT_POLL_QUANTUM.min(deadline.saturating_duration_since(Instant::now())),
                 );
             }
-            Err(_) => return None,
+            Err(error) => return Err(format!("wait poll failed: {error}")),
         }
     }
 }
@@ -202,36 +221,54 @@ fn signal_tree(child: &mut Child, _signal: ()) {
 /// Terminate the whole tree: SIGTERM, bounded grace, SIGKILL, bounded reap.
 /// Always returns a reap description; never blocks past two graces.
 #[cfg(unix)]
-fn terminate_tree(child: &mut Child) -> String {
+fn terminate_tree(child: &mut Child, group: Option<rustix::process::Pid>) -> String {
     use rustix::process::Signal;
-    // Preserve the group before signaling: once the leader exits and is
-    // reaped, its PID no longer resolves via getpgid, but TERM-ignoring
-    // descendants still live in that group and need SIGKILL.
-    let group = process_group_of(child);
     signal_group(child, group, Signal::TERM);
-    if let Some(status) = poll_exit(child, SIGNAL_GRACE) {
-        // Leader exited, but descendants that trapped SIGTERM survive:
-        // SIGKILL the preserved group so no survivor outlives the wall
-        // failure. ESRCH (group already empty) is a harmless no-op.
-        if let Some(group) = group {
-            let _ = rustix::process::kill_process_group(group, Signal::KILL);
-        }
-        return format!("reaped with {status}");
-    }
-    signal_group(child, group, Signal::KILL);
     match poll_exit(child, SIGNAL_GRACE) {
-        Some(status) => format!("reaped with {status}"),
-        None => String::from("still alive after SIGKILL grace; abandoned"),
+        Ok(Some(status)) => {
+            // Leader exited, but descendants that trapped SIGTERM survive:
+            // SIGKILL the preserved group so no survivor outlives the wall
+            // failure. ESRCH (group already empty) is a harmless no-op.
+            if let Some(group) = group {
+                let _ = rustix::process::kill_process_group(group, Signal::KILL);
+            }
+            format!("reaped with {status}")
+        }
+        Ok(None) => {
+            signal_group(child, group, Signal::KILL);
+            match poll_exit(child, SIGNAL_GRACE) {
+                Ok(Some(status)) => format!("reaped with {status}"),
+                Ok(None) => String::from("still alive after SIGKILL grace; abandoned"),
+                Err(error) => format!(
+                    "cleanup wait failed after SIGKILL: {error}; still alive after SIGKILL grace"
+                ),
+            }
+        }
+        Err(error) => {
+            // A wait error never bypasses tree cleanup: send the hard kill
+            // and make one more bounded reap attempt before returning.
+            signal_group(child, group, Signal::KILL);
+            match poll_exit(child, SIGNAL_GRACE) {
+                Ok(Some(status)) => format!("wait error: {error}; reaped with {status}"),
+                Ok(None) => format!(
+                    "wait error: {error}; still alive after SIGKILL grace; abandoned"
+                ),
+                Err(retry_error) => format!(
+                    "wait error: {error}; cleanup wait failed after SIGKILL: {retry_error}; abandoned"
+                ),
+            }
+        }
     }
 }
 
 /// Terminate without process groups: kill, bounded reap.
 #[cfg(not(unix))]
-fn terminate_tree(child: &mut Child) -> String {
+fn terminate_tree(child: &mut Child, _group: ()) -> String {
     signal_tree(child, ());
     match poll_exit(child, SIGNAL_GRACE) {
-        Some(status) => format!("reaped with {status}"),
-        None => String::from("still alive after kill grace; abandoned"),
+        Ok(Some(status)) => format!("reaped with {status}"),
+        Ok(None) => String::from("still alive after kill grace; abandoned"),
+        Err(error) => format!("cleanup wait failed after kill: {error}; abandoned"),
     }
 }
 
@@ -251,14 +288,34 @@ fn check_unit_command_status(unit_id: &str, status: ExitStatus) -> Result<(), St
 /// has already exited when this runs: its bytes are all in the pipe buffer
 /// (or already forwarded), so an idle wait means squatter grandchildren,
 /// not a slow tail — while every forwarded chunk resets the idle window.
-fn drain_pumps(receiver: &mpsc::Receiver<PumpEvent>, eofs: &mut usize, expected_eof: usize) {
+enum DrainResult {
+    Complete,
+    GraceExpired,
+    WallExpired,
+}
+
+enum FinishError {
+    WallExpired { reaped: String },
+    Reap { error: String, cleanup: String },
+}
+
+fn drain_pumps(
+    receiver: &mpsc::Receiver<PumpEvent>,
+    eofs: &mut usize,
+    expected_eof: usize,
+    wall_deadline: Instant,
+) -> DrainResult {
     let cap = Instant::now() + DRAIN_GRACE;
     let mut idle_deadline = Instant::now() + DRAIN_IDLE_GRACE;
     while *eofs < expected_eof && Instant::now() < cap {
         let now = Instant::now();
+        if now >= wall_deadline {
+            return DrainResult::WallExpired;
+        }
         let quantum = idle_deadline
             .saturating_duration_since(now)
-            .min(cap.saturating_duration_since(now));
+            .min(cap.saturating_duration_since(now))
+            .min(wall_deadline.saturating_duration_since(now));
         match receiver.recv_timeout(quantum) {
             Ok(PumpEvent::Output) => {
                 idle_deadline = Instant::now() + DRAIN_IDLE_GRACE;
@@ -267,9 +324,89 @@ fn drain_pumps(receiver: &mpsc::Receiver<PumpEvent>, eofs: &mut usize, expected_
                 *eofs += 1;
             }
             // Either the idle window or the total cap elapsed: both stop.
-            Err(_) => break,
+            Err(_) => {
+                if Instant::now() >= wall_deadline {
+                    return DrainResult::WallExpired;
+                }
+                return DrainResult::GraceExpired;
+            }
         }
     }
+    if *eofs >= expected_eof {
+        DrainResult::Complete
+    } else if Instant::now() >= wall_deadline {
+        DrainResult::WallExpired
+    } else {
+        DrainResult::GraceExpired
+    }
+}
+
+fn finish_exited_command(
+    child: &mut Child,
+    group: ProcessGroup,
+    receiver: &mpsc::Receiver<PumpEvent>,
+    eofs: &mut usize,
+    expected_eof: usize,
+    wall_deadline: Instant,
+) -> Result<ExitStatus, FinishError> {
+    if matches!(
+        drain_pumps(receiver, eofs, expected_eof, wall_deadline),
+        DrainResult::WallExpired
+    ) {
+        return Err(FinishError::WallExpired {
+            reaped: terminate_tree(child, group),
+        });
+    }
+    match child.wait() {
+        Ok(status) => Ok(status),
+        Err(error) => Err(FinishError::Reap {
+            error: error.to_string(),
+            cleanup: terminate_tree(child, group),
+        }),
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "supervisor timeout state stays explicit at the cleanup boundary"
+)]
+fn poll_after_output_timeout(
+    child: &mut Child,
+    group: ProcessGroup,
+    unit_id: &str,
+    command: &str,
+    limits: &RunLimits,
+    started: Instant,
+    pid: u32,
+    stall_deadline: &mut Instant,
+    wall_deadline: Instant,
+) -> Result<bool, String> {
+    match child.try_wait() {
+        Ok(Some(_)) => return Ok(true),
+        Ok(None) => {}
+        Err(error) => {
+            let cleanup = terminate_tree(child, group);
+            return Err(format!(
+                "run CI command {unit_id}: wait poll failed: {error}; cleanup: {cleanup}"
+            ));
+        }
+    }
+    let now = Instant::now();
+    if now >= wall_deadline {
+        let reaped = terminate_tree(child, group);
+        return Err(wall_message(
+            unit_id, command, limits, started, pid, &reaped,
+        ));
+    }
+    if now >= *stall_deadline {
+        eprintln!(
+            "velnor: CI command for unit {unit_id} produced no stdout/stderr output for {}s (pid {pid}); still running under a {}s wall deadline: {command}",
+            limits.stall_warn.as_secs(),
+            limits.wall.as_secs(),
+        );
+        *stall_deadline = now + limits.stall_warn;
+    }
+    Ok(false)
 }
 
 /// Run one project command under `limits`.
@@ -289,6 +426,10 @@ pub(crate) fn run_command(
     let wall_deadline = started + limits.wall;
     let mut child = spawn_grouped_command(root, command)
         .map_err(|error| format!("run CI command {unit_id}: {error}"))?;
+    #[cfg(unix)]
+    let group: ProcessGroup = process_group_of(&mut child);
+    #[cfg(not(unix))]
+    let group: ProcessGroup = ();
     let (sender, receiver) = mpsc::channel();
     let mut expected_eof = 0;
     if let Some(stdout) = child.stdout.take() {
@@ -313,7 +454,7 @@ pub(crate) fn run_command(
             Ok(PumpEvent::Output) => {
                 stall_deadline = Instant::now() + limits.stall_warn;
                 if Instant::now() >= wall_deadline {
-                    let reaped = terminate_tree(&mut child);
+                    let reaped = terminate_tree(&mut child, group);
                     return Err(wall_message(
                         unit_id, command, limits, started, pid, &reaped,
                     ));
@@ -326,23 +467,18 @@ pub(crate) fn run_command(
                 }
             }
             Err(_) => {
-                if child.try_wait().ok().flatten().is_some() {
+                if poll_after_output_timeout(
+                    &mut child,
+                    group,
+                    unit_id,
+                    command,
+                    limits,
+                    started,
+                    pid,
+                    &mut stall_deadline,
+                    wall_deadline,
+                )? {
                     break;
-                }
-                let now = Instant::now();
-                if now >= wall_deadline {
-                    let reaped = terminate_tree(&mut child);
-                    return Err(wall_message(
-                        unit_id, command, limits, started, pid, &reaped,
-                    ));
-                }
-                if now >= stall_deadline {
-                    eprintln!(
-                        "velnor: CI command for unit {unit_id} produced no stdout/stderr output for {}s (pid {pid}); still running under a {}s wall deadline: {command}",
-                        limits.stall_warn.as_secs(),
-                        limits.wall.as_secs(),
-                    );
-                    stall_deadline = now + limits.stall_warn;
                 }
             }
         }
@@ -350,17 +486,28 @@ pub(crate) fn run_command(
     loop {
         match child.try_wait() {
             Ok(Some(_)) => {
-                // Reap now: `try_wait` only peeks, and the exit status from
-                // the reaping `wait()` is the one that counts.
-                let status = child
-                    .wait()
-                    .map_err(|error| format!("run CI command {unit_id}: reap failed: {error}"))?;
-                drain_pumps(&receiver, &mut eofs, expected_eof);
-                return check_unit_command_status(unit_id, status);
+                // Keep the leader unreaped while draining so its preserved
+                // group can still clean up a pipe-holding grandchild.
+                return match finish_exited_command(
+                    &mut child,
+                    group,
+                    &receiver,
+                    &mut eofs,
+                    expected_eof,
+                    wall_deadline,
+                ) {
+                    Ok(status) => check_unit_command_status(unit_id, status),
+                    Err(FinishError::WallExpired { reaped }) => Err(wall_message(
+                        unit_id, command, limits, started, pid, &reaped,
+                    )),
+                    Err(FinishError::Reap { error, cleanup }) => Err(format!(
+                        "run CI command {unit_id}: reap failed: {error}; cleanup: {cleanup}"
+                    )),
+                };
             }
             Ok(None) => {
                 if Instant::now() >= wall_deadline {
-                    let reaped = terminate_tree(&mut child);
+                    let reaped = terminate_tree(&mut child, group);
                     return Err(wall_message(
                         unit_id, command, limits, started, pid, &reaped,
                     ));
@@ -370,7 +517,10 @@ pub(crate) fn run_command(
                 );
             }
             Err(error) => {
-                return Err(format!("run CI command {unit_id}: reap failed: {error}"));
+                let cleanup = terminate_tree(&mut child, group);
+                return Err(format!(
+                    "run CI command {unit_id}: reap failed: {error}; cleanup: {cleanup}"
+                ));
             }
         }
     }
@@ -414,13 +564,13 @@ mod tests {
 
     #[test]
     fn limit_parses_override_and_falls_back() {
-        assert_eq!(parse_limit_secs(None, 600), Duration::from_secs(600));
+        assert_eq!(parse_limit_secs(None, 600), Duration::from_mins(10));
         assert_eq!(parse_limit_secs(Some("30"), 600), Duration::from_secs(30));
         assert_eq!(parse_limit_secs(Some(" 120 "), 600), Duration::from_mins(2));
         for invalid in ["", "0", "-5", "ten", "1.5"] {
             assert_eq!(
                 parse_limit_secs(Some(invalid), 600),
-                Duration::from_secs(600),
+                Duration::from_mins(10),
                 "invalid override {invalid:?} must fall back to the default",
             );
         }
@@ -434,7 +584,7 @@ mod tests {
             &std::env::temp_dir(),
             "test-unit",
             "echo hello",
-            &limits(Duration::from_secs(60), Duration::from_secs(60)),
+            &limits(Duration::from_mins(1), Duration::from_mins(1)),
         );
         assert!(
             result.is_ok(),
@@ -451,7 +601,7 @@ mod tests {
             &std::env::temp_dir(),
             "test-unit",
             "exec sleep 2",
-            &limits(Duration::from_millis(200), Duration::from_secs(60)),
+            &limits(Duration::from_millis(200), Duration::from_mins(1)),
         );
         assert!(
             result.is_ok(),
@@ -467,7 +617,7 @@ mod tests {
             &std::env::temp_dir(),
             "test-unit",
             "while true; do echo tick; sleep 0.05; done",
-            &limits(Duration::from_secs(60), Duration::from_millis(500)),
+            &limits(Duration::from_mins(1), Duration::from_millis(500)),
         );
         let message = failed_message(result);
         assert!(
@@ -493,7 +643,7 @@ mod tests {
             &std::env::temp_dir(),
             "test-unit",
             "exec 1>&- 2>&-; exec sleep 30",
-            &limits(Duration::from_secs(60), Duration::from_millis(500)),
+            &limits(Duration::from_mins(1), Duration::from_millis(500)),
         );
         let message = failed_message(result);
         assert!(
@@ -515,7 +665,7 @@ mod tests {
             &std::env::temp_dir(),
             "test-unit",
             "(sleep 5 &)",
-            &limits(Duration::from_secs(60), Duration::from_secs(60)),
+            &limits(Duration::from_mins(1), Duration::from_mins(1)),
         );
         assert!(
             result.is_ok(),
@@ -528,13 +678,68 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn exited_child_with_piped_grandchild_is_cleaned_up_at_wall() {
+        // The leader exits before the wall while its grandchild keeps the
+        // pipes open. The preserved group must still be killed when draining
+        // reaches the same absolute wall deadline.
+        let pid_file = std::env::temp_dir().join(format!(
+            "velnor-exec-post-exit-wall-{}.pid",
+            crate::unique_suffix()
+        ));
+        let script = format!("sleep 30 & echo $! > '{}'; exit 0", pid_file.display());
+        let started = Instant::now();
+        let message = failed_message(run_command(
+            &std::env::temp_dir(),
+            "test-unit",
+            &script,
+            &limits(Duration::from_mins(1), Duration::from_millis(300)),
+        ));
+        assert!(
+            message.contains("wall deadline"),
+            "post-exit drain must fail at the wall, got: {message}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "post-exit wall cleanup must stay bounded"
+        );
+
+        let pid = std::fs::read_to_string(&pid_file)
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        assert!(!pid.is_empty(), "fixture must record the grandchild PID");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let gone = loop {
+            let alive = std::process::Command::new("kill")
+                .args(["-0", &pid])
+                .output()
+                .is_ok_and(|output| output.status.success());
+            if !alive {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            thread::sleep(Duration::from_millis(25));
+        };
+        if !gone {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", &pid])
+                .output();
+        }
+        let _ = std::fs::remove_file(&pid_file);
+        assert!(gone, "post-exit grandchild {pid} must die with its group");
+    }
+
     #[test]
     fn nonzero_status_preserved() {
         let message = failed_message(run_command(
             &std::env::temp_dir(),
             "test-unit",
             "exit 3",
-            &limits(Duration::from_secs(60), Duration::from_secs(60)),
+            &limits(Duration::from_mins(1), Duration::from_mins(1)),
         ));
         assert!(
             message.contains("CI command failed for unit test-unit"),
@@ -548,7 +753,7 @@ mod tests {
             &std::env::temp_dir(),
             "test-unit",
             "printf 'partial'",
-            &limits(Duration::from_secs(60), Duration::from_secs(60)),
+            &limits(Duration::from_mins(1), Duration::from_mins(1)),
         );
         assert!(
             result.is_ok(),
@@ -572,7 +777,7 @@ mod tests {
             &std::env::temp_dir(),
             "test-unit",
             &script,
-            &limits(Duration::from_secs(60), Duration::from_secs(1)),
+            &limits(Duration::from_mins(1), Duration::from_secs(1)),
         ));
         assert!(
             message.contains("wall deadline"),
@@ -619,7 +824,7 @@ mod tests {
             &std::env::temp_dir(),
             "test-unit",
             &script,
-            &limits(Duration::from_secs(60), Duration::from_secs(1)),
+            &limits(Duration::from_mins(1), Duration::from_secs(1)),
         ));
         assert!(
             message.contains("wall deadline"),

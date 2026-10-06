@@ -832,9 +832,18 @@ impl<'a> GuestDockerTeardown<'a> {
         Ok(code)
     }
 
+    fn remove_container(&mut self, name: &str) -> Result<(), String> {
+        let args = crate::docker::client::container_remove_args(name, true, false);
+        record_docker_invocation(self.events, self.host_docker, &args)?;
+        crate::docker::Docker::job(&mut *self.runner)
+            .container_remove(name, true, false)
+            .map(|_| ())
+            .map_err(|error| format!("docker {}: {error:#}", args.join(" ")))
+    }
+
     /// Remove created containers (job container first) then the job network,
-    /// retrying the whole sequence a bounded number of times. Best-effort: a
-    /// teardown failure is logged, never changes the job result, and the
+    /// retrying the whole sequence a bounded number of times. Teardown errors
+    /// are logged with their cause; they never replace the job result, and the
     /// ownership labels plus startup reconcile reclaim any remainder.
     fn run_teardown(&mut self) {
         if !self.armed {
@@ -842,32 +851,42 @@ impl<'a> GuestDockerTeardown<'a> {
         }
         self.armed = false;
         let mut removed = false;
+        let mut observed_failures = Vec::new();
         for attempt in 1..=GUEST_TEARDOWN_ATTEMPTS {
             let mut remaining = Vec::new();
-            for name in self.containers.iter().rev() {
-                let gone = docker_operands(
-                    self.runner,
-                    self.events,
-                    self.host_docker,
-                    &["rm", "-f"],
-                    &[name],
-                )
-                .map(|result| result.code == 0)
-                .unwrap_or(false);
-                if !gone {
-                    remaining.push(name.clone());
+            let to_remove = self.containers.iter().rev().cloned().collect::<Vec<_>>();
+            for name in to_remove {
+                match self.remove_container(&name) {
+                    Ok(()) => {}
+                    Err(error) => {
+                        observed_failures.push(format!("container {name}: {error}"));
+                        remaining.push(name);
+                    }
                 }
             }
             self.containers = remaining;
-            let network_gone = docker_operands(
+            let network_gone = match docker_operands(
                 self.runner,
                 self.events,
                 self.host_docker,
                 &["network", "rm"],
                 &[&self.network],
-            )
-            .map(|result| result.code == 0)
-            .unwrap_or(false);
+            ) {
+                Ok(result) if result.code == 0 => true,
+                Ok(result) => {
+                    observed_failures.push(format!(
+                        "network {} exited {}: {}",
+                        self.network,
+                        result.code,
+                        result.stderr.trim()
+                    ));
+                    false
+                }
+                Err(error) => {
+                    observed_failures.push(format!("network {}: {error}", self.network));
+                    false
+                }
+            };
             removed = self.containers.is_empty() && network_gone;
             if removed || attempt == GUEST_TEARDOWN_ATTEMPTS {
                 break;
@@ -876,9 +895,15 @@ impl<'a> GuestDockerTeardown<'a> {
         }
         if !removed {
             self.events.push(log_line(&format!(
-                "Warning: guest Docker teardown left {} container(s) and network {} unremoved",
+                "Warning: guest Docker teardown left {} container(s) and network {} unremoved: {}",
                 self.containers.len(),
-                self.network
+                self.network,
+                observed_failures.join("; ")
+            )));
+        } else if !observed_failures.is_empty() {
+            self.events.push(log_line(&format!(
+                "Guest Docker teardown recovered after retry: {}",
+                observed_failures.join("; ")
             )));
         }
     }
@@ -1550,6 +1575,66 @@ mod tests {
     use crate::executor::CommandResult;
     use velnor_model::{GuestService, GuestStep, JobConclusion};
 
+    struct ImmutableIdRecordingCommands(RecordingCommands);
+
+    impl std::ops::Deref for ImmutableIdRecordingCommands {
+        type Target = RecordingCommands;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl std::ops::DerefMut for ImmutableIdRecordingCommands {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.0
+        }
+    }
+
+    impl ImmutableIdRecordingCommands {
+        fn with_id(&mut self, args: &[String], mut result: CommandResult) -> CommandResult {
+            if args.first().is_some_and(|arg| arg == "inspect")
+                && args.get(1).is_some_and(|arg| arg == "--format={{.Id}}")
+                && let Some(selector) = args.last()
+            {
+                result.stdout = hex_sha256(selector.as_bytes());
+            }
+            result
+        }
+    }
+
+    impl CommandRunner for ImmutableIdRecordingCommands {
+        fn run(&mut self, program: &str, args: &[String]) -> anyhow::Result<CommandResult> {
+            let result = self.0.run(program, args)?;
+            Ok(self.with_id(args, result))
+        }
+
+        fn run_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+            timeout: std::time::Duration,
+        ) -> anyhow::Result<CommandResult> {
+            let result = self.0.run_timeout_with_env(program, args, env, timeout)?;
+            Ok(self.with_id(args, result))
+        }
+
+        fn run_with_stdin_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+            stdin: &str,
+            timeout: std::time::Duration,
+        ) -> anyhow::Result<CommandResult> {
+            let result = self
+                .0
+                .run_with_stdin_timeout_with_env(program, args, env, stdin, timeout)?;
+            Ok(self.with_id(args, result))
+        }
+    }
+
     /// Effective view of every recorded call: argv, plus the environment the
     /// command actually receives (env file contents and process-environment
     /// forwards), plus its stdin. Environment pairs and step scripts are no
@@ -1620,6 +1705,76 @@ mod tests {
             buildx: false,
             testcontainers: false,
         }
+    }
+
+    #[test]
+    fn delivered_context_values_reach_guest_expression_evaluation_losslessly() {
+        let mut plan = sample_plan();
+        plan.context_data = vec![
+            (
+                "numbers".into(),
+                velnor_model::ContextValue::object(vec![
+                    (
+                        "nan".into(),
+                        velnor_model::ContextValue::non_finite(velnor_model::NonFinite::NaN),
+                    ),
+                    (
+                        "positive".into(),
+                        velnor_model::ContextValue::non_finite(
+                            velnor_model::NonFinite::PositiveInfinity,
+                        ),
+                    ),
+                    (
+                        "negative".into(),
+                        velnor_model::ContextValue::non_finite(
+                            velnor_model::NonFinite::NegativeInfinity,
+                        ),
+                    ),
+                ])
+                .unwrap(),
+            ),
+            (
+                "sensitive".into(),
+                velnor_model::ContextValue::case_sensitive_object(vec![
+                    (
+                        "Path".into(),
+                        velnor_model::ContextValue::String("upper".into()),
+                    ),
+                    (
+                        "path".into(),
+                        velnor_model::ContextValue::String("lower".into()),
+                    ),
+                ])
+                .unwrap(),
+            ),
+        ];
+        plan.steps[0].script = concat!(
+            "printf '%s' '${{ numbers.nan }}|${{ numbers.positive }}|",
+            "${{ numbers.negative }}|${{ sensitive.Path }}|",
+            "${{ sensitive.path }}|${{ sensitive.PATH }}'"
+        )
+        .into();
+
+        let bytes = plan.encode().unwrap();
+        let decoded = decode_guest_plan(&bytes).unwrap();
+        let mut runner = RecordingCommands::default();
+        let mut events = Vec::new();
+        execute_guest_plan(&decoded, &mut runner, &mut events, false).unwrap();
+
+        let script = runner
+            .call_stdin
+            .iter()
+            .find(|stdin| stdin.contains("NaN|Infinity|-Infinity"))
+            .expect("guest step receives the resolved expression script");
+        assert!(script.contains("NaN|Infinity|-Infinity|upper|lower|"));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ExecutionEvent::StepCompleted {
+                step_id,
+                exit_code: 0,
+                skipped: false
+            } if step_id == "run"
+        )));
     }
 
     #[test]
@@ -1765,33 +1920,49 @@ mod tests {
             continue_on_error: false,
             timeout_ms: None,
         });
-        let mut runner = RecordingCommands {
+        let mut runner = ImmutableIdRecordingCommands(RecordingCommands {
             next: CommandResult {
                 code: 0,
                 stdout: "ok".into(),
                 stderr: String::new(),
             },
             ..RecordingCommands::default()
-        };
+        });
         let mut events = Vec::new();
         let error = execute_guest_plan(&plan, &mut runner, &mut events, true).unwrap_err();
         assert!(error.contains("script"), "{error}");
-        assert!(runner.calls.iter().any(|(_, args)| args
-            .windows(4)
-            .any(|w| w == ["rm", "-f", "--", "velnor-job-job-1"])));
-        assert!(runner
+        let rm_calls = runner
             .calls
             .iter()
-            .any(|(_, args)| args.windows(4).any(|w| w == ["rm", "-f", "--", "pg"])));
+            .filter(|(_, args)| args.first().is_some_and(|arg| arg == "rm"))
+            .collect::<Vec<_>>();
+        assert_eq!(rm_calls.len(), 2, "{:?}", runner.calls);
+        assert!(rm_calls.iter().all(|(_, args)| {
+            args.get(3)
+                .is_some_and(|id| id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        }));
+        assert_eq!(rm_calls[0].1[3], hex_sha256(b"velnor-job-job-1"));
+        assert_eq!(rm_calls[1].1[3], hex_sha256(b"pg"));
+        assert!(runner.calls.iter().any(|(_, args)| {
+            args.first().is_some_and(|arg| arg == "inspect")
+                && args
+                    .last()
+                    .is_some_and(|selector| selector == "velnor-job-job-1")
+        }));
+        assert!(runner.calls.iter().any(|(_, args)| {
+            args.first().is_some_and(|arg| arg == "inspect")
+                && args.last().is_some_and(|selector| selector == "pg")
+        }));
         assert!(runner.calls.iter().any(|(_, args)| args
             .windows(4)
             .any(|w| w == ["network", "rm", "--", "velnor-net-job-1"])));
     }
 
-    /// Fails the first `docker network rm` with a transient nonzero exit.
+    /// Injects transient Docker remove failures while recording argv.
     struct FlakyNetworkRm {
         calls: Vec<(String, Vec<String>)>,
         network_rm_failures_left: usize,
+        container_rm_failures_left: usize,
     }
 
     impl FlakyNetworkRm {
@@ -1799,7 +1970,13 @@ mod tests {
             Self {
                 calls: Vec::new(),
                 network_rm_failures_left: failures,
+                container_rm_failures_left: 0,
             }
+        }
+
+        fn failing_container_remove(mut self) -> Self {
+            self.container_rm_failures_left = 1;
+            self
         }
 
         fn network_rm_calls(&self) -> usize {
@@ -1813,20 +1990,36 @@ mod tests {
     impl CommandRunner for FlakyNetworkRm {
         fn run(&mut self, program: &str, args: &[String]) -> anyhow::Result<CommandResult> {
             self.calls.push((program.to_string(), args.to_vec()));
-            if args.windows(2).any(|w| w == ["network", "rm"]) && self.network_rm_failures_left > 0
-            {
-                self.network_rm_failures_left -= 1;
-                return Ok(CommandResult {
-                    code: 1,
-                    stdout: String::new(),
-                    stderr: "transient daemon error".into(),
-                });
-            }
-            Ok(CommandResult {
+            let mut result = CommandResult {
                 code: 0,
                 stdout: String::new(),
                 stderr: String::new(),
-            })
+            };
+            if args.first().is_some_and(|arg| arg == "inspect")
+                && args.get(1).is_some_and(|arg| arg == "--format={{.Id}}")
+                && let Some(selector) = args.last()
+            {
+                result.stdout = hex_sha256(selector.as_bytes());
+            } else if args.first().is_some_and(|arg| arg == "inspect")
+                && args
+                    .get(1)
+                    .is_some_and(|arg| arg == "--format={{.State.Status}}")
+            {
+                result.stdout = "created".into();
+            } else if args.first().is_some_and(|arg| arg == "rm")
+                && self.container_rm_failures_left > 0
+            {
+                self.container_rm_failures_left -= 1;
+                result.code = 1;
+                result.stderr = "injected remove failure".into();
+            }
+            if args.windows(2).any(|w| w == ["network", "rm"]) && self.network_rm_failures_left > 0
+            {
+                self.network_rm_failures_left -= 1;
+                result.code = 1;
+                result.stderr = "transient daemon error".into();
+            }
+            Ok(result)
         }
     }
 
@@ -1840,6 +2033,38 @@ mod tests {
         assert!(events.iter().all(|event| !matches!(
             event,
             ExecutionEvent::Log { line, .. } if line.contains("teardown left")
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ExecutionEvent::Log { line, .. } if line.contains("recovered after retry")
+        )));
+    }
+
+    #[test]
+    fn guest_teardown_reports_rm_errors_and_suppresses_same_id_replay() {
+        let mut plan = sample_plan();
+        plan.job_id = "rm-failure".into();
+        let mut runner = FlakyNetworkRm::failing(0).failing_container_remove();
+        let mut events = Vec::new();
+
+        let code = execute_guest_plan(&plan, &mut runner, &mut events, false).unwrap();
+
+        assert_eq!(code, 0);
+        let deletes = runner
+            .calls
+            .iter()
+            .filter(|(_, args)| args.first().is_some_and(|arg| arg == "rm"))
+            .collect::<Vec<_>>();
+        assert_eq!(deletes.len(), 2, "{:?}", runner.calls);
+        assert!(deletes.iter().all(|(_, args)| {
+            args.get(3)
+                .is_some_and(|id| id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        }));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ExecutionEvent::Log { line, .. }
+                if line.contains("injected remove failure")
+                    && line.contains("teardown left 1 container")
         )));
     }
 
