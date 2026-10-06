@@ -371,7 +371,10 @@ pub(crate) fn validate_mutable_mount_seed(unit: &Unit) -> Result<(), GeneratorEr
 
 /// The commands a lane runs: the lane-specific override when declared, the
 /// base vector otherwise.
-fn lane_commands<'a>(lane_override: Option<&'a [String]>, base: &'a [String]) -> &'a [String] {
+fn lane_commands<'a>(
+    lane_override: Option<&'a [crate::validation::CheckCommand]>,
+    base: &'a [crate::validation::CheckCommand],
+) -> &'a [crate::validation::CheckCommand] {
     lane_override.unwrap_or(base)
 }
 

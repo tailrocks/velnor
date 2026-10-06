@@ -556,7 +556,7 @@ pub(crate) fn current_check_impl() -> String {
 /// recipe.
 #[must_use]
 pub(crate) fn recipe_digest(
-    commands: &BTreeMap<String, Vec<String>>,
+    commands: &BTreeMap<String, Vec<crate::validation::CheckCommand>>,
     generator_revision: &str,
     check_impl: &str,
 ) -> String {
@@ -566,7 +566,13 @@ pub(crate) fn recipe_digest(
     push_line(&mut bytes, &format!("check:{check_impl}"));
     for (lane_scope, steps) in commands {
         for (index, step) in steps.iter().enumerate() {
-            push_line(&mut bytes, &format!("commands:{lane_scope}:{index}={step}"));
+            push_line(
+                &mut bytes,
+                &format!(
+                    "commands:{lane_scope}:{index}={}",
+                    serde_json::to_string(step).unwrap_or_default()
+                ),
+            );
         }
     }
     hex_sha256(&bytes)
@@ -635,11 +641,12 @@ pub(crate) fn hex_sha256(bytes: &[u8]) -> String {
 /// contract's key files and paths.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct UnitConfigView {
+    pub(crate) check_contract: crate::validation::CheckContract,
     pub(crate) id: String,
     pub(crate) kind: String,
     pub(crate) root: String,
     pub(crate) watch: Vec<String>,
-    pub(crate) commands: BTreeMap<String, Vec<String>>,
+    pub(crate) commands: BTreeMap<String, Vec<crate::validation::CheckCommand>>,
     pub(crate) depends_on: Vec<String>,
     pub(crate) tool_version: Option<String>,
     pub(crate) cache_key_files: Vec<String>,
@@ -655,6 +662,10 @@ pub(crate) fn config_digest(view: &UnitConfigView) -> String {
     push_line(&mut bytes, &format!("reuse-version:{REUSE_VERSION}"));
     push_line(&mut bytes, &format!("id:{}", view.id));
     push_line(&mut bytes, &format!("kind:{}", view.kind));
+    push_line(
+        &mut bytes,
+        &format!("check-contract:{:?}", view.check_contract),
+    );
     push_line(&mut bytes, &format!("root:{}", view.root));
     let mut watch = view.watch.clone();
     watch.sort();
@@ -663,7 +674,13 @@ pub(crate) fn config_digest(view: &UnitConfigView) -> String {
     }
     for (lane_scope, steps) in &view.commands {
         for (index, step) in steps.iter().enumerate() {
-            push_line(&mut bytes, &format!("commands:{lane_scope}:{index}={step}"));
+            push_line(
+                &mut bytes,
+                &format!(
+                    "commands:{lane_scope}:{index}={}",
+                    serde_json::to_string(step).unwrap_or_default()
+                ),
+            );
         }
     }
     let mut depends_on = view.depends_on.clone();
@@ -2017,13 +2034,15 @@ mod tests {
     fn recipe_digest_separates_commands_revision_and_impl() {
         let commands = BTreeMap::from([(
             "github/affected".to_owned(),
-            vec!["cargo test --locked".to_owned()],
+            vec![crate::validation::CheckCommand::from("cargo test --locked")],
         )]);
         let base = recipe_digest(&commands, "rev-a", "impl-a");
         assert!(is_full_fingerprint(&base));
         let other_commands = BTreeMap::from([(
             "github/affected".to_owned(),
-            vec!["cargo test --locked --all-features".to_owned()],
+            vec![crate::validation::CheckCommand::from(
+                "cargo test --locked --all-features",
+            )],
         )]);
         assert_ne!(base, recipe_digest(&other_commands, "rev-a", "impl-a"));
         assert_ne!(base, recipe_digest(&commands, "rev-b", "impl-a"));
@@ -2539,13 +2558,14 @@ mod tests {
 
     fn config_view() -> UnitConfigView {
         UnitConfigView {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: "rust-alpha".to_owned(),
             kind: "rust".to_owned(),
             root: "crates/alpha".to_owned(),
             watch: vec!["crates/alpha/**".to_owned()],
             commands: BTreeMap::from([(
                 "github/affected".to_owned(),
-                vec!["cargo test --locked".to_owned()],
+                vec![crate::validation::CheckCommand::from("cargo test --locked")],
             )]),
             depends_on: vec!["rust-base".to_owned()],
             tool_version: Some("1.90.0".to_owned()),
@@ -2639,7 +2659,7 @@ mod tests {
         let mut commands = config_view();
         commands.commands.insert(
             "velnor/full".to_owned(),
-            vec!["cargo test --locked".to_owned()],
+            vec![crate::validation::CheckCommand::from("cargo test --locked")],
         );
         variants.push(("commands", commands));
         let mut depends = config_view();

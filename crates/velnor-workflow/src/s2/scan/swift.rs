@@ -138,6 +138,7 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             format!("{container_root}/**")
         };
         let mut unit = Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: format!("swift-{extension}-{}", identifier_suffix(scheme_name)),
             label: format!("Apple scheme ({scheme_name})"),
             kind: UnitKind::Swift,
@@ -147,8 +148,8 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
                 root_watch,
                 "*.xcconfig".to_owned(),
             ],
-            pr_commands: commands.clone(),
-            full_commands: commands,
+            pr_commands: (commands.clone()).into_iter().map(Into::into).collect(),
+            full_commands: (commands).into_iter().map(Into::into).collect(),
             depends_on: Vec::new(),
             pinned_lockfile: false,
             cache: Some(CacheSpec {

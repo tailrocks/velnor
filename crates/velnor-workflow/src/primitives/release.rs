@@ -3433,12 +3433,11 @@ fn render_release_unit_job(
         skip_when_offline_ready,
     );
     let cargo_offline = checks_env(unit);
-    let _ = writeln!(
-        output,
-        "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
-        yaml_scalar(&unit.id),
-        yaml_scalar(&unit.id)
-    );
+    let environment = format!("          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.sha }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection", yaml_scalar(&unit.id));
+    output.push_str("      - name: Plan full release selection\n        env:\n          CI_SCOPE_OVERRIDE: full\n          EVENT_NAME: ${{ github.event_name }}\n          HEAD_SHA: ${{ github.sha }}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: |\n          set -euo pipefail\n          mkdir -p .velnor-ci-selection\n          velnor-workflow plan --config .github/ci/project.toml\n");
+    let check_environment = cargo_offline;
+    super::ir::render_visible_checks(output, &[unit], lane, &environment, &check_environment, "");
+
     id
 }
 
@@ -5686,14 +5685,15 @@ cp "$record" "$out"
 
     fn unit(id: &str) -> crate::Unit {
         crate::Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: id.to_owned(),
             label: id.to_owned(),
             kind: crate::UnitKind::Rust,
             root: ".".to_owned(),
             pinned_lockfile: true,
             watch: vec!["Cargo.toml".to_owned()],
-            pr_commands: vec!["cargo check".to_owned()],
-            full_commands: vec!["cargo check".to_owned()],
+            pr_commands: vec!["cargo check".into()],
+            full_commands: vec!["cargo check".into()],
             github_pr_commands: None,
             github_full_commands: None,
             velnor_pr_commands: None,
@@ -6889,8 +6889,8 @@ cp "$record" "$out"
     #[test]
     fn github_release_unit_cache_restore_declares_cache_step_id() {
         let mut config = config(&["release.yml"], Some(binary_spec()));
-        config.units[0].pr_commands = vec!["mbx nextest run --locked".to_owned()];
-        config.units[0].full_commands = vec!["mbx nextest run --locked".to_owned()];
+        config.units[0].pr_commands = vec!["mbx nextest run --locked".into()];
+        config.units[0].full_commands = vec!["mbx nextest run --locked".into()];
         config.units[0].cache = Some(crate::CacheSpec {
             key_files: vec!["Cargo.lock".to_owned()],
             paths: vec!["~/.cargo/registry".to_owned()],

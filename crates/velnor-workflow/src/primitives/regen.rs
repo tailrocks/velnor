@@ -42,14 +42,14 @@ impl Primitive for RegenGate {
                 .iter()
                 .any(|candidate| candidate == &command)
             {
-                unit.pr_commands.insert(0, command.clone());
+                unit.pr_commands.insert(0, command.clone().into());
             }
             if !unit
                 .full_commands
                 .iter()
                 .any(|candidate| candidate == &command)
             {
-                unit.full_commands.insert(0, command.clone());
+                unit.full_commands.insert(0, command.clone().into());
             }
             units.push(unit);
         }

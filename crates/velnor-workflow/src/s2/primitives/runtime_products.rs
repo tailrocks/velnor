@@ -661,14 +661,15 @@ mod tests {
 
     fn unit() -> crate::s2::Unit {
         crate::s2::Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: "rust-example".to_owned(),
             label: "rust-example".to_owned(),
             kind: UnitKind::Rust,
             root: ".".to_owned(),
             pinned_lockfile: true,
             watch: vec!["Cargo.toml".to_owned()],
-            pr_commands: vec!["cargo check".to_owned()],
-            full_commands: vec!["cargo check".to_owned()],
+            pr_commands: vec!["cargo check".into()],
+            full_commands: vec!["cargo check".into()],
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,

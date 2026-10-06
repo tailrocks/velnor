@@ -696,15 +696,16 @@ mod tests {
         let mut app = app();
         app.inputs = Some(crate::s2::GenerationInputs::parts(0, 0));
         let unit = crate::s2::Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: "workspace-with-a-long-name".to_owned(),
             label: "Workspace with a long Unicode label λ".to_owned(),
             kind: crate::s2::UnitKind::Rust,
             root: "crates/workspace-with-a-long-name".to_owned(),
             watch: Vec::new(),
             pr_commands: (0..20)
-                .map(|index| format!("cargo test --package example-{index}"))
+                .map(|index| format!("cargo test --package example-{index}").into())
                 .collect(),
-            full_commands: vec!["cargo test --workspace --all-targets".to_owned()],
+            full_commands: vec!["cargo test --workspace --all-targets".into()],
             depends_on: Vec::new(),
             pinned_lockfile: true,
             cache: None,
@@ -1000,8 +1001,8 @@ mod tests {
         if let Some(config) = app.config.as_mut()
             && let Some(unit) = config.units.first_mut()
         {
-            unit.pr_commands = vec!["pr-exact".to_owned()];
-            unit.full_commands = vec!["full-exact".to_owned()];
+            unit.pr_commands = vec!["pr-exact".into()];
+            unit.full_commands = vec!["full-exact".into()];
         }
         app.overlay = Some(super::super::Overlay::Details);
 

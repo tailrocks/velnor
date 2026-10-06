@@ -1,5 +1,7 @@
 //! Rust detector: Cargo manifests, workspace graph, and Rust source facts.
 
+use crate::validation::{CargoOperation, CargoRecipe, CheckCommand};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
@@ -10,8 +12,8 @@ use super::file_walk::{
 };
 use super::{RepositoryShape, ScanContext};
 use crate::s2::{
-    identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec,
-    GeneratorError, RustToolchain, Unit, UnitKind,
+    identifier_suffix, parent_path, CachePurpose, CacheSpec, GeneratorError, RustToolchain, Unit,
+    UnitKind,
 };
 
 /// The scanner's Rust dependency-policy unit. Its commands resolve the
@@ -235,6 +237,14 @@ pub(crate) struct CargoManifestFacts {
     pub(crate) test_targets: Vec<String>,
     pub(crate) features: Vec<String>,
     pub(crate) crate_types: Vec<String>,
+    library: LibraryFacts,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LibraryFacts {
+    path: Option<String>,
+    doctests: bool,
+    autolib: bool,
 }
 
 #[derive(Default)]
@@ -432,7 +442,6 @@ fn analyze_rust_manifests(
     for manifest in &package_facts {
         let manifest_path = join_repo_path(&manifest.root, "Cargo.toml");
         let prefix = path_prefix(&manifest.root);
-        let command_prefix = shell_change_dir(&manifest.root);
         let default_build_script = join_repo_path(&manifest.root, "build.rs");
         let build_script = manifest.build_script.as_deref().or_else(|| {
             file_set
@@ -443,41 +452,35 @@ fn analyze_rust_manifests(
             file.starts_with(&format!("{prefix}tests/"))
                 || file.starts_with(&format!("{prefix}benches/"))
         });
-        let package_selector = manifest.package_name.as_deref().map_or_else(
-            || format!("--manifest-path {}", shell_quote("Cargo.toml")),
-            |name| format!("--package {}", shell_quote(name)),
-        );
-        let cargo_lock_flag = if file_set.contains("Cargo.lock") {
-            "--locked"
-        } else {
-            ""
+        let recipe = |operation| CargoRecipe {
+            operation,
+            root: manifest.root.clone(),
+            package: manifest.package_name.clone(),
+            workspace: false,
+            locked: file_set.contains("Cargo.lock"),
+            all_features: true,
+            backend: crate::validation::CargoBackend::Cargo,
         };
-        let test_command = if has_nextest {
-            // Crates without any test target must still verify green: without
-            // the flag nextest exits nonzero on an empty collection, failing
-            // test-less crates that fmt and clippy accept.
-            format!(
-                "{command_prefix}cargo nextest run {cargo_lock_flag} --all-features {package_selector} --no-tests pass"
-            )
-        } else {
-            format!(
-                "{command_prefix}cargo test {cargo_lock_flag} --all-features {package_selector}"
-            )
-        };
-        let clippy_command = format!(
-            "{command_prefix}cargo clippy {cargo_lock_flag} --profile test --no-deps --all-targets --all-features {package_selector} -- -D warnings"
-        );
-        // Clippy before tests: report lint failures before compiling and
-        // running the test targets. Keep every command and its exact flags;
-        // the test command still covers test-less crates through `--no-tests`.
-        let commands = vec![
-            format!(
-                "{command_prefix}cargo fmt --manifest-path {} -- --check",
-                shell_quote("Cargo.toml")
-            ),
-            clippy_command,
-            test_command,
-        ];
+        let mut commands = [
+            CargoOperation::Format,
+            CargoOperation::Clippy,
+            if has_nextest {
+                CargoOperation::Nextest
+            } else {
+                CargoOperation::Test
+            },
+        ]
+        .into_iter()
+        .map(|operation| CheckCommand::cargo(recipe(operation)))
+        .collect::<Vec<_>>();
+        if has_nextest
+            && manifest.library.doctests
+            && (manifest.library.path.is_some()
+                || (manifest.library.autolib
+                    && file_set.contains(&join_repo_path(&manifest.root, "src/lib.rs"))))
+        {
+            commands.push(CheckCommand::cargo(recipe(CargoOperation::Doctest)));
+        }
         let mut watch = vec![
             manifest_path.clone(),
             "Cargo.lock".to_owned(),
@@ -576,6 +579,14 @@ fn analyze_rust_manifests(
             ));
         }
         result.units.push(Unit {
+            check_contract: if commands
+                .iter()
+                .any(|command| command.kind == crate::validation::CheckKind::Doctest)
+            {
+                crate::validation::CheckContract::RustTestsAndDoctests
+            } else {
+                crate::validation::CheckContract::RustTests
+            },
             id: roots_by_manifest
                 .get(&manifest_path)
                 .cloned()
@@ -630,12 +641,13 @@ fn analyze_rust_manifests(
                 );
                 "cargo deny check advisories bans sources"
             };
-            commands.push(command.to_owned());
+            commands.push(CheckCommand::from(command));
         }
         if has_cargo_audit {
-            commands.push("cargo audit".to_owned());
+            commands.push("cargo audit".into());
         }
         result.units.push(Unit {
+            check_contract: crate::validation::CheckContract::Auxiliary,
             id: POLICY_UNIT_ID.to_owned(),
             label: "Rust dependency policy".to_owned(),
             kind: UnitKind::Rust,
@@ -1002,6 +1014,11 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
         test_targets: Vec::new(),
         features: Vec::new(),
         crate_types: Vec::new(),
+        library: LibraryFacts {
+            path: None,
+            doctests: true,
+            autolib: true,
+        },
     };
     let mut section = String::new();
     let lines = contents.lines().collect::<Vec<_>>();
@@ -1022,6 +1039,12 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
             if section == "package" {
                 facts.has_package = true;
             }
+            if section == "lib" {
+                facts
+                    .library
+                    .path
+                    .get_or_insert_with(|| "src/lib.rs".to_owned());
+            }
             if section == "workspace" {
                 facts.has_workspace = true;
             }
@@ -1039,6 +1062,9 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
         }
         match section.as_str() {
             "package" if key == "name" => facts.package_name = toml_string_value(&value),
+            "package" if key == "autolib" => facts.library.autolib = value != "false",
+            "lib" if key == "path" => facts.library.path = toml_string_value(&value),
+            "lib" if key == "doctest" => facts.library.doctests = value != "false",
             "package" if key == "build" => facts.build_script = toml_string_value(&value),
             "workspace" if key == "members" => {
                 facts.workspace_members = toml_array_values(&value);
@@ -1439,7 +1465,10 @@ mod tests {
             let expected_order = vec![format, clippy, test];
             let mut expected_multiset = expected_order.clone();
             expected_multiset.sort();
-            let mut observed_multiset = commands.clone();
+            let mut observed_multiset = commands
+                .iter()
+                .map(|command| command.run.clone())
+                .collect::<Vec<_>>();
             observed_multiset.sort();
             assert_eq!(
                 observed_multiset, expected_multiset,
@@ -1450,6 +1479,77 @@ mod tests {
                 "validation command order changed"
             );
             assert_eq!(analysis.units[0].full_commands, expected_order);
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn doctest_steps_follow_library_target_applicability() {
+        for (name, settings, source, expected) in [
+            ("auto-lib", "", "src/lib.rs", true),
+            ("bin-only", "", "src/main.rs", false),
+            (
+                "explicit-lib",
+                "[lib]\npath = \"custom.rs\"\n",
+                "custom.rs",
+                true,
+            ),
+            ("disabled", "[lib]\ndoctest = false\n", "src/lib.rs", false),
+            ("no-auto", "autolib = false\n", "src/lib.rs", false),
+            (
+                "explicit-no-auto",
+                "autolib = false\n[lib]\n",
+                "src/lib.rs",
+                true,
+            ),
+        ] {
+            let root = scratch(name);
+            must(fs::create_dir_all(root.join("src")), "create source");
+            must(
+                fs::create_dir_all(root.join(".config")),
+                "create nextest config",
+            );
+            must(
+                fs::write(
+                    root.join("Cargo.toml"),
+                    format!("[package]\nname = \"widget\"\nversion = \"0.1.0\"\n{settings}"),
+                ),
+                "write manifest",
+            );
+            must(fs::write(root.join(source), ""), "write source");
+            must(
+                fs::write(root.join(".config/nextest.toml"), ""),
+                "write nextest config",
+            );
+            must(
+                fs::write(
+                    root.join("rust-toolchain.toml"),
+                    "[toolchain]\nchannel = \"1.98.1\"\n",
+                ),
+                "write toolchain",
+            );
+            let files = vec![
+                "rust-toolchain.toml".to_owned(),
+                "Cargo.toml".to_owned(),
+                source.to_owned(),
+                ".config/nextest.toml".to_owned(),
+            ];
+            let file_set = files.iter().cloned().collect();
+            let analysis = must(
+                super::analyze_rust_manifests(&root, &files, &file_set, &["Cargo.toml".to_owned()]),
+                "scan fixture",
+            );
+            let commands = &analysis.units[0].pr_commands;
+            assert_eq!(
+                commands
+                    .iter()
+                    .any(|command| command.kind == crate::validation::CheckKind::Doctest),
+                expected,
+                "{name}"
+            );
+            assert!(
+                crate::validation::validate(analysis.units[0].check_contract, commands).is_ok()
+            );
             let _ = fs::remove_dir_all(root);
         }
     }
