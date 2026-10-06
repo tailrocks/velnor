@@ -564,6 +564,38 @@ pub(crate) fn is_github_owned_label(label: &str) -> bool {
     label.starts_with("ubuntu-") || label.starts_with("macos-") || label.starts_with("windows-")
 }
 
+/// A documented GitHub-hosted image label: the strict audit-side counterpart
+/// of [`is_github_owned_label`]. Scan-time selector validation stays
+/// prefix-lenient so configured labels flow through, but the policy audit
+/// fails closed: only documented images count as hosted, so an undeclared
+/// self-hosted label such as `ubuntu-private` cannot pose as hosted.
+#[must_use]
+pub(crate) fn is_documented_github_hosted_image(label: &str) -> bool {
+    matches!(
+        label,
+        "ubuntu-latest"
+            | "ubuntu-26.04"
+            | "ubuntu-26.04-arm"
+            | "ubuntu-24.04"
+            | "ubuntu-24.04-arm"
+            | "ubuntu-22.04"
+            | "ubuntu-22.04-arm"
+            | "macos-latest"
+            | "macos-latest-large"
+            | "macos-26"
+            | "macos-15-large"
+            | "macos-15"
+            | "macos-14-large"
+            | "macos-14"
+            | "macos-13-large"
+            | "macos-13"
+            | "windows-latest"
+            | "windows-2025"
+            | "windows-2022"
+            | "windows-11"
+    )
+}
+
 /// Stable plan digest over sorted unit IDs × sorted providers × exclusion
 /// declarations × command/profile/features/fixture digests.
 pub(crate) fn plan_digest(

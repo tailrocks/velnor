@@ -2504,7 +2504,10 @@ mod tests {
         assert!(previous_outputs.contains(&output));
         let state_before = must(std::fs::read(&state_path), "read prior ownership state");
         let mut snapshot = must(
-            Snapshot::capture(&root, previous_outputs),
+            Snapshot::capture(
+                &root,
+                super::promotion_snapshot_paths(&previous_outputs, false),
+            ),
             "capture promotion preimages",
         );
         must(std::fs::remove_file(&output_path), "remove old output");

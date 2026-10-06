@@ -9654,6 +9654,7 @@ struct FileIdentity {
 struct GeneratedWritePlan {
     files: Vec<PlannedFile>,
     changed: Vec<PathBuf>,
+    stale: Vec<PathBuf>,
     /// Unknown `.github` entries slated for force-gated removal: unrecorded
     /// files, symlinks, special files, and whole directories with no
     /// expected descendants. Kept apart from `files` so validation
@@ -10322,6 +10323,12 @@ fn plan_generated_write_with_static_sources_and_options(
         || ownership_preimage.is_executable()
         || !ownership_preimage
             .has_bytes(ownership_state_content(files, symlinks, inputs).as_bytes());
+    let stale_files =
+        stale_owned_files(root, files, symlinks, ownership.map(|state| &state.outputs))?;
+    let stale = stale_files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
     let mut changed: Vec<PathBuf> = files
         .iter()
         .filter(|(relative, wanted)| {
@@ -10341,7 +10348,7 @@ fn plan_generated_write_with_static_sources_and_options(
             })
             .map(|(relative, _)| relative.clone()),
     );
-    let expected = expected_tree_paths(files, symlinks);
+    let expected = expected_tree_paths(files, symlinks, ownership.map(|state| &state.outputs));
     let unknown_paths = collect_unknown_tree_entries(root, &expected)?;
     let conflicts = changed
         .iter()
@@ -10349,17 +10356,34 @@ fn plan_generated_write_with_static_sources_and_options(
         .cloned()
         .collect::<Vec<_>>();
 
-    // Unknown `.github` content is never imported. `--force` removes it so
-    // the generated tree can take over; without `--force` generation stops.
-    if !unknown_paths.is_empty() && !adopt {
+    // Unknown `.github` content splits by provenance. An unrecorded workflow
+    // is never removed, even with `--force`: a hand-written workflow is
+    // someone's CI, and only a recorded generator output proves the file is
+    // ours to reconcile. Recorded-but-unrendered workflows are stale
+    // generator outputs (other recorded collateral stays in `expected` and
+    // follows the digest-verified stale path), and unrecorded collateral
+    // elsewhere under `.github` is ordinary foreign clutter: `--force`
+    // clears both so the generated tree can move on, while anything else
+    // stops generation.
+    let (foreign, adoptable): (Vec<_>, Vec<_>) = unknown_paths.into_iter().partition(|relative| {
+        relative.starts_with(Path::new(".github/workflows"))
+            && !recorded_outputs_contain(ownership, relative)
+    });
+    if !foreign.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "existing files are outside the Velnor workflow generator and will not be imported: {}; remove them manually (--force never removes unrecorded workflows)",
+            display_paths(foreign.iter()),
+        )));
+    }
+    if !adoptable.is_empty() && !adopt {
         return Err(GeneratorError::usage(format!(
             "existing files are outside the Velnor workflow generator and will not be imported: {}; rerun with --force to replace them with generated output (bodies are never adopted)",
-            display_paths(unknown_paths.iter()),
+            display_paths(adoptable.iter()),
         )));
     }
     let mut unknown = Vec::new();
     if adopt {
-        for relative in unknown_paths {
+        for relative in adoptable {
             let preimage = capture_unknown_preimage(&root.join(&relative))?;
             if matches!(preimage, FilePreimage::Missing) {
                 continue;
@@ -10412,9 +10436,14 @@ fn plan_generated_write_with_static_sources_and_options(
                 .unwrap_or(FilePreimage::Missing),
         }
     }));
+    planned_files.extend(stale_files);
     let ownership_action = if ownership.is_none() {
         PlannedAction::Create
-    } else if ownership_needs_refresh || !changed.is_empty() || !unknown.is_empty() {
+    } else if ownership_needs_refresh
+        || !changed.is_empty()
+        || !stale.is_empty()
+        || !unknown.is_empty()
+    {
         PlannedAction::Update
     } else {
         PlannedAction::Same
@@ -10427,6 +10456,7 @@ fn plan_generated_write_with_static_sources_and_options(
     Ok(GeneratedWritePlan {
         files: planned_files,
         changed,
+        stale,
         unknown,
         conflicts,
         ownership_present: matches!(state_file, OwnershipStateFile::Present(_)),
@@ -10519,7 +10549,8 @@ fn generated_check_error(
             })
         })
     };
-    let outputs_unchanged = plan.changed.is_empty() && plan.unknown.is_empty();
+    let outputs_unchanged =
+        plan.changed.is_empty() && plan.stale.is_empty() && plan.unknown.is_empty();
     if outputs_unchanged
         && plan.differences() == [PathBuf::from(OWNERSHIP_STATE)]
         && let Some(error) = input_change(plan)
@@ -10692,6 +10723,7 @@ fn apply_generated_write_plan_with_static_sources_and_lock(
     // file exactly matches this renderer's output. `verify_generated_ownership`
     // rejects any divergent file before this point, including under `--force`.
     if plan.changed.is_empty()
+        && plan.stale.is_empty()
         && plan.unknown.is_empty()
         && (!plan.ownership_present || plan.ownership_needs_refresh)
     {
@@ -10739,7 +10771,13 @@ fn revalidate_unknown_tree(
     symlinks: &BTreeMap<PathBuf, PathBuf>,
     plan: &GeneratedWritePlan,
 ) -> Result<(), GeneratorError> {
-    let expected = expected_tree_paths(files, symlinks);
+    let state_path = PathBuf::from(OWNERSHIP_STATE);
+    let state_preimage = capture_file_preimage(&root.join(&state_path), &state_path)?;
+    let recorded = match parse_ownership_state(root, &state_preimage)? {
+        OwnershipStateFile::Present(state) => Some(state.outputs),
+        OwnershipStateFile::Absent | OwnershipStateFile::ForeignSchema { .. } => None,
+    };
+    let expected = expected_tree_paths(files, symlinks, recorded.as_ref());
     let current = collect_unknown_tree_entries(root, &expected)?;
     let planned = plan
         .unknown
@@ -10895,6 +10933,11 @@ impl StagedTree {
                 FilePreimage::Missing => return Err(preimage_changed(&file.path)),
             }
         }
+        for relative in &plan.stale {
+            let planned =
+                planned_file(plan, relative, "generated plan has no stale-file preimage")?;
+            self.move_aside(root, relative, &planned.preimage)?;
+        }
         for relative in &plan.changed {
             if let Some(target) = symlinks.get(relative) {
                 let planned = planned_file(plan, relative, "generated plan has no file preimage")?;
@@ -10957,6 +11000,7 @@ impl StagedTree {
             .map(|file| file.path.clone())
             .collect::<BTreeSet<_>>();
         let mut written = plan.changed.clone();
+        written.extend(plan.stale.iter().cloned());
         written.extend(plan.unknown.iter().map(|file| file.path.clone()));
         if state_installed {
             written.push(ownership_path);
@@ -12371,6 +12415,56 @@ fn is_known_legacy_workflows_agents_md(relative: &Path, current: &[u8]) -> bool 
         && current == LEGACY_WORKFLOWS_AGENTS_MD.as_bytes()
 }
 
+fn stale_owned_files(
+    root: &Path,
+    files: &BTreeMap<PathBuf, String>,
+    symlinks: &BTreeMap<PathBuf, PathBuf>,
+    ownership: Option<&BTreeMap<PathBuf, u64>>,
+) -> Result<Vec<PlannedFile>, GeneratorError> {
+    let Some(ownership) = ownership else {
+        return Ok(Vec::new());
+    };
+    let mut stale = Vec::new();
+    for (relative, expected) in ownership {
+        if files.contains_key(relative) || symlinks.contains_key(relative) {
+            continue;
+        }
+        // Only `.github` collateral outside the workflows directory follows
+        // the digest-verified stale path. Recorded workflow outputs are
+        // force-gated through the unknown walk instead (they are excluded
+        // from `expected` in `expected_tree_paths`), and recorded entries
+        // outside `.github` are dropped silently when state refreshes.
+        if !relative.starts_with(Path::new(".github"))
+            || relative.starts_with(Path::new(".github/workflows"))
+        {
+            continue;
+        }
+        let path = root.join(relative);
+        if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return Err(GeneratorError::usage(format!(
+                "refusing to remove symlinked stale generated file: {}",
+                path.display()
+            )));
+        }
+        let preimage = capture_file_preimage(&path, relative)?;
+        let Some(current) = preimage.bytes() else {
+            continue;
+        };
+        if content_digest_bytes(current) != *expected {
+            return Err(GeneratorError::usage(format!(
+                "stale generated file was manually modified: {}",
+                relative.display()
+            )));
+        }
+        stale.push(PlannedFile {
+            path: relative.clone(),
+            action: PlannedAction::Delete,
+            preimage,
+        });
+    }
+    Ok(stale)
+}
+
 /// The generation inputs a recorded state file pins: the repo-owned config
 /// digest, the scanned shape digest, and the generator revision.
 ///
@@ -12671,16 +12765,42 @@ fn display_paths<'a>(paths: impl Iterator<Item = &'a PathBuf>) -> String {
         .join(", ")
 }
 
-/// Every path the unknown walk excuses: current renderer outputs and the
-/// ownership state. Sidecar rows omitted by the current renderer remain
-/// ordinary inputs and cannot expand the generator's deletion authority.
+/// Whether the parsed ownership state records a generated output at
+/// `relative`. Missing state records nothing: every unknown entry is then
+/// a foreign body.
+fn recorded_outputs_contain(ownership: Option<&OwnershipState>, relative: &Path) -> bool {
+    ownership
+        .map(|state| state.outputs.contains_key(relative))
+        .unwrap_or(false)
+}
+
+/// Every path the unknown walk excuses: current renderer outputs, the
+/// ownership state, and recorded non-workflow collateral (which follows the
+/// digest-verified stale path instead). Recorded-but-unrendered workflows
+/// stay unexpected so the walk surfaces them as force-gated stale outputs.
 fn expected_tree_paths(
     files: &BTreeMap<PathBuf, String>,
     symlinks: &BTreeMap<PathBuf, PathBuf>,
+    recorded: Option<&BTreeMap<PathBuf, u64>>,
 ) -> BTreeSet<PathBuf> {
     let mut expected = BTreeSet::from([PathBuf::from(OWNERSHIP_STATE)]);
     expected.extend(files.keys().cloned());
     expected.extend(symlinks.keys().cloned());
+    if let Some(recorded) = recorded {
+        // Recorded workflow outputs stay out of `expected` so the unknown
+        // walk surfaces them: unrendered recorded workflows are force-gated
+        // stale outputs, not silently kept collateral. Recorded entries
+        // outside `.github` are out of the walk's scope either way.
+        expected.extend(
+            recorded
+                .keys()
+                .filter(|relative| {
+                    relative.starts_with(Path::new(".github"))
+                        && !relative.starts_with(Path::new(".github/workflows"))
+                })
+                .cloned(),
+        );
+    }
     expected
 }
 
@@ -13917,14 +14037,14 @@ mod tests {
             "write owned-output parent alias target",
         );
         must(
-            symlink("workflows", root.join(".github/WORKFLOWS")),
+            symlink("workflows", root.join(".github/flows")),
             "create same-depth parent alias",
         );
 
         assert!(must(
             scanner_path_matches_owned_path(
                 &root,
-                ".github/WORKFLOWS/generated.yml",
+                ".github/flows/generated.yml",
                 ".github/workflows/generated.yml",
             ),
             "same-depth parent alias",
@@ -27579,6 +27699,7 @@ channel = "stable"
         let plan = GeneratedWritePlan {
             files: Vec::new(),
             changed: Vec::new(),
+            stale: Vec::new(),
             unknown: Vec::new(),
             conflicts: Vec::new(),
             ownership_present: false,
@@ -27670,6 +27791,7 @@ channel = "stable"
                 preimage,
             }],
             changed: vec![relative.clone()],
+            stale: Vec::new(),
             unknown: Vec::new(),
             conflicts: Vec::new(),
             ownership_present: false,
@@ -27760,6 +27882,7 @@ channel = "stable"
                 preimage,
             }],
             changed: vec![relative.clone()],
+            stale: Vec::new(),
             unknown: Vec::new(),
             conflicts: Vec::new(),
             ownership_present: false,
@@ -27976,6 +28099,7 @@ channel = "stable"
                 preimage: FilePreimage::Missing,
             }],
             changed: vec![relative],
+            stale: Vec::new(),
             unknown: Vec::new(),
             conflicts: Vec::new(),
             ownership_present: false,
@@ -28043,6 +28167,7 @@ channel = "stable"
         let plan = GeneratedWritePlan {
             files: Vec::new(),
             changed: Vec::new(),
+            stale: Vec::new(),
             unknown: Vec::new(),
             conflicts: Vec::new(),
             ownership_present: false,
@@ -28174,11 +28299,9 @@ channel = "stable"
         );
         let error = must_some(
             write_generated(&root, &current, false, false, false).err(),
-            "reject unowned symlinked legacy guide",
+            "reject symlinked legacy guide",
         );
-        assert!(error
-            .to_string()
-            .contains("outside the Velnor workflow generator"));
+        assert!(error.to_string().contains("symlinked stale generated file"));
         assert!(fs::symlink_metadata(root.join(&guide)).is_ok());
         assert!(must(fs::read_dir(&outside), "read outside directory")
             .next()

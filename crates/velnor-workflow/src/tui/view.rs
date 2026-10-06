@@ -935,6 +935,7 @@ mod tests {
                 },
             ],
             changed: Vec::new(),
+            stale: Vec::new(),
             unknown: Vec::new(),
             conflicts: Vec::new(),
             ownership_present: true,

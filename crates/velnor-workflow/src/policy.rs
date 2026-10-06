@@ -4906,15 +4906,9 @@ fn canonical_velnor_lane_admission(
         ));
     }
     let dispatch = if lanes_input {
-        format!(
-            "github.ref=='refs/heads/{}'&&(github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor')",
-            policy.default_branch
-        )
+        "github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor'".to_owned()
     } else {
-        velnor_dispatch_expression(
-            matches!(automatic, RunnerMode::Velnor | RunnerMode::Both),
-            &policy.default_branch,
-        )
+        velnor_dispatch_expression(matches!(automatic, RunnerMode::Velnor | RunnerMode::Both))
     };
     let automatic = matches!(automatic, RunnerMode::Velnor | RunnerMode::Both).then(|| {
         if policy.pull_request_on_velnor {
@@ -4938,15 +4932,13 @@ fn canonical_velnor_lane_admission(
     })
 }
 
-fn velnor_dispatch_expression(include_default: bool, default_branch: &str) -> String {
+fn velnor_dispatch_expression(include_default: bool) -> String {
     let choices = if include_default {
-        "github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'||github.event.inputs.runner==''"
+        "github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''"
     } else {
-        "github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'"
+        "github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'"
     };
-    format!(
-        "github.ref=='refs/heads/{default_branch}'&&(github.event_name=='workflow_dispatch'&&({choices}))"
-    )
+    format!("github.event_name == 'workflow_dispatch' && ({choices})")
 }
 
 fn inspect_workflow(

@@ -176,12 +176,13 @@ fn find_docker_executable() -> Result<(PathBuf, OsString), String> {
         {
             continue;
         }
-        let executable = fs::canonicalize(&candidate).map_err(|error| {
-            format!(
-                "resolve trusted Docker executable {}: {error}",
-                candidate.display()
-            )
-        })?;
+        // Execute through the `docker` leaf name: resolving the leaf rewrites
+        // argv0 and breaks multi-call binaries that dispatch on it (OrbStack's
+        // `docker` is a symlink to its `docker-tools` dispatcher, which
+        // rejects any other argv0). The directory above is already
+        // canonicalized and all metadata checks follow links, so the trust
+        // checks still describe the executed file.
+        let executable = candidate;
         if !trusted_directories.iter().any(|path| path == &directory) {
             trusted_directories.push(directory.clone());
         }
@@ -2623,10 +2624,10 @@ mod tests {
 
     impl TestSocket {
         fn new(label: &str) -> Self {
-            let root = env::temp_dir().join(format!(
-                "velnor-candidate-docker-test-{label}-{}",
-                crate::unique_suffix()
-            ));
+            // Bind under `/tmp` with a short stem: `TMPDIR` on macOS plus the
+            // unique suffix overflows `SUN_LEN`, so a temp-dir socket path
+            // cannot bind there.
+            let root = PathBuf::from(format!("/tmp/vcnd-{label}-{}", crate::unique_suffix()));
             fs::create_dir(&root).unwrap_or_else(|error| {
                 panic!(
                     "create test Docker socket directory {}: {error}",

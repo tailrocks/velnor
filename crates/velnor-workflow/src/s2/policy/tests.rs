@@ -905,7 +905,10 @@ fn owner_policy_rejects_merge_sha_wrong_head_repository_and_revision() {
         declared_ruleset_contexts: "ci-required,DCO,Policy",
     });
     assert!(
-        job.contains("actions/workflows/ci-pr.yml/runs?head_sha=$CANDIDATE_SHA"),
+        job.contains("actions/workflows/ci-pr.yml/runs?head_sha={candidate_sha}")
+            && job.contains(
+                "\"$transport_helper\" select \"$trusted_github_host\" \"$GITHUB_REPOSITORY\" \"$CANDIDATE_SHA\""
+            ),
         "candidate polling is keyed by the resolved PR head: {job}"
     );
     assert!(

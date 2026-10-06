@@ -644,15 +644,19 @@ mod tests {
 
     #[test]
     fn provider_and_scope_overrides_are_typed_and_fall_back_independently() {
-        let base = crate_set(RustTestRunner::CargoTest);
-        let custom = RustPhaseSet::custom(["mise run verify-docs".to_owned()]);
+        // Nextest never runs doctests, so the canonical crate set keeps its
+        // separate doctest phase valid; a `cargo test` runner would already
+        // cover doctests and must not list the phase.
+        let base = crate_set(RustTestRunner::Nextest);
         let mut contract = RustValidationContract::new(RustCommandMatrix {
             affected: base.clone(),
             full: base,
         });
-        contract
-            .set_mut(RustProvider::Github, RustScope::Affected)
-            .commands = custom.commands.clone();
+        contract.set_custom(
+            RustProvider::Github,
+            RustScope::Affected,
+            ["mise run verify-docs".to_owned()],
+        );
 
         assert_eq!(
             contract

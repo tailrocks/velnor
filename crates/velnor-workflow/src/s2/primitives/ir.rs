@@ -9979,7 +9979,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             trusted_gate: gate.as_deref(),
             default_branch: &self.default_branch,
             declared_ruleset_contexts: &self.declared_ruleset_contexts,
-            #[cfg(test)]
             candidate_artifact_wiring: crate::candidate_artifact_wiring_enabled(
                 &self.workflow_revision,
             ),

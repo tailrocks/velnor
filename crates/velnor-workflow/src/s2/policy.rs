@@ -3261,7 +3261,6 @@ fn canonical_api_step_findings(
             contexts.into_iter().collect::<Vec<_>>().join(",")
         };
         let rendered = super::policy_job(&super::PolicyJobSpec {
-            #[cfg(test)]
             candidate_artifact_wiring: true,
             name: "Policy",
             revision: &revision,
@@ -5083,7 +5082,7 @@ fn is_approved_dynamic_runner(label: &str) -> bool {
 /// equals a declared selector's whole set is that provider; anything else
 /// static is foreign. Label substrings are never consulted.
 fn classify_static_label(label: &str, velnor_policy: &VelnorPolicyContract) -> RunnerAnalysis {
-    if super::provider::is_github_owned_label(label) {
+    if super::provider::is_documented_github_hosted_image(label) {
         return RunnerAnalysis::default();
     }
     match velnor_policy.provider_for_labels(&[label]) {

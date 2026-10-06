@@ -1746,7 +1746,7 @@ fn required_artifact_lanes_input_contract() {
             "github",
             "inputs.lanes != 'velnor'",
             "inputs.lanes == 'velnor'",
-            "${{ (github.ref=='refs/heads/main'&&github.event_name=='workflow_dispatch'&&inputs.lanes=='velnor') && fromJSON('[\"self-hosted\",\"velnor\"]') || \"ubuntu-24.04\" }}",
+            "${{ (github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor') && fromJSON('[\"self-hosted\",\"velnor\"]') || \"ubuntu-24.04\" }}",
         ),
         (
             "velnor",

@@ -366,6 +366,12 @@ mod tests {
                 root.join("crates/velnor-workflow/src/lib.rs"),
                 "pinned source\n",
             )?;
+            fs::write(
+                root.join("crates/velnor-workflow/Cargo.toml"),
+                "[package]\nname = \"velnor-workflow\"\n[dependencies]\n",
+            )?;
+            fs::write(root.join("Cargo.toml"), "[workspace]\n")?;
+            fs::write(root.join("Cargo.lock"), "# lock\n")?;
             fs::write(root.join("mock-bin/gh"), "#!/bin/sh\n[ \"$LOOKUP_STATUS\" = network ] && exit 1\nprintf 'HTTP/2 %s\\n' \"$LOOKUP_STATUS\"\n[ \"$LOOKUP_STATUS\" = 200 ]\n")?;
             command(&root, "chmod", &["+x", "mock-bin/gh"])?;
             command(&root, "git", &["init", "-q"])?;
@@ -375,7 +381,7 @@ mod tests {
                 "git",
                 &["config", "user.email", "fixture@example.invalid"],
             )?;
-            command(&root, "git", &["add", "crates"])?;
+            command(&root, "git", &["add", "crates", "Cargo.toml", "Cargo.lock"])?;
             command(
                 &root,
                 "git",
