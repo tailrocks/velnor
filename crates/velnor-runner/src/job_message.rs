@@ -226,14 +226,14 @@ macro_rules! member {
     };
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct Member {
     name: &'static str,
     aliases: &'static [&'static str],
     shape: Shape,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Shape {
     Raw,
     String,
@@ -420,6 +420,17 @@ fn wire_member_is_null(value: &Value, name: &str) -> bool {
             .find(|(member, _)| clr_ordinal_ignore_case_eq(member, name))
             .is_some_and(|(_, value)| value.is_null())
     })
+}
+
+/// Whether the wire message carried a non-null `Resources.Containers`
+/// collection for legacy sidecar aliases to resolve against.
+fn wire_resources_containers_present(value: &Value) -> bool {
+    value
+        .as_object()
+        .and_then(|object| clr_object_member(object, "Resources"))
+        .and_then(Value::as_object)
+        .and_then(|resources| clr_object_member(resources, "Containers"))
+        .is_some_and(|containers| !containers.is_null())
 }
 
 fn validate_context_data_root_shape(value: &Value) -> Result<()> {
@@ -683,7 +694,11 @@ fn json_number_to_value(number: &JsonNumber) -> Result<Value> {
 
 fn json_number_to_double(number: &JsonNumber) -> Result<f64> {
     match &number.kind {
-        JsonNumberKind::Int64(value) => Ok(*value as f64),
+        // Integers convert through the truncating BigInteger cast, not the
+        // round-to-nearest hardware conversion: 9007199254740995 projects to
+        // 9007199254740994.0.
+        JsonNumberKind::Int64(value) => clr_big_integer_to_f64(&value.to_string())
+            .context("invalid CLR Int64 Double conversion"),
         JsonNumberKind::BigInteger(value) => {
             clr_big_integer_to_f64(value).context("invalid CLR BigInteger Double conversion")
         }
@@ -739,10 +754,12 @@ fn clr_double_value(value: &mut Value) -> Result<()> {
         }
         Value::Number(number) => {
             if let Some(integer) = number.as_i64() {
-                integer as f64
+                clr_big_integer_to_f64(&integer.to_string())
+                    .context("invalid CLR Int64 Double conversion")?
             } else if let Some(integer) = number.as_u64() {
                 if integer <= i64::MAX as u64 {
-                    integer as f64
+                    clr_big_integer_to_f64(&integer.to_string())
+                        .context("invalid CLR Int64 Double conversion")?
                 } else {
                     clr_big_integer_to_f64(&integer.to_string())
                         .context("invalid CLR BigInteger Double conversion")?
@@ -976,8 +993,8 @@ const CONTEXT_PAIR_FIELDS: &[Member] = &[
 const WORKSPACE_FIELDS: &[Member] = &[member!("Clean", Shape::String)];
 
 const ACTIONS_ENVIRONMENT_FIELDS: &[Member] = &[
-    member!("Name", Shape::String),
-    member!("Url", Shape::TemplateToken),
+    member!("name", Shape::String),
+    member!("url", Shape::TemplateToken),
 ];
 
 const SERVICE_ENDPOINT_REFERENCE_FIELDS: &[Member] =
@@ -1158,8 +1175,10 @@ fn normalize_template_token(value: &mut Value) -> Result<()> {
             let integer = number
                 .as_i64()
                 .context("TemplateToken integer is outside Int64")?;
+            let converted = clr_big_integer_to_f64(&integer.to_string())
+                .context("finite Int64 converts to finite Double")?;
             *value = Value::Number(
-                serde_json::Number::from_f64(integer as f64)
+                serde_json::Number::from_f64(converted)
                     .context("finite Int64 converts to finite Double")?,
             );
         }
@@ -1211,7 +1230,10 @@ fn normalize_template_token(value: &mut Value) -> Result<()> {
         6 => {
             if let Value::Object(object) = value
                 && let Some(token) = object.get_mut("num")
+                && !token.is_null()
             {
+                // The member pass already projected an empty string to null;
+                // only convert a value it has not normalized yet.
                 clr_double_value(token)?;
             }
         }
@@ -1264,6 +1286,20 @@ fn normalize_pipeline_context_data(value: &mut Value) -> Result<()> {
         *value = Value::Null;
         return Ok(());
     }
+    if value
+        .as_object()
+        .is_some_and(|object| clr_object_member(object, "t").is_none())
+    {
+        // Raw pre-hydration context carries plain JSON objects, not wire
+        // envelopes. Tag the payload as the string kind without dropping any
+        // member: the CLR projection reads a string envelope with no payload
+        // as empty, while the typed projection surfaces the kept members as
+        // an object.
+        if let Value::Object(object) = value {
+            object.insert("t".to_owned(), Value::from(0));
+        }
+        return Ok(());
+    }
     let Some(kind) = context_data_type(value)? else {
         *value = Value::Null;
         return Ok(());
@@ -1310,7 +1346,10 @@ fn normalize_pipeline_context_data(value: &mut Value) -> Result<()> {
         4 => {
             if let Value::Object(object) = value
                 && let Some(number) = object.get_mut("n")
+                && !number.is_null()
             {
+                // The member pass already projected an empty string to null;
+                // only convert a value it has not normalized yet.
                 clr_double_value(number)?;
             }
         }
@@ -1325,9 +1364,11 @@ fn context_data_number_to_double(number: &serde_json::Number) -> Result<serde_js
             .as_f64()
             .context("invalid PipelineContextData Double")?
     } else {
-        number
+        let integer = number
             .as_i64()
-            .context("PipelineContextData integer is outside Int64")? as f64
+            .context("PipelineContextData integer is outside Int64")?;
+        clr_big_integer_to_f64(&integer.to_string())
+            .context("invalid PipelineContextData Int64 Double conversion")?
     };
     serde_json::Number::from_f64(value).context("PipelineContextData Double must be finite")
 }
@@ -1460,10 +1501,13 @@ fn normalize_mutable_converter_collection_aliases(
 }
 
 fn is_mutable_converter_collection(member: &Member) -> bool {
+    // Table identity compares by content: the field tables are `const`
+    // items, so each use site may hold a distinct address and pointer
+    // equality is unspecified.
     match (member.name, member.shape) {
         ("seq", Shape::TemplateTokenArray) | ("a", Shape::PipelineContextArray) => true,
-        ("map", Shape::Array(fields)) => std::ptr::eq(fields, TEMPLATE_PAIR_FIELDS),
-        ("d", Shape::Array(fields)) => std::ptr::eq(fields, CONTEXT_PAIR_FIELDS),
+        ("map", Shape::Array(fields)) => fields == TEMPLATE_PAIR_FIELDS,
+        ("d", Shape::Array(fields)) => fields == CONTEXT_PAIR_FIELDS,
         _ => false,
     }
 }
@@ -1490,7 +1534,7 @@ fn normalize_converter_collection_occurrence(member: &Member, value: &mut Value)
             };
             for item in items {
                 if item.is_null() {
-                    if std::ptr::eq(fields, TEMPLATE_PAIR_FIELDS) {
+                    if fields == TEMPLATE_PAIR_FIELDS {
                         anyhow::bail!("TemplateToken map item must be an object");
                     }
                     continue;
@@ -1705,6 +1749,11 @@ pub struct WireAgentJobRequestMessage {
     explicit_null_timeline: bool,
     #[serde(skip)]
     explicit_null_resources: bool,
+    /// Whether the wire message carried a non-null `Resources.Containers`
+    /// collection. Legacy sidecar aliases resolve strictly against a present
+    /// collection and pass through unresolved when there is none.
+    #[serde(skip)]
+    explicit_containers_collection: bool,
 }
 
 /// Consumer-facing job model. Collection entries required by Velnor are
@@ -1847,8 +1896,11 @@ impl WireAgentJobRequestMessage {
                 projection.insert(name.to_owned(), value.clone());
             }
         }
+        let explicit_containers_collection =
+            wire_resources_containers_present(&Value::Object(projection.clone()));
         let mut message: Self = serde_json::from_value(Value::Object(projection))
             .context("parse callback fields for AgentJobRequestMessage")?;
+        message.explicit_containers_collection = explicit_containers_collection;
         message.validate_jtoken_context_shapes()?;
         message.on_deserialized()
     }
@@ -1883,12 +1935,14 @@ impl WireAgentJobRequestMessage {
         let explicit_null_plan = wire_member_is_null(&value, "Plan");
         let explicit_null_timeline = wire_member_is_null(&value, "Timeline");
         let explicit_null_resources = wire_member_is_null(&value, "Resources");
+        let explicit_containers_collection = wire_resources_containers_present(&value);
         let explicit_display_names = wire_step_display_name_presence(&value);
         let mut message: Self =
             serde_json::from_value(value).context("parse AgentJobRequestMessage")?;
         message.explicit_null_plan = explicit_null_plan;
         message.explicit_null_timeline = explicit_null_timeline;
         message.explicit_null_resources = explicit_null_resources;
+        message.explicit_containers_collection = explicit_containers_collection;
         for (slot, is_explicit) in message.steps.iter_mut().zip(explicit_display_names) {
             if let Some(step) = slot {
                 step.display_name_is_explicit = is_explicit;
@@ -2069,6 +2123,12 @@ impl WireAgentJobRequestMessage {
                 .resources
                 .as_ref()
                 .context("null Resources during sidecar-container callback")?;
+            if resources.containers.is_empty() && !self.explicit_containers_collection {
+                // No Containers collection to resolve against: leave legacy
+                // sidecars unresolved instead of failing. A present
+                // collection resolves strictly below.
+                return Ok(());
+            }
             let mut entries = Vec::with_capacity(sidecars.len());
             for (network_alias, resource_alias) in sidecars {
                 let resource =
@@ -2480,7 +2540,7 @@ impl OrderedJsonValueExt for OrderedJsonValue {
             Shape::TemplateToken => self.into_clr_template_token(),
             Shape::TemplateTokenArray => match self {
                 Self::Undefined => Ok(Value::Null),
-                Self::Array(values) => values
+                Self::Array(values) => collapse_trailing_elisions(values)
                     .into_iter()
                     .map(OrderedJsonValue::into_clr_template_token)
                     .collect::<Result<Vec<_>>>()
@@ -2491,7 +2551,7 @@ impl OrderedJsonValueExt for OrderedJsonValue {
             Shape::PipelineContextData => self.into_clr_context_data(),
             Shape::PipelineContextArray => match self {
                 Self::Undefined => Ok(Value::Null),
-                Self::Array(values) => values
+                Self::Array(values) => collapse_trailing_elisions(values)
                     .into_iter()
                     .map(OrderedJsonValue::into_clr_context_data)
                     .collect::<Result<Vec<_>>>()
@@ -2512,6 +2572,7 @@ impl OrderedJsonValueExt for OrderedJsonValue {
             Self::Object(entries) => {
                 let value = ContextValue::case_sensitive_object(ordered_context_entries(entries)?)
                     .context("invalid ServiceEndpoint.OperationStatus JObject")?;
+                let value = sort_jtoken_object_entries(value);
                 serde_json::to_value(value).context("encode ServiceEndpoint.OperationStatus")
             }
             _ => anyhow::bail!("ServiceEndpoint.OperationStatus must be a JObject or null"),
@@ -2526,6 +2587,7 @@ impl OrderedJsonValueExt for OrderedJsonValue {
         };
         let value = ContextValue::object(ordered_context_entries(entries)?)
             .context("invalid ResourceProperties JToken tree")?;
+        let value = sort_jtoken_object_entries(value);
         serde_json::to_value(value).context("encode ResourceProperties JToken tree")
     }
 
@@ -2587,7 +2649,7 @@ impl OrderedJsonValueExt for OrderedJsonValue {
                 // cannot faithfully represent BigInteger/nonfinite JTokens.
                 continue;
             };
-            if std::ptr::eq(members, CONTEXT_PAIR_FIELDS)
+            if members == CONTEXT_PAIR_FIELDS
                 && member.name == "v"
                 && matches!(&value, OrderedJsonValue::Constructor { .. })
             {
@@ -2605,14 +2667,13 @@ impl OrderedJsonValueExt for OrderedJsonValue {
                 shape => value.into_clr_value(shape)?,
             };
             if let Some(previous) = previous {
-                let merged =
-                    if std::ptr::eq(members, AUTHORIZATION_FIELDS) && member.name == "Parameters" {
-                        retain_nonempty_authorization_parameters(previous, value)
-                    } else if converter_members_replace_duplicates(members) {
-                        value
-                    } else {
-                        merge_ordered_clr_value(member.shape, previous, value)
-                    };
+                let merged = if members == AUTHORIZATION_FIELDS && member.name == "Parameters" {
+                    retain_nonempty_authorization_parameters(previous, value)
+                } else if converter_members_replace_duplicates(members) {
+                    value
+                } else {
+                    merge_ordered_clr_value(member.shape, previous, value)
+                };
                 object.insert(canonical.to_owned(), merged);
             } else {
                 object.insert(canonical.to_owned(), value);
@@ -2761,7 +2822,11 @@ impl OrderedJsonValueExt for OrderedJsonValue {
         let Self::Object(entries) = &value else {
             return match value {
                 Self::Number(number) => match number.kind {
-                    JsonNumberKind::Int64(value) => Ok(double_to_wire_value(value as f64)),
+                    JsonNumberKind::Int64(value) => {
+                        let converted = clr_big_integer_to_f64(&value.to_string())
+                            .context("invalid CLR Int64 Double conversion")?;
+                        Ok(double_to_wire_value(converted))
+                    }
                     JsonNumberKind::Float(value) => Ok(double_to_wire_value(value)),
                     JsonNumberKind::BigInteger(_) => {
                         anyhow::bail!("TemplateToken integer is outside Int64")
@@ -2808,7 +2873,11 @@ impl OrderedJsonValueExt for OrderedJsonValue {
             return match value {
                 Self::Array(_) => Ok(Value::Null),
                 Self::Number(number) => match number.kind {
-                    JsonNumberKind::Int64(value) => Ok(double_to_wire_value(value as f64)),
+                    JsonNumberKind::Int64(value) => {
+                        let converted = clr_big_integer_to_f64(&value.to_string())
+                            .context("invalid CLR Int64 Double conversion")?;
+                        Ok(double_to_wire_value(converted))
+                    }
                     JsonNumberKind::Float(value) => Ok(double_to_wire_value(value)),
                     JsonNumberKind::BigInteger(_) => {
                         anyhow::bail!("PipelineContextData integer is outside Int64")
@@ -2888,20 +2957,20 @@ impl OrderedJsonValueExt for OrderedJsonValue {
 }
 
 fn converter_members_replace_duplicates(members: &'static [Member]) -> bool {
-    std::ptr::eq(members, TEMPLATE_TOKEN_DISCRIMINATOR_FIELDS)
-        || std::ptr::eq(members, TEMPLATE_TOKEN_STRING_FIELDS)
-        || std::ptr::eq(members, TEMPLATE_TOKEN_SEQUENCE_FIELDS)
-        || std::ptr::eq(members, TEMPLATE_TOKEN_MAPPING_FIELDS)
-        || std::ptr::eq(members, TEMPLATE_TOKEN_EXPRESSION_FIELDS)
-        || std::ptr::eq(members, TEMPLATE_TOKEN_BOOLEAN_FIELDS)
-        || std::ptr::eq(members, TEMPLATE_TOKEN_NUMBER_FIELDS)
-        || std::ptr::eq(members, PIPELINE_CONTEXT_DISCRIMINATOR_FIELDS)
-        || std::ptr::eq(members, PIPELINE_CONTEXT_STRING_FIELDS)
-        || std::ptr::eq(members, PIPELINE_CONTEXT_ARRAY_FIELDS)
-        || std::ptr::eq(members, PIPELINE_CONTEXT_DICTIONARY_FIELDS)
-        || std::ptr::eq(members, PIPELINE_CONTEXT_BOOLEAN_FIELDS)
-        || std::ptr::eq(members, PIPELINE_CONTEXT_NUMBER_FIELDS)
-        || std::ptr::eq(members, PIPELINE_CONTEXT_CASE_SENSITIVE_DICTIONARY_FIELDS)
+    members == TEMPLATE_TOKEN_DISCRIMINATOR_FIELDS
+        || members == TEMPLATE_TOKEN_STRING_FIELDS
+        || members == TEMPLATE_TOKEN_SEQUENCE_FIELDS
+        || members == TEMPLATE_TOKEN_MAPPING_FIELDS
+        || members == TEMPLATE_TOKEN_EXPRESSION_FIELDS
+        || members == TEMPLATE_TOKEN_BOOLEAN_FIELDS
+        || members == TEMPLATE_TOKEN_NUMBER_FIELDS
+        || members == PIPELINE_CONTEXT_DISCRIMINATOR_FIELDS
+        || members == PIPELINE_CONTEXT_STRING_FIELDS
+        || members == PIPELINE_CONTEXT_ARRAY_FIELDS
+        || members == PIPELINE_CONTEXT_DICTIONARY_FIELDS
+        || members == PIPELINE_CONTEXT_BOOLEAN_FIELDS
+        || members == PIPELINE_CONTEXT_NUMBER_FIELDS
+        || members == PIPELINE_CONTEXT_CASE_SENSITIVE_DICTIONARY_FIELDS
 }
 
 fn ordered_action_reference_type(value: &OrderedJsonValue) -> Option<(ActionReferenceType, i32)> {
@@ -2970,6 +3039,60 @@ fn ordered_converter_i32(value: &OrderedJsonValue, field: &str) -> Result<Option
     i32::try_from(*integer)
         .map(Some)
         .with_context(|| format!("{field} integer is outside Int32"))
+}
+
+/// Collapse a trailing run of elision holes to a single hole in
+/// converter backing arrays. `[,]` parses to two holes (one per empty
+/// slot), which raw JToken trees keep; the typed token/context converters
+/// project the trailing run to one null instead.
+fn collapse_trailing_elisions(values: Vec<OrderedJsonValue>) -> Vec<OrderedJsonValue> {
+    let mut trimmed = values;
+    let mut trailing_holes = 0;
+    while trimmed
+        .last()
+        .is_some_and(|value| matches!(value, OrderedJsonValue::Undefined))
+    {
+        trimmed.pop();
+        trailing_holes += 1;
+    }
+    if trailing_holes > 0 {
+        trimmed.push(OrderedJsonValue::Undefined);
+    }
+    trimmed
+}
+
+/// Sort JToken object entries into canonical byte order. The `from_value`
+/// path iterates `serde_json::Map`s, which are already byte-ordered, so the
+/// ordered-reader path must sort explicitly for both parse paths to agree.
+fn sort_jtoken_object_entries(value: ContextValue) -> ContextValue {
+    match value {
+        ContextValue::Object {
+            case_sensitive,
+            mut entries,
+        } => {
+            for (_, member) in entries.iter_mut() {
+                let sorted =
+                    sort_jtoken_object_entries(std::mem::replace(member, ContextValue::Null));
+                *member = sorted;
+            }
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            ContextValue::Object {
+                case_sensitive,
+                entries,
+            }
+        }
+        ContextValue::Array(values) => {
+            ContextValue::Array(values.into_iter().map(sort_jtoken_object_entries).collect())
+        }
+        ContextValue::Constructor { name, arguments } => ContextValue::Constructor {
+            name,
+            arguments: arguments
+                .into_iter()
+                .map(sort_jtoken_object_entries)
+                .collect(),
+        },
+        other => other,
+    }
 }
 
 fn ordered_context_entries(
@@ -3080,7 +3203,7 @@ fn merge_ordered_clr_objects(members: &'static [Member], previous: Value, next: 
             previous.insert(name, value);
             continue;
         };
-        if std::ptr::eq(members, AUTHORIZATION_FIELDS) && member.name == "Parameters" {
+        if members == AUTHORIZATION_FIELDS && member.name == "Parameters" {
             // EndpointAuthorization.OnDeserialized copies the later
             // serialized parameter dictionary into a fresh
             // OrdinalIgnoreCase dictionary only when it contains entries.
@@ -3253,11 +3376,22 @@ fn container_template_token(resource: &ContainerResource) -> Result<Value> {
 fn pipeline_context_value(value: &Value) -> Result<Value> {
     let Value::Object(object) = value else {
         return match value {
+            // PipelineContextDataJsonConverter returns null for JSON arrays.
             Value::Array(_) => Ok(Value::Null),
             Value::Number(number) => Ok(Value::Number(context_data_number_to_double(number)?)),
             _ => Ok(value.clone()),
         };
     };
+    if clr_object_member(object, "t").is_none() {
+        // Raw pre-hydration context carries plain JSON objects, not wire
+        // envelopes; materialize them member-wise instead of misreading the
+        // untagged object as an empty string envelope.
+        let mut values = serde_json::Map::new();
+        for (key, member) in object {
+            values.insert(key.clone(), pipeline_context_value(member)?);
+        }
+        return Ok(Value::Object(values));
+    }
     let Some(kind) = context_data_type(value)? else {
         return Ok(Value::Null);
     };
@@ -3350,6 +3484,7 @@ fn pipeline_context_value(value: &Value) -> Result<Value> {
 fn pipeline_context_context_value(value: &Value) -> Result<ContextValue> {
     let Some(object) = value.as_object() else {
         return match value {
+            // PipelineContextDataJsonConverter returns null for JSON arrays.
             Value::Array(_) => Ok(ContextValue::Null),
             Value::Number(number) => {
                 Ok(ContextValue::Number(context_data_number_to_double(number)?))
@@ -3357,18 +3492,50 @@ fn pipeline_context_context_value(value: &Value) -> Result<ContextValue> {
             _ => ContextValue::from_json(value.clone()).map_err(anyhow::Error::from),
         };
     };
+    if clr_object_member(object, "t").is_none() {
+        // Raw pre-hydration context carries plain JSON objects, not wire
+        // envelopes; materialize them member-wise instead of misreading the
+        // untagged object as an empty string envelope.
+        let entries = object
+            .iter()
+            .map(|(key, member)| {
+                pipeline_context_context_value(member).map(|value| (key.clone(), value))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        return ContextValue::object(entries)
+            .map_err(anyhow::Error::from)
+            .context("invalid raw PipelineContextData object");
+    }
     let Some(kind) = context_data_type(value)? else {
         return Ok(ContextValue::Null);
     };
     let member = |name: &str| clr_object_member(object, name);
     match kind {
-        0 => Ok(ContextValue::String(
-            member("s")
-                .map(clr_string_value)
-                .transpose()?
-                .flatten()
-                .unwrap_or_default(),
-        )),
+        0 => {
+            if member("s").is_none() {
+                // A string envelope with no string payload carries no string;
+                // surface its remaining members as an object so raw
+                // pre-hydration payloads keep their shape. The discriminator
+                // itself is envelope framing, not data.
+                let entries = object
+                    .iter()
+                    .filter(|(key, _)| !clr_ordinal_ignore_case_eq(key, "t"))
+                    .map(|(key, value)| {
+                        pipeline_context_context_value(value).map(|value| (key.clone(), value))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                return ContextValue::object(entries)
+                    .map_err(anyhow::Error::from)
+                    .context("invalid string-envelope object members");
+            }
+            Ok(ContextValue::String(
+                member("s")
+                    .map(clr_string_value)
+                    .transpose()?
+                    .flatten()
+                    .unwrap_or_default(),
+            ))
+        }
         1 => {
             let values = match member("a") {
                 Some(Value::Array(values)) => values
