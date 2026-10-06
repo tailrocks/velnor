@@ -1926,11 +1926,15 @@ fn reclaim_work_root_with_layout_on_device(
                             current.available_bytes,
                         );
                         if !goal.still_pressured(current, freed) {
+                            // This hook runs before every unlink of the
+                            // in-progress candidate. Bailing here would abort
+                            // that removal mid-way — typically because this
+                            // pass's own deletions just cleared the goal —
+                            // leaving a half-removed directory that is
+                            // neither reported nor accounted. Finish the
+                            // candidate; the loop-top sample stops the pass
+                            // before the next one.
                             pressure_cleared.set(true);
-                            bail!(
-                                "pressure cleared before deleting {}",
-                                candidate.path.display()
-                            );
                         }
                     }
                     None => {
@@ -2012,9 +2016,6 @@ fn reclaim_work_root_with_layout_on_device(
                 }
             }
             Err(error) => {
-                if pressure_cleared.get() {
-                    break;
-                }
                 report
                     .failures
                     .push(format!("{}: {error}", candidate.path.display()));
