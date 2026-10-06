@@ -1,0 +1,39 @@
+# Neutral example: a main-branch-driven versioned-tool publisher for a Rust
+# binary tool.
+#
+# This file is a test fixture (see `versioned_tool_renders_end_to_end`): the
+# generator must accept it and render the five-job version graph — a PR-only
+# version gate, a manifest-version resolver, a published-reuse assert, a
+# target-by-lane matrix build, and a mutexed immutable publish — into the
+# row's own file with the row's own workflow name. All names are
+# fixture-local; no consumer repository is named.
+#
+# The version policy lives in named tasks the repository owns
+# (`check-example-tool-version`, `assert-example-tool-published`,
+# `build-example-tool`): generic code renders placement, gates, fetch depth,
+# and failure propagation only, never the product checks or the compile.
+schema = 1
+
+[generator]
+repository = "example/synthetic-release"
+
+[workflow]
+velnor_labels = ["self-hosted", "example-lane"]
+
+[[declare]]
+primitive = "release"
+file = "example-tool.yml"
+
+[declare.args]
+kind = "versioned-tool"
+package = "example-tool"
+binary = "example-tool"
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+version_manifest = "crates/example-tool/Cargo.toml"
+version_prefix = "example-tool-v"
+publish_group = "example-tap-publish"
+version_gate_tasks = ["check-example-tool-version"]
+assert_tasks = ["assert-example-tool-published"]
+build_tasks = ["build-example-tool"]
+push_paths = ["crates/example-tool/**"]
+pull_request_paths = ["crates/example-tool/**", "Cargo.lock", "rust-toolchain.toml"]

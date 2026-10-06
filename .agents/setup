@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+step() {
+  local label="$1"
+  shift
+  local started=$SECONDS
+  printf '==> %s\n' "$label"
+  "$@"
+  printf '    completed in %ss\n' "$((SECONDS - started))"
+}
+
+required_packages=(build-essential ca-certificates cmake curl pkg-config perl unzip xz-utils)
+missing_packages=()
+for package in "${required_packages[@]}"; do
+  if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q '^install ok installed$'; then
+    missing_packages+=("$package")
+  fi
+done
+
+if ((${#missing_packages[@]})); then
+  step "Refresh apt metadata" sudo apt-get update
+  step "Install system build dependencies" sudo apt-get install -y --no-install-recommends "${missing_packages[@]}"
+else
+  echo "==> System build dependencies already installed"
+fi
+
+mkdir -p "$HOME/.local/bin"
+mise_bin="$HOME/.local/bin/mise"
+if [[ ! -x "$mise_bin" ]]; then
+  echo "==> Install mise"
+  curl --fail --silent --show-error --location https://mise.run \
+    | MISE_INSTALL_PATH="$mise_bin" sh
+else
+  echo "==> mise already installed"
+fi
+
+profile_marker="# velnor mise toolchain"
+touch "$HOME/.bash_profile"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile"; then
+  cat >>"$HOME/.bash_profile" <<'EOF'
+
+# velnor mise toolchain
+if [[ -x "$HOME/.local/bin/mise" ]]; then
+  eval "$("$HOME/.local/bin/mise" activate bash)"
+fi
+EOF
+fi
+
+export PATH="$HOME/.local/bin:$PATH"
+step "Trust repository tool configuration" "$mise_bin" trust --yes "$repo_root/mise.toml"
+step "Install locked toolchain" "$mise_bin" install --locked
+step "Fetch locked Rust dependencies" "$mise_bin" exec -- cargo fetch --locked
+step "Install locked documentation dependencies" "$mise_bin" exec -- bun install --frozen-lockfile
+
+echo "==> Orb setup complete"

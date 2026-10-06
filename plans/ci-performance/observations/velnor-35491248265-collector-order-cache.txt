@@ -1,0 +1,19 @@
+2026-09-20T05:17:16.7948059Z No mbx cache found
+2026-09-20T05:17:22.5563834Z ##[group]rust-unit-collector: cd -- 'tools/unit-collector' && mbx fmt --manifest-path 'Cargo.toml' -- --check
+2026-09-20T05:17:22.6441333Z ##[group]rust-unit-collector: cd -- 'tools/unit-collector' && mbx nextest run --locked --all-features --package 'unit-collector' --no-tests pass
+2026-09-20T05:17:33.0883421Z     Finished `test` profile [unoptimized + debuginfo] target(s) in 10.04s
+2026-09-20T05:17:33.1636633Z      Summary [   0.052s] 42 tests run: 42 passed, 0 skipped
+2026-09-20T05:17:33.2003389Z mbx[cache]: object cache: 1 hits, 0 misses, 69 not looked up, 4 bypassed; 0 B downloaded, 0 B uploaded, 319.4 MiB stored locally
+2026-09-20T05:17:33.2004252Z mbx[cache]: 10.52s session; 0ns estimated compiler time avoided (summed across compilations)
+2026-09-20T05:17:33.2004822Z mbx[cache]: 69 compilations had no usable prior inputs or matching prediction for a lookup
+2026-09-20T05:17:33.2005378Z mbx[cache]: bypass reasons: 3 cc-missing-output, 1 native-library
+2026-09-20T05:17:33.2005956Z mbx[cache]: Cargo artifact reuse and CI cache archive transfers are not included above
+2026-09-20T05:17:33.2020139Z ##[group]rust-unit-collector: cd -- 'tools/unit-collector' && mbx clippy --locked --profile test --all-targets --all-features --package 'unit-collector' -- -D warnings
+2026-09-20T05:17:36.4560392Z     Finished `test` profile [unoptimized + debuginfo] target(s) in 3.20s
+2026-09-20T05:17:36.4731277Z mbx[cache]: object cache: 0 hits, 0 misses, 35 not looked up, 1 bypassed; 0 B downloaded, 0 B uploaded, 15.9 MiB stored locally
+2026-09-20T05:17:36.4732125Z mbx[cache]: 3.27s session; 0ns estimated compiler time avoided (summed across compilations)
+2026-09-20T05:17:36.4732849Z mbx[cache]: 35 compilations had no usable prior inputs or matching prediction for a lookup
+2026-09-20T05:17:36.4733417Z mbx[cache]: bypass reasons: 1 native-library
+2026-09-20T05:17:36.4733916Z mbx[cache]: Cargo artifact reuse and CI cache archive transfers are not included above
+2026-09-20T05:17:36.5342210Z [36;1mecho "VELNOR_CI_REPORT $report_json"[0m
+2026-09-20T05:17:36.5789080Z VELNOR_CI_REPORT {"schema_version":1,"job":"rust-unit-collector","log_present":true,"queue_seconds":null,"queue_source":null,"total_source":"job_markers","runner_setup_seconds":3,"selection_transport_seconds":0,"tool_bootstrap_seconds":12,"cache_prep_seconds":3,"cargo_fetch_seconds":1,"checks_wall_seconds":14,"checks_seconds":14,"cleanup_seconds":0,"total_seconds":33,"cache_outcomes":{"lane":"github","rustup":"exact","mold":"exact","cargo":"prefix","mbx":"prefix","docker_seed":null},"origin_downloads":{"updating_crates_io_index":0,"updating_git":0,"downloading_crates":0,"downloaded_lines":[]},"compiler":{"mbx_outcomes":["mbx[cache]: object cache: 1 hits, 0 misses, 69 not looked up, 4 bypassed; 0 B downloaded, 0 B uploaded, 319.4 MiB stored locally","mbx[cache]: object cache: 0 hits, 0 misses, 35 not looked up, 1 bypassed; 0 B downloaded, 0 B uploaded, 15.9 MiB stored locally"],"finished_segments":["    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.04s","    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.20s"],"compiling_lines":41}}

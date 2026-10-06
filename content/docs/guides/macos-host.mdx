@@ -1,0 +1,267 @@
+---
+title: "macOS on-demand host"
+---
+
+# macOS on-demand host
+
+`velnorctl host` runs a foreground, repository-scoped Velnor host on a Mac
+whose Docker daemon is a Linux VM (OrbStack or Docker Desktop). Jobs stay
+Linux container jobs: the host contributes capacity and a Docker endpoint, not
+a macOS runner. `macos-*` labels are still rejected (see
+[Execution](/guides/execution#what-velnor-does-not-support)).
+
+This is a recovery and development surface. It registers repository-scoped
+runners only and refuses organization URLs, so a laptop can never join the
+`velnor-trusted` fleet pool by accident.
+
+> Navigation: [← Operator guide](/guides/operator) · [Execution →](/guides/execution)
+
+## Prerequisites
+
+- **Docker daemon.** OrbStack or Docker Desktop, running. Velnor resolves the
+  endpoint the way the `docker` CLI does: `DOCKER_HOST`, then the current
+  Docker context (`~/.docker/config.json` → `currentContext`), then the
+  default socket. Every `velnorctl` surface (`host status`, `docker report`,
+  the runner) uses that one resolver, so they cannot disagree about which
+  daemon they mean.
+- **Job image.** `velnor/job-ubuntu:26.04` must exist on that daemon. Build it
+  from a checkout with `velnorctl host bootstrap-image` (below); `host start`
+  refuses to run when the image is missing rather than pulling one.
+- **`GITHUB_TOKEN`.** A short-lived token with repository administration
+  rights, exported in the environment. Tokens are never accepted as flags.
+- **Binaries.** `velnorctl` and `velnor-runner` built from the same checkout
+  (`cargo build --locked -p velnorctl -p velnor-runner`). Slot and job
+  children exec `velnor-runner` from beside `velnorctl`.
+- **Outbound network for those binaries.** The host talks to GitHub from
+  the `velnorctl` and `velnor-runner` processes themselves (api.github.com,
+  `*.actions.githubusercontent.com`, and the `*.blob.core.windows.net` log
+  and cache storage). A macOS outbound filter (Little Snitch and similar)
+  holds TCP connects from a binary it has no rule for; the connect times out
+  and the host prints `GitHub routing probe failed closed: … operation timed
+  out` and registers nothing. Allow both binaries before starting — they are
+  ad-hoc signed and rebuilt often, so the rule must follow the path. The
+  system `curl` is usually already allowed, and
+  `VELNOR_GITHUB_HTTP_TRANSPORT=curl` moves the REST calls (registration,
+  routing probe) onto it; the broker session, run-service, and results
+  uploads stay in-process, so a still-filtered `velnor-runner` registers and
+  runs jobs but logs `WARN best-effort Results Service … upload failed …
+  operation timed out`, and the job's log is missing on GitHub. `host start`
+  prints the transport it will use as `github_transport`.
+
+Check the daemon before anything else:
+
+```sh
+target/debug/velnorctl docker report
+```
+
+The report names the resolved endpoint, its source (env, context, or default),
+the provider, cgroup mode, and the resource-boundary check. Add `--output
+json` for a stable object.
+
+## Build the job image
+
+```sh
+export GITHUB_TOKEN=$(gh auth token)
+target/debug/velnorctl host bootstrap-image
+```
+
+`bootstrap-image` compiles the Linux `velnor-workflow` binary in
+`rust:1.98.1-bookworm` and builds `docker/job-ubuntu.Dockerfile` on the current
+daemon. It does not pull GHCR and does not copy caches from fleet hosts. The
+token is passed to the Dockerfile as the `mise_github_token` build secret.
+`--docker-image TAG` changes the tag; `--rebuild-workflow` rebuilds the
+workflow binary even when `release-binaries/<arch>/velnor-workflow` exists.
+
+## Start a host
+
+```sh
+export GITHUB_TOKEN=$(gh auth token)
+target/debug/velnorctl host start --repo tailrocks/velnor --name recovery-1 --slots 2
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--repo OWNER/NAME` | Repository to register against (default `tailrocks/velnor`). `--url` accepts the full URL; both refuse organization scopes. |
+| `--name NAME` | Local instance name: the control-socket instance, the config directory, and the daemon `--name`. Defaults to `velnor-local-<host>` (see [Identity](#identity)). `--instance` is the same value and must agree when both are given. |
+| `--slots N` | Bounded slot count (default 1). |
+| `--pr N` | Print the scheduling semantics for a PR you are trying to recover. GitHub remains the scheduler; see below. |
+| `--docker-image TAG` | Job image (default `velnor/job-ubuntu:26.04`). Must already be on the daemon. |
+| `--work-dir`, `--docker-host-work-dir` | Runner work root and the daemon's view of it when the VM maps it differently. |
+| `--config-dir` | Per-host runner config directory. Defaults to `hosts/<name>` under the runner config root. |
+
+`host start` prints its decisions before it registers anything: storage root,
+GitHub scope and REST transport, instance, slots, the GitHub runner names
+the slots will register (see [Identity](#identity)), Docker endpoint,
+execution platform, control socket, and the pool (`none`). It then runs the
+Docker preflight and starts the daemon in the foreground.
+
+### `--pr` and what the host can claim
+
+`--pr N` does not target a PR. It prints what GitHub will and will not send:
+
+- The host registers repository-scoped runners. Jobs already queued with
+  `group: velnor-trusted` cannot be claimed by it; changing labels or YAML does
+  not rewrite queued jobs.
+- A `workflow_dispatch` against the PR branch is a new run and does not satisfy
+  the original PR checks unless GitHub associates it.
+
+### Trust scope and the `velnor-host-docker` label
+
+The pool ceiling comes from `VELNOR_TRUST_SCOPE` (default `untrusted`):
+
+```sh
+VELNOR_TRUST_SCOPE=trusted target/debug/velnorctl host start --repo tailrocks/velnor --name recovery-1
+```
+
+Only the exact `trusted` scope adds the `velnor-host-docker` label, which the
+workflow uses for jobs that need the host Docker socket. An untrusted host
+never claims it. The scope is a ceiling, not a grant: fork and unknown jobs
+still run under the untrusted floor, and same-repository PR jobs on a trusted
+host write to the `pr` store scope (see [Stores](#stores-and-the-pr-seed)).
+Every host also carries `self-hosted` and `velnor-target-mvp`, plus the ARM
+label on Apple silicon.
+
+## Identity
+
+The GitHub runner name is `velnor-<host>-<instance>-<slot>` (`<slot>` counts
+from 0), and the same string appears in the job's **Set up job** log as
+`Runner name`, with `Machine name`, `Instance`, and `Slot` beneath it. Every
+JIT registration serves one job; while a slot runs one it already holds the
+next registration, named `velnor-<host>-<instance>-<slot>-next-<pid>-<cycle>`,
+so the runner list shows that form from the second job on.
+
+- `<host>` is the slug of the machine's `uname` nodename (lowercase,
+  `[a-z0-9-]`, e.g. `alexeys-macbook-pro-local`). `velnorctl` and
+  `velnor-runner` share one slug function, so both sides derive the identical
+  string.
+- Without `--name`, the instance is `velnor-local-<host>` and the daemon
+  collapses it to `local`: the runner registers as
+  `velnor-alexeys-macbook-pro-local-local-0`, never
+  `velnor-…-local-velnor-local-…-0`.
+- With `--name recovery-1`, the runner is `velnor-<host>-recovery-1-<slot>`.
+- The instance name is capped at 64 bytes because it doubles as the
+  control-socket instance; a long hostname is cut to fit and still collapses
+  correctly. GitHub's 64-character runner-name limit is met without lossy
+  truncation for hostnames of typical length.
+
+`velnorctl version` reports the release version and source SHA the binaries
+were built from, so the identity in a job summary can be matched to a build.
+
+## Inspect, drain, stop
+
+```sh
+target/debug/velnorctl host status
+target/debug/velnorctl host drain
+target/debug/velnorctl host stop
+```
+
+- `status` prints the control-socket root, the resolved Docker endpoint and
+  its source, the execution platform, and each active host with its pid,
+  control API version, and last health document. `velnorctl --instance <name>
+  get slots` follows one host.
+- `drain` sends `SIGTERM`: active jobs finish, waiters and idle slots exit.
+  Ctrl-C in the foreground terminal does the same.
+- `stop` sends `SIGTERM` and waits (default 30 s, `--timeout` to change) for
+  the process to exit. It never force-kills; on timeout it exits with a
+  timeout class and tells you to retry.
+
+### Step logs on disk
+
+Every completed step's log is written locally before it is uploaded, so a
+host whose egress blocks GitHub's blob storage (the job page then shows
+`404`/`BlobNotFound`) still has the full output:
+
+```text
+<storage root>/lib/velnor/runner/hosts/<name>/slots/slot-<n>/logs/pages/<job-id>/
+  index.tsv              # order, exit code, page file, step display name
+  001-<step-id>.log      # exactly the bytes the Results Service blob carries
+  ...
+```
+
+The slot writes a page the moment the step finishes (the executor side, like
+actions/runner's `_diag/pages/`); the network publisher uploads that file from
+disk, so upload failures never decide whether the page exists. Lines are
+secret-masked and carry the same 7-digit timestamp prefix as the GitHub blob.
+`lifecycle.log` names the directory per job (`step-log-pages dir=…`). The
+newest 32 job directories are kept per slot. To find the failing command of a
+red job:
+
+```sh
+slot=<storage root>/lib/velnor/runner/hosts/<name>/slots/slot-<n>
+rg -n "step-log-pages dir=" "$slot/logs/lifecycle.log" | tail -1
+awk -F'\t' '$2 != 0' "$slot/logs/pages/<job-id>/index.tsv"   # failed steps
+```
+
+## Storage root
+
+Without `VELNOR_STORAGE_ROOT`, `host start` uses a user-owned prefix:
+`~/.velnor-store` on macOS and `~/.local/state/velnor` on Linux. The macOS path
+is a short dot-directory on purpose: Unix socket paths are limited to 104
+bytes, and `~/Library/Application Support/velnor/run/velnor/<name>/control.sock`
+overflows that limit.
+
+Beneath the prefix the layout is the packaged one:
+
+| Path | Contents |
+| --- | --- |
+| `cache/velnor/v1/<trust>/<class>` | Persistent stores (Cargo, mise, actions cache, artifacts, …), partitioned by trust scope. |
+| `lib/velnor/runner/hosts/<name>` | Per-host config directory: `execution.toml`, `state.db`, journal, `health.json`. |
+| `run/velnor/<name>/control.sock` | Control socket for `velnorctl --instance <name>`. |
+| `log/velnor` | Service logs. |
+
+Set `VELNOR_STORAGE_ROOT` explicitly to relocate everything.
+
+## Stores and the `pr` seed
+
+Persistent stores are partitioned by trust scope. On a trusted host, a
+same-repository pull-request job writes to the `pr` scope (D18): trusted
+events (push, schedule, dispatch) write `trusted`, PR writes never reach it,
+and the `pr` stores are ordinary persistent host directories bind-mounted
+read-write into every PR job — shared across slots, under Cargo's own
+package-cache locking, exactly like the mise installs and every other
+`pr`-scope store.
+
+Before a PR job's container starts, the daemon **seeds** the `pr` Cargo store
+from this host's `trusted` one by copy: every regular file under
+`cargo/registry/cache`, `cargo/registry/index` and `cargo/git/db` that
+`trusted` holds and `pr` lacks is copied to a temp name beside its destination
+and linked into place without ever replacing an existing `pr` file, so
+concurrent seeds and running jobs are safe and a reader sees either no file
+or a complete one. Symlinks are skipped. Bare repositories under `git/db` are
+seeded whole or not at all. The seed is a copy, never a hard link and never an
+overlay: a hard link would share an inode with the trusted store, and a file
+rewritten in place through the `pr` mount would then rewrite `trusted` — the
+poisoning D18 exists to prevent. The seed is bounded by the same store budget
+the compiler stores are held to (`Compiler store budget:` at daemon start and
+in `velnor-runner preflight`); when the `pr` store plus the seed would exceed
+it, the newest entries are seeded first and the daemon log names what was
+skipped.
+
+Because PR writes persist in `pr` and are shared by every slot, the first
+`Control / Prepare Cargo` job a host runs warms every Velnor Rust unit that
+lands on it afterwards — the units run Cargo offline and find what
+`Prepare Cargo` fetched, whether the host's `trusted` store was warm or not.
+A PR that adds a dependency works the same way: `Prepare Cargo` fetches it
+into `pr`, and the units read it there.
+
+The daemon log carries one line per PR admission,
+`seeded pr cargo store from trusted: N files, M bytes, T ms` (`0 files` when
+nothing was missing), and the job's **Set up job** log states
+`Persistent stores: cargo pr scope (seeded from trusted: N files)`; a trusted
+event's job states `Persistent stores: cargo trusted scope`. There is no
+capability to probe and no fallback path: a seed that cannot copy fails the
+job before its container exists.
+
+## Cleanup
+
+- Stop the host (`host stop`, or Ctrl-C the foreground process).
+- Job containers and per-job networks carry the `velnor.job-id` label and
+  are reclaimed at job teardown; a crashed host's leftovers are reclaimed on
+  the next start.
+- Remove the storage root to discard everything the host persisted:
+  `rm -rf ~/.velnor-store` (or your `VELNOR_STORAGE_ROOT`). Stores are caches;
+  nothing in them is authoritative.
+- Idle slots deregister from GitHub as the host drains; check the
+  repository's runner list and remove any registration a crashed host left
+  behind.
+- `docker image rm velnor/job-ubuntu:26.04` if the image should go too.

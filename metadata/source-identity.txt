@@ -1,0 +1,7 @@
+source=${SOURCE:-<redacted-local-path>}
+git_dir=${SOURCE:-<redacted-local-path>}/
+git_common_dir=${SOURCE:-<redacted-local-path>}/
+git_version=git version 2.55.0
+object_format=
+repository_head=
+repository_head_kind=detached

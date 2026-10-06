@@ -1,0 +1,10 @@
+# BuildKit GC policy for trusted docker hosts (Phase 6 §8).
+# Install beside the daemon or pass via buildkitd-config-inline on trusted jobs.
+#
+# Reference: https://github.com/moby/buildkit/blob/master/docs/buildkitd.toml.md
+
+[worker.oci]
+  gc = true
+  reservedSpace = "10GB"
+  maxUsedSpace = "40GB"
+  minFreeSpace = "5GB"
