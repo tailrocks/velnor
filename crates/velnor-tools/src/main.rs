@@ -6105,7 +6105,8 @@ with:
 
         let aliased_store = operator_alias.join("store");
         let entries = list_dir_entries_below(&aliased_store, &operator_alias, 1, 10);
-        assert!(entries.contains(&aliased_store.join("selected").display().to_string()));
+        let expected = velnor_storage_snapshot::snapshot_path_identity(&aliased_store.join("selected"));
+        assert!(entries.contains(&expected));
 
         let opened =
             open_snapshot_root_after_canonicalize(&aliased_store, &operator_alias, |canonical| {

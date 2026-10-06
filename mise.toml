@@ -240,21 +240,7 @@ cat "$digest_output"
 """
 
 [tasks.check]
-# Each task reference finishes before the next starts. Sibling dependencies do
-# not establish formatting/lint/test order.
-run = [
-  { task = "fmt" },
-  { task = "lint" },
-  { task = "test" },
-  { task = "test-production-topology" },
-  { task = "test-release-feature-boundary" },
-  { task = "test-release-boundary-script" },
-  { task = "test-hooks" },
-  { task = "actionlint" },
-  { task = "audit-ci" },
-  { task = "deny" },
-  { task = "pin-integrity" },
-]
+depends = ["fmt", "actionlint", "audit-ci", "deny", "pin-integrity", "lint", "test", "test-production-topology", "test-release-feature-boundary", "test-release-boundary-script", "test-hooks"]
 
 [tasks.ci]
 depends = ["actionlint", "audit-ci", "deny", "pin-integrity"]
