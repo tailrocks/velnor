@@ -223,26 +223,24 @@ impl DockerBackend {
             "docker {}",
             args.join(" ")
         )));
-        let removed = crate::docker::Docker::job(&mut *world.runner)
-            .container_remove(&job, true, false)
-            .map_err(|error| {
-                ExecutionError::DockerPreflight(format!(
+        // Best-effort like teardown: the remove targets the resolved immutable
+        // ID (never a re-resolvable name), but an unresolvable or
+        // unreconciled daemon must not fail the cancellation itself — the
+        // ownership labels plus startup reconcile reclaim any remainder.
+        if let Err(error) =
+            crate::docker::Docker::job(&mut *world.runner).container_remove(&job, true, false)
+        {
+            events.push(ExecutionEvent::Log {
+                stream: 1,
+                line: format!(
                     "Docker cancellation could not remove job container {job}: {error:#}"
-                ))
+                ),
             });
-        match removed {
-            Ok(_) => events.push(ExecutionEvent::JobCompleted {
-                conclusion: JobConclusion::Cancelled,
-                exit_code: 1,
-            }),
-            Err(error) => {
-                events.push(ExecutionEvent::Log {
-                    stream: 1,
-                    line: format!("Docker cancellation cleanup failed: {error}"),
-                });
-                return Err(error);
-            }
         }
+        events.push(ExecutionEvent::JobCompleted {
+            conclusion: JobConclusion::Cancelled,
+            exit_code: 1,
+        });
         Ok(())
     }
 }

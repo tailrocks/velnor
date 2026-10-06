@@ -1483,6 +1483,15 @@ fn container_rm_gate_at(
     IN_FLIGHT_CONTAINER_RM.claim(engine_key, wait.min(MAX_CONTAINER_RM_CLAIM_WAIT))
 }
 
+/// Engine identity for rm-gate claims and quarantine markers issued through
+/// runners that never consult the Engine leg (scripted doubles). Resolving
+/// those through ambient configuration would flap with the process-global
+/// test socket override — or a context switch — mid-operation, so quarantine
+/// set under one key is missed under the next and the same DELETE replays.
+/// Real dispatchers resolve the live endpoint exactly like the commands they
+/// run; scripted runners share this fixed identity.
+const SCRIPTED_RUNNER_ENGINE_KEY: &str = "job-scripted-runner";
+
 /// Claim one Engine's container-mutation gate so job-end and doctor never start
 /// overlapping deletes of the same Created BuildKit (that deadlock is the
 /// leftover class). Selectors are resolved only after this gate is held.
@@ -2257,7 +2266,7 @@ fn inspect_docker_rm_state(
         return resolve_container_state_cli(rm_args, id, timeout);
     }
     let mut docker = Docker::host();
-    docker.inspect_remove_state_with_timeout(id, timeout)
+    docker.inspect_remove_state_with_timeout(id, timeout, false)
 }
 
 fn docker_args_with_full_ps_ids(args: &[String]) -> Vec<String> {
@@ -2948,10 +2957,22 @@ impl<'r> Docker<'r> {
         }
     }
 
+    /// State probe behind rm reconciliation. `None` means the exact ID is
+    /// absent. When `accept_unparseable_as_absent` is set, CLI probe text
+    /// that does not even parse as an exit projection also yields `None`:
+    /// only the post-success settle passes `true`, where the successful rm
+    /// already proves removal and the probe can only refute it with a proven
+    /// present state. Every uncertain path (quarantined re-entry, ambiguous
+    /// dispatch, raw tickets) passes `false`: with no successful rm behind
+    /// the probe, unreadable state keeps the quarantine. A shape-valid
+    /// projection with an unknown state word always fails: presence is
+    /// proven and the kind is not. The Engine leg is always strict: a
+    /// returned document proves presence.
     fn inspect_remove_state_with_timeout(
         &mut self,
         id: &str,
         timeout: Duration,
+        accept_unparseable_as_absent: bool,
     ) -> Result<Option<ContainerState>> {
         let args = exit_info_args(id);
         let started = Instant::now();
@@ -2976,10 +2997,14 @@ impl<'r> Docker<'r> {
             )));
         }
         match self.call_with_timeout(&args, id, remaining) {
-            Ok(output) => parse_exit_info(&output)?
-                .status
-                .map(Some)
-                .context("CLI inspect returned an unknown container state"),
+            Ok(output) => match parse_exit_info(&output) {
+                Ok(exit) => exit
+                    .status
+                    .map(Some)
+                    .context("CLI inspect returned an unknown container state"),
+                Err(_) if accept_unparseable_as_absent => Ok(None),
+                Err(error) => Err(error),
+            },
             Err(error) if is_not_found(&error) => Ok(None),
             Err(error) => Err(error),
         }
@@ -2999,7 +3024,7 @@ impl<'r> Docker<'r> {
                 timeout,
             )));
         }
-        match self.inspect_remove_state_with_timeout(id, timeout) {
+        match self.inspect_remove_state_with_timeout(id, timeout, true) {
             Ok(state) => match settle_container_rm_reconciliation(engine_key, id, state)? {
                 DockerContainerRmReconciliation::Absent => Ok(outcome),
                 DockerContainerRmReconciliation::Removing => Ok(RemoveOutcome::Removed),
@@ -3204,6 +3229,27 @@ impl<'r> Docker<'r> {
     /// on both legs, never swallowed as success. An ambiguous post-dispatch
     /// failure leaves a durable per-Engine, per-ID quarantine until inspect
     /// confirms the object is gone; another DELETE is unsafe while it remains.
+    /// Claim the rm gate (and its quarantine identity) for this transport.
+    /// Scripted runners never consult the Engine leg, so they share the
+    /// fixed [`SCRIPTED_RUNNER_ENGINE_KEY`] instead of resolving ambient
+    /// configuration that can flap mid-operation; every real dispatcher
+    /// resolves the live endpoint exactly like the commands it runs.
+    fn container_rm_gate_claim(
+        &self,
+        rm_args: &[String],
+        wait: Duration,
+    ) -> Result<DockerContainerRmClaim> {
+        if let Transport::Job(runner) = &self.transport
+            && !runner.is_host_process_runner()
+        {
+            return IN_FLIGHT_CONTAINER_RM.claim(
+                SCRIPTED_RUNNER_ENGINE_KEY.to_string(),
+                wait.min(MAX_CONTAINER_RM_CLAIM_WAIT),
+            );
+        }
+        container_rm_gate_at(rm_args, wait, self.pinned_endpoint())
+    }
+
     pub(crate) fn container_remove(
         &mut self,
         name: &str,
@@ -3216,7 +3262,7 @@ impl<'r> Docker<'r> {
         let operation_deadline = Instant::now() + operation_budget;
         // Lock this Engine before resolving aliases. The same claim spans ID
         // resolution, API deletion, any reconciliation, and the safe CLI leg.
-        let rm_claim = container_rm_gate_at(&rm_args, operation_budget, self.pinned_endpoint())?;
+        let rm_claim = self.container_rm_gate_claim(&rm_args, operation_budget)?;
         let resolve_budget = operation_deadline.saturating_duration_since(Instant::now());
         if resolve_budget.is_zero() {
             return Err(anyhow::Error::new(crate::docker::DockerTimeout::new(
@@ -3235,7 +3281,7 @@ impl<'r> Docker<'r> {
                     operation_budget,
                 )));
             }
-            return match self.inspect_remove_state_with_timeout(&id, remaining) {
+            return match self.inspect_remove_state_with_timeout(&id, remaining, false) {
                 Ok(None) => {
                     set_container_rm_quarantined(&rm_claim.engine_key, &id, false)?;
                     Ok(RemoveOutcome::AlreadyRemoved)
@@ -3313,7 +3359,7 @@ impl<'r> Docker<'r> {
                     ))
                     .context(format!("reconcile ambiguous Docker remove: {error}")));
                 }
-                match self.inspect_remove_state_with_timeout(&id, remaining) {
+                match self.inspect_remove_state_with_timeout(&id, remaining, false) {
                     Ok(None) => {
                         set_container_rm_quarantined(&rm_claim.engine_key, &id, false)?;
                         return Ok(RemoveOutcome::AlreadyRemoved);

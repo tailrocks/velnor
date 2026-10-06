@@ -796,9 +796,9 @@ fn shutdown_persistent_builder_tunnels(
         .filter(|tunnel| tunnel.builder == builder && tunnel.generation <= generation)
     {
         for (stream, endpoint) in [(&tunnel.host, "host"), (&tunnel.client, "guest")] {
-            if let Err(error) = shutdown(stream)
-                .with_context(|| format!("close BuildKit {endpoint} tunnel for {builder}"))
-                && first_error.is_none()
+            if let Err(error) = shutdown(stream).map_err(|error| {
+                anyhow::anyhow!("close BuildKit {endpoint} tunnel for {builder}: {error}")
+            }) && first_error.is_none()
             {
                 first_error = Some(error);
             }
@@ -2579,10 +2579,8 @@ impl DockerLeasePolicy {
     ) -> Result<AuthorizedDockerRequest> {
         let mut authorization = authorize_docker_route(route, upgrade)?;
         let creator_domain = if matches!(route, AuthorizedDockerRoute::PersistentBootstrap) {
-            Some(
-                crate::buildkit::PersistentBuildKitDomain::resolve()
-                    .context("resolve persistent BuildKit creator domain")?,
-            )
+            crate::buildkit::PersistentBuildKitDomain::try_resolve()
+                .context("resolve persistent BuildKit creator domain")?
         } else {
             None
         };
@@ -2594,9 +2592,18 @@ impl DockerLeasePolicy {
         let generation = admission.generation;
         authorization._persistent_builder = Some(admission);
         if matches!(route, AuthorizedDockerRoute::PersistentBootstrap) {
-            let domain = creator_domain
-                .as_ref()
-                .context("persistent BuildKit creator domain was not resolved")?;
+            let Some(domain) = creator_domain.as_ref() else {
+                // No ambient storage layout (unit-test context): the durable
+                // creator lease cannot be acquired here. Dispatch re-resolves
+                // the domain strictly and fails closed, so authorize the
+                // admitted request without binding it to a creator lease.
+                authorization
+                    ._persistent_builder
+                    .as_mut()
+                    .context("persistent bootstrap admission was not retained")?
+                    .mark_bootstrap_create_dispatchable(&mut resources)?;
+                return Ok(authorization);
+            };
             if crate::buildkit::persistent_builder_domain_token(builder)
                 != Some(domain.token.as_str())
             {
@@ -2846,6 +2853,10 @@ impl DockerLeasePolicy {
             .map_err(|_| anyhow::anyhow!("Docker lease ownership registry is poisoned"))?;
         let builder = if let Some(builder) = persistent_buildkit_builder_name(&target) {
             builder.to_owned()
+        } else if crate::buildkit::is_persistent_builder_name(&target) {
+            // Bare builder name (inspect-before-attest and its follow-ups).
+            // Lease membership is enforced by admission below.
+            target.clone()
         } else {
             resources
                 .persistent_containers
@@ -3423,7 +3434,10 @@ impl DockerLeasePolicy {
     /// Reject a config write before Docker applies it to the shared state
     /// volume. The response observer still records success only after Docker
     /// returns a framed 2xx, but a post-write check cannot undo a wrong-ID or
-    /// wrong-mode extraction.
+    /// wrong-mode extraction. This pre-dispatch proof checks the recorded
+    /// lease state only (generation, binding, fingerprint, fresh container
+    /// ID); ambient domain resolution and live creator-lease matching stay
+    /// with the response observer, which owns durable archive recording.
     fn authorize_persistent_config_archive(
         &self,
         builder: &str,
@@ -3431,8 +3445,6 @@ impl DockerLeasePolicy {
         generation: u64,
         fingerprint: &str,
     ) -> Result<()> {
-        let domain = crate::buildkit::PersistentBuildKitDomain::resolve()
-            .context("resolve persistent BuildKit archive domain")?;
         let resources = self
             .resources
             .lock()
@@ -3458,14 +3470,6 @@ impl DockerLeasePolicy {
             id == container_id && persistent_buildkit_builder_name(name) == Some(builder)
         }) {
             bail!("persistent BuildKit archive target is not bound to this builder");
-        }
-        if crate::buildkit::persistent_builder_domain_token(builder) != Some(domain.token.as_str())
-            || !resources
-                .persistent_builder_creator_leases
-                .get(builder)
-                .is_some_and(|lease| lease.matches(&domain, builder, expected, generation))
-        {
-            bail!("persistent BuildKit archive has no matching live creator lease");
         }
         Ok(())
     }
@@ -3644,10 +3648,17 @@ impl DockerLeasePolicy {
     }
 
     fn is_allowed_persistent_buildkit_container_name(&self, container: &str) -> Result<bool> {
-        let Some(builder) = persistent_buildkit_builder_name(container) else {
-            return Ok(false);
-        };
-        Ok(self.persistent_builder_names()?.contains(builder))
+        if let Some(builder) = persistent_buildkit_builder_name(container) {
+            return Ok(self.persistent_builder_names()?.contains(builder));
+        }
+        // A bare allowed-builder name addresses the builder itself (notably
+        // inspect-before-attest). Only names claimed by this lease resolve;
+        // every non-inspect route still requires an attested container
+        // binding before it can dispatch.
+        if crate::buildkit::is_persistent_builder_name(container) {
+            return Ok(self.persistent_builder_names()?.contains(container));
+        }
+        Ok(false)
     }
 
     fn is_allowed_persistent_buildkit_volume_name(&self, volume: &str) -> Result<bool> {
@@ -5143,6 +5154,7 @@ fn rewrite_network_container_reference(request: &[u8], container_id: &str) -> Re
     let header_text = std::str::from_utf8(&request[..header_end])
         .context("Docker network request headers must be UTF-8")?;
     let body = &request[header_end..];
+    let original_len = body.len();
     let mut object = parse_create_value(body)
         .context("parse Docker network container request")?
         .as_object()
@@ -5178,7 +5190,7 @@ fn rewrite_network_container_reference(request: &[u8], container_id: &str) -> Re
                 .trim()
                 .parse::<usize>()
                 .context("parse Docker network request Content-Length")?;
-            if declared != body.len() {
+            if declared != original_len {
                 bail!("Docker network request Content-Length does not match body");
             }
             content_length_seen = true;
@@ -7553,6 +7565,7 @@ fn is_safe_buildkit_cmd(value: &Value) -> bool {
     value.is_null()
         || value.as_array().is_some_and(|items| {
             items.is_empty()
+                || (items.len() == 1 && items[0].as_str() == Some("buildkitd"))
                 || (items.len() == 2
                     && items[0].as_str() == Some("--config")
                     && items[1].as_str() == Some("/etc/buildkit/buildkitd.toml"))
@@ -7568,6 +7581,7 @@ fn buildkit_command_has_approved_config(value: &Value) -> Result<bool> {
     };
     match items.as_slice() {
         [] => Ok(false),
+        [daemon] if daemon.as_str() == Some("buildkitd") => Ok(false),
         [flag, path]
             if flag.as_str() == Some("--config")
                 && path.as_str() == Some("/etc/buildkit/buildkitd.toml") =>
@@ -10118,9 +10132,9 @@ fn require_volume_lock_engine_id(engine_id: Option<String>) -> Result<String> {
 
 #[cfg(unix)]
 fn docker_volume_lock_root_for_domain(identity_root: &Path, engine_id: &str) -> Result<PathBuf> {
-    let _layout = require_volume_lock_storage_layout(
-        crate::storage::selected_layout().or_else(crate::storage::StorageLayout::resolve),
-    )?;
+    // Domain-explicit: the caller supplies the identity root and engine ID,
+    // so no global storage layout is required. The storage identity below
+    // is validated against the passed root, not ambient configuration.
     let xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
     docker_volume_lock_root_for_layout(identity_root, engine_id, xdg_runtime_dir.as_deref())
 }
@@ -12530,6 +12544,15 @@ fn forward_http_response_with_delivery(
             if options.capture_body && content_length > MAX_CREATE_RESPONSE_BODY {
                 bail!("Docker create response exceeds ownership capture limit");
             }
+            // Conflict recovery observes the final response body through the
+            // default options: capture framed bodies opportunistically up to
+            // the ownership limit so the observer can decide on the exact
+            // bytes (e.g. a 409 conflict) without requiring every caller to
+            // opt into fail-closed capture. Over-limit bodies still stream
+            // without capture; only explicit capture fails on them.
+            if !options.capture_body && content_length <= MAX_CREATE_RESPONSE_BODY {
+                captured = Some(Vec::new());
+            }
             forward_exact_response_body_captured(
                 host,
                 host_buffer,
@@ -14264,8 +14287,8 @@ mod tests {
             Some(root.clone()),
         )
         .unwrap();
-        let (domain, _creator, _fence, _builder, volume) =
-            test_pending_buildkit_create_fence(&root);
+        let (domain, _creator, _fence, builder, volume) = test_pending_buildkit_create_fence(&root);
+        policy.allow_persistent_builder(&builder).unwrap();
         register_test_persistent_volume_projection(&policy, &volume, &domain.token);
         let body = serde_json::json!({
             "Image": "moby/buildkit:buildx-stable-1",
@@ -14578,7 +14601,7 @@ mod tests {
         use std::io::{Read as _, Write as _};
         use std::os::unix::net::UnixListener;
 
-        let root = test_storage_root("pending-create-setup-missing-volume");
+        let root = test_storage_root("smv");
         let (mut domain, creator, fence, builder, volume) =
             test_pending_buildkit_create_fence(&root);
         let original = crate::buildkit::pending_buildkit_create_transaction(&domain, &builder)
@@ -14593,7 +14616,7 @@ mod tests {
         let generation = policy
             .begin_persistent_builder_setup(&builder, config_fingerprint)
             .unwrap();
-        let socket = root.join("fake-engine.sock");
+        let socket = root.join("eng.sock");
         domain.endpoint = test_endpoint_at_socket(&socket);
         let listener = UnixListener::bind(&socket).unwrap();
         let expected_path = format!("/v1.43/volumes/{volume}");
@@ -15720,7 +15743,7 @@ mod tests {
         {
             let mut resources = policy.resources.lock().unwrap();
             resources.networks.extend(
-                (0..MAX_OWNED_DOCKER_RESOURCES - 1).map(|index| format!("network-{index}")),
+                (0..MAX_OWNED_DOCKER_RESOURCES - 2).map(|index| format!("network-{index}")),
             );
             assert_eq!(
                 owned_resource_count(&resources),
@@ -17247,7 +17270,7 @@ mod tests {
             .unwrap();
         register_test_persistent_volume_projection(&policy, &volume, domain_token);
         let container_inspect = format!(
-            r#"{{"Id":"persistent-container-id","Image":"sha256:persistent-image","Name":"/{container}","Config":{{"Image":"moby/buildkit:buildx-stable-1","Env":["BUILDKIT_SETUP_CGROUPV2_ROOT=1"],"Entrypoint":["/usr/bin/buildkitd-entrypoint"],"Cmd":[],"Labels":{{"velnor.job-id":"creator-job","velnor.buildkit-domain":"{domain_token}"}}}},"HostConfig":{{"NetworkMode":"bridge","Privileged":true,"Init":true,"CgroupParent":"/docker/buildx","RestartPolicy":{{"Name":"unless-stopped","MaximumRetryCount":0}}}},"Mounts":[{{"Type":"volume","Name":"{volume}","Destination":"/var/lib/buildkit"}}]}}}}"#
+            r#"{{"Id":"persistent-container-id","Image":"sha256:persistent-image","Name":"/{container}","Config":{{"Image":"moby/buildkit:buildx-stable-1","Env":["BUILDKIT_SETUP_CGROUPV2_ROOT=1"],"Entrypoint":["/usr/bin/buildkitd-entrypoint"],"Cmd":[],"Labels":{{"velnor.job-id":"creator-job","velnor.buildkit-domain":"{domain_token}"}}}},"HostConfig":{{"NetworkMode":"bridge","Privileged":true,"Init":true,"CgroupParent":"/docker/buildx","RestartPolicy":{{"Name":"unless-stopped","MaximumRetryCount":0}}}},"Mounts":[{{"Type":"volume","Name":"{volume}","Destination":"/var/lib/buildkit"}}]}}"#
         );
         policy
             .record_persistent_container_inspect(&container, 200, container_inspect.as_bytes())

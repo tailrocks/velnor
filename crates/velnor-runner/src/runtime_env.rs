@@ -280,6 +280,15 @@ pub(crate) fn environment_token_pairs(value: &Value) -> Vec<(String, String)> {
 }
 
 fn environment_object_pairs(object: &Map<String, Value>) -> Vec<(String, String)> {
+    // Token-shaped objects (CLR TemplateToken members) follow the strict
+    // converter: only a mapping token defines names. A member-less plain map
+    // (no `type` discriminator and no token payload members) is the legacy
+    // broker encoding and still yields its entries directly.
+    if object_member(object, &["type"]).is_none()
+        && object_member(object, &["map", "seq", "lit", "expr", "bool", "num"]).is_none()
+    {
+        return environment_plain_map_pairs(object);
+    }
     match environment_token_type(object) {
         // JobExtension evaluates each EnvironmentVariables entry as a
         // step-environment TemplateToken, whose converter requires a mapping.
@@ -292,6 +301,32 @@ fn environment_object_pairs(object: &Map<String, Value>) -> Vec<(String, String)
             .flat_map(environment_pair_value)
             .collect(),
         Some(_) | None => Vec::new(),
+    }
+}
+
+/// Legacy broker encoding: a bare string map (or a single `{name, value}`
+/// pair) with no TemplateToken members.
+fn environment_plain_map_pairs(object: &Map<String, Value>) -> Vec<(String, String)> {
+    if let (Some(name), Some(value)) = (
+        object_member(object, &["name"]),
+        object_member(object, &["value"]),
+    ) && let Some(name) = environment_plain_name(name)
+    {
+        return vec![(name, environment_value(value))];
+    }
+    object
+        .iter()
+        .map(|(name, value)| (name.clone(), environment_value(value)))
+        .collect()
+}
+
+fn environment_plain_name(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Object(object) => {
+            object_member(object, &["value", "lit"]).and_then(environment_plain_name)
+        }
+        _ => None,
     }
 }
 

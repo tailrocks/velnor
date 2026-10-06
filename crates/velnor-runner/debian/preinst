@@ -539,6 +539,17 @@ exact_locked_shell_exec_start() {
   '
 }
 
+# The drain-gate exemption only covers maintenance that serializes on the
+# shared package-transaction lock; anything else must drain like a normal
+# unit. The match is on the manager-reported argv so a rewritten fragment
+# cannot smuggle an unguarded command past the exemption.
+locked_maintenance_exec_start() {
+  case "$1" in
+    *"argv[]=/usr/bin/flock --shared --no-fork $PACKAGE_TRANSACTION_LOCK "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 maintenance_service_under_transaction_lock() {
   case "$1" in
     velnor-cache-gc.service)
@@ -572,7 +583,7 @@ maintenance_service_under_transaction_lock() {
       ;;
   esac
 
-  systemd_property_matches "$1" Type oneshot || return 1
+  [ "$(systemctl show --property=Type --value "$1" 2>/dev/null || true)" = oneshot ] || return 1
   systemd_property_matches "$1" NeedDaemonReload no || return 1
   systemd_property_is_empty "$1" DropInPaths || return 1
   for property in ExecCondition ExecStartPre ExecStartPost ExecReload ExecStop ExecStopPost; do
@@ -585,6 +596,7 @@ maintenance_service_under_transaction_lock() {
     *) return 1 ;;
   esac
   exec_start=$(systemd_property "$1" ExecStart) || return 1
+  locked_maintenance_exec_start "$exec_start" || return 1
   fragment_sha=$(sha256sum "$fragment" 2>/dev/null | awk '{print $1}') || return 1
   [ "$fragment_sha" = "$expected_fragment_sha" ] || return 1
   if [ "$fleet_audit" -eq 1 ]; then
@@ -855,9 +867,7 @@ verify_pending_systemd_activation_jobs() {
         return 1
         ;;
       velnor*.service)
-        if scheduled_oneshot_under_transaction_lock "$unit"; then
-          continue
-        fi
+        scheduled_oneshot_under_transaction_lock "$unit" && continue || true
         append_active_unit "pending-service-job($unit:$state)"
         return 1
         ;;
@@ -1018,9 +1028,7 @@ all_velnor_units_drained() {
     state=${candidate##*|}
     case "$unit" in
       velnor*)
-        if scheduled_oneshot_under_transaction_lock "$unit"; then
-          continue
-        fi
+        scheduled_oneshot_under_transaction_lock "$unit" && continue || true
         append_active_unit "$unit($state)"
         ;;
       *)
@@ -1076,9 +1084,7 @@ all_velnor_units_drained() {
     state=${candidate##*|}
     case "$timer" in
       velnor*)
-        if scheduled_oneshot_under_transaction_lock "$timer"; then
-          continue
-        fi
+        scheduled_oneshot_under_transaction_lock "$timer" && continue || true
         append_active_unit "$timer($state)"
         ;;
       *)
@@ -1171,9 +1177,7 @@ all_velnor_units_drained() {
     state=${candidate##*|}
     case "$unit" in
       velnor*)
-        if scheduled_oneshot_under_transaction_lock "$unit"; then
-          continue
-        fi
+        scheduled_oneshot_under_transaction_lock "$unit" && continue || true
         append_active_unit "$unit($state)"
         ;;
       *)

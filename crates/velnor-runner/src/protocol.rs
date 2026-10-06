@@ -3123,6 +3123,26 @@ impl<'de, E: serde::de::Error> Deserializer<'de> for ClrValueDeserializer<E> {
         }
     }
 
+    fn deserialize_struct<V>(
+        self,
+        name: &'static str,
+        _fields: &'static [&'static str],
+        visitor: V,
+    ) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        // Newtonsoft rejects JSON arrays for POCO targets even when the
+        // array is empty; serde would otherwise fill a defaulted struct
+        // from an empty sequence.
+        if self.value.is_array() {
+            return Err(serde::de::Error::custom(format!(
+                "Cannot deserialize the current JSON array into type '{name}'"
+            )));
+        }
+        self.deserialize_any(visitor)
+    }
+
     fn deserialize_newtype_struct<V>(
         self,
         _name: &'static str,
@@ -3140,7 +3160,7 @@ impl<'de, E: serde::de::Error> Deserializer<'de> for ClrValueDeserializer<E> {
 
     serde::forward_to_deserialize_any! {
         bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes
-        byte_buf unit unit_struct seq tuple tuple_struct map struct enum identifier ignored_any
+        byte_buf unit unit_struct seq tuple tuple_struct map enum identifier ignored_any
     }
 }
 
@@ -3371,9 +3391,8 @@ fn validate_clr_double_value(value: &Value) -> std::result::Result<(), ClrValida
             Err(clr_serialization_error("Double cannot be null"))
         }
         Value::String(value) if parse_clr_double_text(value).is_some() => Ok(()),
-        Value::String(_) | Value::Array(_) | Value::Object(_) => {
-            Err(clr_reader_error("invalid Double value"))
-        }
+        Value::String(_) => Err(clr_serialization_error("invalid Double value")),
+        Value::Array(_) | Value::Object(_) => Err(clr_reader_error("invalid Double value")),
         Value::Null => Err(clr_serialization_error("Double cannot be null")),
     }
 }
@@ -3617,6 +3636,26 @@ fn validate_clr_dynamic_integer(value: &Value) -> std::result::Result<(), ClrVal
 /// ordered token tree and source-aware scanner with the wire DTO parser.
 type ClrOrderedValue = OrderedJsonValue;
 
+/// Collapse a trailing run of elision holes to a single hole in projected
+/// arrays. `[,]` parses to two holes (one per empty slot); the decode
+/// pipeline's typed token/context converters and JToken projections keep
+/// one null/undefined instead of surfacing the raw pair.
+fn collapse_trailing_clr_elisions(values: Vec<ClrOrderedValue>) -> Vec<ClrOrderedValue> {
+    let mut trimmed = values;
+    let mut trailing_holes = 0;
+    while trimmed
+        .last()
+        .is_some_and(|value| matches!(value, ClrOrderedValue::Undefined))
+    {
+        trimmed.pop();
+        trailing_holes += 1;
+    }
+    if trailing_holes > 0 {
+        trimmed.push(ClrOrderedValue::Undefined);
+    }
+    trimmed
+}
+
 fn collapse_exact_clr_context_entries(
     entries: Vec<(String, ClrOrderedValue)>,
 ) -> Vec<(String, ContextValue)> {
@@ -3765,9 +3804,12 @@ impl OrderedJsonValue {
                     .map(Self::into_context_value)
                     .collect(),
             },
-            Self::Array(values) => {
-                ContextValue::Array(values.into_iter().map(Self::into_context_value).collect())
-            }
+            Self::Array(values) => ContextValue::Array(
+                collapse_trailing_clr_elisions(values)
+                    .into_iter()
+                    .map(Self::into_context_value)
+                    .collect(),
+            ),
             Self::Object(values) => ContextValue::Object {
                 case_sensitive: true,
                 entries: collapse_exact_clr_context_entries(values),
@@ -3804,9 +3846,29 @@ impl OrderedJsonValue {
             ClrWireShape::String => self.into_clr_string_value(),
             ClrWireShape::Guid
             | ClrWireShape::Int32
-            | ClrWireShape::Int64
             | ClrWireShape::Boolean
             | ClrWireShape::DateTime => self.into_value(),
+            ClrWireShape::Int64 => match self {
+                Self::Number(number) => {
+                    // Convert.ToInt64 rounds floating-point input to even;
+                    // unrepresentable magnitudes stay verbatim for typed
+                    // validation to reject.
+                    let rounded = match number.kind {
+                        JsonNumberKind::Float(value) => Some(value.round_ties_even()),
+                        _ => None,
+                    };
+                    match rounded {
+                        Some(rounded)
+                            if rounded >= i64::MIN as f64
+                                && rounded < 9_223_372_036_854_775_808.0 =>
+                        {
+                            Value::Number((rounded as i64).into())
+                        }
+                        _ => Self::Number(number).into_value(),
+                    }
+                }
+                value => value.into_value(),
+            },
             ClrWireShape::Uri => match self {
                 Self::Null | Self::Undefined => Value::Null,
                 Self::String(value) if value.is_empty() => Value::Null,
@@ -3818,6 +3880,35 @@ impl OrderedJsonValue {
                     kind: JsonNumberKind::BigInteger(value),
                     ..
                 }) => clr_big_integer_double_value(&value),
+                Self::Number(JsonNumber {
+                    kind: JsonNumberKind::Int64(value),
+                    ..
+                }) => serde_json::Number::from_f64(value as f64)
+                    .map(Value::Number)
+                    .unwrap_or(Value::Null),
+                Self::Number(JsonNumber {
+                    kind: JsonNumberKind::Float(value),
+                    ..
+                }) => serde_json::Number::from_f64(value)
+                    .map(Value::Number)
+                    .unwrap_or_else(|| {
+                        Value::String(
+                            non_finite_text(if value.is_nan() {
+                                NonFinite::NaN
+                            } else if value.is_sign_negative() {
+                                NonFinite::NegativeInfinity
+                            } else {
+                                NonFinite::PositiveInfinity
+                            })
+                            .to_owned(),
+                        )
+                    }),
+                Self::String(text) => match parse_clr_double_text(&text) {
+                    Some(parsed) => serde_json::Number::from_f64(parsed)
+                        .map(Value::Number)
+                        .unwrap_or_else(|| Value::String(text)),
+                    None => Value::String(text),
+                },
                 value => value.into_value(),
             },
             ClrWireShape::Object(schema) => self.into_clr_object(schema),
@@ -3832,7 +3923,7 @@ impl OrderedJsonValue {
             },
             ClrWireShape::ArrayTemplateToken => match self {
                 Self::Array(values) => Value::Array(
-                    values
+                    collapse_trailing_clr_elisions(values)
                         .into_iter()
                         .map(|value| value.into_clr_value(ClrWireShape::TemplateToken))
                         .collect(),
@@ -3841,7 +3932,7 @@ impl OrderedJsonValue {
             },
             ClrWireShape::ArrayPipelineContextData => match self {
                 Self::Array(values) => Value::Array(
-                    values
+                    collapse_trailing_clr_elisions(values)
                         .into_iter()
                         .map(|value| value.into_clr_value(ClrWireShape::PipelineContextData))
                         .collect(),
@@ -3931,13 +4022,13 @@ impl OrderedJsonValue {
             ClrWireShape::Links => self.into_clr_links(),
             ClrWireShape::TemplateToken => match self {
                 Self::NonFinite { value, .. } => {
-                    json!({"Type": 6, "Num": non_finite_text(value)})
+                    json!({"type": 6, "num": non_finite_text(value)})
                 }
                 value => value.into_clr_template_token(),
             },
             ClrWireShape::PipelineContextData => match self {
                 Self::NonFinite { value, .. } => {
-                    json!({"T": 4, "N": non_finite_text(value)})
+                    json!({"t": 4, "n": non_finite_text(value)})
                 }
                 value => value.into_clr_context_data(),
             },
@@ -4059,7 +4150,7 @@ impl OrderedJsonValue {
             None => 0,
         };
         let fields = clr_template_token_fields(kind);
-        Self::normalize_named_fields(values, &fields, Some(("Type", kind)))
+        Self::normalize_named_fields(values, &fields, Some(("type", kind)))
     }
 
     fn into_clr_context_data(self) -> Value {
@@ -4115,7 +4206,7 @@ impl OrderedJsonValue {
             None => 0,
         };
         let fields = clr_context_data_fields(kind);
-        Self::normalize_named_fields(values, &fields, Some(("T", kind)))
+        Self::normalize_named_fields(values, &fields, Some(("t", kind)))
     }
 
     fn into_clr_steps(self) -> Value {
@@ -4294,10 +4385,10 @@ enum ClrWireShape {
 fn is_mutable_converter_collection(field: &ClrWireField) -> bool {
     matches!(
         (field.name, field.shape),
-        ("Seq", ClrWireShape::ArrayTemplateToken)
-            | ("Map", ClrWireShape::Array(ClrWireSchema::TemplatePair))
-            | ("A", ClrWireShape::ArrayPipelineContextData)
-            | ("D", ClrWireShape::Array(ClrWireSchema::ContextPair))
+        ("seq", ClrWireShape::ArrayTemplateToken)
+            | ("map", ClrWireShape::Array(ClrWireSchema::TemplatePair))
+            | ("a", ClrWireShape::ArrayPipelineContextData)
+            | ("d", ClrWireShape::Array(ClrWireSchema::ContextPair))
     )
 }
 
@@ -4346,40 +4437,40 @@ impl ClrWireField {
 
 fn clr_template_token_fields(kind: i32) -> Vec<ClrWireField> {
     let mut fields = vec![
-        ClrWireField::raw("Type"),
-        ClrWireField::int32("File"),
-        ClrWireField::int32("Line"),
-        ClrWireField::int32("Col"),
+        ClrWireField::raw("type"),
+        ClrWireField::int32("file"),
+        ClrWireField::int32("line"),
+        ClrWireField::int32("col"),
     ];
     match kind {
-        0 => fields.push(ClrWireField::string("Lit")),
-        1 => fields.push(ClrWireField::typed("Seq", ClrWireShape::ArrayTemplateToken)),
+        0 => fields.push(ClrWireField::string("lit")),
+        1 => fields.push(ClrWireField::typed("seq", ClrWireShape::ArrayTemplateToken)),
         2 => fields.push(ClrWireField::typed(
-            "Map",
+            "map",
             ClrWireShape::Array(ClrWireSchema::TemplatePair),
         )),
-        3 | 4 => fields.push(ClrWireField::string("Expr")),
-        5 => fields.push(ClrWireField::boolean("Bool")),
-        6 => fields.push(ClrWireField::typed("Num", ClrWireShape::Double)),
+        3 | 4 => fields.push(ClrWireField::string("expr")),
+        5 => fields.push(ClrWireField::boolean("bool")),
+        6 => fields.push(ClrWireField::typed("num", ClrWireShape::Double)),
         _ => {}
     }
     fields
 }
 
 fn clr_context_data_fields(kind: i32) -> Vec<ClrWireField> {
-    let mut fields = vec![ClrWireField::raw("T")];
+    let mut fields = vec![ClrWireField::raw("t")];
     match kind {
-        0 => fields.push(ClrWireField::string("S")),
+        0 => fields.push(ClrWireField::string("s")),
         1 => fields.push(ClrWireField::typed(
-            "A",
+            "a",
             ClrWireShape::ArrayPipelineContextData,
         )),
         2 | 5 => fields.push(ClrWireField::typed(
-            "D",
+            "d",
             ClrWireShape::Array(ClrWireSchema::ContextPair),
         )),
-        3 => fields.push(ClrWireField::boolean("B")),
-        4 => fields.push(ClrWireField::typed("N", ClrWireShape::Double)),
+        3 => fields.push(ClrWireField::boolean("b")),
+        4 => fields.push(ClrWireField::typed("n", ClrWireShape::Double)),
         _ => {}
     }
     fields
@@ -4530,13 +4621,13 @@ const DEBUGGER_TUNNEL_WIRE_FIELDS: &[ClrWireField] = &[
 ];
 const REFERENCE_LINK_WIRE_FIELDS: &[ClrWireField] = &[ClrWireField::string("Href")];
 const TEMPLATE_PAIR_WIRE_FIELDS: &[ClrWireField] = &[
-    ClrWireField::typed("Key", ClrWireShape::TemplateToken),
-    ClrWireField::typed("Value", ClrWireShape::TemplateToken),
+    ClrWireField::typed("key", ClrWireShape::TemplateToken),
+    ClrWireField::typed("value", ClrWireShape::TemplateToken),
 ];
 const PIPELINE_CONTEXT_DATA_WIRE_FIELDS: &[ClrWireField] = &[];
 const CONTEXT_PAIR_WIRE_FIELDS: &[ClrWireField] = &[
-    ClrWireField::string("K"),
-    ClrWireField::typed("V", ClrWireShape::PipelineContextData),
+    ClrWireField::string("k"),
+    ClrWireField::typed("v", ClrWireShape::PipelineContextData),
 ];
 const ACTION_STEP_WIRE_FIELDS: &[ClrWireField] = &[
     ClrWireField::raw("Type"),
@@ -4809,14 +4900,14 @@ fn validate_clr_merged_template_collisions(
     let Some(object) = value.as_object() else {
         return Ok(());
     };
-    let kind = object.get("Type").and_then(Value::as_i64).unwrap_or(0);
+    let kind = object.get("type").and_then(Value::as_i64).unwrap_or(0);
     let child_shape = match kind {
         1 => Some(ClrWireShape::ArrayTemplateToken),
         2 => Some(ClrWireShape::Array(ClrWireSchema::TemplatePair)),
         _ => None,
     };
     if let Some(shape) = child_shape
-        && let Some(child) = object.get(if kind == 1 { "Seq" } else { "Map" })
+        && let Some(child) = object.get(if kind == 1 { "seq" } else { "map" })
     {
         validate_clr_merged_case_collisions(child, shape)?;
     }
@@ -6176,7 +6267,15 @@ fn validate_clr_ordered_occurrences(
             Err(clr_reader_error("undefined cannot be read as a CLR string"))
         }
         ClrWireShape::String => {
-            validate_clr_nullable_string_value(&value.clone().into_clr_string_value())
+            let normalized = value.clone().into_clr_string_value();
+            // Composite wire values defer to typed struct validation: plain
+            // CLR strings report a reader error there, while expression
+            // strings (endpoint names) report a retryable serialization
+            // error. Deciding here would pre-empt that distinction.
+            if matches!(normalized, Value::Array(_) | Value::Object(_)) {
+                return Ok(());
+            }
+            validate_clr_nullable_string_value(&normalized)
         }
         ClrWireShape::Guid => match value {
             ClrOrderedValue::NonFinite { .. } => {
@@ -16444,10 +16543,7 @@ mod tests {
 
     #[test]
     fn acquired_double_string_special_whitespace_and_reader_dispositions_match_clr() {
-        for (value, expected) in [
-            ("\u{00a0}+Infinity\u{00a0}", f64::INFINITY),
-            ("\u{202f}-infinity\u{202f}", f64::NEG_INFINITY),
-        ] {
+        for value in ["\u{00a0}+Infinity\u{00a0}", "\u{202f}-infinity\u{202f}"] {
             let body = format!(r#"{{"jobContainer":{{"type":6,"num":{}}}}}"#, json!(value));
             let decoded = decode_acquire_job_success_body(
                 200,
@@ -16459,8 +16555,8 @@ mod tests {
             let message = decoded.message.expect("typed special Double materializes");
             let runtime = message.materialize_runtime().unwrap();
             assert_eq!(
-                runtime.job_container.as_ref().unwrap()["num"].as_f64(),
-                Some(expected)
+                runtime.job_container.as_ref().unwrap()["num"].as_str(),
+                Some(value)
             );
         }
 

@@ -213,7 +213,8 @@ pub struct PressureRootProbeBatch {
 }
 
 impl HostCapacity {
-    /// Probe the filesystem holding `path` (or its nearest existing ancestor).
+    /// Probe the filesystem holding `path`. The path itself must exist; a
+    /// missing leaf fails so callers can record the root unmeasurable.
     ///
     /// Admission uses only the bounded `statvfs` primitive. Docker usage stays
     /// unknown unless a caller supplies an independently bounded measurement
@@ -448,7 +449,12 @@ fn open_pressure_directory(
 ) -> Result<(PathBuf, File, crate::leftover_disk::FilesystemEntryIdentity)> {
     // Resolve configured aliases, including macOS /var -> /private/var, before
     // opening. The descriptor pins that target; revalidation rejects retargets.
+    // A missing leaf must fail here (callers record it unmeasurable) rather
+    // than silently pinning the parent filesystem.
     let probe = existing_ancestor(requested_path)?;
+    if probe != requested_path {
+        anyhow::bail!("pressure root {} does not exist", requested_path.display());
+    }
     let resolved_path = fs::canonicalize(probe)
         .with_context(|| format!("resolve pressure root ancestor {}", probe.display()))?;
     let descriptor = open_directory_descriptor(&resolved_path)

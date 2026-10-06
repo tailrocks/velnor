@@ -623,9 +623,30 @@ pub fn node_service_executable() -> std::io::Result<std::path::PathBuf> {
 /// Service entry point: unconditional strict-capability admission, manifest
 /// integrity check, service-surface CLI parsing, telemetry initialization,
 /// and dispatch. Behavior matches the historical daemon bootstrap.
+/// Whether a service command is a systemd-dispatched long-lived role whose
+/// unit carries no outer flock. Those roles hold the shared package lock
+/// for their whole process lifetime and prove the installed tuple inside
+/// it; every other verb either guards its own narrower scope (transient
+/// job workers) or must run lock-free (release transactions take the
+/// exclusive side, hooks run under the maintainer-script gates).
+fn runner_role_requires_package_guard(command: &ServiceCommand) -> bool {
+    matches!(
+        command,
+        ServiceCommand::Daemon(_)
+            | ServiceCommand::Guardian(_)
+            | ServiceCommand::Controller(_)
+            | ServiceCommand::Slot(_)
+    )
+}
+
 pub async fn execute() -> anyhow::Result<()> {
     crate::scaffold::enforce_admission()?;
     let cli = ServiceCli::parse();
+    let _package_guard = if runner_role_requires_package_guard(&cli.command) {
+        Some(crate::release::package_runner_execution_guard()?)
+    } else {
+        None
+    };
     match cli.command {
         ServiceCommand::Guardian(args) => {
             crate::scaffold::init_telemetry(None);

@@ -1817,7 +1817,6 @@ pub struct PackageExecutionGuard {
 
 #[derive(Debug, Clone, Copy)]
 enum PackageExecutionBinary {
-    #[allow(dead_code)]
     Runner,
     OperatorCli,
 }
@@ -1826,6 +1825,15 @@ enum PackageExecutionBinary {
 /// velnorctl execution path. Exact development builds return a no-op guard.
 pub fn package_execution_guard() -> Result<PackageExecutionGuard> {
     package_execution_guard_for_binary(PackageExecutionBinary::OperatorCli)
+}
+
+/// Acquire the package lock and prove the installed tuple before a
+/// systemd-dispatched `velnor-runner` role runs. Role units carry no outer
+/// flock: this process-lifetime guard is the single ownership boundary, and
+/// the tuple proof runs inside it so verification and exec cannot straddle
+/// a package transaction. Exact development builds return a no-op guard.
+pub fn package_runner_execution_guard() -> Result<PackageExecutionGuard> {
+    package_execution_guard_for_binary(PackageExecutionBinary::Runner)
 }
 
 fn package_execution_guard_for_binary(

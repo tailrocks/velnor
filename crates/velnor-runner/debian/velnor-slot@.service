@@ -16,7 +16,9 @@ EnvironmentFile=-/etc/velnor/secrets.env
 Environment=MISE_LOCKFILE=1
 Environment=MISE_LOCKED=1
 Environment=MISE_LOCKED_VERIFY_PROVENANCE=1
-ExecStart=/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock /usr/bin/velnor-runner slot --state-dir /var/lib/velnor --scope default --slot-index %i --generation 1
+# The slot holds the package guard in-process for its whole lifetime
+# and proves the installed tuple inside it (no outer flock).
+ExecStart=/usr/bin/velnor-runner slot --state-dir /var/lib/velnor --scope default --slot-index %i --generation 1
 Restart=always
 RestartSec=5
 TimeoutStopSec=10800
