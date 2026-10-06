@@ -4658,13 +4658,14 @@ mod tests {
 
     #[test]
     fn reclaim_stops_at_target_and_skips_in_use_scope() {
+        let _serial = crate::trust_scope::test_support::serialized();
+        crate::trust_scope::resolve("trusted");
         let root = std::env::temp_dir().join(format!("velnor-reclaim-{}", uuid::Uuid::new_v4()));
         let work = root.join("work");
         let layout = crate::storage::StorageLayout::from_prefix(&root);
         let trust_key = crate::trust_scope::filesystem_key("trusted");
         let actions_cache = StoreCatalog::for_work_root_with_layout(&work, &layout)
-            .actions_cache("trusted")
-            .join(&trust_key);
+            .actions_cache("trusted");
         let active = actions_cache.join("active/key");
         let first = actions_cache.join("first/key");
         let second = actions_cache.join("second/key");
