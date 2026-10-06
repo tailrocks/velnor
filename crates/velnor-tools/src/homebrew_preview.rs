@@ -888,3 +888,67 @@ fn valid_preview_version(version: &str, base: &str, source_commit: &str) -> bool
         && count.bytes().all(|byte| byte.is_ascii_digit())
         && short == &source_commit[..7]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git(root: &Path, args: &[&str]) -> Result<()> {
+        let status = Command::new("git").current_dir(root).args(args).status()?;
+        ensure!(status.success(), "git {} failed", args.join(" "));
+        Ok(())
+    }
+
+    // 3000 entries need 123KB of queries and return megabytes of blob
+    // bytes. Writing every query before reading any response deadlocks
+    // once either 64KB pipe buffer fills (observed: five tests hung 45+
+    // minutes with parent and git both stuck in blocking write).
+    // Interleaved query/response must complete and stay exact.
+    #[test]
+    fn blob_reader_serves_thousands_of_entries_without_deadlock() -> Result<()> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "homebrew-read-blobs-{}-{nanos}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root)?;
+        git(&root, &["init", "--quiet"])?;
+        git(&root, &["config", "user.name", "read-blobs-fixture"])?;
+        git(
+            &root,
+            &["config", "user.email", "read-blobs-fixture@example.invalid"],
+        )?;
+        for index in 0..3000 {
+            // Distinct 2KB bodies: every response is large and unique.
+            let body = format!("blob-body-{index:05}\n").repeat(128);
+            fs::write(root.join(format!("file-{index:05}.txt")), &body)?;
+        }
+        git(&root, &["add", "-A"])?;
+        git(&root, &["commit", "--quiet", "-m", "three thousand blobs"])?;
+        let head = git_output(&root, &["rev-parse", "HEAD"])?;
+        let source = ValidatedSource {
+            root: root.clone(),
+            commit: head,
+            commit_epoch: 0,
+            base_version: String::new(),
+        };
+        let entries = source_entries(&source)?;
+        assert_eq!(entries.len(), 3000);
+        let blobs = read_blobs(&root, &entries)?;
+        assert_eq!(blobs.len(), 3000);
+        for entry in &entries {
+            let expected = format!("blob-body-{}\n", &entry.path[5..10]).repeat(128);
+            assert_eq!(
+                blobs.get(&entry.oid).map(Vec::as_slice),
+                Some(expected.as_bytes())
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+}
