@@ -100,6 +100,7 @@ struct PhysicalPlanPaths {
     // removed relative to its separately pinned anchor.
     _preserved_pins: BTreeMap<PathBuf, Option<PinnedDirectory>>,
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 struct PhysicalDirectorySnapshot {
@@ -120,6 +121,7 @@ struct PinnedDirectory {
     _file: File,
     identity: DirectoryIdentity,
 }
+
 impl PartialEq for PhysicalPlanPaths {
     fn eq(&self, other: &Self) -> bool {
         self.candidates == other.candidates
@@ -138,6 +140,7 @@ impl PartialEq for PhysicalPlanPaths {
 }
 
 impl Eq for PhysicalPlanPaths {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(not(test), allow(dead_code))]
 struct CandidateRoot {
@@ -156,6 +159,35 @@ struct InstancePlan {
     candidates: Vec<CandidateRoot>,
     preserved: Vec<PathBuf>,
     anchor_identities: AnchorIdentities,
+}
+
+/// Purge the exact old roots for every configured packaged daemon instance.
+/// An unconfigured host is a no-op; no process environment fallback exists.
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+pub(crate) fn purge_configured_legacy_roots() -> Result<()> {
+    verify_package_purge_preconditions()?;
+    purge_instances_with(
+        crate::daemon_instance::enumerate,
+        verify_complete_instance_inventory,
+        verify_effective_unit,
+    )
+}
+
+/// Prove that configured roots and effective systemd units are replayable,
+/// without creating roots, taking locks, or deleting anything. Debian runs
+/// this before its first package-owned mutation.
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+pub(crate) fn verify_configured_legacy_roots() -> Result<()> {
+    verify_package_purge_preconditions()?;
+    let instances = crate::daemon_instance::enumerate()?;
+    verify_complete_instance_inventory(&instances)?;
+    for instance in &instances {
+        verify_effective_unit(instance)?;
+    }
+    validate_plans(&plans_for_instances(&instances)?)?;
+    Ok(())
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1185,6 +1217,7 @@ fn physical_directory_snapshot(
     }
     Ok((PhysicalDirectorySnapshot { root, locations }, pin))
 }
+
 /// Detect overlap through symlink and bind-mount aliases. Mount IDs remain
 /// part of the snapshot for change detection, but the same directory inode
 /// can have different mount IDs after a bind mount, so alias proof compares
@@ -1557,6 +1590,17 @@ fn recheck_physical_plan_paths(
     Ok(())
 }
 
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn verify_complete_instance_inventory(
+    instances: &[crate::daemon_instance::DaemonInstance],
+) -> Result<()> {
+    verify_complete_instance_inventory_with_systemd_path(
+        instances,
+        Path::new("/run/systemd/system"),
+    )
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 fn verify_complete_instance_inventory_with_systemd_path(
     instances: &[crate::daemon_instance::DaemonInstance],
@@ -1590,6 +1634,17 @@ fn verify_complete_instance_inventory_with_systemd_path(
         "--full",
     ])?;
     validate_systemd_unit_inventory(&expected, &loaded, &unit_files)
+}
+
+/// The package migration is a host-wide operation. Both Debian's maintainer
+/// scripts and direct hidden CLI dispatch reach this proof before root
+/// inventory, runtime-root creation, locking, or deletion.
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn verify_package_purge_preconditions() -> Result<()> {
+    verify_package_transaction_lock()?;
+    verify_package_host_drain()?;
+    verify_no_live_runner_processes()
 }
 
 #[cfg(target_os = "linux")]
@@ -1628,6 +1683,13 @@ fn require_systemd_effective_unit_proof(systemd_runtime: &Path) -> Result<()> {
         bail!("refusing legacy purge without systemd effective-unit proof");
     }
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn verify_package_transaction_lock() -> Result<()> {
+    bail!("legacy package migration requires Linux /proc flock proof")
 }
 
 #[cfg(target_os = "linux")]
@@ -1708,6 +1770,190 @@ fn process_is_current_or_ancestor(owner: u32, mut current: u32) -> Result<bool> 
     }
     Ok(false)
 }
+
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn verify_package_host_drain() -> Result<()> {
+    if !Path::new("/run/systemd/system").is_dir() {
+        bail!("refusing legacy purge without systemd host-drain proof");
+    }
+
+    verify_supported_systemd_activation_version()?;
+    verify_supported_system_bus_daemon()?;
+    let systemd_manager_owner = systemd_manager_owner()?;
+    reload_system_bus_activation_cache()?;
+
+    let services = systemctl_listing(&[
+        "list-units",
+        "--all",
+        "--type=service",
+        "--no-legend",
+        "--no-pager",
+        "--plain",
+        "--full",
+    ])?;
+    let loaded_services = parse_active_unit_rows(&services, "service")?;
+    for (unit, state) in &loaded_services {
+        if matches!(state.as_str(), "inactive" | "failed") {
+            continue;
+        }
+        if unit.starts_with("velnor") {
+            if verify_transaction_oneshot_service(unit).is_ok() {
+                continue;
+            }
+            bail!("active or unverified Velnor service prevents legacy purge: {unit} ({state})");
+        }
+        if service_invokes_packaged_runner(unit)? {
+            bail!("active service invokes the packaged Velnor runner: {unit} ({state})");
+        }
+    }
+
+    // `list-units --all` omits installed units that systemd has never loaded.
+    // Both loaded inactive services and installed unit files can be started
+    // on demand when a D-Bus name is requested, so inspect effective
+    // Type=/BusName= and Exec* properties for their union. Only reject
+    // candidates that can invoke Velnor; ordinary inactive D-Bus services
+    // (common on desktop and server hosts) remain valid.
+    let service_unit_files = systemctl_listing(&[
+        "list-unit-files",
+        "--type=service",
+        "--no-legend",
+        "--no-pager",
+        "--full",
+    ])?;
+    verify_dbus_activatable_services(&loaded_services, &service_unit_files)?;
+
+    let timers = systemctl_listing(&[
+        "list-units",
+        "--all",
+        "--type=timer",
+        "--no-legend",
+        "--no-pager",
+        "--plain",
+        "--full",
+    ])?;
+    for (timer, state) in parse_active_unit_rows(&timers, "timer")? {
+        if matches!(state.as_str(), "inactive" | "failed") {
+            continue;
+        }
+        let triggers = systemctl_show_unit(&timer, "Triggers")?;
+        if timer.starts_with("velnor") {
+            let expected = transaction_timer_service(&timer)
+                .with_context(|| format!("active Velnor timer is not allowlisted: {timer}"))?;
+            verify_transaction_timer(&timer, &expected)?;
+            verify_transaction_oneshot_service(&expected)?;
+        } else {
+            for target in triggers
+                .split_whitespace()
+                .filter(|name| name.ends_with(".service"))
+            {
+                if service_invokes_packaged_runner(target)? {
+                    bail!("active timer {timer} can start a service invoking the Velnor runner: {target}");
+                }
+                if target.starts_with("velnor") {
+                    bail!("active timer {timer} can start a Velnor service: {target}");
+                }
+            }
+        }
+    }
+    for kind in ["socket", "path"] {
+        let activation_units = systemctl_listing(&[
+            "list-units",
+            "--all",
+            &format!("--type={kind}"),
+            "--no-legend",
+            "--no-pager",
+            "--plain",
+            "--full",
+        ])?;
+        for (activation, state) in parse_active_unit_rows(&activation_units, kind)? {
+            if matches!(state.as_str(), "inactive" | "failed") {
+                continue;
+            }
+            bail!("active {kind} activation unit prevents legacy purge: {activation} ({state})");
+        }
+    }
+    verify_pending_systemd_activation_jobs(&systemd_manager_owner)?;
+    verify_active_service_drain()?;
+    Ok(())
+}
+
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn verify_pending_systemd_activation_jobs(expected_manager_owner: &str) -> Result<()> {
+    let barrier = Command::new("/usr/bin/busctl")
+        .args([
+            "--system",
+            "call",
+            "org.freedesktop.systemd1",
+            "/org/freedesktop/systemd1",
+            "org.freedesktop.systemd1.Manager",
+            "ListJobs",
+        ])
+        .output()
+        .context("inspect queued systemd activation jobs with Manager.ListJobs")?;
+    if !barrier.status.success() {
+        bail!("system manager rejected the ListJobs job inventory");
+    }
+    let barrier = String::from_utf8(barrier.stdout)
+        .context("system manager returned invalid UTF-8 in ListJobs response")?;
+    validate_systemd_list_jobs_response(&barrier)?;
+    let manager_owner = systemd_manager_owner()?;
+    if manager_owner != expected_manager_owner {
+        bail!("systemd bus owner changed during the D-Bus activation drain");
+    }
+
+    // `ListJobs` is a snapshot, not an activation fence. The exclusive
+    // package transaction lock prevents shipped Velnor ExecStart wrappers
+    // from entering while purge runs; this snapshot and the final unit/process
+    // scans reject already-running or queued work. D-Bus direct Exec commands
+    // that can invoke Velnor are rejected by the activation-file scan.
+    let jobs = systemctl_listing(&["list-jobs", "--no-legend", "--no-pager", "--full"])?;
+    for (unit, _job_type, state) in parse_systemd_job_rows(&jobs)? {
+        if !matches!(state.as_str(), "waiting" | "running") {
+            continue;
+        }
+        if unit.ends_with(".service") {
+            if unit.starts_with("velnor") {
+                if verify_transaction_oneshot_service(&unit).is_ok() {
+                    continue;
+                }
+                bail!("pending systemd job can activate a Velnor service: {unit}");
+            }
+            if service_invokes_packaged_runner(&unit)? {
+                bail!("pending systemd job can activate a service invoking Velnor: {unit}");
+            }
+        } else if unit.ends_with(".socket") || unit.ends_with(".path") || unit.ends_with(".timer") {
+            bail!("pending systemd activation-unit job prevents legacy purge: {unit}");
+        }
+    }
+    Ok(())
+}
+
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn systemd_manager_owner() -> Result<String> {
+    let output = Command::new("/usr/bin/busctl")
+        .args([
+            "--system",
+            "call",
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "GetNameOwner",
+            "s",
+            "org.freedesktop.systemd1",
+        ])
+        .output()
+        .context("query the systemd manager owner on the system bus")?;
+    if !output.status.success() {
+        bail!("system bus could not resolve the systemd manager owner");
+    }
+    let response = String::from_utf8(output.stdout)
+        .context("system bus returned invalid UTF-8 in the manager owner")?;
+    parse_busctl_unique_name(&response)
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 fn parse_busctl_unique_name(response: &str) -> Result<String> {
     let fields = response.split_whitespace().collect::<Vec<_>>();
@@ -1816,6 +2062,41 @@ fn parse_systemd_job_rows(raw: &str) -> Result<Vec<(String, String, String)>> {
     Ok(jobs)
 }
 
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn reload_system_bus_activation_cache() -> Result<()> {
+    let output = Command::new("/usr/bin/busctl")
+        .args([
+            "--system",
+            "call",
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "ReloadConfig",
+        ])
+        .output()
+        .context("synchronously reload the system D-Bus activation cache")?;
+    if !output.status.success() {
+        bail!("system bus rejected ReloadConfig; activation cache is unproven");
+    }
+    Ok(())
+}
+
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn verify_supported_systemd_activation_version() -> Result<()> {
+    let output = Command::new("/usr/bin/systemctl")
+        .args(["show", "--property=Version", "--value"])
+        .output()
+        .context("query running systemd manager version for D-Bus activation drain")?;
+    if !output.status.success() {
+        bail!("systemd refused manager-version query for D-Bus activation drain");
+    }
+    let version = String::from_utf8(output.stdout)
+        .context("systemd returned invalid UTF-8 in manager-version output")?;
+    validate_systemd_activation_version(&version)
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 fn validate_systemd_activation_version(version: &str) -> Result<()> {
     let first_line = version
@@ -1851,6 +2132,93 @@ fn validate_systemd_activation_version(version: &str) -> Result<()> {
         bail!("systemd v235 or newer is required for the supported D-Bus activation drain");
     }
     Ok(())
+}
+
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn verify_supported_system_bus_daemon() -> Result<()> {
+    let active_state = systemctl_show_unit("dbus.service", "ActiveState")?;
+    if active_state.trim() != "active" {
+        bail!("cannot prove the system bus daemon while dbus.service is not active");
+    }
+    let need_daemon_reload = systemctl_show_unit("dbus.service", "NeedDaemonReload")?;
+    if need_daemon_reload.trim() != "no" {
+        bail!("cannot prove the system bus daemon while dbus.service has stale unit state");
+    }
+    let exec_start = systemctl_show_unit("dbus.service", "ExecStart")?;
+    dbus_config_file_from_exec_start(&exec_start)?;
+    Ok(())
+}
+
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn verify_active_service_drain() -> Result<()> {
+    let services = systemctl_listing(&[
+        "list-units",
+        "--all",
+        "--type=service",
+        "--no-legend",
+        "--no-pager",
+        "--plain",
+        "--full",
+    ])?;
+    for (unit, state) in parse_active_unit_rows(&services, "service")? {
+        if matches!(state.as_str(), "inactive" | "failed") {
+            continue;
+        }
+        if unit.starts_with("velnor") {
+            if verify_transaction_oneshot_service(&unit).is_ok() {
+                continue;
+            }
+            bail!("active or activating Velnor service prevents legacy purge: {unit} ({state})");
+        }
+        if service_invokes_packaged_runner(&unit)? {
+            bail!(
+                "active or activating service invokes the packaged Velnor runner: {unit} ({state})"
+            );
+        }
+    }
+    Ok(())
+}
+
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn verify_dbus_activatable_services(
+    loaded_services: &[(String, String)],
+    service_unit_files: &str,
+) -> Result<()> {
+    let mut services = loaded_services
+        .iter()
+        .map(|(unit, _)| unit.clone())
+        .collect::<BTreeSet<_>>();
+    services.extend(parse_service_unit_file_names(service_unit_files)?);
+
+    for unit in services {
+        if service_is_dbus_activatable(&unit)? && service_invokes_packaged_runner(&unit)? {
+            bail!("D-Bus-activatable service can invoke the packaged Velnor runner: {unit}");
+        }
+    }
+    let dbus_service_dirs = effective_dbus_system_service_dirs()?;
+    verify_dbus_activation_service_files_in(&dbus_service_dirs, |unit| {
+        service_invokes_packaged_runner(unit)
+    })?;
+    Ok(())
+}
+
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn effective_dbus_system_service_dirs() -> Result<Vec<PathBuf>> {
+    let active_state = systemctl_show_unit("dbus.service", "ActiveState")?;
+    if active_state.trim() != "active" {
+        bail!("cannot prove D-Bus activation directories while dbus.service is not active");
+    }
+    let need_daemon_reload = systemctl_show_unit("dbus.service", "NeedDaemonReload")?;
+    if need_daemon_reload.trim() != "no" {
+        bail!("cannot prove D-Bus activation directories while dbus.service has stale unit state");
+    }
+    let exec_start = systemctl_show_unit("dbus.service", "ExecStart")?;
+    let config_file = dbus_config_file_from_exec_start(&exec_start)?;
+    collect_dbus_system_service_dirs(&config_file)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -2674,9 +3042,45 @@ fn parse_service_unit_file_names(raw: &str) -> Result<BTreeSet<String>> {
     Ok(services)
 }
 
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn service_is_dbus_activatable(unit: &str) -> Result<bool> {
+    let unit_type = systemctl_show_unit(unit, "Type")?;
+    let bus_name = systemctl_show_unit(unit, "BusName")?;
+    Ok(has_dbus_activation_properties(&unit_type, &bus_name))
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 fn has_dbus_activation_properties(unit_type: &str, bus_name: &str) -> bool {
     unit_type.trim() == "dbus" || !bus_name.trim().is_empty()
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn parse_active_unit_rows(raw: &str, kind: &str) -> Result<Vec<(String, String)>> {
+    let suffix = format!(".{kind}");
+    let mut active = Vec::new();
+    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 4
+            || !fields[0].ends_with(&suffix)
+            || fields[1].is_empty()
+            || fields[3].is_empty()
+            || !matches!(
+                fields[2],
+                "active"
+                    | "reloading"
+                    | "inactive"
+                    | "failed"
+                    | "activating"
+                    | "deactivating"
+                    | "maintenance"
+            )
+        {
+            bail!("systemd returned a malformed {kind} unit inventory row");
+        }
+        active.push((fields[0].to_owned(), fields[2].to_owned()));
+    }
+    Ok(active)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -2696,6 +3100,46 @@ fn transaction_timer_service(timer: &str) -> Option<String> {
         return None;
     }
     Some(format!("velnor-doctor@{instance}.service"))
+}
+
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn verify_transaction_timer(timer: &str, expected_service: &str) -> Result<()> {
+    if transaction_timer_service(timer).as_deref() != Some(expected_service) {
+        bail!("active Velnor timer has an unsupported target: {timer}");
+    }
+    if systemctl_show_unit(timer, "NeedDaemonReload")?.trim() != "no"
+        || !systemctl_show_unit(timer, "DropInPaths")?.trim().is_empty()
+    {
+        bail!("active Velnor timer has stale or custom unit configuration: {timer}");
+    }
+    let fragment = systemctl_show_unit(timer, "FragmentPath")?;
+    let fragment_name = if timer.starts_with("velnor-doctor@") {
+        "velnor-doctor@.timer"
+    } else {
+        timer
+    };
+    let expected_contents = match fragment_name {
+        "velnor-cache-gc.timer" => include_str!("../../velnor-tools/debian/velnor-cache-gc.timer"),
+        "velnor-doctor.timer" => include_str!("../debian/velnor-doctor.timer"),
+        "velnor-doctor@.timer" => include_str!("../debian/velnor-doctor@.timer"),
+        "velnor-fleet-policy-audit.timer" => {
+            include_str!("../../velnor-tools/debian/velnor-fleet-policy-audit.timer")
+        }
+        _ => bail!("active Velnor timer is not allowlisted: {timer}"),
+    };
+    let fragment_path = Path::new(fragment.trim());
+    if !["/usr/lib/systemd/system", "/lib/systemd/system"]
+        .iter()
+        .any(|root| fragment_path == Path::new(root).join(fragment_name))
+        || fs::read_to_string(fragment_path).ok().as_deref() != Some(expected_contents)
+    {
+        bail!("active Velnor timer does not use its exact packaged fragment: {timer}");
+    }
+    if systemctl_show_unit(timer, "Triggers")?.trim() != expected_service {
+        bail!("active Velnor timer has an unsupported trigger: {timer}");
+    }
+    Ok(())
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -2750,6 +3194,101 @@ fn expected_transaction_oneshot_argv(unit: &str) -> Option<Vec<String>> {
         _ => return None,
     };
     Some(argv.into_iter().map(str::to_owned).collect())
+}
+
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn verify_transaction_oneshot_service(unit: &str) -> Result<()> {
+    let fleet_policy_audit = unit == "velnor-fleet-policy-audit.service";
+    let expected_argv =
+        if fleet_policy_audit {
+            None
+        } else {
+            Some(expected_transaction_oneshot_argv(unit).with_context(|| {
+                format!("active transaction service is not allowlisted: {unit}")
+            })?)
+        };
+    if systemctl_show_unit(unit, "Type")?.trim() != "oneshot" {
+        bail!("allowlisted transaction service has an unexpected Type: {unit}");
+    }
+    if systemctl_show_unit(unit, "NeedDaemonReload")?.trim() != "no"
+        || !systemctl_show_unit(unit, "DropInPaths")?.trim().is_empty()
+    {
+        bail!("allowlisted transaction service has stale or custom unit configuration: {unit}");
+    }
+    for property in [
+        "ExecCondition",
+        "ExecStartPre",
+        "ExecStartPost",
+        "ExecReload",
+        "ExecStop",
+        "ExecStopPost",
+    ] {
+        if !systemctl_show_unit(unit, property)?.trim().is_empty() {
+            bail!("allowlisted transaction service has an extra command ({property}): {unit}");
+        }
+    }
+    let fragment = systemctl_show_unit(unit, "FragmentPath")?;
+    let fragment_name = if unit.starts_with("velnor-doctor@") {
+        "velnor-doctor@.service"
+    } else {
+        unit
+    };
+    let expected_contents = match fragment_name {
+        "velnor-cache-gc.service" => {
+            include_str!("../../velnor-tools/debian/velnor-cache-gc.service")
+        }
+        "velnor-doctor.service" => include_str!("../debian/velnor-doctor.service"),
+        "velnor-doctor@.service" => include_str!("../debian/velnor-doctor@.service"),
+        "velnor-fleet-policy-audit.service" => {
+            include_str!("../../velnor-tools/debian/velnor-fleet-policy-audit.service")
+        }
+        _ => bail!("transaction service is not allowlisted: {unit}"),
+    };
+    let fragment_path = Path::new(fragment.trim());
+    if !["/usr/lib/systemd/system", "/lib/systemd/system"]
+        .iter()
+        .any(|root| fragment_path == Path::new(root).join(fragment_name))
+        || fs::read_to_string(fragment_path).ok().as_deref() != Some(expected_contents)
+    {
+        bail!("allowlisted transaction service does not use its exact packaged fragment: {unit}");
+    }
+    let exec_start = systemctl_show_unit(unit, "ExecStart")?;
+    if fleet_policy_audit {
+        verify_locked_shell_exec_start(&exec_start)?;
+    } else if parse_exec_start_property(&exec_start)?
+        != expected_argv.context("transaction argv missing")?
+    {
+        bail!("allowlisted transaction service has a different ExecStart: {unit}");
+    }
+    Ok(())
+}
+
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn service_invokes_packaged_runner(unit: &str) -> Result<bool> {
+    let output = Command::new("/usr/bin/systemctl")
+        .args([
+            "show",
+            "--no-pager",
+            "--property=ExecCondition",
+            "--property=ExecStartPre",
+            "--property=ExecStart",
+            "--property=ExecStartPost",
+            "--property=ExecReload",
+            "--property=ExecStop",
+            "--property=ExecStopPost",
+            "--value",
+            unit,
+        ])
+        .output()
+        .with_context(|| format!("query command properties for active service {unit}"))?;
+    if !output.status.success() {
+        bail!("systemd refused command-property query for active service {unit}");
+    }
+    let commands = String::from_utf8(output.stdout)
+        .with_context(|| format!("systemd returned invalid command data for {unit}"))?;
+    Ok(command_properties_invoke_velnor(&commands))
 }
 
 #[allow(dead_code)]
@@ -2966,6 +3505,7 @@ fn is_python_interpreter(basename: &str) -> bool {
             !component.is_empty() && component.bytes().all(|byte| byte.is_ascii_digit())
         })
 }
+
 #[cfg(target_os = "linux")]
 #[cfg_attr(not(test), allow(dead_code))]
 fn process_argv_invokes_velnor(cmdline: &[u8]) -> bool {
@@ -2979,6 +3519,134 @@ fn process_argv_invokes_velnor(cmdline: &[u8]) -> bool {
             .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
             .any(|token| matches!(token, "daemon" | "controller" | "slot" | "job" | "guardian"))
     })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn verify_locked_shell_exec_start(raw: &str) -> Result<()> {
+    let value = raw.trim();
+    let expected_prefix = format!(
+        "{{ path=/usr/bin/flock ; argv[]=/usr/bin/flock --shared --no-fork {PACKAGE_TRANSACTION_LOCK} /bin/sh -c "
+    );
+    if value.matches("{ path=").count() != 1
+        || !value.starts_with(&expected_prefix)
+        || !value.contains(" ; ignore_errors=no ; start_time=")
+        || !value.ends_with('}')
+    {
+        bail!("fleet policy audit ExecStart is not one locked shell invocation");
+    }
+    Ok(())
+}
+
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn verify_no_live_runner_processes() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let self_pid = std::process::id();
+        let packaged_runner = match fs::metadata("/usr/bin/velnor-runner") {
+            Ok(metadata) => {
+                let digest = sha256_file(File::open("/usr/bin/velnor-runner")?)?;
+                Some(((metadata.dev(), metadata.ino()), metadata.len(), digest))
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => None,
+            Err(error) => return Err(error).context("inspect packaged runner identity"),
+        };
+        let processes =
+            fs::read_dir("/proc").context("enumerate host processes for purge drain")?;
+        for entry in processes {
+            let entry = entry.context("read host process entry")?;
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if pid == self_pid {
+                continue;
+            }
+            let cmdline_path = entry.path().join("cmdline");
+            let cmdline = match fs::read(&cmdline_path) {
+                Ok(cmdline) => cmdline,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+                    if entry.path().exists() {
+                        bail!("cannot inspect command line for host process {pid}");
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("inspect command line for host process {pid}"));
+                }
+            };
+            if process_argv_invokes_velnor(&cmdline) {
+                bail!("Velnor runner service process {pid} is still live");
+            }
+            let executable = match fs::read_link(entry.path().join("exe")) {
+                Ok(executable) => executable,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+                    if entry.path().exists() {
+                        bail!("cannot inspect executable for host process {pid}");
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("inspect executable for host process {pid}"));
+                }
+            };
+            let executable_name = executable
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .strip_suffix(" (deleted)")
+                .unwrap_or_else(|| {
+                    executable
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default()
+                });
+            if executable_name == "velnor-runner" {
+                bail!("Velnor runner process {pid} is still live");
+            }
+            if let Some((expected_identity, expected_size, expected_digest)) = packaged_runner {
+                match File::open(entry.path().join("exe")) {
+                    Ok(mut file) => {
+                        let metadata = file.metadata().with_context(|| {
+                            format!("inspect executable identity for host process {pid}")
+                        })?;
+                        if (metadata.dev(), metadata.ino()) == expected_identity {
+                            bail!("packaged Velnor runner process {pid} is still live");
+                        }
+                        if metadata.len() == expected_size && sha256_file(file)? == expected_digest
+                        {
+                            bail!("copied packaged Velnor runner process {pid} is still live");
+                        }
+                    }
+                    Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                    Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+                        if entry.path().exists() {
+                            bail!("cannot inspect executable identity for host process {pid}");
+                        }
+                    }
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("inspect executable identity for host process {pid}")
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        bail!("legacy package migration requires Linux process inventory proof")
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -3211,6 +3879,69 @@ fn reject_manager_environment_overrides(environment: &str) -> Result<()> {
     Ok(())
 }
 
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn verify_effective_unit(instance: &crate::daemon_instance::DaemonInstance) -> Result<()> {
+    verify_static_unit_files(instance)?;
+    verify_regular_instance_environment_file(instance)?;
+    verify_root_environment_file(instance)?;
+    verify_secret_environment_file(instance)?;
+    validate_instance_roots(instance)?;
+    require_systemd_effective_unit_proof(Path::new("/run/systemd/system"))?;
+
+    let fragment = systemctl_show(instance, "FragmentPath")?;
+    let expected_fragment = packaged_fragment_path(instance)?;
+    let actual_fragment = fs::canonicalize(fragment.trim())
+        .with_context(|| format!("resolve effective fragment for {}", instance.unit))?;
+    let expected_fragment =
+        fs::canonicalize(&expected_fragment).context("resolve packaged daemon unit fragment")?;
+    if actual_fragment != expected_fragment {
+        bail!(
+            "unit {} uses unsupported fragment {} (expected {})",
+            instance.unit,
+            fragment.trim(),
+            expected_fragment.display()
+        );
+    }
+    let need_daemon_reload = systemctl_show(instance, "NeedDaemonReload")?;
+    if need_daemon_reload.trim() != "no" {
+        bail!(
+            "unit {} has stale or unknown manager state; daemon-reload proof is required",
+            instance.unit
+        );
+    }
+    verify_effective_dropins(instance)?;
+
+    let state = systemctl_show(instance, "ActiveState")?;
+    if state.trim() != "inactive" {
+        bail!(
+            "refusing legacy purge while unit {} is {}",
+            instance.unit,
+            state.trim()
+        );
+    }
+    let root_directory = systemctl_show(instance, "RootDirectory")?;
+    if !matches!(root_directory.trim(), "" | "/") {
+        bail!(
+            "unit {} has unsupported RootDirectory={}",
+            instance.unit,
+            root_directory.trim()
+        );
+    }
+    let root_image = systemctl_show(instance, "RootImage")?;
+    if !root_image.trim().is_empty() {
+        bail!(
+            "unit {} has unsupported RootImage={}",
+            instance.unit,
+            root_image.trim()
+        );
+    }
+    validate_effective_working_directory(instance, &systemctl_show(instance, "WorkingDirectory")?)?;
+    validate_effective_exec_start(instance, &systemctl_show(instance, "ExecStart")?)?;
+    verify_effective_environment_files(instance)?;
+    Ok(())
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 fn validate_effective_working_directory(
     instance: &crate::daemon_instance::DaemonInstance,
@@ -3243,6 +3974,45 @@ fn validate_effective_exec_start(
         );
     }
     Ok(())
+}
+
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn verify_effective_environment_files(
+    instance: &crate::daemon_instance::DaemonInstance,
+) -> Result<()> {
+    let actual = parse_environment_files_property(&systemctl_show(instance, "EnvironmentFiles")?)?;
+    let secret_path = configured_secret_environment_file(instance)?;
+    let expected = vec![(instance.env_file.clone(), false), (secret_path, true)];
+    if actual != expected {
+        bail!(
+            "unit {} has unsupported effective EnvironmentFiles; only the packaged instance and optional secrets files are accepted",
+            instance.unit
+        );
+    }
+    Ok(())
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn parse_environment_files_property(raw: &str) -> Result<Vec<(PathBuf, bool)>> {
+    let fields = raw.split_whitespace().collect::<Vec<_>>();
+    if fields.is_empty() || fields.len() % 2 != 0 {
+        bail!("systemd EnvironmentFiles property has unsupported format");
+    }
+    let mut files = Vec::with_capacity(fields.len() / 2);
+    for pair in fields.as_chunks::<2>().0 {
+        let path = PathBuf::from(pair[0]);
+        if !path.is_absolute() {
+            bail!("systemd EnvironmentFiles contains a non-absolute path");
+        }
+        let optional = match pair[1] {
+            "(ignore_errors=no)" => false,
+            "(ignore_errors=yes)" => true,
+            _ => bail!("systemd EnvironmentFiles has unsupported ignore_errors value"),
+        };
+        files.push((path, optional));
+    }
+    Ok(files)
 }
 
 /// The packaged secrets file is loaded after the ordinary instance env file,
@@ -3283,6 +4053,26 @@ fn verify_secret_environment_file(instance: &crate::daemon_instance::DaemonInsta
                 path.display()
             );
         }
+    }
+    Ok(())
+}
+
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn verify_regular_instance_environment_file(
+    instance: &crate::daemon_instance::DaemonInstance,
+) -> Result<()> {
+    let metadata = fs::symlink_metadata(&instance.env_file).with_context(|| {
+        format!(
+            "inspect configured instance environment file {}",
+            instance.env_file.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!(
+            "configured instance environment file is not a regular file: {}",
+            instance.env_file.display()
+        );
     }
     Ok(())
 }
@@ -3370,6 +4160,90 @@ fn configured_secret_environment_file(
         .context("configured instance env file has no parent")?
         .join(file_name))
 }
+
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn packaged_fragment_path(instance: &crate::daemon_instance::DaemonInstance) -> Result<PathBuf> {
+    let name = if instance.instance == crate::daemon_instance::BARE_INSTANCE {
+        "velnor-daemon.service"
+    } else {
+        "velnor-daemon@.service"
+    };
+    for root in ["/usr/lib/systemd/system", "/lib/systemd/system"] {
+        let path = Path::new(root).join(name);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    bail!("packaged systemd unit fragment {name} is missing")
+}
+
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn verify_static_unit_files(instance: &crate::daemon_instance::DaemonInstance) -> Result<()> {
+    let fragment = packaged_fragment_path(instance)?;
+    let expected = if instance.instance == crate::daemon_instance::BARE_INSTANCE {
+        include_str!("../debian/velnor-daemon.service")
+    } else {
+        include_str!("../debian/velnor-daemon@.service")
+    };
+    let actual = fs::read_to_string(&fragment)
+        .with_context(|| format!("read packaged unit fragment {}", fragment.display()))?;
+    if actual != expected {
+        bail!(
+            "packaged unit fragment was modified: {}",
+            fragment.display()
+        );
+    }
+
+    let template = "velnor-daemon@.service";
+    for root in unit_search_roots() {
+        let concrete = root.join(&instance.unit);
+        if concrete != fragment && fs::symlink_metadata(&concrete).is_ok() {
+            bail!(
+                "unsupported custom daemon unit fragment exists: {}",
+                concrete.display()
+            );
+        }
+        let candidate = root.join(template);
+        if candidate != fragment && fs::symlink_metadata(&candidate).is_ok() {
+            let contents = fs::read_to_string(&candidate)
+                .with_context(|| format!("read daemon unit candidate {}", candidate.display()))?;
+            let expected = include_str!("../debian/velnor-daemon@.service");
+            if contents != expected {
+                bail!(
+                    "unsupported custom daemon unit fragment exists: {}",
+                    candidate.display()
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn unit_search_roots() -> Vec<PathBuf> {
+    [
+        "/etc/systemd/system",
+        "/run/systemd/system",
+        "/usr/local/lib/systemd/system",
+        "/usr/lib/systemd/system",
+        "/lib/systemd/system",
+        "/usr/local/share/systemd/system",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect()
+}
+
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn verify_effective_dropins(instance: &crate::daemon_instance::DaemonInstance) -> Result<()> {
+    let raw = systemctl_show(instance, "DropInPaths")?;
+    verify_dropin_paths_property(instance, &raw)
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 fn verify_dropin_paths_property(
     instance: &crate::daemon_instance::DaemonInstance,
@@ -3382,6 +4256,36 @@ fn verify_dropin_paths_property(
         );
     }
     Ok(())
+}
+
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn systemctl_show(
+    instance: &crate::daemon_instance::DaemonInstance,
+    property: &str,
+) -> Result<String> {
+    systemctl_show_unit(&instance.unit, property)
+}
+
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
+fn systemctl_show_unit(unit: &str, property: &str) -> Result<String> {
+    let property_arg = format!("--property={property}");
+    let output = Command::new("/usr/bin/systemctl")
+        .args(["show", "--no-pager"])
+        .arg(property_arg)
+        .args(["--value"])
+        .arg(unit)
+        .output()
+        .with_context(|| format!("query systemd property {property} for {unit}"))?;
+    if !output.status.success() {
+        bail!(
+            "systemd refused property {property} for {unit}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    String::from_utf8(output.stdout)
+        .with_context(|| format!("systemd returned invalid UTF-8 for {property} on {unit}"))
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -5245,5 +6149,132 @@ mod tests {
         mkdir(&candidate);
         let current = plan_for_instance(&instance).unwrap();
         assert!(validate_candidate_snapshots(&[initial], &[current]).is_err());
+    }
+
+    #[test]
+    fn parses_systemd_unit_inventory_rows_for_host_drain() {
+        let raw = "dbus.service loaded active running D-Bus System Message Bus\n\
+             \n\
+             velnor-daemon.service loaded inactive dead Velnor daemon\n\
+             cron.service loaded failed failed Regular background program processing daemon\n";
+        let rows = parse_active_unit_rows(raw, "service").unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("dbus.service".to_owned(), "active".to_owned()),
+                ("velnor-daemon.service".to_owned(), "inactive".to_owned()),
+                ("cron.service".to_owned(), "failed".to_owned()),
+            ]
+        );
+        assert!(parse_active_unit_rows("", "service").unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_malformed_systemd_unit_inventory_rows() {
+        for raw in [
+            "velnor-daemon.service loaded active\n",
+            "velnor-daemon.socket loaded active running Velnor socket\n",
+            "velnor-daemon.service loaded bogus running Velnor daemon\n",
+            "dbus.service loaded active running D-Bus\nmalformed-row\n",
+        ] {
+            assert!(
+                parse_active_unit_rows(raw, "service").is_err(),
+                "unexpected accept: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_timer_inventory_rows_for_transaction_timer_scan() {
+        let raw = "velnor-cache-gc.timer loaded active waiting Velnor cache GC\n";
+        let rows = parse_active_unit_rows(raw, "timer").unwrap();
+        assert_eq!(
+            rows,
+            vec![("velnor-cache-gc.timer".to_owned(), "active".to_owned())]
+        );
+        assert!(parse_active_unit_rows(raw, "service").is_err());
+    }
+
+    #[test]
+    fn parses_effective_environment_files_property() {
+        let files = parse_environment_files_property(
+            "/run/velnor/daemon.env (ignore_errors=no) /run/velnor/secrets.env (ignore_errors=yes)",
+        )
+        .unwrap();
+        assert_eq!(
+            files,
+            vec![
+                (PathBuf::from("/run/velnor/daemon.env"), false),
+                (PathBuf::from("/run/velnor/secrets.env"), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_environment_files_properties() {
+        for raw in [
+            "",
+            "/run/velnor/daemon.env",
+            "relative.env (ignore_errors=no)",
+            "/run/velnor/daemon.env (ignore_errors=maybe)",
+            "/run/velnor/daemon.env (ignore_errors=no) trailing",
+        ] {
+            assert!(
+                parse_environment_files_property(raw).is_err(),
+                "unexpected accept: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_single_locked_shell_exec_start() {
+        let raw = format!(
+            "{{ path=/usr/bin/flock ; argv[]=/usr/bin/flock --shared --no-fork {PACKAGE_TRANSACTION_LOCK} /bin/sh -c exec velnor-fleet-policy-audit ; ignore_errors=no ; start_time=123456 }}"
+        );
+        assert!(verify_locked_shell_exec_start(&raw).is_ok());
+    }
+
+    #[test]
+    fn rejects_unlocked_or_ambiguous_exec_start() {
+        let locked = format!(
+            "{{ path=/usr/bin/flock ; argv[]=/usr/bin/flock --shared --no-fork {PACKAGE_TRANSACTION_LOCK} /bin/sh -c exec velnor-fleet-policy-audit ; ignore_errors=no ; start_time=1 }}"
+        );
+        let unlocked = locked.replace("/usr/bin/flock", "/usr/bin/env");
+        let doubled = format!("{locked} {locked}");
+        let optional_errors = locked.replace("ignore_errors=no", "ignore_errors=yes");
+        let missing_marker = locked.replace(" ; ignore_errors=no ; start_time=1", "");
+        let unterminated = locked.trim_end_matches('}').to_owned();
+        for raw in [
+            "",
+            unlocked.as_str(),
+            doubled.as_str(),
+            optional_errors.as_str(),
+            missing_marker.as_str(),
+            unterminated.as_str(),
+        ] {
+            assert!(
+                verify_locked_shell_exec_start(raw).is_err(),
+                "unexpected accept: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lists_packaged_unit_search_roots_in_lookup_order() {
+        let roots = unit_search_roots();
+        assert_eq!(
+            roots,
+            [
+                "/etc/systemd/system",
+                "/run/systemd/system",
+                "/usr/local/lib/systemd/system",
+                "/usr/lib/systemd/system",
+                "/lib/systemd/system",
+                "/usr/local/share/systemd/system",
+            ]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>()
+        );
     }
 }
