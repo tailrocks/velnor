@@ -482,9 +482,8 @@ fn secure_directory_entries(directory: &fs::File) -> Result<Vec<SecureDirectoryE
     {
         use std::os::unix::ffi::OsStringExt as _;
 
-        let parent_mount_id = match mount_identity_of_directory(directory)? {
-            FilesystemMountIdentity::LinuxMountId(mount_id) => mount_id,
-        };
+        let FilesystemMountIdentity::LinuxMountId(parent_mount_id) =
+            mount_identity_of_directory(directory)?;
         // `fdopendir` advances a directory stream cursor. Open `.` relative
         // to the pinned descriptor so every scan gets an independent cursor.
         let scan_directory = open_directory_child(directory, std::ffi::OsStr::new("."))?;
@@ -1228,9 +1227,11 @@ fn filesystem_entry_snapshot(
             inode: stat.stx_ino,
             mount,
         };
-        let logical_bytes = (kind == FilesystemEntryKind::RegularFile)
-            .then_some(stat.stx_size)
-            .unwrap_or(0);
+        let logical_bytes = if kind == FilesystemEntryKind::RegularFile {
+            stat.stx_size
+        } else {
+            0
+        };
         let modified = modified_time_from_linux_statx(&stat)?;
         Ok(FilesystemEntrySnapshot {
             entry: FilesystemEntry {
@@ -2235,9 +2236,7 @@ fn remove_dir_all_at(
 ) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        let expected_mount_id = match expected_mount {
-            FilesystemMountIdentity::LinuxMountId(mount_id) => mount_id,
-        };
+        let FilesystemMountIdentity::LinuxMountId(expected_mount_id) = expected_mount;
         remove_dir_all_with_identity_at(
             parent,
             name,
@@ -3312,6 +3311,7 @@ pub(crate) struct MacOsDirectoryEntry {
 }
 
 #[cfg(target_os = "linux")]
+#[cfg_attr(not(test), allow(dead_code))]
 fn remove_dir_all_with_identity(
     path: &Path,
     expected_device: u64,
@@ -3351,6 +3351,7 @@ fn remove_dir_all_with_identity(
 }
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 fn remove_dir_all_with_identity_at(
     parent: &fs::File,
     name: &std::ffi::OsStr,
@@ -3401,13 +3402,13 @@ fn remove_dir_all_with_identity_at(
             root_path.display()
         );
     }
-    if let Some(pinned) = pinned_candidate {
-        if directory_identity(pinned)? != source_identity {
-            bail!(
-                "leftover workspace descriptor changed since inventory: {}",
-                root_path.display()
-            );
-        }
+    if let Some(pinned) = pinned_candidate
+        && directory_identity(pinned)? != source_identity
+    {
+        bail!(
+            "leftover workspace descriptor changed since inventory: {}",
+            root_path.display()
+        );
     }
     let root_identity = ensure_identity(
         root_path,
@@ -4921,6 +4922,7 @@ fn open_root_directory(
 }
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 fn walk_directory_tree(
     directory: &fs::File,
     path: &Path,
@@ -5061,6 +5063,7 @@ fn checked_current_stat(
 }
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 fn unlink_checked_entry(
     parent: &fs::File,
     name: &std::ffi::OsStr,
@@ -5097,6 +5100,7 @@ fn unlink_checked_entry(
 }
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 fn unlink_checked_directory(
     parent: &fs::File,
     name: &std::ffi::OsStr,

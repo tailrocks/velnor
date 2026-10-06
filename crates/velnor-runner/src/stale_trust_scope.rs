@@ -1593,6 +1593,8 @@ fn verify_complete_instance_inventory_with_systemd_path(
 }
 
 #[cfg(target_os = "linux")]
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
 fn verify_package_transaction_lock() -> Result<()> {
     use std::os::fd::AsRawFd as _;
     use std::os::unix::fs::MetadataExt as _;
@@ -1629,6 +1631,8 @@ fn require_systemd_effective_unit_proof(systemd_runtime: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
 fn exclusive_flock_owner(device: u64, inode: u64, locks: &str) -> Result<u32> {
     let major = ((device >> 8) & 0x0fff) | ((device >> 32) & 0xffff_f000);
     let minor = (device & 0x00ff) | ((device >> 12) & 0xffff_ff00);
@@ -1682,6 +1686,8 @@ fn exclusive_flock_owner(device: u64, inode: u64, locks: &str) -> Result<u32> {
 }
 
 #[cfg(target_os = "linux")]
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
 fn process_is_current_or_ancestor(owner: u32, mut current: u32) -> Result<bool> {
     while current > 1 {
         if current == owner {
@@ -2961,6 +2967,7 @@ fn is_python_interpreter(basename: &str) -> bool {
         })
 }
 #[cfg(target_os = "linux")]
+#[cfg_attr(not(test), allow(dead_code))]
 fn process_argv_invokes_velnor(cmdline: &[u8]) -> bool {
     let args = cmdline
         .split(|byte| *byte == 0)
@@ -2975,6 +2982,8 @@ fn process_argv_invokes_velnor(cmdline: &[u8]) -> bool {
 }
 
 #[cfg(target_os = "linux")]
+// No current callers; kept compiled for planned secure-cleanup wiring.
+#[allow(dead_code)]
 fn sha256_file(mut file: File) -> Result<[u8; 32]> {
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
@@ -3925,10 +3934,7 @@ mod tests {
         mkdir(&anchor);
         mkdir(&outside.join("scope/cargo"));
         let redirect = anchor.join("scope");
-        #[cfg(target_os = "macos")]
         std::os::unix::fs::symlink(outside.join("scope"), &redirect).unwrap();
-        #[cfg(target_os = "linux")]
-        std::os::unix::fs::symlink(&outside.join("scope"), &redirect).unwrap();
         let mut ancestor_candidates = [CandidateRoot {
             instance: "test".into(),
             class: "cargo",
@@ -4020,12 +4026,8 @@ mod tests {
         let candidate = anchor.join("old-root");
         mkdir(&candidate.join("child"));
         let anchor_identity = crate::leftover_disk::filesystem_directory_identity(&anchor).unwrap();
-        let mount = crate::leftover_disk::filesystem_mount_identity(&anchor)
-            .unwrap()
-            .unwrap();
-        let crate::leftover_disk::FilesystemMountIdentity::LinuxMountId(mount_id) = mount else {
-            panic!("expected Linux mount identity");
-        };
+        let mount = crate::leftover_disk::filesystem_mount_identity(&anchor).unwrap();
+        let crate::leftover_disk::FilesystemMountIdentity::LinuxMountId(mount_id) = mount;
         let wrong = crate::leftover_disk::FilesystemMountIdentity::LinuxMountId(mount_id + 1);
         assert!(
             crate::leftover_disk::remove_dir_all_on_device_and_mount_under(
@@ -4922,7 +4924,7 @@ mod tests {
             b"/bin/sh\0-c\0exec /opt/runner-copy daemon --name alpha\0"
         ));
         assert!(process_argv_invokes_velnor(
-            b"/opt/runner-copy\0--name\0alpha\0--labels\0test\0--slots\02\0daemon\0"
+            b"/opt/runner-copy\0--name\0alpha\0--labels\0test\0--slots\x002\0daemon\0"
         ));
     }
 

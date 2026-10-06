@@ -487,6 +487,8 @@ struct PressureStat {
 }
 
 #[cfg(unix)]
+// statvfs counters are narrower on macOS; the widening conversions are load-bearing there.
+#[allow(clippy::useless_conversion)]
 fn statvfs_descriptor(descriptor: &File) -> Result<PressureStat> {
     use std::os::fd::AsRawFd as _;
 
@@ -540,9 +542,9 @@ fn stable_volume_fingerprint(descriptor: &File) -> Result<Option<String>> {
         if result != 0 || fs_uuid.len == 0 || usize::from(fs_uuid.len) > fs_uuid.uuid.len() {
             return Ok(None);
         }
-        return Ok(Some(format_volume_uuid(
+        Ok(Some(format_volume_uuid(
             &fs_uuid.uuid[..usize::from(fs_uuid.len)],
-        )));
+        )))
     }
     #[cfg(target_os = "macos")]
     {

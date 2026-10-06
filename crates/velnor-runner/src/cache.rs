@@ -3894,7 +3894,7 @@ mod tests {
         let repository_key =
             crate::store_catalog::repository_store_key("https://github.com", "42").unwrap();
         let trust_key = crate::trust_scope::filesystem_key(crate::trust_scope::FAIL_CLOSED);
-        let outside_scope = outside.join(trust_key).join(repository_key);
+        let outside_scope = outside.join(&trust_key).join(repository_key);
         fs::create_dir_all(outside_scope.join("workspace/target/debug")).unwrap();
         let outside_sentinel = outside_scope.join("workspace/target/debug/sentinel");
         fs::write(&outside_sentinel, vec![7; 4096]).unwrap();

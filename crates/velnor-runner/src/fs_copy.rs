@@ -1080,6 +1080,8 @@ impl NoFollowDestinationDir {
 
             let mode = metadata.mode();
             if mode & 0o022 != 0 {
+                // S_ISVTX is u16 on macOS, u32 on Linux; the cast is load-bearing on macOS.
+                #[allow(clippy::unnecessary_cast)]
                 let sticky = mode & (libc::S_ISVTX as u32) != 0;
                 let child_controlled =
                     child_metadata.uid() == 0 || child_metadata.uid() == runner_uid;
@@ -3194,7 +3196,9 @@ fn cleanup_mount_id(directory: &fs::File) -> Result<u64> {
     )
     .map_err(std::io::Error::from)
     .context("inspect pinned directory mount ID for secure cleanup")?;
-    if !stat.stx_mask.contains(rustix::fs::StatxFlags::MNT_ID) {
+    if !rustix::fs::StatxFlags::from_bits_truncate(stat.stx_mask)
+        .contains(rustix::fs::StatxFlags::MNT_ID)
+    {
         bail!("kernel did not provide a mount ID for secure tree cleanup");
     }
     Ok(stat.stx_mnt_id)
@@ -3355,7 +3359,7 @@ fn create_temporary_file(parent: &fs::File, temporary_name: &OsStr) -> std::io::
     .map_err(Into::into)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn remove_temporary_file(parent: &fs::File, temporary_name: &OsStr) {
     let _ = rustix::fs::unlinkat(parent, temporary_name, rustix::fs::AtFlags::empty());
 }

@@ -1185,7 +1185,7 @@ impl PermitLedger {
     /// Park a departed waiter's demand: it keeps its queue ticket
     /// (`first_seen_unix`, `sequence`) but no longer head-blocks younger
     /// eligible demand. Redelivery ([`Self::observe_demand`],
-    /// [`Self::acquire`]) revives it at its original age; without
+    /// [`Self::acquire_attempt`]) revives it at its original age; without
     /// redelivery the row is inert. Only an eligible row parks; a permit
     /// holder's granted row and closed rows are untouched.
     pub fn park_demand(&mut self, holder: &str) -> Result<bool, LedgerError> {

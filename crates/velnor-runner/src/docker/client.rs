@@ -1703,7 +1703,7 @@ fn shared_container_rm_lock_root() -> Result<PathBuf> {
 
     #[cfg(all(not(test), target_os = "linux"))]
     {
-        return Ok(PathBuf::from("/run/velnor/docker-container-rm-locks"));
+        Ok(PathBuf::from("/run/velnor/docker-container-rm-locks"))
     }
 
     #[cfg(all(not(test), target_os = "macos"))]

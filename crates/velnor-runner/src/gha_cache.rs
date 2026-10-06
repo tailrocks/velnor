@@ -7361,6 +7361,8 @@ fn unlink_cache_file_if_same_with_hook(
     )
     .map_err(io::Error::from)
     .with_context(|| format!("recheck quarantined {label}"))?;
+    // st_dev is u32 on macOS, u64 on Linux; the conversion is load-bearing on macOS.
+    #[allow(clippy::useless_conversion)]
     let named_device =
         u64::try_from(named.st_dev).context("convert quarantined cache-GC entry device ID")?;
     if rustix::fs::FileType::from_raw_mode(named.st_mode) != rustix::fs::FileType::RegularFile

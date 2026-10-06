@@ -10145,7 +10145,7 @@ fn shared_host_volume_lock_namespace(
     #[cfg(target_os = "linux")]
     {
         let _ = xdg_runtime_dir;
-        return Ok(PathBuf::from("/run/velnor/docker-volume-locks"));
+        Ok(PathBuf::from("/run/velnor/docker-volume-locks"))
     }
 
     #[cfg(target_os = "macos")]
