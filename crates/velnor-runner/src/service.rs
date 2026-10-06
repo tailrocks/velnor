@@ -713,18 +713,14 @@ pub async fn execute() -> anyhow::Result<()> {
             command: StoragePurgeCommand::PurgeLegacy,
         }) => {
             crate::scaffold::init_telemetry(None);
-            // The storage lane owns `stale_trust_scope::purge_configured_legacy_roots`;
-            // fail closed until that merge lands its entry points.
-            anyhow::bail!("package storage purge-legacy is not available in this build")
+            crate::stale_trust_scope::purge_configured_legacy_roots()
         }
         #[cfg(unix)]
         ServiceCommand::Storage(StoragePurgeArgs {
             command: StoragePurgeCommand::VerifyLegacy,
         }) => {
             crate::scaffold::init_telemetry(None);
-            // The storage lane owns `stale_trust_scope::verify_configured_legacy_roots`;
-            // fail closed until that merge lands its entry points.
-            anyhow::bail!("package storage verify-legacy is not available in this build")
+            crate::stale_trust_scope::verify_configured_legacy_roots()
         }
         other => {
             let command = Command::try_from(other)?;
