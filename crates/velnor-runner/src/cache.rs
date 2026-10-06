@@ -5447,7 +5447,12 @@ mod tests {
         let work = root.join("work");
         let candidate = sccache_root(&work, "untrusted", &layout).join("idle");
         fs::create_dir_all(candidate.join("key")).unwrap();
-        fs::write(candidate.join("key/payload"), vec![0; 32]).unwrap();
+        // The candidate alone must cover the Amount(50) goal: removal
+        // quarantine-renames before unlinking, which flips this test's
+        // existence-keyed availability mock mid-deletion. The pre-unlink
+        // hook then keeps a candidate that accounts for the goal and
+        // aborts (restoring) one that does not.
+        fs::write(candidate.join("key/payload"), vec![0; 64]).unwrap();
         backdate(&candidate, EMERGENCY_MIN_IDLE * 2);
         let run_root = root.join("run");
         let log_root = root.join("log");

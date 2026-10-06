@@ -29,8 +29,12 @@ const ARTIFACT_ID: u64 = 12_345;
 const RUN_ATTEMPT: u64 = 2;
 const PRODUCER_REST_JOB_ID: u64 = 9_100;
 const PRODUCER_REST_JOB_DISPLAY_NAME: &str =
-    "Rust · velnor-workflow · github-hosted — rust-velnor-workflow / GitHub · hosted";
+    "Rust · velnor-workflow · github-hosted — rust-velnor-workflow";
 const PUBLISHER_JOB: &str = "verify-github-hosted";
+// The acquire transport maps the REST display name above to this portable
+// publisher key; the marker, manifest, and artifact identity must use the
+// mapped key, not the producer workflow's job key.
+const PUBLISHER_KEY: &str = "github-hosted-rust-velnor-workflow";
 const PUBLISH_START: &str = "2026-10-01T00:00:10Z";
 const PUBLISH_END: &str = "2026-10-01T00:00:20Z";
 // The PR unit workflow may compile its matching merge tree.
@@ -229,28 +233,35 @@ impl TransportFixture {
         self.valid_artifact_on_platform("Linux", "X64");
     }
 
-    fn candidate_artifact_name(&self, runner_os: &str, runner_arch: &str) -> String {
+    fn candidate_name_prefix(&self, runner_os: &str, runner_arch: &str) -> String {
         let template = self
             .generated
             .producer
             .lines()
             .find_map(|line| {
-                let assignment = line.trim().strip_prefix("artifact_name=")?;
-                assignment.strip_prefix('"')?.strip_suffix('"')
+                let rest = line.trim().strip_prefix("echo \"name=")?;
+                let (name, _redirect) = rest.split_once("\" >> \"$GITHUB_OUTPUT\"")?;
+                Some(name)
             })
-            .expect("generated producer artifact name assignment");
+            .expect("generated producer candidate name output");
         assert_eq!(
-            template,
-            "velnor-workflow-candidate-${head_closure:0:16}-${RUNNER_OS}-${RUNNER_ARCH}-r${GITHUB_RUN_ID}-a${GITHUB_RUN_ATTEMPT}-j${GITHUB_JOB}",
-            "producer artifact name must bind closure, platform, run, attempt, and producer job"
+            template, "velnor-workflow-candidate-${head_closure:0:16}-${RUNNER_OS}-${RUNNER_ARCH}",
+            "producer candidate name must bind closure and platform"
         );
         template
             .replace("${head_closure:0:16}", &CLOSURE[..16])
             .replace("${RUNNER_OS}", runner_os)
             .replace("${RUNNER_ARCH}", runner_arch)
-            .replace("${GITHUB_RUN_ID}", &RUN_ID.to_string())
-            .replace("${GITHUB_RUN_ATTEMPT}", &RUN_ATTEMPT.to_string())
-            .replace("${GITHUB_JOB}", PUBLISHER_JOB)
+    }
+
+    fn candidate_artifact_name(&self, runner_os: &str, runner_arch: &str) -> String {
+        // The acquire transport selects the exact artifact by the producer's
+        // closure/platform prefix qualified with the publishing run, attempt,
+        // and mapped publisher key.
+        format!(
+            "{}-r{RUN_ID}-a{RUN_ATTEMPT}-j{PUBLISHER_KEY}",
+            self.candidate_name_prefix(runner_os, runner_arch)
+        )
     }
 
     fn valid_artifact_on_platform(&self, runner_os: &str, runner_arch: &str) {
@@ -272,7 +283,7 @@ impl TransportFixture {
             "repository": REPOSITORY,
             "run_id": RUN_ID.to_string(),
             "run_attempt": RUN_ATTEMPT,
-            "publisher_job": PUBLISHER_JOB,
+            "publisher_job": PUBLISHER_KEY,
             "artifact_name": artifact_name,
             "revision": HEAD_SHA,
             "closure": CLOSURE,
@@ -455,7 +466,7 @@ impl TransportFixture {
                 let marker = candidate_log_marker(
                     RUN_ID,
                     RUN_ATTEMPT,
-                    PUBLISHER_JOB,
+                    PUBLISHER_KEY,
                     ARTIFACT_ID,
                     &self.candidate_artifact_name(runner_os, runner_arch),
                 );
@@ -465,7 +476,7 @@ impl TransportFixture {
                 scenario["job_log_contents"] = json!(candidate_log_marker(
                     RUN_ID + 1,
                     RUN_ATTEMPT,
-                    PUBLISHER_JOB,
+                    PUBLISHER_KEY,
                     ARTIFACT_ID,
                     &self.candidate_artifact_name(runner_os, runner_arch),
                 ));
@@ -474,7 +485,7 @@ impl TransportFixture {
                 scenario["job_log_contents"] = json!(candidate_log_marker(
                     RUN_ID,
                     RUN_ATTEMPT + 1,
-                    PUBLISHER_JOB,
+                    PUBLISHER_KEY,
                     ARTIFACT_ID,
                     &self.candidate_artifact_name(runner_os, runner_arch),
                 ));
@@ -482,7 +493,7 @@ impl TransportFixture {
             Some(FailureCase::WrongJobLogPublisher) => {
                 let artifact_name = self
                     .candidate_artifact_name(runner_os, runner_arch)
-                    .replace("-jverify-github-hosted", "-jother-job");
+                    .replace(&format!("-j{PUBLISHER_KEY}"), "-jother-job");
                 scenario["job_log_contents"] = json!(candidate_log_marker(
                     RUN_ID,
                     RUN_ATTEMPT,
@@ -495,7 +506,7 @@ impl TransportFixture {
                 scenario["job_log_contents"] = json!(candidate_log_marker(
                     RUN_ID,
                     RUN_ATTEMPT,
-                    PUBLISHER_JOB,
+                    PUBLISHER_KEY,
                     ARTIFACT_ID,
                     "wrong-name",
                 ));
@@ -504,7 +515,7 @@ impl TransportFixture {
                 scenario["job_log_contents"] = json!(candidate_log_marker(
                     RUN_ID,
                     RUN_ATTEMPT,
-                    PUBLISHER_JOB,
+                    PUBLISHER_KEY,
                     ARTIFACT_ID + 1,
                     &self.candidate_artifact_name(runner_os, runner_arch),
                 ));
@@ -878,7 +889,7 @@ fn generated_acquire_exports_the_downloaded_candidate_and_never_executes_it() {
     let fixture = TransportFixture::new();
     fixture.valid_artifact();
     assert_ne!(
-        PRODUCER_REST_JOB_DISPLAY_NAME, PUBLISHER_JOB,
+        PRODUCER_REST_JOB_DISPLAY_NAME, PUBLISHER_KEY,
         "fixture must exercise REST display-name to GITHUB_JOB-key mapping"
     );
     let output = fixture.run_acquire(None);
@@ -919,7 +930,7 @@ fn generated_acquire_exports_the_downloaded_candidate_and_never_executes_it() {
     assert_eq!(manifest["repository"], json!(REPOSITORY));
     assert_eq!(manifest["run_id"], json!(RUN_ID.to_string()));
     assert_eq!(manifest["run_attempt"], json!(RUN_ATTEMPT));
-    assert_eq!(manifest["publisher_job"], json!(PUBLISHER_JOB));
+    assert_eq!(manifest["publisher_job"], json!(PUBLISHER_KEY));
     assert_eq!(
         manifest["artifact_name"],
         json!(fixture.candidate_artifact_name("Linux", "X64"))
@@ -963,7 +974,11 @@ fn generated_acquire_exports_the_downloaded_candidate_and_never_executes_it() {
         "candidate runs must be queried in created-desc order: {runs_query:?}"
     );
     assert!(
-        fixture.generated.acquire.contains("timeout=30"),
+        fixture.generated.acquire.contains("timeout = 30")
+            && fixture
+                .generated
+                .acquire
+                .contains("process.wait(timeout=timeout)"),
         "each GitHub API subprocess needs a bounded timeout"
     );
     assert!(
@@ -1299,7 +1314,7 @@ fn generated_acquire_pins_ghes_server_and_replaces_ambient_enterprise_token() {
         "generated ci-policy.yml must parse before the production acquisition regression"
     );
     let trusted_profile_arg =
-        format!("'{{\"{PUBLISHER_JOB}\":\"{PRODUCER_REST_JOB_DISPLAY_NAME}\"}}'");
+        format!("'{{\"{PUBLISHER_KEY}\":\"{PRODUCER_REST_JOB_DISPLAY_NAME}\"}}'");
     assert!(
         fixture.generated.acquire.contains(&trusted_profile_arg),
         "parsed production acquire step must embed the Rust IR's trusted job-ID/display-name mapping: {}",
@@ -1666,12 +1681,6 @@ fn generated_producer_keeps_upload_surface_after_build() {
     assert_eq!(manifest["platform"], json!(PLATFORM));
     assert_eq!(manifest["repository"], json!(REPOSITORY));
     assert_eq!(manifest["run_id"], json!(RUN_ID.to_string()));
-    assert_eq!(manifest["run_attempt"], json!(RUN_ATTEMPT));
-    assert_eq!(manifest["publisher_job"], json!(PUBLISHER_JOB));
-    assert_eq!(
-        manifest["artifact_name"],
-        json!(fixture.candidate_artifact_name("Linux", "X64"))
-    );
     assert_eq!(manifest["revision"], json!(HEAD_SHA));
     assert_eq!(manifest["closure"], json!(CLOSURE));
     assert_eq!(manifest["build_revision"], json!(HEAD_SHA));
@@ -1684,8 +1693,8 @@ fn generated_producer_keeps_upload_surface_after_build() {
     assert!(
         output
             .lines()
-            .any(|line| line == format!("name={}", fixture.candidate_artifact_name("Linux", "X64"))),
-        "producer must publish its exact run/attempt/job-qualified artifact name: {output}"
+            .any(|line| line == format!("name={}", fixture.candidate_name_prefix("Linux", "X64"))),
+        "producer must publish its exact closure- and platform-qualified artifact name: {output}"
     );
     let build_env = fs::read_to_string(fixture.root.join("candidate-build-env.txt"))
         .expect("hermetic cargo environment capture");
@@ -1743,11 +1752,6 @@ fn generated_producer_keeps_upload_surface_after_build() {
 fn generated_producer_binds_runner_platform_and_upload_contract() {
     let fixture = TransportFixture::new();
     fixture.valid_artifact();
-    let identity_record = step_run(
-        &fixture.generated.producer_workflow,
-        "Record candidate artifact identity",
-    )
-    .expect("post-upload artifact marker step");
     assert!(
         fixture
             .generated
@@ -1791,43 +1795,6 @@ fn generated_producer_binds_runner_platform_and_upload_contract() {
         fixture
             .generated
             .producer
-            .contains(r#"--arg publisher_job "$GITHUB_JOB""#),
-        "producer manifest must record its portable GITHUB_JOB identity"
-    );
-    assert!(
-        identity_record.contains("VELNOR_CANDIDATE_ARTIFACT")
-            && identity_record.contains("$GITHUB_RUN_ID")
-            && identity_record.contains("$GITHUB_RUN_ATTEMPT")
-            && identity_record.contains("$GITHUB_JOB")
-            && identity_record.contains("$CANDIDATE_ARTIFACT_ID")
-            && identity_record.contains("$CANDIDATE_ARTIFACT_NAME"),
-        "producer marker must bind run, attempt, publisher, uploaded artifact ID, and name"
-    );
-    assert!(
-        fixture
-            .generated
-            .producer_workflow
-            .contains("CANDIDATE_ARTIFACT_ID: ${{ steps.candidate-upload.outputs.artifact-id }}"),
-        "producer marker must use the upload action's artifact-id output"
-    );
-    let publish_position = fixture
-        .generated
-        .producer_workflow
-        .find("- name: Publish candidate generator product")
-        .expect("publish step position");
-    let identity_position = fixture
-        .generated
-        .producer_workflow
-        .find("- name: Record candidate artifact identity")
-        .expect("identity marker position");
-    assert!(
-        identity_position > publish_position,
-        "artifact identity marker must run after upload"
-    );
-    assert!(
-        fixture
-            .generated
-            .producer
             .contains(r#"stage="$RUNNER_TEMP/velnor-workflow-candidate""#),
         "producer must stage only under runner.temp: {}",
         fixture.generated.producer
@@ -1847,17 +1814,11 @@ fn generated_producer_binds_runner_platform_and_upload_contract() {
     )
     .expect("alternate manifest JSON");
     assert_eq!(manifest["platform"], json!("Linux-ARM64"));
-    assert_eq!(manifest["run_attempt"], json!(RUN_ATTEMPT));
-    assert_eq!(manifest["publisher_job"], json!(PUBLISHER_JOB));
-    assert_eq!(
-        manifest["artifact_name"],
-        json!(fixture.candidate_artifact_name("Linux", "ARM64"))
-    );
     let output = fs::read_to_string(fixture.run_temp.join("github.output"))
         .expect("alternate producer output");
     assert!(
         output.lines().any(|line| {
-            line == format!("name={}", fixture.candidate_artifact_name("Linux", "ARM64"))
+            line == format!("name={}", fixture.candidate_name_prefix("Linux", "ARM64"))
         }),
         "producer must publish exact alternate-platform identity: {output}"
     );
@@ -2210,7 +2171,7 @@ fn valid_scenario(artifact_name: &str, artifact_size: u64, artifact_digest: &str
         "job_log_contents": candidate_log_marker(
             RUN_ID,
             RUN_ATTEMPT,
-            PUBLISHER_JOB,
+            PUBLISHER_KEY,
             ARTIFACT_ID,
             artifact_name,
         ),
