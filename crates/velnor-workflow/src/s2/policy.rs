@@ -3214,29 +3214,6 @@ fn canonical_api_step_findings(
         .as_ref()
         .and_then(config::RepoGenerationConfig::repository)
         .unwrap_or_default();
-    let mut declared_ruleset_contexts = generation
-        .as_ref()
-        .map(|generation| generation.ruleset_required_status_checks().to_vec())
-        .filter(|contexts| !contexts.is_empty())
-        .unwrap_or_else(|| {
-            if generation
-                .as_ref()
-                .and_then(config::RepoGenerationConfig::ci_required)
-                .unwrap_or(true)
-            {
-                vec!["ci-required".to_owned()]
-            } else {
-                Vec::new()
-            }
-        });
-    if let Some(generation) = &generation {
-        declared_ruleset_contexts
-            .extend(generation.ruleset_external_status_checks().iter().cloned());
-    }
-    declared_ruleset_contexts.push("Policy".to_owned());
-    declared_ruleset_contexts.sort();
-    declared_ruleset_contexts.dedup();
-    let declared_ruleset_contexts = declared_ruleset_contexts.join(",");
     let hosted = static_local_provider(job, velnor_policy).is_none();
     let expected = if hosted {
         let revision = match entrypoint_policy_revision(root) {
@@ -3271,7 +3248,6 @@ fn canonical_api_step_findings(
             cache_backend: "github",
             trusted_gate: None,
             default_branch,
-            declared_ruleset_contexts: &declared_ruleset_contexts,
         });
         let document: Value = match serde_yaml::from_str(&format!("jobs:\n{rendered}")) {
             Ok(document) => document,

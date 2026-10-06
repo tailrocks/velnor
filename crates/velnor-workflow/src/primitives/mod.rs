@@ -991,7 +991,8 @@ pub(crate) fn lanes_runs_on(
             lanes_labels_json(&config.velnor_labels),
         )),
         RunnerMode::Github | RunnerMode::Both => Ok(format!(
-            "${{{{ (github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor') && fromJSON('{}') || {} }}}}",
+            "${{{{ (github.ref=='refs/heads/{}'&&github.event_name=='workflow_dispatch'&&inputs.lanes=='velnor') && fromJSON('{}') || {} }}}}",
+            config.default_branch,
             lanes_labels_json(&config.velnor_labels),
             json_string(&config.github_runner),
         )),

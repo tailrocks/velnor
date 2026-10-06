@@ -1024,7 +1024,6 @@ mod tests {
             mise_lock_keys: BTreeSet::new(),
             mise_lock_backends: BTreeMap::new(),
             mise_install_deps: MiseInstallDeps::default(),
-            declared_ruleset_contexts: String::new(),
             rust_pin: None,
         }
     }
@@ -6423,7 +6422,6 @@ pub(crate) struct WorkflowIr {
     /// The D19 generator pin (`ProjectConfig::workflow_revision`).
     pub(crate) workflow_revision: String,
     /// Declared `[policy]` contexts for ruleset API 403 fallback.
-    pub(crate) declared_ruleset_contexts: String,
     pub(crate) rust_needs: RustNeeds,
     pub(crate) concurrency_group: Option<String>,
     pub(crate) serial_stack_groups: bool,
@@ -7461,7 +7459,6 @@ impl WorkflowIr {
             empty_selection_proof: config.empty_selection_proof,
             repository: config.repository.clone(),
             workflow_revision: config.workflow_revision.clone(),
-            declared_ruleset_contexts: crate::s2::declared_ruleset_contexts_literal(config),
             rust_needs: config.rust_needs,
             concurrency_group: config.concurrency_group.clone(),
             serial_stack_groups: config.serial_stack_groups,
@@ -9841,7 +9838,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             cache_backend: if local { "local" } else { "github" },
             trusted_gate: gate.as_deref(),
             default_branch: &self.default_branch,
-            declared_ruleset_contexts: &self.declared_ruleset_contexts,
             candidate_artifact_wiring: crate::candidate_artifact_wiring_enabled(
                 &self.workflow_revision,
             ),

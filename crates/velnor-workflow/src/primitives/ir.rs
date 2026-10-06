@@ -369,7 +369,6 @@ mod tests {
             mise_lock_keys: BTreeSet::new(),
             mise_lock_backends: BTreeMap::new(),
             mise_install_deps: MiseInstallDeps::default(),
-            declared_ruleset_contexts: String::new(),
         }
     }
 
@@ -3623,7 +3622,6 @@ pub(crate) struct WorkflowIr {
     /// The D19 generator pin (`ProjectConfig::workflow_revision`).
     pub(crate) workflow_revision: String,
     /// Declared `[policy]` contexts for ruleset API 403 fallback.
-    pub(crate) declared_ruleset_contexts: String,
     pub(crate) default_dispatch_runner: String,
     pub(crate) runners: RunnerMode,
     pub(crate) automatic: RunnerMode,
@@ -4539,7 +4537,6 @@ impl WorkflowIr {
             },
             repository: config.repository.clone(),
             workflow_revision: config.workflow_revision.clone(),
-            declared_ruleset_contexts: crate::declared_ruleset_contexts_literal(config),
             default_dispatch_runner: config.default_dispatch_runner.clone(),
             runners: config.runners,
             automatic: config.automatic,
@@ -6875,7 +6872,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             cache_backend: if velnor { "local" } else { "github" },
             trusted_gate: gate.as_deref(),
             default_branch: &self.default_branch,
-            declared_ruleset_contexts: &self.declared_ruleset_contexts,
             candidate_artifact_wiring: crate::candidate_artifact_wiring_enabled(
                 &self.workflow_revision,
             ),
@@ -6894,24 +6890,26 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         format!(
             "(github.event_name=='merge_group'||(github.ref=='refs/heads/{}'&&(github.event_name=='push'||github.event_name=='schedule')))||({})",
             self.default_branch,
-            Self::velnor_dispatch_selection_expression()
+            self.velnor_dispatch_selection_expression()
         )
     }
 
-    /// A `workflow_dispatch` that selects the Velnor lane, on any ref.
-    ///
-    /// Dispatch is not ref-gated: GitHub only accepts a dispatch from an
-    /// actor with write access and only onto a ref of this repository, which
-    /// is the same authorship a same-repository pull-request head carries,
-    /// and the runner classifies both as `TrustClass::Trusted` without
-    /// consulting `github.ref` (`velnor-runner` `trust_class.rs`,
-    /// `TrustClass::derive`: every non-`pull_request*`, non-`workflow_run`
-    /// event executes base-repository code; conformance test
-    /// `trust_class_conformance_non_pr_events_are_trusted` lists
-    /// `workflow_dispatch`). A default-branch gate here would only withhold
-    /// the Velnor lane from a maintainer proving a branch on it.
-    fn velnor_dispatch_selection_expression() -> &'static str {
-        "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')"
+    /// A workflow_dispatch selecting the Velnor lane is trusted only from
+    /// the configured default branch, matching the self-hosted runner policy.
+    fn velnor_dispatch_selection_expression(&self) -> String {
+        format!(
+            "github.ref=='refs/heads/{}'&&(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'))",
+            self.default_branch
+        )
+    }
+
+    fn velnor_dispatch_lane_expression(&self, include_omitted: bool) -> String {
+        let dispatch = dispatch_lane_expression(RunnerMode::Velnor, include_omitted)
+            .replace(" ", "");
+        format!(
+            "github.ref=='refs/heads/{}'&&({dispatch})",
+            self.default_branch
+        )
     }
 
     fn velnor_automatic_event_expression(&self) -> String {
@@ -7003,7 +7001,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let omitted_github = matches!(self.automatic, RunnerMode::Github | RunnerMode::Both);
         let omitted_velnor = matches!(self.automatic, RunnerMode::Velnor | RunnerMode::Both);
         let dispatch_github = dispatch_lane_expression(RunnerMode::Github, omitted_github);
-        let dispatch_velnor = dispatch_lane_expression(RunnerMode::Velnor, omitted_velnor);
+        let dispatch_velnor = self.velnor_dispatch_lane_expression(omitted_velnor);
         match lane {
             RunnerMode::Github => {
                 if matches!(self.automatic, RunnerMode::Github | RunnerMode::Both) {
@@ -7015,8 +7013,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                     dispatch_github
                 }
             }
-            // Dispatch admits the Velnor lane on any ref; see
-            // `velnor_dispatch_selection_expression` for the trust argument.
+            // Local Velnor dispatches are admitted only from the default
+            // branch, which is also what the trusted-runner policy requires.
             RunnerMode::Velnor => {
                 if matches!(self.automatic, RunnerMode::Velnor | RunnerMode::Both) {
                     self.velnor_lane_event_expression(&dispatch_velnor)
@@ -7033,7 +7031,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             format!(
                 "{} || ({})",
                 self.velnor_automatic_event_expression(),
-                Self::velnor_dispatch_selection_expression()
+                self.velnor_dispatch_selection_expression()
             )
         } else {
             self.trusted_event_expression()
