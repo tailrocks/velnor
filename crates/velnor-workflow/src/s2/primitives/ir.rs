@@ -241,11 +241,10 @@ mod tests {
     use std::process::Command;
 
     use super::{
-        explicit_toolchain_step_id, provider_input, snapshot_compatibility,
-        unit_owns_workflow_crate, CacheReportFacts, GraphNode, Pins, Platform, ProviderAdmission,
-        ProviderId, ProviderSet, ReportedCacheLayer, RequiredCaller, RustNeeds, RustToolchain,
-        ToolRequirement, Unit, UnitKind, ValidationPhase, WorkflowIr, WorkflowKind, XcodeToolchain,
-        REQUIRED_CHECK,
+        explicit_toolchain_step_id, provider_input, snapshot_compatibility, CacheReportFacts,
+        GraphNode, Pins, Platform, ProviderAdmission, ProviderId, ProviderSet, ReportedCacheLayer,
+        RequiredCaller, RustNeeds, RustToolchain, ToolRequirement, Unit, UnitKind, ValidationPhase,
+        WorkflowIr, WorkflowKind, XcodeToolchain, REQUIRED_CHECK,
     };
     use crate::s2::config::MiseInstallDeps;
     use crate::s2::platform::{NamedProduct, Prerequisite};
