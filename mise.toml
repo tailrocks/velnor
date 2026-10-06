@@ -1,5 +1,6 @@
 [tools]
 actionlint = "1.7.12"
+"aqua:j178/prek" = "0.5.3"
 "aqua:oven-sh/bun" = "1.4.0"
 # Prebuilt fetcher for cargo-deb in the preview/release deb jobs. mise's own
 # cargo:* backend is unusable here: it hard-declares a mise-managed rust as an
@@ -24,6 +25,14 @@ cargo.binstall_quickinstall = true
 
 [tasks.fmt]
 run = "cargo fmt --all --check"
+
+[tasks.bootstrap]
+description = "Install repository-local hooks after mise install (also supports linked worktrees)"
+run = "bun scripts/install-hooks.mjs"
+
+[tasks.test-hooks]
+description = "Verify staged snapshot isolation and fail-closed hook behavior"
+run = "bun test scripts/pre-commit-snapshot.test.mjs"
 
 # Apply formatting in place; `fmt` above stays the read-only gate.
 [tasks.fmt-fix]
@@ -223,7 +232,21 @@ cat "$digest_output"
 """
 
 [tasks.check]
-depends = ["fmt", "actionlint", "audit-ci", "deny", "pin-integrity", "lint", "test", "test-production-topology", "test-release-feature-boundary", "test-release-boundary-script"]
+# Each task reference finishes before the next starts. Sibling dependencies do
+# not establish formatting/lint/test order.
+run = [
+  { task = "fmt" },
+  { task = "lint" },
+  { task = "test" },
+  { task = "test-production-topology" },
+  { task = "test-release-feature-boundary" },
+  { task = "test-release-boundary-script" },
+  { task = "test-hooks" },
+  { task = "actionlint" },
+  { task = "audit-ci" },
+  { task = "deny" },
+  { task = "pin-integrity" },
+]
 
 [tasks.ci]
 depends = ["actionlint", "audit-ci", "deny", "pin-integrity"]
