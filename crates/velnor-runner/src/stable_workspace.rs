@@ -2078,11 +2078,14 @@ fn remove_scope_regular_entry(
     )
     .map_err(std::io::Error::from)
     .context("recheck stable-workspace cleanup record before unlink")?;
+    // st_nlink is u16 on macOS, u64 on Linux; the conversion is load-bearing on macOS.
+    #[allow(clippy::useless_conversion)]
+    let expected_link_count = u64::from(named.st_nlink);
     anyhow::ensure!(
         rustix::fs::FileType::from_raw_mode(named.st_mode) == rustix::fs::FileType::RegularFile
             && named.st_dev as u64 == identity.device
             && named.st_ino == identity.inode
-            && u64::from(named.st_nlink) == expected_links,
+            && expected_link_count == expected_links,
         "stable-workspace cleanup record changed before unlink"
     );
     rustix::fs::unlinkat(parent_descriptor, name, rustix::fs::AtFlags::empty())
