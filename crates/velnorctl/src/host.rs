@@ -35,6 +35,13 @@ pub async fn run(globals: &GlobalArgs, command: HostCommand) -> Result<(), Comma
 }
 
 async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandError> {
+    let _package_guard = velnor_runner::package_execution_guard().map_err(|error| {
+        CommandError::new(
+            ExitClass::Operation,
+            "host.package_guard_failed",
+            format!("cannot verify the active packaged release: {error:#}"),
+        )
+    })?;
     crate::ensure_native_github_http_transport();
     ensure_dev_canonical_storage()?;
     ensure_dev_service_binary()?;
