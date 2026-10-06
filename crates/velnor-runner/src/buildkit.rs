@@ -7023,11 +7023,17 @@ mod tests {
         let config_fingerprint = "no-config-v1";
         write_test_builder_readiness(&domain, &builder, container_id, config_fingerprint).unwrap();
         let container_inspections = Cell::new(0);
+        let volume_inspections = Cell::new(0);
+        let volume_removed = Cell::new(false);
         let result = remove_builder_with(
             &domain,
             &builder,
             |_, _, _| Ok(()),
-            |_, _| Ok(true),
+            |_, _| {
+                let inspection = volume_inspections.get() + 1;
+                volume_inspections.set(inspection);
+                Ok(inspection < 3)
+            },
             |_, _, _, _| {
                 let inspection = container_inspections.get() + 1;
                 container_inspections.set(inspection);
@@ -7047,6 +7053,7 @@ mod tests {
                 Ok(())
             },
             |_| {
+                volume_removed.set(true);
                 let stopped = read_builder_readiness_state(&domain, &builder)
                     .unwrap()
                     .unwrap();
@@ -7057,7 +7064,9 @@ mod tests {
         );
 
         assert!(result.is_ok());
-        assert_eq!(container_inspections.get(), 3);
+        assert_eq!(container_inspections.get(), 2);
+        assert_eq!(volume_inspections.get(), 3);
+        assert!(volume_removed.get());
         let stopped = read_builder_readiness_state(&domain, &builder)
             .unwrap()
             .unwrap();

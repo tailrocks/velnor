@@ -2776,6 +2776,14 @@ pub(crate) fn resolve_static_file_source(
     root: &Path,
     source: &str,
 ) -> Result<PathBuf, GeneratorError> {
+    // Report scanner-pruned spellings with the prune error even though the
+    // hardened containment check below also rejects dot-directories: the
+    // pruned-directory message is the contract tests assert for these paths.
+    if let Some(directory) = scanner_pruned_directory(root, Path::new(source)) {
+        return Err(GeneratorError::usage(format!(
+            "[[static_file]] source must stay inside the scanner input: `{source}` is under pruned directory `{directory}`"
+        )));
+    }
     if !is_contained_repository_path(source) {
         return Err(GeneratorError::usage(format!(
             "[[static_file]] source must be a repository-relative path, found `{source}`"
