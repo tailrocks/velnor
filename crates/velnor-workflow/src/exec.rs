@@ -129,6 +129,11 @@ fn spawn_grouped_command(root: &Path, command: &str) -> std::io::Result<Child> {
     let mut spawned = Command::new("bash");
     spawned
         .args(["-euo", "pipefail", "-c", command])
+        .envs([
+            ("MISE_AUTO_INSTALL", "false"),
+            ("MISE_EXEC_AUTO_INSTALL", "false"),
+            ("MISE_NOT_FOUND_AUTO_INSTALL", "false"),
+        ])
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

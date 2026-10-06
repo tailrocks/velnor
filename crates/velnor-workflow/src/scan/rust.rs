@@ -242,6 +242,7 @@ pub(crate) struct CargoManifestFacts {
     pub(crate) crate_types: Vec<String>,
     pub(crate) has_lib_section: bool,
     pub(crate) autolib: Option<bool>,
+    pub(crate) lib_doctest: Option<bool>,
 }
 
 #[derive(Default)]
@@ -291,7 +292,7 @@ const DOCTEST_CRATE_TYPES: [&str; 4] = ["lib", "rlib", "dylib", "proc-macro"];
 /// unless `[package] autolib = false` disables it. A declared `crate-type`
 /// without a rustdoc-readable kind (cdylib/staticlib-only) opts out, as does
 /// a repository without nextest, whose `cargo test` phase already runs the
-/// doctests inline.
+/// doctests inline. An explicit `[lib] doctest = false` also opts out.
 fn package_runs_doctests(
     manifest: &CargoManifestFacts,
     file_set: &BTreeSet<String>,
@@ -304,6 +305,9 @@ fn package_runs_doctests(
     let has_lib = manifest.has_lib_section
         || (manifest.autolib != Some(false) && file_set.contains(&lib_path));
     if !has_lib {
+        return false;
+    }
+    if manifest.lib_doctest == Some(false) {
         return false;
     }
     manifest.crate_types.is_empty()
@@ -928,6 +932,7 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
         crate_types: Vec::new(),
         has_lib_section: false,
         autolib: None,
+        lib_doctest: None,
     };
     let mut section = String::new();
     let lines = contents.lines().collect::<Vec<_>>();
@@ -990,6 +995,7 @@ pub(crate) fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestF
                 facts.crate_types = toml_string_value(&value)
                     .map_or_else(|| toml_array_values(&value), |single| vec![single]);
             }
+            "lib" if key == "doctest" => facts.lib_doctest = Some(value != "false"),
             "features" => facts.features.push(key),
             section if is_cargo_dependency_section(section) => {
                 facts.dependencies.push(CargoDependency {
