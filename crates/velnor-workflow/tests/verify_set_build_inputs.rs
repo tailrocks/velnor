@@ -404,8 +404,14 @@ fn success_results_for(expected: &serde_json::Value) -> Result<String, Box<dyn E
                     .and_then(serde_json::Value::as_str)
                     .ok_or("expected unit command digest")?;
                 result["repository"] = serde_json::json!(RESULT_REPOSITORY);
-                result["base_sha"] = expected.get("base_sha").cloned().ok_or("expected base_sha")?;
-                result["head_sha"] = expected.get("head_sha").cloned().ok_or("expected head_sha")?;
+                result["base_sha"] = expected
+                    .get("base_sha")
+                    .cloned()
+                    .ok_or("expected base_sha")?;
+                result["head_sha"] = expected
+                    .get("head_sha")
+                    .cloned()
+                    .ok_or("expected head_sha")?;
                 result["run_id"] = serde_json::json!(RESULT_RUN_ID);
                 result["run_attempt"] = serde_json::json!(RESULT_RUN_ATTEMPT);
                 result["plan_digest"] = expected

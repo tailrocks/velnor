@@ -3264,10 +3264,12 @@ fn policy_preflight_rejects_static_replacements_of_ci_pr_and_runtime_products() 
     let _ = fs::remove_dir_all(root);
 }
 
-/// The dual-lane Velnor gate only admits dispatch from the configured
-/// default branch; any-ref dispatch shapes are rejected.
+/// The dual-lane Velnor gate admits the ref-gated dispatch shapes older
+/// rendered trees carry plus the any-ref dispatch shapes the generator
+/// emits: dispatch needs write access on a ref of this repository, the
+/// authorship the runner already trusts.
 #[test]
-fn velnor_pr_gate_requires_default_branch_dispatch() {
+fn velnor_pr_gate_admits_generated_dispatch_shapes() {
     let automatic = "github.event_name == 'pull_request' && \
         github.event.pull_request.head.repo.full_name == github.repository || \
         (github.ref == 'refs/heads/main' && (github.event_name == 'push' || \
@@ -3294,8 +3296,8 @@ fn velnor_pr_gate_requires_default_branch_dispatch() {
     ] {
         let gate = format!("{}{{{{ ({automatic} || {dispatch}) }}}}", "$");
         assert!(
-            !is_generated_velnor_pr_gate(&gate, "main"),
-            "dispatch outside the default branch must not be admitted: {dispatch}"
+            is_generated_velnor_pr_gate(&gate, "main"),
+            "the generated any-ref dispatch shape must be admitted: {dispatch}"
         );
     }
     let github_only = format!(

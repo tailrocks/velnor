@@ -187,8 +187,7 @@ fn is_admitted_runner_selector_line(root: &Path, path: &Path, line: &str) -> boo
 }
 
 fn is_admitted_owner_bootstrap_slug_line(root: &Path, path: &Path, line: &str) -> bool {
-    path == root.join(OWNER_BOOTSTRAP_FIXTURE_PATH)
-        && OWNER_BOOTSTRAP_SLUG_LINES.contains(&line)
+    path == root.join(OWNER_BOOTSTRAP_FIXTURE_PATH) && OWNER_BOOTSTRAP_SLUG_LINES.contains(&line)
 }
 
 /// The Velnor policy fixtures need its canonical selector to pass config

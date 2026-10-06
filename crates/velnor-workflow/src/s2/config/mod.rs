@@ -3164,14 +3164,17 @@ fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorErro
     for row in rows {
         let file = row.file.as_deref().unwrap_or_default();
         let source = row.source.as_deref().unwrap_or_default();
-        if !is_contained_github_path(file) {
-            return Err(GeneratorError::usage(format!(
-                "[[static_file]] file must be a repository-relative path inside `.github/`, found `{file}`"
-            )));
-        }
+        // The reservation compares paths, not strings, so it runs before the
+        // spelling-sensitive containment check: a redundant separator must not
+        // dodge the guard by failing containment first.
         if let Some(reserved) = crate::generator_owned_static_file_path(file) {
             return Err(GeneratorError::usage(format!(
                 "remove the `[[static_files]]` row for `{reserved}`: the generator owns this path"
+            )));
+        }
+        if !is_contained_github_path(file) {
+            return Err(GeneratorError::usage(format!(
+                "[[static_file]] file must be a repository-relative path inside `.github/`, found `{file}`"
             )));
         }
         if !crate::path_spelling_is_supported(file)

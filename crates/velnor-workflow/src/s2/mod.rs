@@ -9213,7 +9213,7 @@ fn write_generated(
         dry_run,
         check,
         force,
-        force && !check,
+        false,
     )
 }
 
@@ -9431,6 +9431,14 @@ fn plan_generated_write_with_static_sources_and_options(
         .iter()
         .map(|file| file.path.clone())
         .collect::<Vec<_>>();
+    // A recorded-but-unrendered file is unknown until `--force`: the sidecar
+    // row no longer proves ownership once the renderer drops the output.
+    if !stale.is_empty() && !adopt {
+        return Err(GeneratorError::usage(format!(
+            "existing files are outside the Velnor workflow generator and will not be imported: {}; rerun with --force to replace them with generated output (bodies are never adopted)",
+            display_paths(stale.iter()),
+        )));
+    }
     let mut changed: Vec<PathBuf> = files
         .iter()
         .filter(|(relative, wanted)| {
@@ -9458,34 +9466,17 @@ fn plan_generated_write_with_static_sources_and_options(
         .cloned()
         .collect::<Vec<_>>();
 
-    // Unknown `.github` content splits by provenance. An unrecorded workflow
-    // is never removed, even with `--force`: a hand-written workflow is
-    // someone's CI, and only a recorded generator output proves the file is
-    // ours to reconcile. Recorded-but-unrendered workflows are stale
-    // generator outputs (other recorded collateral stays in `expected` and
-    // follows the digest-verified stale path), and unrecorded collateral
-    // elsewhere under `.github` is ordinary foreign clutter: `--force`
-    // clears both so the generated tree can move on, while anything else
-    // stops generation.
-    let (foreign, adoptable): (Vec<_>, Vec<_>) = unknown_paths.into_iter().partition(|relative| {
-        relative.starts_with(Path::new(".github/workflows"))
-            && !recorded_outputs_contain(ownership, relative)
-    });
-    if !foreign.is_empty() {
-        return Err(GeneratorError::usage(format!(
-            "existing files are outside the Velnor workflow generator and will not be imported: {}; remove them manually (--force never removes unrecorded workflows)",
-            display_paths(foreign.iter()),
-        )));
-    }
-    if !adoptable.is_empty() && !adopt {
+    // Unknown `.github` content is never imported. `--force` removes it so
+    // the generated tree can take over; without `--force` generation stops.
+    if !unknown_paths.is_empty() && !adopt {
         return Err(GeneratorError::usage(format!(
             "existing files are outside the Velnor workflow generator and will not be imported: {}; rerun with --force to replace them with generated output (bodies are never adopted)",
-            display_paths(adoptable.iter()),
+            display_paths(unknown_paths.iter()),
         )));
     }
     let mut unknown = Vec::new();
     if adopt {
-        for relative in adoptable {
+        for relative in unknown_paths {
             let preimage = capture_unknown_preimage(&root.join(&relative))?;
             if matches!(preimage, FilePreimage::Missing) {
                 continue;
@@ -11764,13 +11755,6 @@ fn display_paths<'a>(paths: impl Iterator<Item = &'a PathBuf>) -> String {
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// Whether the parsed ownership state records a generated output at
-/// `relative`. Missing state records nothing: every unknown entry is then
-/// a foreign body.
-fn recorded_outputs_contain(ownership: Option<&OwnershipState>, relative: &Path) -> bool {
-    ownership.is_some_and(|state| state.outputs.contains_key(relative))
 }
 
 /// Every path the unknown walk excuses: current renderer outputs, the
@@ -26249,7 +26233,16 @@ lockfile = true
             "stale workflow must survive the default writer"
         );
         must(
-            write_generated(&root, &current, false, false, true),
+            write_generated_with_options(
+                &root,
+                &current,
+                &BTreeMap::new(),
+                &GenerationInputs::parts(0, 0),
+                false,
+                false,
+                true,
+                true,
+            ),
             "force removes unknown workflow through the .github walk",
         );
         assert!(
@@ -26399,7 +26392,16 @@ lockfile = true
         );
 
         must(
-            write_generated(&root, &current, false, false, true),
+            write_generated_with_options(
+                &root,
+                &current,
+                &BTreeMap::new(),
+                &GenerationInputs::parts(0, 0),
+                false,
+                false,
+                true,
+                true,
+            ),
             "force removes unknown handwritten workflow",
         );
         assert!(!root.join(&handwritten).exists());
@@ -26643,7 +26645,16 @@ lockfile = true
         assert!(!root.join(OWNERSHIP_STATE).exists());
 
         let outcome = must(
-            write_generated(&root, &current, false, false, true),
+            write_generated_with_options(
+                &root,
+                &current,
+                &BTreeMap::new(),
+                &GenerationInputs::parts(0, 0),
+                false,
+                false,
+                true,
+                true,
+            ),
             "force adopts unrecorded workflow and template",
         );
         assert!(matches!(outcome, WriteOutcome::Written { .. }));
@@ -26750,7 +26761,16 @@ lockfile = true
             0
         );
         must(
-            write_generated(&root, &current, false, false, true),
+            write_generated_with_options(
+                &root,
+                &current,
+                &BTreeMap::new(),
+                &GenerationInputs::parts(0, 0),
+                false,
+                false,
+                true,
+                true,
+            ),
             "force removes unknown executable workflow",
         );
         assert!(!stale_path.exists());
@@ -27216,7 +27236,7 @@ lockfile = true
     }
 
     #[test]
-    fn unrendered_legacy_guide_is_removed_after_digest_verification() {
+    fn unrendered_legacy_guide_requires_force_even_when_digest_matches() {
         let root = temporary_repository("stale-generated-guide");
         must(
             fs::write(
@@ -27236,19 +27256,35 @@ lockfile = true
         );
         let current = must(generated_files(&config), "generate");
         let mut previous = current.clone();
-        previous.insert(
-            PathBuf::from(".github/UNIFIED-ACTIONS.md"),
-            format!("{GENERATED_HEADER}legacy guide\n"),
-        );
+        let guide = PathBuf::from(".github/UNIFIED-ACTIONS.md");
+        previous.insert(guide.clone(), format!("{GENERATED_HEADER}legacy guide\n"));
         must(
             write_generated(&root, &previous, false, false, false),
             "write previous generated layout",
         );
-        must(
-            write_generated(&root, &current, false, false, false),
-            "remove verified unrendered legacy guide",
+        let error = must_some(
+            write_generated(&root, &current, false, false, false).err(),
+            "stale collateral is unknown without current-renderer proof",
         );
-        assert!(!root.join(".github/UNIFIED-ACTIONS.md").exists());
+        assert!(error.to_string().contains("will not be imported"));
+        assert!(
+            root.join(&guide).is_file(),
+            "stale collateral must survive the default writer"
+        );
+        must(
+            write_generated_with_options(
+                &root,
+                &current,
+                &BTreeMap::new(),
+                &GenerationInputs::parts(0, 0),
+                false,
+                false,
+                true,
+                true,
+            ),
+            "force removes stale collateral",
+        );
+        assert!(!root.join(&guide).exists());
         let state = must(
             fs::read_to_string(root.join(OWNERSHIP_STATE)),
             "read refreshed ownership state",
