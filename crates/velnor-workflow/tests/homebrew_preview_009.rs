@@ -495,7 +495,30 @@ fn apt_native_channel_is_unmodified() {
     );
 }
 
+/// The drift gates pin a historical base commit that shallow CI checkouts
+/// do not contain. Fetch just that commit when it is missing instead of
+/// failing with "fatal: not a tree object".
+fn ensure_task_base(repository: &Path) {
+    let probe = Command::new("git")
+        .current_dir(repository)
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{TASK_BASE}^{{commit}}"),
+        ])
+        .output()
+        .expect("probe baseline commit");
+    if !probe.status.success() {
+        git(
+            repository,
+            &["fetch", "--no-tags", "--depth", "1", "origin", TASK_BASE],
+        );
+    }
+}
+
 fn baseline_paths(repository: &Path, prefixes: &[&str]) -> Vec<String> {
+    ensure_task_base(repository);
     let mut args = vec!["ls-tree", "-r", "--name-only", "-z", TASK_BASE, "--"];
     args.extend(prefixes.iter().copied());
     git_bytes(repository, &args)
@@ -907,6 +930,7 @@ fn unpack_archive(fixture: &Fixture, destination: &Path) {
 }
 
 fn assert_toml_subtree_unchanged(repository: &Path, path: &str, keys: &[&str]) {
+    ensure_task_base(repository);
     let current_bytes = fs::read(repository.join(path)).expect("read current TOML config");
     let base_bytes = git_bytes(repository, &["show", &format!("{TASK_BASE}:{path}")]);
     let current = toml::from_str::<TomlValue>(&String::from_utf8_lossy(&current_bytes))
