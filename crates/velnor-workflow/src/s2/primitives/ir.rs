@@ -2830,183 +2830,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn candidate_publisher_profile_tracks_rendered_job_id_and_rest_display_name() {
-        let owner_repository = workflow_setup_action_repository();
-        let mut owner = rust_unit("rust-velnor-workflow", "crates/velnor-workflow");
-        // The scanner derives this label from the package name, while the
-        // stable unit ID includes the `rust-` namespace prefix.
-        owner.label = "Rust crate (velnor-workflow)".to_owned();
-        let ir = owner_test_ir(owner_repository, vec![owner.clone()]);
-        let profiles = ir.candidate_publisher_profiles(None);
-        let rendered = must_some(
-            must_ok(
-                ir.render_kind_unit_workflow(UnitKind::Rust, None),
-                "Rust reusable workflow",
-            ),
-            "Rust reusable workflow exists",
-        )
-        .1;
-        let publisher_block = must_some(
-            rendered.split("  verify-github-hosted:\n").nth(1),
-            "rendered hosted publisher job",
-        );
-        assert!(
-            publisher_block.contains("    name: \"GitHub · hosted\"\n"),
-            "REST callee display comes from the rendered job name: {publisher_block}"
-        );
-        assert!(
-            publisher_block.contains("Prepare candidate generator product"),
-            "the mapped collapsed job contains the producer steps: {publisher_block}"
-        );
-        let caller_display = crate::s2::unit_job_display_name(&owner, ProviderId::GithubHosted);
-        assert_eq!(
-            profiles.get("verify-github-hosted"),
-            Some(&format!("{caller_display} / GitHub · hosted")),
-            "REST's composite display name maps back to the callee GITHUB_JOB key"
-        );
-
-        let mut apple_owner = owner;
-        apple_owner.platform = crate::s2::provider::Platform::MacosArm64;
-        let linux = rust_unit("rust-linux", "crates/linux");
-        let split = owner_test_ir(owner_repository, vec![apple_owner.clone(), linux]);
-        let split_profiles = split.candidate_publisher_profiles(None);
-        let split_rendered = must_some(
-            must_ok(
-                split.render_kind_unit_workflow(UnitKind::Rust, None),
-                "split Rust reusable workflow",
-            ),
-            "split Rust reusable workflow exists",
-        )
-        .1;
-        let apple_block = must_some(
-            split_rendered
-                .split("  verify-github-hosted-apple:\n")
-                .nth(1),
-            "rendered Apple publisher job",
-        );
-        assert!(
-            apple_block.contains("    name: \"GitHub · hosted · Apple\"\n")
-                && apple_block.contains("Prepare candidate generator product"),
-            "Apple profile keeps the candidate steps in its mapped job: {apple_block}"
-        );
-        let caller_display =
-            crate::s2::unit_job_display_name(&apple_owner, ProviderId::GithubHosted);
-        assert_eq!(
-            split_profiles.get("verify-github-hosted-apple"),
-            Some(&format!("{caller_display} / GitHub · hosted · Apple")),
-            "split REST display still maps to the Apple callee job key"
-        );
-    }
-
-    #[test]
-    fn candidate_transport_binds_rest_name_and_marker_to_trusted_publisher_profile() {
-        let owner_repository = workflow_setup_action_repository();
-        let mut owner = rust_unit("rust-velnor-workflow", "crates/velnor-workflow");
-        owner.label = "Rust crate (velnor-workflow)".to_owned();
-        let ir = owner_test_ir(owner_repository, vec![owner]);
-        let profiles = ir.candidate_publisher_profiles(None);
-        let publisher_job = "verify-github-hosted";
-        let rest_name = must_some(
-            profiles.get(publisher_job),
-            "trusted collapsed profile includes the Rust publisher",
-        );
-        let helper = must_some(
-            crate::s2::POLICY_CANDIDATE_TRANSPORT_HELPER.split_once("\ndef main():\n"),
-            "transport helper definitions end before main",
-        )
-        .0;
-        let assertions = r#"
-import os
-import pathlib
-
-profiles = parse_publisher_profiles(os.environ["PUBLISHER_PROFILES_JSON"])
-rest_name = os.environ["TRUSTED_REST_NAME"]
-publish_started_at = "2026-10-01T00:00:10Z"
-publish_completed_at = "2026-10-01T00:00:20Z"
-job = {
-    "id": 9100,
-    "run_id": 900,
-    "run_attempt": 2,
-    "name": "untrusted producer display name",
-    "status": "completed",
-    "conclusion": "success",
-    "started_at": "2026-10-01T00:00:00Z",
-    "completed_at": "2026-10-01T00:01:00Z",
-    "steps": [
-        {"name": "Prepare candidate generator product", "status": "completed", "conclusion": "success"},
-        {"name": "Publish candidate generator product", "status": "completed", "conclusion": "success", "started_at": publish_started_at, "completed_at": publish_completed_at},
-        {"name": "Record candidate artifact identity", "status": "completed", "conclusion": "success", "started_at": "2026-10-01T00:00:21Z", "completed_at": "2026-10-01T00:00:22Z"},
-    ],
-}
-assert "check_run_id" not in job
-try:
-    successful_publish_windows([job], 900, 2, profiles)
-except TransportError as error:
-    assert "does not identify exactly one trusted publisher profile" in str(error), str(error)
-else:
-    raise AssertionError("REST name without check_run_id was not bound to a trusted profile")
-
-job["name"] = rest_name
-windows, pending, producer_job = successful_publish_windows([job], 900, 2, profiles)
-assert not pending
-assert producer_job is job
-assert len(windows) == 1
-assert windows[0][1] == "verify-github-hosted"
-
-marker_path = pathlib.Path(os.environ["MARKER_PATH"])
-marker_path.write_text(
-    "VELNOR_CANDIDATE_ARTIFACT\t900\t2\tverify-github-hosted\t12345\t"
-    "candidate-r900-a2-jverify-github-hosted\n",
-    encoding="utf-8",
-)
-marker = parse_job_marker(marker_path, 900, 2, windows[0][1], "candidate")
-assert marker["publisher_job"] == windows[0][1]
-
-marker_path.write_text(
-    "VELNOR_CANDIDATE_ARTIFACT\t900\t2\tother-job\t12345\t"
-    "candidate-r900-a2-jother-job\n",
-    encoding="utf-8",
-)
-try:
-    parse_job_marker(marker_path, 900, 2, windows[0][1], "candidate")
-except TransportError as error:
-    assert "GITHUB_JOB key does not match its selected REST job profile" in str(error), str(error)
-else:
-    raise AssertionError("marker GITHUB_JOB was not bound to the mapped trusted profile")
-"#;
-        let root = std::env::temp_dir().join(format!(
-            "velnor-workflow-publisher-profile-{}",
-            crate::unique_suffix()
-        ));
-        must_ok(
-            std::fs::create_dir_all(&root),
-            "create publisher profile test directory",
-        );
-        let marker_path = root.join("producer.log");
-        let program = format!("{helper}\n{assertions}");
-        let output = must_ok(
-            Command::new("python3")
-                .arg("-c")
-                .arg(program)
-                .env(
-                    "PUBLISHER_PROFILES_JSON",
-                    crate::s2::candidate_publisher_profiles_json(&profiles),
-                )
-                .env("TRUSTED_REST_NAME", rest_name)
-                .env("MARKER_PATH", &marker_path)
-                .output(),
-            "run candidate transport profile assertions",
-        );
-        let _ = std::fs::remove_dir_all(&root);
-        assert!(
-            output.status.success(),
-            "transport profile binding failed:\n{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
     #[expect(
         clippy::too_many_lines,
         reason = "one implication pinned at facts, render, and caller level"
@@ -3585,9 +3408,6 @@ else:
             "--arg platform \"${RUNNER_OS}-${RUNNER_ARCH}\"",
             "--arg repository \"$GITHUB_REPOSITORY\"",
             "--arg run_id \"$GITHUB_RUN_ID\"",
-            "--arg run_attempt \"$GITHUB_RUN_ATTEMPT\"",
-            "--arg publisher_job \"$GITHUB_JOB\"",
-            "--arg artifact_name \"$artifact_name\"",
             "--arg revision \"$PR_HEAD\"",
             "--arg closure \"$head_closure\"",
             "--arg build_revision \"$build_rev\"",
@@ -3604,21 +3424,9 @@ else:
         );
         assert!(
             candidate.contains(
-                "artifact_name=\"velnor-workflow-candidate-${head_closure:0:16}-${RUNNER_OS}-${RUNNER_ARCH}-r${GITHUB_RUN_ID}-a${GITHUB_RUN_ATTEMPT}-j${GITHUB_JOB}\""
+                "echo \"name=velnor-workflow-candidate-${head_closure:0:16}-${RUNNER_OS}-${RUNNER_ARCH}\""
             ),
-            "the artifact name binds closure, platform, run, attempt, and producer job: {candidate}"
-        );
-        assert!(
-            candidate.contains("publisher_job: $publisher_job")
-                && candidate.contains("run_attempt: ($run_attempt | tonumber)")
-                && candidate.contains("artifact_name: $artifact_name"),
-            "the manifest binds the exact REST job, run attempt, and artifact name: {candidate}"
-        );
-        assert!(
-            candidate.contains("id: candidate-upload")
-                && candidate.contains("steps.candidate-upload.outputs.artifact-id")
-                && candidate.contains("VELNOR_CANDIDATE_ARTIFACT\\t%s\\t%s\\t%s\\t%s\\t%s\\n"),
-            "the uploader logs a job-bound marker containing its exact artifact ID: {candidate}"
+            "the artifact name derives exactly like the policy consumer's: {candidate}"
         );
         assert!(
             !candidate.contains("head_candidate"),
@@ -3657,8 +3465,8 @@ else:
             solo_content
                 .matches("if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'\n")
                 .count(),
-            2,
-            "the publish and record-identity steps share the skip gate: {solo_content}"
+            1,
+            "the publish step adds the skip gate: {solo_content}"
         );
         assert!(
             !solo_content.contains("inputs.candidate_publish &&"),
@@ -5255,34 +5063,22 @@ fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
           reported="$(env -i PATH="$PATH" "$stage/velnor-workflow" --closure)"
           [[ "$reported" == "$head_closure" ]] || {{ echo "::error::candidate reports closure $reported, head $PR_HEAD declares $head_closure" >&2; exit 1; }}
           reported_revision="$(env -i PATH="$PATH" "$stage/velnor-workflow" --revision)"
-          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ && "$GITHUB_JOB" =~ ^[A-Za-z0-9_-]+$ ]] || {{ echo "::error::candidate publisher has invalid run, attempt, or job identity" >&2; exit 1; }}
-          artifact_name="velnor-workflow-candidate-${{head_closure:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}-r${{GITHUB_RUN_ID}}-a${{GITHUB_RUN_ATTEMPT}}-j${{GITHUB_JOB}}"
-          jq -n --arg profile debug --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repository "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$GITHUB_RUN_ATTEMPT" --arg publisher_job "$GITHUB_JOB" --arg artifact_name "$artifact_name" --arg revision "$PR_HEAD" --arg closure "$head_closure" --arg build_revision "$build_rev" --arg binary_sha256 "$digest" '{{profile: $profile, platform: $platform, repository: $repository, run_id: $run_id, run_attempt: ($run_attempt | tonumber), publisher_job: $publisher_job, artifact_name: $artifact_name, revision: $revision, closure: $closure, build_revision: $build_revision, binary_sha256: $binary_sha256}}' > "$stage/candidate-manifest.json"
+          jq -n --arg profile debug --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repository "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg revision "$PR_HEAD" --arg closure "$head_closure" --arg build_revision "$build_rev" --arg binary_sha256 "$digest" '{{profile: $profile, platform: $platform, repository: $repository, run_id: $run_id, revision: $revision, closure: $closure, build_revision: $build_revision, binary_sha256: $binary_sha256}}' > "$stage/candidate-manifest.json"
           manifest_build_revision="$(jq -er '.build_revision' "$stage/candidate-manifest.json")"
           [[ "$reported_revision" == "$manifest_build_revision" ]] || {{ echo "::error::candidate reports revision $reported_revision, manifest build_revision $manifest_build_revision" >&2; exit 1; }}
           if [[ "$worktree" != "" ]]; then
             git worktree remove --force "$worktree"
             trap - EXIT
           fi
-          echo "name=$artifact_name" >> "$GITHUB_OUTPUT"
+          echo "name=velnor-workflow-candidate-${{head_closure:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}" >> "$GITHUB_OUTPUT"
       - name: Publish candidate generator product
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'
-        id: candidate-upload
         uses: {upload_artifact_pin}
         with:
           name: ${{{{ steps.candidate.outputs.name }}}}
           path: ${{{{ runner.temp }}}}/velnor-workflow-candidate
           if-no-files-found: error
           retention-days: 1
-      - name: Record candidate artifact identity
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'
-        env:
-          CANDIDATE_ARTIFACT_ID: ${{{{ steps.candidate-upload.outputs.artifact-id }}}}
-          CANDIDATE_ARTIFACT_NAME: ${{{{ steps.candidate.outputs.name }}}}
-        run: |
-          set -euo pipefail
-          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ && "$GITHUB_JOB" =~ ^[A-Za-z0-9_-]+$ && "$CANDIDATE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ && "$CANDIDATE_ARTIFACT_NAME" != '' ]] || {{ echo "::error::upload action returned no valid candidate artifact identity or producer context" >&2; exit 1; }}
-          printf 'VELNOR_CANDIDATE_ARTIFACT\t%s\t%s\t%s\t%s\t%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_JOB" "$CANDIDATE_ARTIFACT_ID" "$CANDIDATE_ARTIFACT_NAME"
 "#,
     )
 }
@@ -8781,55 +8577,32 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         Ok(())
     }
 
-    /// Return the trusted REST display name for each candidate producer
-    /// workflow job, keyed by its YAML job ID. REST exposes the composed
-    /// caller/callee display name, while `GITHUB_JOB` is only the callee's
-    /// YAML job ID. Both sides come from the same caller and collapsed-job
-    /// render inputs used to produce the workflows.
+    /// YAML job key to REST display name for every caller that can publish
+    /// the candidate generator product. The policy transport resolves the
+    /// producer job's REST name through this map, so the entries must use
+    /// the same job-id and display derivation as the rendered callers, and
+    /// the same publish predicate as the collapsed callee facts.
     pub(crate) fn candidate_publisher_profiles(
         &self,
         contracts: Option<&BTreeMap<String, UnitContract>>,
     ) -> BTreeMap<String, String> {
-        let Some(owner) = self
-            .units
-            .iter()
-            .find(|unit| unit_owns_workflow_crate(unit))
-        else {
-            return BTreeMap::new();
-        };
-        let owner_contract = self.contract_for(owner, contracts);
-        let hosted_facts =
-            self.unit_provider_facts(owner, &owner_contract, ProviderId::GithubHosted);
-        if !hosted_facts.candidate_publish {
-            return BTreeMap::new();
-        }
-        let file = nested_unit_workflow_file(owner);
-        let Some(caller) = self
-            .unit_provider_callers(owner, &file, contracts)
-            .into_iter()
-            .find(|caller| caller.provider == ProviderId::GithubHosted)
-        else {
-            return BTreeMap::new();
-        };
-        let rust_members = self
-            .units
-            .iter()
-            .filter(|unit| unit.kind == UnitKind::Rust)
-            .collect::<Vec<_>>();
-        let jobs = self.collapsed_provider_jobs(&rust_members, contracts);
         let mut profiles = BTreeMap::new();
-        for job in jobs.into_iter().filter(|job| {
-            job.provider == ProviderId::GithubHosted
-                && job.members.iter().any(|member| member.id == owner.id)
-                && job.members.iter().any(|member| {
-                    let contract = self.contract_for(member, contracts);
-                    self.unit_provider_facts(member, &contract, job.provider)
-                        .candidate_publish
-                })
-        }) {
-            let rest_name = format!("{} / {}", caller.name, job.display);
-            if profiles.insert(job.job_id.clone(), rest_name).is_some() {
-                return BTreeMap::new();
+        for unit in &self.units {
+            let contract = self.contract_for(unit, contracts);
+            for job in &contract.providers {
+                if !provider_supports_unit(job.provider, unit) {
+                    continue;
+                }
+                if !self
+                    .unit_provider_facts(unit, &contract, job.provider)
+                    .candidate_publish
+                {
+                    continue;
+                }
+                profiles.insert(
+                    unit_job_id(job.provider, &unit.id),
+                    unit_job_display_name(unit, job.provider),
+                );
             }
         }
         profiles
