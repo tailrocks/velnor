@@ -1453,7 +1453,14 @@ fn immutable_container_id_selector(id: &str) -> bool {
 }
 
 fn docker_engine_key(args: &[String]) -> Result<String> {
-    let command = host_docker_command(args)?;
+    docker_engine_key_at(args, None)
+}
+
+fn docker_engine_key_at(
+    args: &[String],
+    endpoint: Option<&super::engine::DockerEndpoint>,
+) -> Result<String> {
+    let command = host_docker_command_at(args, endpoint)?;
     let host = command
         .get_envs()
         .find(|(name, _)| *name == "DOCKER_HOST")
@@ -1464,7 +1471,15 @@ fn docker_engine_key(args: &[String]) -> Result<String> {
 }
 
 fn container_rm_gate(args: &[String], wait: Duration) -> Result<DockerContainerRmClaim> {
-    let engine_key = docker_engine_key(args)?;
+    container_rm_gate_at(args, wait, None)
+}
+
+fn container_rm_gate_at(
+    args: &[String],
+    wait: Duration,
+    endpoint: Option<&super::engine::DockerEndpoint>,
+) -> Result<DockerContainerRmClaim> {
+    let engine_key = docker_engine_key_at(args, endpoint)?;
     IN_FLIGHT_CONTAINER_RM.claim(engine_key, wait.min(MAX_CONTAINER_RM_CLAIM_WAIT))
 }
 
@@ -1868,8 +1883,19 @@ pub(crate) fn claim_docker_container_rm(
 pub(crate) const MAINTENANCE_PAYLOAD_DEADLINE: Duration = Duration::from_secs(1800);
 
 fn host_docker_command(args: &[String]) -> Result<std::process::Command> {
+    host_docker_command_at(args, None)
+}
+
+fn host_docker_command_at(
+    args: &[String],
+    endpoint: Option<&super::engine::DockerEndpoint>,
+) -> Result<std::process::Command> {
     let mut command = std::process::Command::new("docker");
-    crate::executor::configure_host_docker_command(&mut command, "docker", args)?;
+    if let Some(endpoint) = endpoint {
+        super::engine::configure_host_docker_command_at_endpoint(&mut command, args, endpoint)?;
+    } else {
+        crate::executor::configure_host_docker_command(&mut command, "docker", args)?;
+    }
     Ok(command)
 }
 
@@ -1949,19 +1975,45 @@ pub(crate) fn host_call(args: &[String]) -> Result<String> {
     host_call_bounded(args, deadline)
 }
 
+/// Run one host Docker call against an endpoint retained by a domain owner.
+/// This deliberately bypasses ambient endpoint resolution for the dispatch.
+pub(crate) fn host_call_at_endpoint(
+    args: &[String],
+    endpoint: &super::engine::DockerEndpoint,
+) -> Result<String> {
+    let (_, deadline) = crate::docker::deadline_for(args, MAINTENANCE_PAYLOAD_DEADLINE);
+    host_call_bounded_at_endpoint(args, deadline, endpoint)
+}
+
 /// Run one host `docker` command under an explicit deadline.
 ///
 /// Expiry is a failure. The process is SIGKILLed and the caller gets a typed
 /// [`crate::docker::DockerTimeout`] naming the operation class and what to look
 /// at, never an empty success.
 pub(crate) fn host_call_bounded(args: &[String], timeout: Duration) -> Result<String> {
+    host_call_bounded_for_endpoint(args, timeout, None)
+}
+
+pub(crate) fn host_call_bounded_at_endpoint(
+    args: &[String],
+    timeout: Duration,
+    endpoint: &super::engine::DockerEndpoint,
+) -> Result<String> {
+    host_call_bounded_for_endpoint(args, timeout, Some(endpoint))
+}
+
+fn host_call_bounded_for_endpoint(
+    args: &[String],
+    timeout: Duration,
+    endpoint: Option<&super::engine::DockerEndpoint>,
+) -> Result<String> {
     let op = crate::docker::classify(args);
     let started = Instant::now();
     let selectors = container_rm_selector_positions(args);
     let rm_claim = if selectors.is_empty() {
         None
     } else {
-        Some(container_rm_gate(args, timeout)?)
+        Some(container_rm_gate_at(args, timeout, endpoint)?)
     };
     let mut execution_args = args.to_vec();
     let mut missing_selectors = Vec::new();
@@ -1982,7 +2034,7 @@ pub(crate) fn host_call_bounded(args: &[String], timeout: Duration) -> Result<St
                     op, timeout,
                 )));
             }
-            match resolve_container_id_cli(args, selector, remaining) {
+            match resolve_container_id_cli_at(args, selector, remaining, endpoint) {
                 Ok(id) => ids.push(Some(id)),
                 Err(error) if is_not_found(&error) => {
                     missing_selectors.push(selector.clone());
@@ -2008,7 +2060,7 @@ pub(crate) fn host_call_bounded(args: &[String], timeout: Duration) -> Result<St
                     op, timeout,
                 )));
             }
-            match resolve_container_state_cli(args, resolved_id, remaining)? {
+            match resolve_container_state_cli_at(args, resolved_id, remaining, endpoint)? {
                 None => {
                     set_container_rm_quarantined(engine_key, resolved_id, false)?;
                     missing_selectors.push(args[position].clone());
@@ -2077,7 +2129,7 @@ pub(crate) fn host_call_bounded(args: &[String], timeout: Duration) -> Result<St
                 op, timeout,
             )));
         }
-        match host_call_bounded_unclaimed(&execution_args, remaining) {
+        match host_call_bounded_unclaimed_at(&execution_args, remaining, endpoint) {
             Ok(output) => {
                 for id in &marked_ids {
                     let inspect_budget = timeout.saturating_sub(started.elapsed());
@@ -2089,10 +2141,15 @@ pub(crate) fn host_call_bounded(args: &[String], timeout: Duration) -> Result<St
                             "reconcile immutable container {id} after successful Docker rm"
                         )));
                     }
-                    let state = resolve_container_state_cli(&execution_args, id, inspect_budget)
-                        .with_context(|| {
-                            format!("reconcile immutable container {id} after successful Docker rm")
-                        })?;
+                    let state = resolve_container_state_cli_at(
+                        &execution_args,
+                        id,
+                        inspect_budget,
+                        endpoint,
+                    )
+                    .with_context(|| {
+                        format!("reconcile immutable container {id} after successful Docker rm")
+                    })?;
                     match settle_container_rm_reconciliation(engine_key, id, state)? {
                         DockerContainerRmReconciliation::Absent => {}
                         DockerContainerRmReconciliation::Removing => {
@@ -2138,7 +2195,7 @@ pub(crate) fn host_call_bounded(args: &[String], timeout: Duration) -> Result<St
             op, timeout,
         )));
     }
-    let output = host_call_bounded_unclaimed(&execution_args, remaining)?;
+    let output = host_call_bounded_unclaimed_at(&execution_args, remaining, endpoint)?;
     if !missing_selectors.is_empty() {
         return Err(anyhow::Error::new(NotFound {
             object: missing_selectors.join(","),
@@ -2152,8 +2209,17 @@ fn resolve_container_id_cli(
     selector: &str,
     timeout: Duration,
 ) -> Result<String> {
+    resolve_container_id_cli_at(rm_args, selector, timeout, None)
+}
+
+fn resolve_container_id_cli_at(
+    rm_args: &[String],
+    selector: &str,
+    timeout: Duration,
+    endpoint: Option<&super::engine::DockerEndpoint>,
+) -> Result<String> {
     let inspect_args = inspect_container_id_args(rm_args, selector);
-    let output = host_call_bounded_unclaimed(&inspect_args, timeout)?;
+    let output = host_call_bounded_unclaimed_at(&inspect_args, timeout, endpoint)?;
     parsed_full_container_id(&output)
 }
 
@@ -2162,8 +2228,17 @@ fn resolve_container_state_cli(
     id: &str,
     timeout: Duration,
 ) -> Result<Option<ContainerState>> {
+    resolve_container_state_cli_at(rm_args, id, timeout, None)
+}
+
+fn resolve_container_state_cli_at(
+    rm_args: &[String],
+    id: &str,
+    timeout: Duration,
+    endpoint: Option<&super::engine::DockerEndpoint>,
+) -> Result<Option<ContainerState>> {
     let args = inspect_container_state_args(rm_args, id);
-    match host_call_bounded_unclaimed(&args, timeout) {
+    match host_call_bounded_unclaimed_at(&args, timeout, endpoint) {
         Ok(output) => ContainerState::parse(&output)
             .map(Some)
             .context("Docker inspect returned an unknown container state"),
@@ -2212,10 +2287,18 @@ fn docker_args_with_full_ps_ids(args: &[String]) -> Vec<String> {
 }
 
 fn host_call_bounded_unclaimed(args: &[String], timeout: Duration) -> Result<String> {
+    host_call_bounded_unclaimed_at(args, timeout, None)
+}
+
+fn host_call_bounded_unclaimed_at(
+    args: &[String],
+    timeout: Duration,
+    endpoint: Option<&super::engine::DockerEndpoint>,
+) -> Result<String> {
     let args = docker_args_with_full_ps_ids(args);
     let op = crate::docker::classify(&args);
     let started = Instant::now();
-    let mut command = host_docker_command(&args)?;
+    let mut command = host_docker_command_at(&args, endpoint)?;
     let child = command
         .args(&args)
         .stdout(std::process::Stdio::piped())
@@ -2286,6 +2369,8 @@ fn is_not_running_command(args: &[String], lower_stderr: &str) -> bool {
 enum Transport<'r> {
     Job(&'r mut dyn CommandRunner),
     Host,
+    /// Host calls bound to the endpoint selected by a durable domain owner.
+    PinnedHost(super::engine::DockerEndpoint),
 }
 
 /// Outcome of the Engine-API attempt for one script-step exec. See
@@ -2335,6 +2420,19 @@ impl<'r> Docker<'r> {
         }
     }
 
+    pub(crate) fn host_at_endpoint(endpoint: super::engine::DockerEndpoint) -> Self {
+        Self {
+            transport: Transport::PinnedHost(endpoint),
+        }
+    }
+
+    fn pinned_endpoint(&self) -> Option<&super::engine::DockerEndpoint> {
+        match &self.transport {
+            Transport::PinnedHost(endpoint) => Some(endpoint),
+            Transport::Job(_) | Transport::Host => None,
+        }
+    }
+
     /// Run one query and return its stdout. Non-zero exits become errors:
     /// a daemon missing-object answer becomes [`NotFound`], a runner timeout
     /// (exit 124) becomes the operation's [`crate::docker::DockerTimeout`],
@@ -2363,6 +2461,9 @@ impl<'r> Docker<'r> {
             // container_remove holds the Engine rm gate and manages the
             // persistent per-ID quarantine around this single CLI dispatch.
             Transport::Host => host_call_bounded_unclaimed(args, timeout),
+            Transport::PinnedHost(endpoint) => {
+                host_call_bounded_unclaimed_at(args, timeout, Some(endpoint))
+            }
             Transport::Job(runner) => {
                 let result = runner
                     .run_timeout("docker", args, timeout)
@@ -2403,6 +2504,9 @@ impl<'r> Docker<'r> {
     ) -> Result<String> {
         match &mut self.transport {
             Transport::Host => host_call_bounded(args, timeout),
+            Transport::PinnedHost(endpoint) => {
+                host_call_bounded_at_endpoint(args, timeout, endpoint)
+            }
             Transport::Job(runner) => {
                 let result = runner
                     .run_timeout("docker", args, timeout)
@@ -2438,6 +2542,7 @@ impl<'r> Docker<'r> {
     fn call_as(&mut self, args: &[String], object: &str, action: &str) -> Result<String> {
         match &mut self.transport {
             Transport::Host => host_call(args),
+            Transport::PinnedHost(endpoint) => host_call_at_endpoint(args, endpoint),
             Transport::Job(runner) => {
                 let full_id_args = docker_args_with_full_ps_ids(args);
                 let result: CommandResult = runner
@@ -2547,7 +2652,11 @@ impl<'r> Docker<'r> {
             "engine fast path serves control-plane calls only"
         );
         let budget = super::engine::api_budget(class_deadline);
-        let socket = match super::engine::socket_path() {
+        let socket = match self.pinned_endpoint() {
+            Some(endpoint) => Ok(endpoint.socket.clone()),
+            None => super::engine::socket_path(),
+        };
+        let socket = match socket {
             Ok(socket) => socket,
             Err(error) => {
                 tracing::warn!(
@@ -2662,7 +2771,11 @@ impl<'r> Docker<'r> {
         }
         let (op, step_deadline) = crate::docker::deadline_for(cli_args, timeout);
         debug_assert_eq!(op, crate::docker::DockerOp::Payload);
-        let Ok(socket) = super::engine::socket_path() else {
+        let socket = match self.pinned_endpoint() {
+            Some(endpoint) => Ok(endpoint.socket.clone()),
+            None => super::engine::socket_path(),
+        };
+        let Ok(socket) = socket else {
             return ScriptExecRoute::UseCli;
         };
         let engine = super::engine::EngineClient::new(socket);
@@ -2977,7 +3090,7 @@ impl<'r> Docker<'r> {
         name: &str,
         timeout: Duration,
     ) -> Result<ExitInfo> {
-        if !matches!(&self.transport, Transport::Host) {
+        if !matches!(&self.transport, Transport::Host | Transport::PinnedHost(_)) {
             anyhow::bail!("bounded container inspect requires the host Docker transport");
         }
         let args = exit_info_args(name);
@@ -3113,7 +3226,7 @@ impl<'r> Docker<'r> {
         let operation_deadline = Instant::now() + operation_budget;
         // Lock this Engine before resolving aliases. The same claim spans ID
         // resolution, API deletion, any reconciliation, and the safe CLI leg.
-        let rm_claim = container_rm_gate(&rm_args, operation_budget)?;
+        let rm_claim = container_rm_gate_at(&rm_args, operation_budget, self.pinned_endpoint())?;
         let resolve_budget = operation_deadline.saturating_duration_since(Instant::now());
         if resolve_budget.is_zero() {
             return Err(anyhow::Error::new(crate::docker::DockerTimeout::new(
@@ -3358,6 +3471,46 @@ mod tests {
     use crate::execution::cancel::{set_active, CancelReason, JobCancellation};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
+
+    #[test]
+    fn pinned_host_transport_keeps_engine_api_on_retained_endpoint() {
+        let calls_a = Arc::new(AtomicUsize::new(0));
+        let calls_b = Arc::new(AtomicUsize::new(0));
+        let seen_a = Arc::clone(&calls_a);
+        let engine_a = MockEngine::serve(
+            move |_| {
+                seen_a.fetch_add(1, Ordering::SeqCst);
+                json_response(
+                    r#"{"Id":"a530e70d9e1e35941b6fc12db9b51a7b19c6d02","State":{"Running":false,"Status":"exited","FinishedAt":"2026-10-01T00:00:00Z"}}"#,
+                )
+            },
+            1,
+        );
+        let seen_b = Arc::clone(&calls_b);
+        let engine_b = MockEngine::serve(
+            move |_| {
+                seen_b.fetch_add(1, Ordering::SeqCst);
+                json_response(
+                    r#"{"Id":"b530e70d9e1e35941b6fc12db9b51a7b19c6d02","State":{"Running":true,"Status":"running","FinishedAt":"0001-01-01T00:00:00Z"}}"#,
+                )
+            },
+            1,
+        );
+        // The ambient endpoint is B, but this domain-owned client must use A
+        // for the API leg rather than re-resolving the process context.
+        let _ambient = EngineTestGuard::serve(engine_b.socket.clone(), None);
+        let endpoint_a = crate::docker::engine::DockerEndpoint {
+            host: format!("unix://{}", engine_a.socket.display()),
+            socket: engine_a.socket.clone(),
+            source: crate::docker::engine::DockerEndpointSource::Explicit,
+            context: None,
+        };
+        let mut docker = Docker::host_at_endpoint(endpoint_a);
+        let exit = docker.inspect_exit("buildkit-daemon").unwrap();
+        assert_eq!(exit.status, Some(ContainerState::Exited));
+        assert_eq!(calls_a.load(Ordering::SeqCst), 1);
+        assert_eq!(calls_b.load(Ordering::SeqCst), 0);
+    }
 
     /// Every fixture below is output captured from a real Engine 29.4.0
     /// invocation of the exact argument vector the parser consumes.

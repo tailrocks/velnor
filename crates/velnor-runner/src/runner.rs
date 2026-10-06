@@ -7727,7 +7727,7 @@ fn maybe_startup_host_docker_reclaim(
         daemon_id,
         config_base,
         prune_stale_velnor_docker_resources,
-        |id| crate::docker_lease::reclaim_daemon_orphan_jobs(id, crate::docker::client::host_call),
+        |id| crate::docker_lease::reclaim_daemon_orphan_jobs(id),
     );
 }
 
@@ -19890,7 +19890,14 @@ fn doctor_host_docker_reclaim(
         eprintln!("doctor host Docker reclaim skipped: {reason}");
         return;
     }
-    if let Err(error) = crate::docker_lease::reclaim_orphan_jobs(&mut docker) {
+    #[cfg(test)]
+    let orphan_reclaim = crate::docker_lease::reclaim_orphan_jobs_with(
+        crate::docker_lease::test_orphan_cleanup_endpoint(),
+        &mut docker,
+    );
+    #[cfg(not(test))]
+    let orphan_reclaim = crate::docker_lease::reclaim_orphan_jobs();
+    if let Err(error) = orphan_reclaim {
         eprintln!("Warning: leftover job Docker reclaim failed: {error:#}");
     }
     if let Err(error) = crate::docker_lease::reclaim_unlabeled_testcontainers(&mut docker) {

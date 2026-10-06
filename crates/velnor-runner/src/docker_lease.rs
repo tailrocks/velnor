@@ -6419,6 +6419,9 @@ fn recover_unbound_created_builder_for_request(
     generation: u64,
     config_fingerprint: &str,
 ) -> Result<bool> {
+    if has_recoverable_pending_buildkit_create(domain, builder)? {
+        checked_pending_recovery_endpoint(host_socket, domain)?;
+    }
     let _recovery = match policy.begin_persistent_builder_recovery(
         domain,
         builder,
@@ -6489,6 +6492,7 @@ fn recover_pending_buildkit_create_for_request(
     if !has_recoverable_pending_buildkit_create(domain, builder)? {
         return Ok(None);
     }
+    checked_pending_recovery_endpoint(host_socket, domain)?;
     policy.ensure_pending_create_creator_lease(domain, builder, config_fingerprint, generation)?;
     let Some(recovery) =
         policy.begin_pending_create_recovery(domain, builder, generation, config_fingerprint)?
@@ -6521,7 +6525,12 @@ fn recover_pending_buildkit_create_for_setup_with_volume_lock(
         &crate::buildkit::PendingBuildKitCreateAccess,
     ) -> Result<VolumeOperationLocks>,
 ) -> Result<Option<String>> {
-    let mut transport = HostPendingBuildKitRecoveryTransport { host_socket };
+    if !has_recoverable_pending_buildkit_create(domain, builder)? {
+        return Ok(None);
+    }
+    let mut transport = HostPendingBuildKitRecoveryTransport {
+        endpoint: checked_pending_recovery_endpoint(host_socket, domain)?,
+    };
     recover_pending_buildkit_create_for_setup_with_volume_lock_and_transport(
         policy,
         domain,
@@ -6620,7 +6629,12 @@ fn recover_pending_buildkit_create_under_gate(
     config_fingerprint: &str,
     recovery: PersistentBuilderRecoveryAdmission,
 ) -> Result<Option<String>> {
-    let mut transport = HostPendingBuildKitRecoveryTransport { host_socket };
+    if !has_recoverable_pending_buildkit_create(domain, builder)? {
+        return Ok(None);
+    }
+    let mut transport = HostPendingBuildKitRecoveryTransport {
+        endpoint: checked_pending_recovery_endpoint(host_socket, domain)?,
+    };
     recover_pending_buildkit_create_under_gate_with_volume_lock(
         policy,
         domain,
@@ -6650,26 +6664,41 @@ trait PendingBuildKitRecoveryTransport {
 }
 
 #[cfg(unix)]
-struct HostPendingBuildKitRecoveryTransport<'a> {
-    host_socket: &'a Path,
+fn checked_pending_recovery_endpoint(
+    host_socket: &Path,
+    domain: &crate::buildkit::PersistentBuildKitDomain,
+) -> Result<crate::docker::DockerEndpoint> {
+    if host_socket != domain.endpoint.socket.as_path() {
+        bail!("pending BuildKit recovery lease socket differs from its domain endpoint");
+    }
+    Ok(domain.endpoint.clone())
 }
 
 #[cfg(unix)]
-impl PendingBuildKitRecoveryTransport for HostPendingBuildKitRecoveryTransport<'_> {
+struct HostPendingBuildKitRecoveryTransport {
+    endpoint: crate::docker::DockerEndpoint,
+}
+
+#[cfg(unix)]
+impl PendingBuildKitRecoveryTransport for HostPendingBuildKitRecoveryTransport {
     fn inspect_volume(&mut self, target: &str) -> Result<(u16, Vec<u8>)> {
-        inspect_volume_on_host(self.host_socket, target)
+        inspect_volume_on_host(&self.endpoint.socket, target)
     }
 
     fn inspect_container(&mut self, target: &str) -> Result<(u16, Vec<u8>)> {
-        inspect_container_on_host(self.host_socket, target)
+        inspect_container_on_host(&self.endpoint.socket, target)
     }
 
     fn upload_archive(&mut self, container_id: &str, config_fingerprint: &str) -> Result<()> {
-        upload_approved_buildkit_archive_on_host(self.host_socket, container_id, config_fingerprint)
+        upload_approved_buildkit_archive_on_host(
+            &self.endpoint.socket,
+            container_id,
+            config_fingerprint,
+        )
     }
 
     fn start_container(&mut self, container_id: &str) -> Result<()> {
-        crate::docker::Docker::host()
+        crate::docker::Docker::host_at_endpoint(self.endpoint.clone())
             .container_start(container_id)
             .map(|_| ())
     }
@@ -6682,6 +6711,9 @@ impl PendingBuildKitRecoveryTransport for HostPendingBuildKitRecoveryTransport<'
         config_fingerprint: &str,
         readiness_epoch: u64,
     ) -> Result<()> {
+        if domain.endpoint != self.endpoint {
+            bail!("pending BuildKit recovery endpoint changed before readiness publication");
+        }
         crate::buildkit::persist_builder_readiness_after_start(
             domain,
             builder,
@@ -9202,30 +9234,134 @@ pub fn force_remove_job_owned_containers(
     Ok(())
 }
 
-pub fn reclaim_orphan_jobs(mut docker: impl FnMut(&[String]) -> Result<String>) -> Result<()> {
-    #[cfg(unix)]
-    let host_socket = crate::docker::engine::resolve_docker_endpoint()
-        .context("resolve Docker endpoint for orphan-volume lock")?
-        .socket;
-    #[cfg(unix)]
-    let mut volume_locks = BTreeMap::new();
-    let mut call = |args: &[String]| {
-        #[cfg(unix)]
-        if let Some(volume) = host_volume_mutation_target(args)
-            && !volume_locks.contains_key(volume)
-        {
-            volume_locks.insert(
-                volume.to_owned(),
-                lock_host_volume_name(&host_socket, volume)?,
-            );
-        }
-        docker(args)
-    };
-    let formatted = call(&list_owned_job_format_args())?;
-    for job_id in docker_client::orphan_job_ids(&formatted) {
-        reclaim_stale_job_owned(&job_id, &mut call)?;
+trait OrphanJobCleanupTransport {
+    fn endpoint(&self) -> &crate::docker::DockerEndpoint;
+    fn call(&mut self, args: &[String]) -> Result<String>;
+    fn lock_volume(&mut self, volume: &str) -> Result<VolumeOperationLocks>;
+}
+
+/// One endpoint-bound host transport for the entire orphan cleanup pass.
+/// Inventory, revalidation, inspect, removal, and the volume-name lock all
+/// derive from this retained endpoint; a later context/environment switch
+/// cannot split the proof and mutation across daemons.
+struct PinnedOrphanJobCleanupTransport {
+    endpoint: crate::docker::DockerEndpoint,
+}
+
+impl PinnedOrphanJobCleanupTransport {
+    fn resolve() -> Result<Self> {
+        let endpoint = crate::docker::engine::resolve_docker_endpoint()
+            .context("resolve Docker endpoint for orphan-job cleanup")?;
+        Ok(Self { endpoint })
     }
-    reclaim_orphan_job_buildkit(&formatted, None, &mut call)
+}
+
+impl OrphanJobCleanupTransport for PinnedOrphanJobCleanupTransport {
+    fn endpoint(&self) -> &crate::docker::DockerEndpoint {
+        &self.endpoint
+    }
+
+    fn call(&mut self, args: &[String]) -> Result<String> {
+        crate::docker::client::host_call_at_endpoint(args, &self.endpoint)
+    }
+
+    fn lock_volume(&mut self, volume: &str) -> Result<VolumeOperationLocks> {
+        #[cfg(unix)]
+        {
+            lock_host_volume_name(&self.endpoint.socket, volume)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = volume;
+            Ok(VolumeOperationLocks::default())
+        }
+    }
+}
+
+#[cfg(test)]
+struct TestOrphanJobCleanupTransport<F> {
+    endpoint: crate::docker::DockerEndpoint,
+    docker: F,
+}
+
+#[cfg(test)]
+impl<F> OrphanJobCleanupTransport for TestOrphanJobCleanupTransport<F>
+where
+    F: FnMut(&[String]) -> Result<String>,
+{
+    fn endpoint(&self) -> &crate::docker::DockerEndpoint {
+        &self.endpoint
+    }
+
+    fn call(&mut self, args: &[String]) -> Result<String> {
+        (self.docker)(args)
+    }
+
+    fn lock_volume(&mut self, _volume: &str) -> Result<VolumeOperationLocks> {
+        Ok(VolumeOperationLocks::default())
+    }
+}
+
+pub fn reclaim_orphan_jobs() -> Result<()> {
+    let mut transport = PinnedOrphanJobCleanupTransport::resolve()?;
+    reclaim_orphan_jobs_with_transport(&mut transport, None)
+}
+
+#[cfg(test)]
+pub(crate) fn test_orphan_cleanup_endpoint() -> crate::docker::DockerEndpoint {
+    crate::docker::DockerEndpoint {
+        host: "unix:///tmp/velnor-orphan-cleanup-test.sock".into(),
+        socket: PathBuf::from("/tmp/velnor-orphan-cleanup-test.sock"),
+        source: crate::docker::DockerEndpointSource::Default,
+        context: None,
+    }
+}
+
+#[cfg(all(test, unix))]
+fn test_endpoint_at_socket(socket: &Path) -> crate::docker::DockerEndpoint {
+    crate::docker::DockerEndpoint {
+        host: format!("unix://{}", socket.display()),
+        socket: socket.to_path_buf(),
+        source: crate::docker::DockerEndpointSource::Default,
+        context: None,
+    }
+}
+
+#[cfg(test)]
+struct ContextSwitchingOrphanCleanupTransport {
+    endpoint: crate::docker::DockerEndpoint,
+    ambient_engine: &'static str,
+    dispatched: Vec<(&'static str, String, Vec<String>)>,
+}
+
+#[cfg(test)]
+impl OrphanJobCleanupTransport for ContextSwitchingOrphanCleanupTransport {
+    fn endpoint(&self) -> &crate::docker::DockerEndpoint {
+        &self.endpoint
+    }
+
+    fn call(&mut self, args: &[String]) -> Result<String> {
+        self.dispatched.push((
+            self.ambient_engine,
+            self.endpoint.host.clone(),
+            args.to_vec(),
+        ));
+        Ok(String::new())
+    }
+
+    fn lock_volume(&mut self, _volume: &str) -> Result<VolumeOperationLocks> {
+        self.ambient_engine = "engine-b";
+        Ok(VolumeOperationLocks::default())
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reclaim_orphan_jobs_with(
+    endpoint: crate::docker::DockerEndpoint,
+    docker: impl FnMut(&[String]) -> Result<String>,
+) -> Result<()> {
+    let mut transport = TestOrphanJobCleanupTransport { endpoint, docker };
+    reclaim_orphan_jobs_with_transport(&mut transport, None)
 }
 
 /// Daemon-scoped variant of [`reclaim_orphan_jobs`] for daemon startup: only
@@ -9234,34 +9370,76 @@ pub fn reclaim_orphan_jobs(mut docker: impl FnMut(&[String]) -> Result<String>) 
 /// boot to reclaim precreated job-environment containers (and their guest
 /// siblings) orphaned by a drain/restart — previously only manual `doctor`
 /// runs reclaimed them (tailrocks/velnor#311).
-pub fn reclaim_daemon_orphan_jobs(
+pub fn reclaim_daemon_orphan_jobs(daemon_id: &str) -> Result<()> {
+    let mut transport = PinnedOrphanJobCleanupTransport::resolve()?;
+    reclaim_orphan_jobs_with_transport(&mut transport, Some(daemon_id))
+}
+
+#[cfg(test)]
+pub(crate) fn reclaim_daemon_orphan_jobs_with(
     daemon_id: &str,
-    mut docker: impl FnMut(&[String]) -> Result<String>,
+    endpoint: crate::docker::DockerEndpoint,
+    docker: impl FnMut(&[String]) -> Result<String>,
 ) -> Result<()> {
-    #[cfg(unix)]
-    let host_socket = crate::docker::engine::resolve_docker_endpoint()
-        .context("resolve Docker endpoint for daemon-orphan volume lock")?
-        .socket;
-    #[cfg(unix)]
+    let mut transport = TestOrphanJobCleanupTransport { endpoint, docker };
+    reclaim_orphan_jobs_with_transport(&mut transport, Some(daemon_id))
+}
+
+fn reclaim_orphan_jobs_with_transport(
+    transport: &mut impl OrphanJobCleanupTransport,
+    daemon_id: Option<&str>,
+) -> Result<()> {
+    let endpoint = transport.endpoint().clone();
     let mut volume_locks = BTreeMap::new();
     let mut call = |args: &[String]| {
-        #[cfg(unix)]
-        if let Some(volume) = host_volume_mutation_target(args)
-            && !volume_locks.contains_key(volume)
-        {
-            volume_locks.insert(
-                volume.to_owned(),
-                lock_host_volume_name(&host_socket, volume)?,
-            );
-        }
-        docker(args)
+        call_orphan_job_cleanup_transport(transport, &endpoint, &mut volume_locks, args)
     };
-    let formatted = call(&list_daemon_owned_job_format_args())?;
-    for job_id in docker_client::daemon_orphan_job_ids(&formatted, daemon_id) {
-        reclaim_stale_job_owned(&job_id, &mut call)?;
+    let job_inventory = match daemon_id {
+        Some(_) => list_daemon_owned_job_format_args(),
+        None => list_owned_job_format_args(),
+    };
+    let formatted = call(&job_inventory)?;
+    match daemon_id {
+        Some(daemon_id) => {
+            for job_id in docker_client::daemon_orphan_job_ids(&formatted, daemon_id) {
+                reclaim_stale_job_owned(&job_id, &mut call)?;
+            }
+            let live = docker_client::live_daemon_job_ids(&formatted, daemon_id);
+            reclaim_orphan_job_buildkit_with_live(&live, Some(daemon_id), &mut call)
+        }
+        None => {
+            for job_id in docker_client::orphan_job_ids(&formatted) {
+                reclaim_stale_job_owned(&job_id, &mut call)?;
+            }
+            reclaim_orphan_job_buildkit(&formatted, None, &mut call)
+        }
     }
-    let live = docker_client::live_daemon_job_ids(&formatted, daemon_id);
-    reclaim_orphan_job_buildkit_with_live(&live, Some(daemon_id), &mut call)
+}
+
+fn call_orphan_job_cleanup_transport(
+    transport: &mut impl OrphanJobCleanupTransport,
+    endpoint: &crate::docker::DockerEndpoint,
+    volume_locks: &mut BTreeMap<String, VolumeOperationLocks>,
+    args: &[String],
+) -> Result<String> {
+    if transport.endpoint() != endpoint {
+        bail!("Docker endpoint changed during orphan cleanup; refusing dispatch");
+    }
+    #[cfg(unix)]
+    if let Some(volume) = host_volume_mutation_target(args)
+        && !volume_locks.contains_key(volume)
+    {
+        volume_locks.insert(volume.to_owned(), transport.lock_volume(volume)?);
+    }
+    // Lock acquisition is a meaningful boundary: refuse to dispatch if a
+    // transport implementation changed its selected endpoint while taking
+    // the name lock. The production transport is immutable, and its call
+    // method always uses the retained endpoint rather than ambient Docker
+    // context/environment.
+    if transport.endpoint() != endpoint {
+        bail!("Docker endpoint changed while acquiring orphan cleanup lock; refusing dispatch");
+    }
+    transport.call(args)
 }
 
 pub fn reclaim_unlabeled_testcontainers(
@@ -9679,8 +9857,9 @@ impl DockerLeaseGuard {
         if !has_recoverable_pending_buildkit_create(domain, builder)? {
             return Ok(None);
         }
+        let endpoint = checked_pending_recovery_endpoint(&self.host_socket, domain)?;
         let engine_id = require_volume_lock_engine_id(
-            crate::docker::engine::daemon_identity_blocking(&self.host_socket)
+            crate::docker::engine::daemon_identity_blocking(&endpoint.socket)
                 .map(|identity| identity.id),
         )?;
         recover_pending_buildkit_create_for_setup_with_volume_lock(
@@ -9721,23 +9900,26 @@ impl DockerLeaseGuard {
             &config_fingerprint,
             |volume| lock_host_volume_name_for_domain(domain, volume),
             || {
+                domain.validate_current()?;
                 let endpoint = crate::docker::engine::resolve_docker_endpoint()
                     .context("resolve Docker Engine for readiness migration")?;
-                if endpoint.socket != self.host_socket {
+                if endpoint != domain.endpoint || endpoint.socket != self.host_socket {
                     bail!("Docker endpoint changed during BuildKit readiness migration");
                 }
-                let engine_id = crate::docker::engine::daemon_identity_blocking(&self.host_socket)
-                    .map(|identity| identity.id)
-                    .filter(|identity| !identity.trim().is_empty())
-                    .context("Docker Engine ID is unavailable during readiness migration")?;
+                let engine_id =
+                    crate::docker::engine::daemon_identity_blocking(&domain.endpoint.socket)
+                        .map(|identity| identity.id)
+                        .filter(|identity| !identity.trim().is_empty())
+                        .context("Docker Engine ID is unavailable during readiness migration")?;
                 if engine_id != domain.engine_id {
                     bail!("Docker Engine changed during BuildKit readiness migration");
                 }
                 Ok(())
             },
             |builder, volume, container_id| {
-                let volume_output = crate::docker::client::host_call(
+                let volume_output = crate::docker::client::host_call_at_endpoint(
                     &inspect_persistent_buildkit_volume_args(volume),
+                    &domain.endpoint,
                 )
                 .with_context(|| format!("inspect legacy BuildKit state volume {volume}"))?;
                 attest_persistent_buildkit_volume_identity(&volume_output, volume, &domain.token)?;
@@ -9762,7 +9944,8 @@ impl DockerLeaseGuard {
                 {
                     bail!("legacy BuildKit container does not match its exact domain/config");
                 }
-                let state = crate::docker::Docker::host()
+                let state = domain
+                    .docker()
                     .inspect_exit(container_id)
                     .context("inspect legacy BuildKit container state")?;
                 if state.status != Some(crate::docker::client::ContainerState::Running) {
@@ -9770,7 +9953,7 @@ impl DockerLeaseGuard {
                 }
                 Ok(())
             },
-            crate::buildkit::wait_for_attested_buildkit_ready,
+            |id| crate::buildkit::wait_for_attested_buildkit_ready(id, &domain.endpoint),
         )?;
         crate::buildkit::recover_starting_builder_in_domain(domain, builder, &config_fingerprint)?;
         let volume = crate::buildkit::daemon_state_volume(builder);
@@ -13551,6 +13734,36 @@ mod tests {
     use super::*;
     use anyhow::anyhow;
 
+    #[cfg(unix)]
+    #[test]
+    fn orphan_cleanup_dispatch_stays_on_retained_endpoint_after_context_switch_at_lock() {
+        let endpoint = test_orphan_cleanup_endpoint();
+        let mut transport = ContextSwitchingOrphanCleanupTransport {
+            endpoint: endpoint.clone(),
+            ambient_engine: "engine-a",
+            dispatched: Vec::new(),
+        };
+        let mut volume_locks = BTreeMap::new();
+
+        call_orphan_job_cleanup_transport(
+            &mut transport,
+            &endpoint,
+            &mut volume_locks,
+            &remove_volume_args(&["buildx_buildkit_velnor-builder-dead0_state".into()]),
+        )
+        .unwrap();
+
+        assert_eq!(transport.ambient_engine, "engine-b");
+        assert_eq!(
+            transport.dispatched,
+            vec![(
+                "engine-b",
+                endpoint.host.clone(),
+                remove_volume_args(&["buildx_buildkit_velnor-builder-dead0_state".into()]),
+            )]
+        );
+    }
+
     #[test]
     fn job_network_guard_defused_drop_is_noop() {
         // No panic, no docker invocation: the guard type runs `docker` only
@@ -14438,7 +14651,8 @@ mod tests {
         use std::os::unix::net::UnixListener;
 
         let root = test_storage_root("pending-create-setup-missing-volume");
-        let (domain, creator, fence, builder, volume) = test_pending_buildkit_create_fence(&root);
+        let (mut domain, creator, fence, builder, volume) =
+            test_pending_buildkit_create_fence(&root);
         let original = crate::buildkit::pending_buildkit_create_transaction(&domain, &builder)
             .unwrap()
             .unwrap();
@@ -14452,6 +14666,7 @@ mod tests {
             .begin_persistent_builder_setup(&builder, config_fingerprint)
             .unwrap();
         let socket = root.join("fake-engine.sock");
+        domain.endpoint = test_endpoint_at_socket(&socket);
         let listener = UnixListener::bind(&socket).unwrap();
         let expected_path = format!("/v1.43/volumes/{volume}");
         let server = std::thread::spawn(move || {
@@ -14521,6 +14736,100 @@ mod tests {
                 .is_err(),
             "ordinary setup locks stay fenced after failed recovery"
         );
+        drop(policy);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_recovery_rejects_socket_mismatch_before_io_and_retains_transaction() {
+        let (root, domain, policy, generation, builder, volume, original) =
+            pending_recovery_setup("pending-create-setup-socket-mismatch");
+        let mismatched_socket = root.join("another-engine.sock");
+
+        let result = recover_pending_buildkit_create_for_setup_with_volume_lock(
+            &policy,
+            &mismatched_socket,
+            &domain,
+            &builder,
+            generation,
+            &original.config_fingerprint,
+            &domain.engine_id,
+            |_, _, _| panic!("endpoint mismatch must be rejected before volume locking"),
+        );
+
+        let error = result.expect_err("a mismatched recovery socket must fail closed");
+        assert!(error
+            .to_string()
+            .contains("lease socket differs from its domain endpoint"));
+        assert!(
+            !mismatched_socket.exists(),
+            "mismatched endpoint must not be contacted or created"
+        );
+        assert_eq!(
+            crate::buildkit::pending_buildkit_create_transaction(&domain, &builder)
+                .unwrap()
+                .unwrap(),
+            original,
+            "endpoint mismatch must preserve the durable recovery transaction"
+        );
+        assert!(
+            policy
+                .lock_volume_names_with_create_access(
+                    &BTreeSet::from([volume]),
+                    Some(&domain),
+                    None,
+                )
+                .is_err(),
+            "endpoint mismatch must retain the pending-create fence"
+        );
+
+        drop(policy);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn request_recovery_rejects_socket_mismatch_before_admission_and_io() {
+        let (root, domain, policy, generation, builder, volume, original) =
+            pending_recovery_setup("pending-create-request-socket-mismatch");
+        let mismatched_socket = root.join("another-engine.sock");
+
+        let result = recover_pending_buildkit_create_for_request(
+            &policy,
+            &mismatched_socket,
+            &domain,
+            &builder,
+            generation,
+            &original.config_fingerprint,
+        );
+
+        let error = result.expect_err("a mismatched request socket must fail closed");
+        assert!(error
+            .to_string()
+            .contains("lease socket differs from its domain endpoint"));
+        assert!(
+            !mismatched_socket.exists(),
+            "mismatched endpoint must not be contacted or created"
+        );
+        assert_eq!(
+            crate::buildkit::pending_buildkit_create_transaction(&domain, &builder)
+                .unwrap()
+                .unwrap(),
+            original,
+            "endpoint mismatch must preserve the durable recovery transaction"
+        );
+        assert!(
+            policy
+                .lock_volume_names_with_create_access(
+                    &BTreeSet::from([volume]),
+                    Some(&domain),
+                    None,
+                )
+                .is_err(),
+            "endpoint mismatch must retain the pending-create fence"
+        );
+
         drop(policy);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -17845,7 +18154,7 @@ mod tests {
         let request = api_request(
             "POST",
             "/v1.43/networks/net-owned/connect",
-            br#"{"Container":"container-alias","EndpointConfig":{}}"#,
+            br#"{ "Container" : "container-alias", "EndpointConfig" : {} }"#,
         );
         let authorization = policy.authorize_admitted(&request).unwrap();
         assert_eq!(authorization.container_id(), Some("old-container-id"));
@@ -17872,10 +18181,51 @@ mod tests {
             )
             .unwrap();
         let body = docker_request_body(&rewritten).unwrap();
+        let header_end = rewritten
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        let header_text = std::str::from_utf8(&rewritten[..header_end]).unwrap();
+        assert!(header_text.contains(&format!("Content-Length: {}\r\n", body.len())));
         let value: Value = serde_json::from_slice(body).unwrap();
         assert_eq!(value["Container"], "old-container-id");
         let (_, target) = docker_request_line(&rewritten).unwrap();
         assert_eq!(target, "/v1.43/networks/net-owned/connect");
+
+        let longer_alias_body =
+            br#"{ "Container" : "very-long-container-alias", "EndpointConfig" : {} }"#;
+        let longer_alias_request = api_request(
+            "POST",
+            "/v1.43/networks/net-owned/connect",
+            longer_alias_body,
+        );
+        let shorter_id =
+            rewrite_network_container_reference(&longer_alias_request, "short-id").unwrap();
+        let shorter_id_body = docker_request_body(&shorter_id).unwrap();
+        assert!(longer_alias_body.len() > shorter_id_body.len());
+        let shorter_id_value: Value = serde_json::from_slice(shorter_id_body).unwrap();
+        assert_eq!(shorter_id_value["Container"], "short-id");
+        let shorter_id_header_end = shorter_id
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        let shorter_id_header = std::str::from_utf8(&shorter_id[..shorter_id_header_end]).unwrap();
+        assert!(
+            shorter_id_header.contains(&format!("Content-Length: {}\r\n", shorter_id_body.len()))
+        );
+
+        let malformed = format!(
+            "POST /v1.43/networks/net-owned/connect HTTP/1.1\r\nHost: docker\r\nContent-Length: 1\r\n\r\n{}",
+            r#"{ "Container" : "container-alias", "EndpointConfig" : {} }"#
+        )
+        .into_bytes();
+        let error = rewrite_network_container_reference(&malformed, "old-container-id")
+            .expect_err("an incorrect original wire length must be rejected");
+        assert!(error
+            .to_string()
+            .contains("Content-Length does not match body"));
     }
 
     #[test]
@@ -19589,7 +19939,7 @@ mod tests {
         let listing = format!(
             "job-id\t{job_id}\t{job_id}\trunning\n\
              guest-id\tguest-container\t{job_id}\texited\n\
-             bk-id\t{BUILDKIT_CONTAINER_NAME_PREFIX}deadbeef\t{job_id}\trunning\n"
+             bk-id\t{BUILDKIT_CONTAINER_NAME_PREFIX}deadbeef0\t{job_id}\trunning\n"
         );
         let mut calls = Vec::new();
         let mut outputs = vec![listing, String::new(), String::new()];
@@ -19751,7 +20101,7 @@ velnor-job-dead\tvelnor-job-dead\texited
             String::new(),
             String::new(),
         ];
-        reclaim_orphan_jobs(|args| {
+        reclaim_orphan_jobs_with(test_orphan_cleanup_endpoint(), |args| {
             calls.push(args.to_vec());
             if outputs.is_empty() {
                 return Err(anyhow!("unexpected docker call {args:?}"));
@@ -19993,7 +20343,7 @@ unlabeled\tbuildx_buildkit_velnor-builder-unlabeled0\tvelnor-job-unlabeled\t\tcr
             "velnor-job-live\tvelnor-job-live\trunning\nvelnor-job-dead\tvelnor-job-dead\texited\n"
                 .to_string(),
         ];
-        reclaim_orphan_jobs(|args| {
+        reclaim_orphan_jobs_with(test_orphan_cleanup_endpoint(), |args| {
             calls.push(args.to_vec());
             if outputs.is_empty() {
                 return Err(anyhow!("unexpected docker call {args:?}"));
@@ -20299,7 +20649,7 @@ buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
             String::new(),
             String::new(),
         ];
-        reclaim_daemon_orphan_jobs(daemon, |args| {
+        reclaim_daemon_orphan_jobs_with(daemon, test_orphan_cleanup_endpoint(), |args| {
             calls.push(args.to_vec());
             if outputs.is_empty() {
                 return Err(anyhow!("unexpected docker call {args:?}"));

@@ -5058,24 +5058,45 @@ where
                 };
                 let outcome = match (capability_revoked, state.temp_host.as_deref()) {
                     (false, _) => None,
-                    (true, Some(_temp)) => {
-                        match crate::buildkit::release_domain_builder_if_last(
-                            &domain,
-                            &name,
-                            &container.name,
-                            stop,
-                            || crate::buildkit::start_builder_in_domain(&domain, &name),
-                        ) {
-                            Ok(outcome) => Some(outcome),
+                    (true, Some(temp)) => {
+                        let recorded = crate::buildkit::read_job_builders(temp);
+                        match recorded {
+                            Ok(builders) if builders.iter().any(|builder| builder == &name) => {
+                                match crate::buildkit::release_domain_builder_if_last(
+                                    &domain,
+                                    &name,
+                                    &container.name,
+                                    stop,
+                                    || crate::buildkit::start_builder_in_domain(&domain, &name),
+                                ) {
+                                    Ok(outcome) => Some(outcome),
+                                    Err(error) => {
+                                        use std::fmt::Write as _;
+                                        let _ = writeln!(
+                                            stderr,
+                                            "buildx post: release of {name} failed ({error:#}); \
+                                             the hold converges via slot repair"
+                                        );
+                                        stdout.push_str(
+                                            "Release failed: daemon left running (see stderr)\n",
+                                        );
+                                        None
+                                    }
+                                }
+                            }
+                            Ok(_) => {
+                                stdout.push_str(
+                                    "No recorded BuildKit hold for this job; builder left running\n",
+                                );
+                                None
+                            }
                             Err(error) => {
                                 use std::fmt::Write as _;
                                 let _ = writeln!(
                                     stderr,
-                                    "buildx post: release of {name} failed ({error:#}); \
-                                     the hold converges via slot repair"
+                                    "buildx post: cannot verify the recorded hold for {name} ({error:#}); \
+                                     the builder is left running"
                                 );
-                                stdout
-                                    .push_str("Release failed: daemon left running (see stderr)\n");
                                 None
                             }
                         }
@@ -14120,6 +14141,8 @@ fn resolve_buildkit_domain(
         return Ok(crate::buildkit::PersistentBuildKitDomain {
             token: crate::buildkit::TEST_BUILDKIT_DOMAIN_TOKEN.to_string(),
             engine_id: "test-docker-engine".to_string(),
+            endpoint: crate::docker::engine::resolve_docker_endpoint()
+                .context("resolve Docker endpoint for test BuildKit domain")?,
             identity_root: slot_temp_root.join("_velnor-test-buildkit-storage"),
             root: slot_temp_root.join("_velnor-test-buildkit-domain"),
         });

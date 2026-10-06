@@ -282,6 +282,26 @@ fn normalize_buildkit_identity_root(root: &Path, macos: bool) -> PathBuf {
     root.to_path_buf()
 }
 
+/// Read an existing storage identity without creating or repairing anything.
+/// Domain re-attestation uses this so a missing identity cannot silently turn
+/// into a new authorization domain during cleanup.
+pub(crate) fn read_existing_buildkit_storage_identity(root: &Path) -> Result<String> {
+    #[cfg(unix)]
+    {
+        let directory = crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(root)
+            .with_context(|| format!("securely open BuildKit storage root {}", root.display()))?;
+        let mut file = directory
+            .open_relative_file(Path::new(BUILDKIT_STORAGE_ID_FILE))
+            .context("open existing BuildKit storage identity")?;
+        read_buildkit_storage_identity(&mut file)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        anyhow::bail!("BuildKit storage identity requires Unix no-follow filesystem support")
+    }
+}
+
 /// Load or atomically initialize the durable identity for a BuildKit storage
 /// root. Existing malformed or unsafe identity entries fail closed; they are
 /// never replaced with a new identity.
