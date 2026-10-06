@@ -7,8 +7,8 @@
 //! head/base repository comparison (`github.repository` against the event
 //! payload's `pull_request.head.repo` or `workflow_run.head_repository`,
 //! with the payload's repository numeric ids as corroboration), the
-//! self [`RepositoryResource`]'s name and `cloneUrl` property as
-//! corroboration (the URL must name the job's own GitHub server host), and
+//! self [`RepositoryResource`]'s typed `url` property as corroboration (the
+//! URL must name the job's own GitHub server host), and
 //! the plan scope identifier as a structural-completeness signal.
 //!
 //! Derivation rules:
@@ -54,7 +54,7 @@
 //! [`RepositoryResource`]: crate::job_message::RepositoryResource
 
 use crate::job_message::AgentJobRequestMessage;
-use serde_json::Value;
+use velnor_model::ContextValue;
 
 /// Per-job trust class, derived from the job's own event.
 ///
@@ -85,17 +85,24 @@ impl TrustClass {
     /// identically.
     #[must_use]
     pub fn derive(job: &AgentJobRequestMessage) -> Self {
-        let Some(event) = event_name(job) else {
+        let Some(context_data) = trust_context_data(job) else {
+            return Self::Unknown;
+        };
+        Self::derive_with_context(job, &context_data)
+    }
+
+    fn derive_with_context(job: &AgentJobRequestMessage, context_data: &ContextValue) -> Self {
+        let Some(event) = event_name(job, context_data) else {
             return Self::Unknown;
         };
         if !plan_scope_present(job) {
             return Self::Unknown;
         }
-        let Some(base) = base_repository(job) else {
+        let Some(base) = base_repository(job, context_data) else {
             return Self::Unknown;
         };
         if is_pull_request_event(event) {
-            let Some(pull) = pull_request_repos(job) else {
+            let Some(pull) = pull_request_repos(context_data) else {
                 return Self::Unknown;
             };
             if !repository_eq(base, &pull.head_full_name) {
@@ -105,7 +112,7 @@ impl TrustClass {
                 return Self::Unknown;
             }
         } else if is_workflow_run_event(event) {
-            let Some(run) = workflow_run_repos(job) else {
+            let Some(run) = workflow_run_repos(context_data) else {
                 return Self::Unknown;
             };
             if !repository_eq(base, &run.head_full_name) {
@@ -115,7 +122,7 @@ impl TrustClass {
                 return Self::Unknown;
             }
         }
-        if repository_resources_contradict(job, base) {
+        if repository_resources_contradict(job, context_data, base) {
             return Self::Unknown;
         }
         Self::Trusted
@@ -204,10 +211,19 @@ impl AdmittedTrust {
     /// hand-assembled pair production cannot produce.
     #[must_use]
     pub fn admit(job: &AgentJobRequestMessage, pool_scope: &str) -> Self {
-        let class = TrustClass::derive(job);
+        let context_data = trust_context_data(job);
+        let class = context_data
+            .as_ref()
+            .map_or(TrustClass::Unknown, |context| {
+                TrustClass::derive_with_context(job, context)
+            });
         let pool = crate::trust_scope::normalize_scope(pool_scope);
-        let event = event_name(job);
-        let (effective_scope, cargo_seed_scope) = store_scopes_for_class(class, pool, event);
+        let event = context_data
+            .as_ref()
+            .and_then(|context| event_name(job, context))
+            .map(ToOwned::to_owned);
+        let (effective_scope, cargo_seed_scope) =
+            store_scopes_for_class(class, pool, event.as_deref());
         Self {
             class,
             effective_scope,
@@ -260,6 +276,15 @@ fn store_scopes_for_class(
 /// `pull_request_review`, and `pull_request_review_comment` all share it.
 const PULL_REQUEST_PREFIX: &[u8; 12] = b"pull_request";
 
+/// Build the same comparer-aware context root that `job_context_data` passes
+/// to InitializeJob. Trust reads only this canonical representation, so nulls,
+/// default scalar values, numeric coercions, and dictionary comparers match
+/// runtime behavior.
+fn trust_context_data(job: &AgentJobRequestMessage) -> Option<ContextValue> {
+    let values = job.materialize_context_values().ok()?;
+    ContextValue::object(values.into_iter().collect()).ok()
+}
+
 fn is_pull_request_event(event: &str) -> bool {
     event.len() >= PULL_REQUEST_PREFIX.len()
         && event.as_bytes()[..PULL_REQUEST_PREFIX.len()].eq_ignore_ascii_case(PULL_REQUEST_PREFIX)
@@ -272,9 +297,12 @@ fn is_workflow_run_event(event: &str) -> bool {
 /// The `github.event_name` variable, else the `github.event_name` context
 /// value. Well-formed names are ASCII `[A-Za-z0-9_]`; anything else is an
 /// unparseable signal, not a non-PR event.
-fn event_name(job: &AgentJobRequestMessage) -> Option<&str> {
+fn event_name<'a>(
+    job: &'a AgentJobRequestMessage,
+    context_data: &'a ContextValue,
+) -> Option<&'a str> {
     let raw = job_variable(job, "github.event_name")
-        .or_else(|| context_string(job, "github", "event_name"))?;
+        .or_else(|| context_string(context_data, "github", "event_name"))?;
     let event = raw.trim();
     if event.is_empty()
         || !event
@@ -289,9 +317,12 @@ fn event_name(job: &AgentJobRequestMessage) -> Option<&str> {
 /// The base repository full name (`owner/repo`) from `github.repository`,
 /// else the `github.repository` context value. Must carry the full-name shape;
 /// a bare word is an unparseable signal.
-fn base_repository(job: &AgentJobRequestMessage) -> Option<&str> {
+fn base_repository<'a>(
+    job: &'a AgentJobRequestMessage,
+    context_data: &'a ContextValue,
+) -> Option<&'a str> {
     let raw = job_variable(job, "github.repository")
-        .or_else(|| context_string(job, "github", "repository"))?;
+        .or_else(|| context_string(context_data, "github", "repository"))?;
     normalize_full_name(raw)
 }
 
@@ -356,34 +387,33 @@ impl HeadBaseRepos {
     }
 }
 
-/// Run a projection over the `github.event` payload. The `event` value may be
-/// an object or a JSON-encoded string (both arrive on the wire; the
-/// executor's event-path writer accepts the same two shapes), and any level
-/// may use the V2 broker compact `{"d": [{k, v}]}` form.
+/// Run a projection over the `github.event` payload. The event may be a
+/// comparer-aware context object or JSON-encoded string, matching the runtime
+/// shapes accepted by the event-path writer. Parse encoded JSON directly into
+/// an exact-key tree so large integer tokens keep their source digits.
 fn with_github_event<T>(
-    job: &AgentJobRequestMessage,
-    project: impl FnOnce(&Value) -> Option<T>,
+    context_data: &ContextValue,
+    project: impl FnOnce(&ContextValue) -> Option<T>,
 ) -> Option<T> {
-    let github = job.context_data.get("github")?;
-    let event = context_get(github, "event")?;
-    let parsed;
-    let event = match event {
-        Value::String(encoded) => {
-            parsed = serde_json::from_str::<Value>(encoded).ok()?;
-            &parsed
+    let github = context_data.get("github")?;
+    let event = github.get("event")?;
+    match event {
+        ContextValue::String(encoded) => {
+            let parsed = ContextValue::from_json_str_case_sensitive(encoded).ok()?;
+            project(&parsed)
         }
-        value => value,
-    };
-    project(event)
+        ContextValue::Object { .. } => project(event),
+        _ => None,
+    }
 }
 
 /// `pull_request.head.repo.full_name` plus the corroborating numeric ids from
 /// `pull_request.{head,base}.repo.id`.
-fn pull_request_repos(job: &AgentJobRequestMessage) -> Option<HeadBaseRepos> {
-    with_github_event(job, |event| {
+fn pull_request_repos(context_data: &ContextValue) -> Option<HeadBaseRepos> {
+    with_github_event(context_data, |event| {
         let pull = context_get(event, "pull_request")?;
         let head_repo = context_get(pull, "head").and_then(|head| context_get(head, "repo"))?;
-        let head_full_name = context_get(head_repo, "full_name")?.as_str()?;
+        let head_full_name = context_value_string(context_get(head_repo, "full_name")?)?;
         let head_full_name = normalize_full_name(head_full_name)?.to_owned();
         let head_id = context_get(head_repo, "id").and_then(json_id);
         let base_id = context_get(pull, "base")
@@ -406,11 +436,11 @@ fn pull_request_repos(job: &AgentJobRequestMessage) -> Option<HeadBaseRepos> {
 /// head/base comparison is the same fork signal as for `pull_request_target`
 /// (and the executor's artifact producer gate treats the same two `full_name`
 /// values as fork-sensitive).
-fn workflow_run_repos(job: &AgentJobRequestMessage) -> Option<HeadBaseRepos> {
-    with_github_event(job, |event| {
+fn workflow_run_repos(context_data: &ContextValue) -> Option<HeadBaseRepos> {
+    with_github_event(context_data, |event| {
         let run = context_get(event, "workflow_run")?;
         let head = context_get(run, "head_repository")?;
-        let head_full_name = context_get(head, "full_name")?.as_str()?;
+        let head_full_name = context_value_string(context_get(head, "full_name")?)?;
         let head_full_name = normalize_full_name(head_full_name)?.to_owned();
         let head_id = context_get(head, "id").and_then(json_id);
         let base_id = context_get(run, "repository")
@@ -426,10 +456,19 @@ fn workflow_run_repos(job: &AgentJobRequestMessage) -> Option<HeadBaseRepos> {
 
 /// A numeric GitHub id rendered comparably whether the payload encoded it as a
 /// JSON number or a string.
-fn json_id(value: &Value) -> Option<String> {
+fn json_id(value: &ContextValue) -> Option<String> {
     match value {
-        Value::Number(number) => Some(number.to_string()),
-        Value::String(raw) => {
+        // Keep integer JSON event IDs exact: adjacent integers above the
+        // Double precision boundary name different repositories. Typed `t=4`
+        // numeric strings have already been coerced to a floating Number by
+        // the runtime materializer, so their `as_f64` form still normalizes.
+        ContextValue::Number(number) => number
+            .as_i64()
+            .map(|value| value.to_string())
+            .or_else(|| number.as_u64().map(|value| value.to_string()))
+            .or_else(|| number.as_f64().map(|value| value.to_string())),
+        ContextValue::BigInteger(value) => Some(value.clone()),
+        ContextValue::String(raw) => {
             let id = raw.trim();
             (!id.is_empty()).then(|| id.to_owned())
         }
@@ -438,58 +477,52 @@ fn json_id(value: &Value) -> Option<String> {
 }
 
 /// Whether the self repository resource contradicts the base repository. The
-/// resource block is what the runner actually clones, so a name or `cloneUrl`
-/// naming a different repository than the event claims fails the derivation
-/// closed. An absent resource block is no contradiction: checkout hydrates it
-/// from the same `github.*` signals this derivation already required.
-fn repository_resources_contradict(job: &AgentJobRequestMessage, base: &str) -> bool {
-    let self_repo = job
-        .resources
-        .repositories
-        .iter()
+/// resource block is what the runner actually clones, so its typed `url`
+/// property must name the same repository and server as the event claims.
+/// Repository identity itself comes from `github.repository`; the upstream
+/// RepositoryResource has no wire `name` member. An absent resource block is
+/// no contradiction: checkout hydrates it from the same `github.*` signals
+/// this derivation already required.
+fn repository_resources_contradict(
+    job: &AgentJobRequestMessage,
+    context_data: &ContextValue,
+    base: &str,
+) -> bool {
+    let mut repositories = job.resources.repositories.iter().filter_map(Option::as_ref);
+    let self_repo = repositories
+        .clone()
         .find(|repo| repo.alias.as_deref() == Some("self"))
-        .or_else(|| job.resources.repositories.first());
+        .or_else(|| repositories.next());
     let Some(self_repo) = self_repo else {
         return false;
     };
-    let mut corroborated = false;
-    if let Some(name) = self_repo
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-    {
-        corroborated = true;
-        if !repository_eq(name, base) {
-            return true;
-        }
+    let url = match self_repo.property_value("url") {
+        None | Some(ContextValue::Null) => return true,
+        Some(ContextValue::String(url)) => url,
+        // The typed upstream getter is Uri; structured and other non-string
+        // JSON values cannot produce one and therefore cannot corroborate.
+        Some(_) => return true,
+    };
+    if url.trim().is_empty() {
+        return true;
     }
-    if let Some(url) = self_repo
-        .properties
-        .get("cloneUrl")
-        .or(self_repo.url.as_ref())
-        .map(|url| url.trim())
-        .filter(|url| !url.is_empty())
-    {
-        // Read exactly the way the checkout planner reads it (`checkout.rs`
-        // `self_clone_url`): the same signal, the same key, the same fallback.
-        // The URL must additionally name the job's own GitHub server host:
-        // checkout clones it verbatim, so a base-matching path on any other
-        // host corroborates nothing.
-        let Some(expected_host) = expected_clone_host(job) else {
-            return true;
-        };
-        match clone_url_repository(url, &expected_host) {
-            Some(repo) => {
-                corroborated = true;
-                if !repository_eq(&repo, base) {
-                    return true;
-                }
+    // Read exactly the way the checkout planner reads it (`checkout.rs`
+    // `self_clone_url`): the same case-insensitive property key.
+    // The URL must additionally name the job's own GitHub server host:
+    // checkout clones it verbatim, so a base-matching path on any other
+    // host corroborates nothing.
+    let Some(expected_host) = expected_clone_host(job, context_data) else {
+        return true;
+    };
+    match clone_url_repository(url, &expected_host) {
+        Some(repo) => {
+            if !repository_eq(&repo, base) {
+                return true;
             }
-            None => return true,
         }
+        None => return true,
     }
-    !corroborated
+    false
 }
 
 /// The public GitHub host: the clone-URL host jobs carry when no
@@ -504,13 +537,23 @@ const GITHUB_COM_HOST: &str = "github.com";
 /// to [`GITHUB_COM_HOST`] when the job carries none. A present-but-garbled
 /// server URL yields no host: without the job's server identity no clone
 /// host can be affirmed, so the corroboration fails closed.
-fn expected_clone_host(job: &AgentJobRequestMessage) -> Option<String> {
-    let Some(raw) = job_variable(job, "github.server_url")
-        .or_else(|| context_string(job, "github", "server_url"))
+fn expected_clone_host(
+    job: &AgentJobRequestMessage,
+    context_data: &ContextValue,
+) -> Option<String> {
+    if let Some(raw) = job_variable(job, "github.server_url") {
+        return server_url_host(raw);
+    }
+    let Some(value) = context_data
+        .get("github")
+        .and_then(|github| github.get("server_url"))
     else {
         return Some(GITHUB_COM_HOST.to_owned());
     };
-    server_url_host(raw)
+    // A present but non-string signal is malformed. In particular, a typed
+    // null string materializes as the empty string, which must not be confused
+    // with an absent server URL and silently receive the github.com default.
+    server_url_host(context_value_string(value)?)
 }
 
 /// The host half of a `github.server_url` value: the authority of a
@@ -621,32 +664,23 @@ fn job_variable<'job>(job: &'job AgentJobRequestMessage, name: &str) -> Option<&
         .and_then(|variable| variable.value.as_deref())
 }
 
-/// A string member of a top-level context object, for raw messages whose
-/// `github.*` variables were never hydrated from `ContextData`.
-fn context_string<'job>(
-    job: &'job AgentJobRequestMessage,
+/// A string member of the runtime's canonical context object, for messages
+/// whose `github.*` variables were never hydrated from `ContextData`.
+fn context_string<'context>(
+    context_data: &'context ContextValue,
     object: &str,
     key: &str,
-) -> Option<&'job str> {
-    let value = job.context_data.get(object)?;
-    context_get(value, key)?.as_str()
+) -> Option<&'context str> {
+    context_value_string(context_data.get(object)?.get(key)?)
 }
 
-/// One-level context lookup that understands both the plain object form and
-/// the V2 broker compact `{"d": [{k, v}]}` form.
-fn context_get<'value>(value: &'value Value, key: &str) -> Option<&'value Value> {
+fn context_get<'value>(value: &'value ContextValue, key: &str) -> Option<&'value ContextValue> {
+    value.get(key)
+}
+
+fn context_value_string(value: &ContextValue) -> Option<&str> {
     match value {
-        Value::Object(object) => {
-            if let Some(hit) = object.get(key) {
-                return Some(hit);
-            }
-            object.get("d").and_then(Value::as_array).and_then(|items| {
-                items.iter().find_map(|item| {
-                    let entry = item.as_object()?;
-                    (entry.get("k").and_then(Value::as_str) == Some(key)).then(|| entry.get("v"))?
-                })
-            })
-        }
+        ContextValue::String(value) => Some(value),
         _ => None,
     }
 }
@@ -665,9 +699,12 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// A job message assembled from its trust signals: `github.*` variables,
-    /// the raw `github` context object, the repository resource block, and the
-    /// plan scope. `None` omits that signal entirely.
+    const TEST_JOB_ID: &str = "11111111-1111-1111-1111-111111111111";
+    const TEST_PLAN_ID: &str = "22222222-2222-2222-2222-222222222222";
+    const TEST_TIMELINE_ID: &str = "33333333-3333-3333-3333-333333333333";
+
+    /// A job message assembled from its trust signals. Ordinary fixture JSON
+    /// is encoded as PipelineContextData before it reaches the message parser.
     fn signal_job(
         variables: serde_json::Value,
         github_context: Option<serde_json::Value>,
@@ -676,24 +713,30 @@ mod tests {
     ) -> AgentJobRequestMessage {
         let mut context_data = serde_json::Map::new();
         if let Some(github) = github_context {
-            context_data.insert("github".to_string(), github);
+            context_data.insert("github".to_string(), pipeline_context_wire(github));
         }
         let plan = match scope_identifier {
-            Some(scope) => json!({ "planId": "plan", "scopeIdentifier": scope }),
-            None => json!({ "planId": "plan" }),
+            Some(scope) => json!({ "planId": TEST_PLAN_ID, "scopeIdentifier": scope }),
+            None => json!({ "planId": TEST_PLAN_ID }),
         };
-        serde_json::from_value(json!({
+        trust_test_job(json!({
             "messageType": "PipelineAgentJobRequest",
             "plan": plan,
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "timeline": { "id": TEST_TIMELINE_ID },
+            "jobId": TEST_JOB_ID,
             "jobDisplayName": "job",
             "requestId": 1,
             "variables": variables,
             "contextData": context_data,
             "resources": { "repositories": repositories },
         }))
-        .expect("trust test job parses")
+    }
+
+    /// Parse trust fixtures through the same Actions Newtonsoft/job-message
+    /// materializer used by acquired jobs. Direct runtime serde intentionally
+    /// requires tagged `ContextValue` payloads and is not the wire boundary.
+    fn trust_test_job(body: serde_json::Value) -> AgentJobRequestMessage {
+        AgentJobRequestMessage::from_value(body).expect("trust test job parses")
     }
 
     fn variables(event: &str, repository: &str) -> serde_json::Value {
@@ -706,8 +749,7 @@ mod tests {
     fn self_repository(name: &str) -> serde_json::Value {
         json!([{
             "alias": "self",
-            "name": name,
-            "properties": { "cloneUrl": format!("https://github.com/{name}.git") },
+            "properties": { "url": format!("https://github.com/{name}.git") },
         }])
     }
 
@@ -749,15 +791,82 @@ mod tests {
         json!({ "workflow_run": run })
     }
 
+    fn context_string(value: &str) -> serde_json::Value {
+        json!({ "t": 0, "s": value })
+    }
+
+    fn context_number(value: u64) -> serde_json::Value {
+        json!({ "t": 4, "n": value })
+    }
+
+    fn context_nan() -> serde_json::Value {
+        json!({ "t": 4, "n": "NaN" })
+    }
+
+    fn pipeline_context_wire(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Null => json!({ "t": 0, "s": null }),
+            serde_json::Value::Bool(value) => json!({ "t": 3, "b": value }),
+            serde_json::Value::Number(value) => json!({ "t": 4, "n": value }),
+            serde_json::Value::String(value) => json!({ "t": 0, "s": value }),
+            serde_json::Value::Array(values) => json!({
+                "t": 1,
+                "a": values.into_iter().map(pipeline_context_wire).collect::<Vec<_>>(),
+            }),
+            serde_json::Value::Object(values)
+                if values
+                    .get("t")
+                    .and_then(serde_json::Value::as_i64)
+                    .is_some_and(|tag| (0..=5).contains(&tag)) =>
+            {
+                serde_json::Value::Object(values)
+            }
+            serde_json::Value::Object(values) => json!({
+                "t": 2,
+                "d": values
+                    .into_iter()
+                    .map(|(key, value)| json!({
+                        "k": key,
+                        "v": pipeline_context_wire(value),
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
+        }
+    }
+
+    fn context_dictionary(
+        entries: impl IntoIterator<Item = (&'static str, serde_json::Value)>,
+    ) -> serde_json::Value {
+        json!({
+            "t": 2,
+            "d": entries
+                .into_iter()
+                .map(|(key, value)| json!({ "k": key, "v": pipeline_context_wire(value) }))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    fn context_case_sensitive_dictionary(
+        entries: impl IntoIterator<Item = (&'static str, serde_json::Value)>,
+    ) -> serde_json::Value {
+        json!({
+            "t": 5,
+            "d": entries
+                .into_iter()
+                .map(|(key, value)| json!({ "k": key, "v": pipeline_context_wire(value) }))
+                .collect::<Vec<_>>(),
+        })
+    }
+
     /// The trusted baseline every fail-closed regression test mutates by
     /// exactly one signal: a `push` job with complete variables, resources,
     /// and plan scope.
     fn trusted_baseline() -> serde_json::Value {
         json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan", "scopeIdentifier": "scope" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": TEST_PLAN_ID, "scopeIdentifier": "scope" },
+            "timeline": { "id": TEST_TIMELINE_ID },
+            "jobId": TEST_JOB_ID,
             "jobDisplayName": "job",
             "requestId": 1,
             "variables": variables("push", "octo/base"),
@@ -766,9 +875,16 @@ mod tests {
         })
     }
 
-    fn derive_json(body: serde_json::Value) -> TrustClass {
-        let job: AgentJobRequestMessage =
-            serde_json::from_value(body).expect("trust test job parses");
+    fn derive_json(mut body: serde_json::Value) -> TrustClass {
+        if let Some(context_data) = body
+            .get_mut("contextData")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for value in context_data.values_mut() {
+                *value = pipeline_context_wire(value.clone());
+            }
+        }
+        let job = trust_test_job(body);
         TrustClass::derive(&job)
     }
 
@@ -783,6 +899,252 @@ mod tests {
             Some("scope"),
         );
         assert_eq!(TrustClass::derive(&job), TrustClass::Trusted);
+    }
+
+    #[test]
+    fn trust_class_materializes_typed_context_string_signals() {
+        let github = context_dictionary([
+            ("event_name", context_string("push")),
+            ("repository", context_string("octo/base")),
+        ]);
+        let job = signal_job(
+            json!({}),
+            Some(github),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+
+        assert_eq!(TrustClass::derive(&job), TrustClass::Trusted);
+    }
+
+    #[test]
+    fn trust_class_ignores_unrelated_typed_nan_context() {
+        let github = context_dictionary([
+            ("event_name", context_string("push")),
+            ("repository", context_string("octo/base")),
+            ("unrelated", context_nan()),
+        ]);
+        let job = signal_job(
+            json!({}),
+            Some(github),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+
+        assert!(job.materialize_context_data().is_err());
+        assert_eq!(TrustClass::derive(&job), TrustClass::Trusted);
+        assert_eq!(
+            AdmittedTrust::admit(&job, "trusted").class(),
+            TrustClass::Trusted
+        );
+    }
+
+    #[test]
+    fn trust_class_present_null_server_url_fails_closed() {
+        let github = context_dictionary([
+            ("event_name", context_string("push")),
+            ("repository", context_string("octo/base")),
+            ("server_url", json!({ "t": 0, "s": null })),
+        ]);
+        let job = signal_job(
+            json!({}),
+            Some(github),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+
+        assert_eq!(TrustClass::derive(&job), TrustClass::Unknown);
+        let admitted = AdmittedTrust::admit(&job, "trusted");
+        assert_eq!(admitted.class(), TrustClass::Unknown);
+        assert_eq!(admitted.effective_scope(), crate::trust_scope::FAIL_CLOSED);
+    }
+
+    #[test]
+    fn trust_class_missing_server_url_value_fails_closed() {
+        let mut github = context_dictionary([
+            ("event_name", context_string("push")),
+            ("repository", context_string("octo/base")),
+        ]);
+        github["d"]
+            .as_array_mut()
+            .expect("typed context dictionary entries")
+            .push(json!({ "k": "server_url" }));
+        let job = signal_job(
+            json!({}),
+            Some(github),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+
+        assert_eq!(TrustClass::derive(&job), TrustClass::Unknown);
+        let admitted = AdmittedTrust::admit(&job, "trusted");
+        assert_eq!(admitted.class(), TrustClass::Unknown);
+        assert_eq!(admitted.effective_scope(), crate::trust_scope::FAIL_CLOSED);
+    }
+
+    #[test]
+    fn trust_class_absent_server_url_uses_github_com_default() {
+        let github = context_dictionary([
+            ("event_name", context_string("push")),
+            ("repository", context_string("octo/base")),
+        ]);
+        let job = signal_job(
+            json!({}),
+            Some(github),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+
+        assert_eq!(TrustClass::derive(&job), TrustClass::Trusted);
+    }
+
+    #[test]
+    fn trust_class_typed_dictionary_context_keys_are_ordinal_ignore_case() {
+        let github = context_dictionary([
+            ("EVENT_NAME", context_string("push")),
+            ("REPOSITORY", context_string("octo/base")),
+        ]);
+        let job = signal_job(
+            json!({}),
+            Some(github),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+
+        assert_eq!(TrustClass::derive(&job), TrustClass::Trusted);
+    }
+
+    #[test]
+    fn trust_class_case_sensitive_dictionary_context_keys_remain_exact() {
+        let exact = context_case_sensitive_dictionary([
+            ("event_name", context_string("push")),
+            ("repository", context_string("octo/base")),
+        ]);
+        let exact_job = signal_job(
+            json!({}),
+            Some(exact),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+        assert_eq!(TrustClass::derive(&exact_job), TrustClass::Trusted);
+
+        let differently_cased = context_case_sensitive_dictionary([
+            ("EVENT_NAME", context_string("push")),
+            ("REPOSITORY", context_string("octo/base")),
+        ]);
+        let differently_cased_job = signal_job(
+            json!({}),
+            Some(differently_cased),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+        assert_eq!(
+            TrustClass::derive(&differently_cased_job),
+            TrustClass::Unknown
+        );
+    }
+
+    #[test]
+    fn trust_class_materializes_typed_event_names_and_numeric_repository_ids() {
+        let head_repo = context_dictionary([
+            ("full_name", context_string("octo/base")),
+            ("id", context_number(101)),
+        ]);
+        let base_repo = context_dictionary([("id", context_number(202))]);
+        let pull = context_dictionary([
+            ("head", context_dictionary([("repo", head_repo)])),
+            ("base", context_dictionary([("repo", base_repo)])),
+        ]);
+        let github = context_dictionary([
+            ("event_name", context_string("pull_request")),
+            ("repository", context_string("octo/base")),
+            ("event", context_dictionary([("pull_request", pull)])),
+        ]);
+        let job = signal_job(
+            json!({}),
+            Some(github),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+
+        assert_eq!(TrustClass::derive(&job), TrustClass::Unknown);
+    }
+
+    #[test]
+    fn trust_class_typed_numeric_id_missing_n_defaults_to_zero() {
+        let head_repo = context_dictionary([
+            ("full_name", context_string("octo/base")),
+            ("id", json!({ "t": 4 })),
+        ]);
+        let base_repo = context_dictionary([("id", context_number(101))]);
+        let pull = context_dictionary([
+            ("head", context_dictionary([("repo", head_repo)])),
+            ("base", context_dictionary([("repo", base_repo)])),
+        ]);
+        let github = context_dictionary([
+            ("event_name", context_string("pull_request")),
+            ("repository", context_string("octo/base")),
+            ("event", context_dictionary([("pull_request", pull)])),
+        ]);
+        let job = signal_job(
+            json!({}),
+            Some(github),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+
+        assert_eq!(TrustClass::derive(&job), TrustClass::Unknown);
+        assert_eq!(
+            AdmittedTrust::admit(&job, "trusted").class(),
+            TrustClass::Unknown
+        );
+    }
+
+    #[test]
+    fn trust_class_typed_numeric_string_id_uses_runtime_double_value() {
+        let head_repo = context_dictionary([
+            ("full_name", context_string("octo/base")),
+            ("id", json!({ "t": 4, "n": "101.0" })),
+        ]);
+        let base_repo = context_dictionary([("id", context_number(101))]);
+        let pull = context_dictionary([
+            ("head", context_dictionary([("repo", head_repo)])),
+            ("base", context_dictionary([("repo", base_repo)])),
+        ]);
+        let github = context_dictionary([
+            ("event_name", context_string("pull_request")),
+            ("repository", context_string("octo/base")),
+            ("event", context_dictionary([("pull_request", pull)])),
+        ]);
+        let job = signal_job(
+            json!({}),
+            Some(github),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+
+        assert_eq!(TrustClass::derive(&job), TrustClass::Trusted);
+    }
+
+    #[test]
+    fn trust_class_event_json_large_integer_ids_remain_distinct() {
+        let event = serde_json::to_string(&pull_request_event(
+            "octo/base",
+            9_007_199_254_740_992,
+            9_007_199_254_740_993,
+        ))
+        .expect("event payload encodes");
+        let job = signal_job(
+            variables("pull_request", "octo/base"),
+            Some(json!({ "event": event })),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+
+        assert_eq!(TrustClass::derive(&job), TrustClass::Unknown);
+        let admitted = AdmittedTrust::admit(&job, "trusted");
+        assert_eq!(admitted.class(), TrustClass::Unknown);
+        assert_eq!(admitted.effective_scope(), crate::trust_scope::FAIL_CLOSED);
     }
 
     #[test]
@@ -876,24 +1238,15 @@ mod tests {
     }
 
     #[test]
-    fn trust_class_conformance_workflow_run_compact_context_classifies() {
+    fn trust_class_conformance_typed_workflow_run_context_classifies() {
+        let github = context_dictionary([
+            ("event_name", context_string("workflow_run")),
+            ("repository", context_string("octo/base")),
+            ("event", workflow_run_event("mallory/base")),
+        ]);
         let job = signal_job(
             json!({}),
-            Some(json!({
-                "d": [
-                    { "k": "event_name", "v": "workflow_run" },
-                    { "k": "repository", "v": "octo/base" },
-                    { "k": "event", "v": {
-                        "d": [
-                            { "k": "workflow_run", "v": {
-                                "d": [{ "k": "head_repository", "v": {
-                                    "d": [{ "k": "full_name", "v": "mallory/base" }],
-                                } }],
-                            } },
-                        ],
-                    } },
-                ],
-            })),
+            Some(github),
             self_repository("octo/base"),
             Some("scope"),
         );
@@ -919,6 +1272,42 @@ mod tests {
             );
             assert_eq!(TrustClass::derive(&job), TrustClass::Trusted);
         }
+    }
+
+    #[test]
+    fn trust_class_conformance_encoded_big_integer_ids_remain_exact() {
+        let classify = |head_id: &str, base_id: &str| {
+            let mut encoded = String::from(
+                r#"{"workflow_run":{"head_repository":{"full_name":"octo/base","id":"#,
+            );
+            encoded.push_str(head_id);
+            encoded.push_str(r#"},"repository":{"id":"#);
+            encoded.push_str(base_id);
+            encoded.push_str("}}}");
+
+            let job = signal_job(
+                variables("workflow_run", "octo/base"),
+                Some(json!({ "event": encoded })),
+                self_repository("octo/base"),
+                Some("scope"),
+            );
+            TrustClass::derive(&job)
+        };
+        let large_id = "18446744073709551616000000000000000001";
+        let adjacent_id = "18446744073709551616000000000000000002";
+        let big_integer = ContextValue::big_integer(large_id).unwrap();
+
+        assert_eq!(json_id(&big_integer).as_deref(), Some(large_id));
+
+        // Raw JSON integer lexemes survive beyond u64. Different adjacent
+        // values must still contradict; converting either to Double loses it.
+        assert_eq!(classify(large_id, adjacent_id), TrustClass::Unknown);
+        // Newtonsoft reports the numeric token as BigInteger; string IDs stay
+        // strings. Both compare by their exact decimal spelling.
+        assert_eq!(
+            classify(large_id, &format!("\"{adjacent_id}\"")),
+            TrustClass::Unknown
+        );
     }
 
     #[test]
@@ -1066,38 +1455,15 @@ mod tests {
     }
 
     #[test]
-    fn trust_class_conformance_compact_context_classifies() {
-        // V2 broker compact `{"d": [{k, v}]}` github context carries the same
-        // signals as the plain object.
+    fn trust_class_conformance_typed_context_classifies() {
+        let github = context_dictionary([
+            ("event_name", context_string("pull_request")),
+            ("repository", context_string("octo/base")),
+            ("event", pull_request_event("mallory/base", 2, 1)),
+        ]);
         let job = signal_job(
             json!({}),
-            Some(json!({
-                "d": [
-                    { "k": "event_name", "v": "pull_request" },
-                    { "k": "repository", "v": "octo/base" },
-                    { "k": "event", "v": {
-                        "d": [
-                            { "k": "pull_request", "v": {
-                                "d": [
-                                    { "k": "head", "v": {
-                                        "d": [{ "k": "repo", "v": {
-                                            "d": [
-                                                { "k": "full_name", "v": "mallory/base" },
-                                                { "k": "id", "v": 2 },
-                                            ],
-                                        } }],
-                                    } },
-                                    { "k": "base", "v": {
-                                        "d": [{ "k": "repo", "v": {
-                                            "d": [{ "k": "id", "v": 1 }],
-                                        } }],
-                                    } },
-                                ],
-                            } },
-                        ],
-                    } },
-                ],
-            })),
+            Some(github),
             self_repository("octo/base"),
             Some("scope"),
         );
@@ -1150,11 +1516,11 @@ mod tests {
 
     #[test]
     fn trust_class_conformance_clone_url_shapes_corroborate() {
-        // Every clone-URL shape git accepts corroborates when it names the
+        // Every repository URL shape git accepts corroborates when it names the
         // job's server host and the base path: `https`, `ssh://`, scp-like,
         // token userinfo, ports, letter case, and the `.git` suffix are all
-        // normalized away before the comparison. The name signal is blanked
-        // so only the URL corroborates.
+        // normalized away before the comparison; only Properties.url
+        // corroborates.
         for clone_url in [
             "https://github.com/octo/base.git",
             "https://github.com/octo/base",
@@ -1169,8 +1535,7 @@ mod tests {
             "github.com:octo/base.git",
         ] {
             let mut baseline = trusted_baseline();
-            baseline["resources"]["repositories"][0]["name"] = serde_json::Value::Null;
-            baseline["resources"]["repositories"][0]["properties"]["cloneUrl"] = json!(clone_url);
+            baseline["resources"]["repositories"][0]["properties"]["url"] = json!(clone_url);
             assert_eq!(
                 derive_json(baseline),
                 TrustClass::Trusted,
@@ -1191,7 +1556,7 @@ mod tests {
         ] {
             let mut baseline = trusted_baseline();
             baseline["variables"]["github.server_url"] = json!({ "value": server_url });
-            baseline["resources"]["repositories"][0]["properties"]["cloneUrl"] =
+            baseline["resources"]["repositories"][0]["properties"]["url"] =
                 json!("https://ghe.corp/octo/base.git");
             assert_eq!(
                 derive_json(baseline),
@@ -1202,7 +1567,7 @@ mod tests {
 
         let mut baseline = trusted_baseline();
         baseline["contextData"] = json!({ "github": { "server_url": "https://ghe.corp" } });
-        baseline["resources"]["repositories"][0]["properties"]["cloneUrl"] =
+        baseline["resources"]["repositories"][0]["properties"]["url"] =
             json!("git@ghe.corp:octo/base.git");
         assert_eq!(derive_json(baseline), TrustClass::Trusted);
     }
@@ -1398,11 +1763,16 @@ mod tests {
 
     #[test]
     fn trust_class_regression_missing_plan_scope_is_unknown() {
-        // `PlanId` is schema-required, so the only expressible "no plan
-        // reference" message is a blank plan id beside an absent scope.
-        let mut baseline = trusted_baseline();
-        baseline["plan"] = json!({ "planId": "   ", "scopeIdentifier": null });
-        assert_eq!(derive_json(baseline), TrustClass::Unknown);
+        // Wire ingress rejects a malformed PlanId. Exercise the trust
+        // derivation's fail-closed guard on the typed model directly.
+        let mut job = signal_job(
+            variables("push", "octo/base"),
+            None,
+            self_repository("octo/base"),
+            None,
+        );
+        job.plan.plan_id = "   ".to_owned();
+        assert_eq!(TrustClass::derive(&job), TrustClass::Unknown);
     }
 
     #[test]
@@ -1500,18 +1870,49 @@ mod tests {
     }
 
     #[test]
-    fn trust_class_regression_contradictory_repository_name_is_unknown() {
+    fn trust_class_regression_contradictory_repository_url_is_unknown() {
         let mut baseline = trusted_baseline();
-        baseline["resources"]["repositories"][0]["name"] = json!("mallory/base");
+        baseline["resources"]["repositories"][0]["properties"]["url"] =
+            json!("https://github.com/mallory/base.git");
         assert_eq!(derive_json(baseline), TrustClass::Unknown);
     }
 
     #[test]
-    fn trust_class_regression_contradictory_clone_url_is_unknown() {
+    fn trust_class_regression_non_scalar_repository_url_is_unknown() {
         let mut baseline = trusted_baseline();
-        baseline["resources"]["repositories"][0]["properties"]["cloneUrl"] =
-            json!("https://github.com/mallory/base.git");
+        baseline["resources"]["repositories"][0]["properties"]["url"] = json!({
+            "href": "https://github.com/octo/base.git"
+        });
         assert_eq!(derive_json(baseline), TrustClass::Unknown);
+    }
+
+    #[test]
+    fn trust_class_regression_non_string_repository_url_is_unknown() {
+        let mut baseline = trusted_baseline();
+        baseline["resources"]["repositories"][0]["properties"]["url"] = json!(true);
+
+        assert_eq!(derive_json(baseline), TrustClass::Unknown);
+    }
+
+    #[test]
+    fn trust_class_ignores_outer_repository_url_field() {
+        let mut baseline = trusted_baseline();
+        baseline["resources"]["repositories"][0]["url"] =
+            json!("https://github.com/mallory/base.git");
+
+        assert_eq!(derive_json(baseline), TrustClass::Trusted);
+    }
+
+    #[test]
+    fn trust_class_reads_repository_url_property_case_insensitively() {
+        let mut baseline = trusted_baseline();
+        let properties = baseline["resources"]["repositories"][0]["properties"]
+            .as_object_mut()
+            .expect("properties object");
+        let url = properties.remove("url").expect("baseline URL");
+        properties.insert("uRl".to_owned(), url);
+
+        assert_eq!(derive_json(baseline), TrustClass::Trusted);
     }
 
     #[test]
@@ -1523,8 +1924,7 @@ mod tests {
             "https://github.com/a/b/c",
         ] {
             let mut baseline = trusted_baseline();
-            baseline["resources"]["repositories"][0]["name"] = serde_json::Value::Null;
-            baseline["resources"]["repositories"][0]["properties"]["cloneUrl"] = json!(clone_url);
+            baseline["resources"]["repositories"][0]["properties"]["url"] = json!(clone_url);
             assert_eq!(
                 derive_json(baseline),
                 TrustClass::Unknown,
@@ -1538,7 +1938,7 @@ mod tests {
         // A path deeper than `owner/repo` is unparseable — it must not
         // corroborate via its tail. Each URL below ends in the base
         // `octo/base`, so a last-two-segments parse would affirm `Trusted`;
-        // the name signal stays friendly to prove the URL alone refuses.
+        // the URL alone must refuse.
         for clone_url in [
             "https://github.com/evil/octo/base",
             "https://github.com/evil/octo/base.git",
@@ -1548,7 +1948,7 @@ mod tests {
             "git@github.com:evil/octo/base",
         ] {
             let mut baseline = trusted_baseline();
-            baseline["resources"]["repositories"][0]["properties"]["cloneUrl"] = json!(clone_url);
+            baseline["resources"]["repositories"][0]["properties"]["url"] = json!(clone_url);
             assert_eq!(
                 derive_json(baseline),
                 TrustClass::Unknown,
@@ -1593,8 +1993,7 @@ mod tests {
     fn trust_class_regression_clone_url_on_foreign_host_is_unknown() {
         // F-V3: a base-matching path on any host but the job's own server
         // corroborates nothing — checkout clones the URL verbatim. The
-        // resource name still matches the base here: a hostile URL is not
-        // rescued by a friendly name.
+        // No independent repository-name field can rescue a hostile URL.
         for clone_url in [
             "https://evil.example/octo/base.git",
             "https://github.com.evil.example/octo/base.git",
@@ -1605,7 +2004,7 @@ mod tests {
             "ssh://git@evil.example:22/octo/base.git",
         ] {
             let mut baseline = trusted_baseline();
-            baseline["resources"]["repositories"][0]["properties"]["cloneUrl"] = json!(clone_url);
+            baseline["resources"]["repositories"][0]["properties"]["url"] = json!(clone_url);
             assert_eq!(
                 derive_json(baseline),
                 TrustClass::Unknown,
@@ -1625,7 +2024,7 @@ mod tests {
         ] {
             let mut baseline = trusted_baseline();
             baseline["variables"]["github.server_url"] = json!({ "value": server_url });
-            baseline["resources"]["repositories"][0]["properties"]["cloneUrl"] = json!(clone_url);
+            baseline["resources"]["repositories"][0]["properties"]["url"] = json!(clone_url);
             assert_eq!(
                 derive_json(baseline),
                 TrustClass::Unknown,
@@ -1660,8 +2059,7 @@ mod tests {
     #[test]
     fn trust_class_regression_hostless_clone_url_is_unknown() {
         // No determinable host, no corroboration: bare paths, local paths,
-        // and `file:` URLs never name the job's server. The name signal is
-        // blanked so only the URL speaks.
+        // and `file:` URLs never name the job's server.
         for clone_url in [
             "github.com/octo/base",
             "github.com/octo/base.git",
@@ -1675,8 +2073,7 @@ mod tests {
             "git@:octo/base",
         ] {
             let mut baseline = trusted_baseline();
-            baseline["resources"]["repositories"][0]["name"] = serde_json::Value::Null;
-            baseline["resources"]["repositories"][0]["properties"]["cloneUrl"] = json!(clone_url);
+            baseline["resources"]["repositories"][0]["properties"]["url"] = json!(clone_url);
             assert_eq!(
                 derive_json(baseline),
                 TrustClass::Unknown,
@@ -1695,8 +2092,7 @@ mod tests {
     #[test]
     fn trust_class_regression_clone_url_without_git_suffix_corroborates() {
         let mut baseline = trusted_baseline();
-        baseline["resources"]["repositories"][0]["name"] = serde_json::Value::Null;
-        baseline["resources"]["repositories"][0]["properties"]["cloneUrl"] =
+        baseline["resources"]["repositories"][0]["properties"]["url"] =
             json!("https://github.com/octo/base");
         assert_eq!(derive_json(baseline), TrustClass::Trusted);
     }
@@ -1709,7 +2105,8 @@ mod tests {
 
         let mut baseline = trusted_baseline();
         baseline["resources"]["repositories"][0]["alias"] = serde_json::Value::Null;
-        baseline["resources"]["repositories"][0]["name"] = json!("mallory/base");
+        baseline["resources"]["repositories"][0]["properties"]["url"] =
+            json!("https://github.com/mallory/base.git");
         assert_eq!(derive_json(baseline), TrustClass::Unknown);
     }
 
@@ -1761,8 +2158,7 @@ mod tests {
             None,
             json!([{
                 "alias": "self",
-                "name": "octo/base",
-                "properties": { "cloneUrl": "git@github.com:octo/base.git" },
+                "properties": { "url": "git@github.com:octo/base.git" },
             }]),
             Some("scope"),
         );

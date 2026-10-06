@@ -1443,7 +1443,8 @@ fn job_once_without_exec_persists_only_after_ownership() {
 fn daemon_acquisition_path_marks_job_running_at_start() {
     use velnor_model::JobId;
     use velnor_runner::node::complete::{
-        confirm_acquisition, intend_acquisition, record_job_started, resolve_acquisition,
+        confirm_acquisition, intend_acquisition, record_job_started,
+        resolve_acquisition_at_endpoint,
     };
     let dir = scratch("daemon-running");
     let mut journal = Journal::open(dir.join("journal.db")).unwrap();
@@ -1459,7 +1460,15 @@ fn daemon_acquisition_path_marks_job_running_at_start() {
         1_000,
     )
     .unwrap();
-    resolve_acquisition(&mut journal, &job_id, &job_id, "plan-1", generation).unwrap();
+    resolve_acquisition_at_endpoint(
+        &mut journal,
+        &job_id,
+        &job_id,
+        "plan-1",
+        generation,
+        "https://run.example/run",
+    )
+    .unwrap();
     confirm_acquisition(&mut journal, &job_id, &slot_id, generation).unwrap();
     assert_eq!(
         journal.load_state().unwrap().jobs[0].phase,

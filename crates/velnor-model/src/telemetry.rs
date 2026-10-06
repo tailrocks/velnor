@@ -1302,6 +1302,23 @@ fn telemetry_epoch(fingerprint: TelemetryFileFingerprint) -> u64 {
 }
 
 fn lock_telemetry_file(path: &Path, exclusive: bool) -> io::Result<File> {
+    lock_telemetry_file_with_retry(path, exclusive, || {})
+}
+
+fn lock_telemetry_file_with_retry(
+    path: &Path,
+    exclusive: bool,
+    on_would_block: impl FnMut(),
+) -> io::Result<File> {
+    lock_telemetry_file_with_retry_and_clock(path, exclusive, Instant::now, on_would_block)
+}
+
+fn lock_telemetry_file_with_retry_and_clock(
+    path: &Path,
+    exclusive: bool,
+    mut now: impl FnMut() -> Instant,
+    mut on_would_block: impl FnMut(),
+) -> io::Result<File> {
     let lock_path = path.with_extension("lock");
     let lock = OpenOptions::new()
         .create(true)
@@ -1309,28 +1326,23 @@ fn lock_telemetry_file(path: &Path, exclusive: bool) -> io::Result<File> {
         .write(true)
         .truncate(false)
         .open(lock_path)?;
-    let operation = if exclusive {
-        rustix::fs::FlockOperation::NonBlockingLockExclusive
-    } else {
-        rustix::fs::FlockOperation::NonBlockingLockShared
-    };
-    let deadline = Instant::now() + Duration::from_millis(100);
+    let deadline = now() + Duration::from_millis(100);
     loop {
-        match rustix::fs::flock(&lock, operation) {
+        let result = if exclusive {
+            lock.try_lock()
+        } else {
+            lock.try_lock_shared()
+        };
+        match result {
             Ok(()) => break,
-            Err(error) if error == rustix::io::Errno::WOULDBLOCK && Instant::now() < deadline => {
+            Err(std::fs::TryLockError::WouldBlock) if now() < deadline => {
+                on_would_block();
                 std::thread::yield_now();
             }
-            Err(error) => {
-                return Err(io::Error::new(
-                    if error == rustix::io::Errno::WOULDBLOCK {
-                        io::ErrorKind::WouldBlock
-                    } else {
-                        io::ErrorKind::Other
-                    },
-                    error.to_string(),
-                ));
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(io::Error::from(io::ErrorKind::WouldBlock));
             }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
         }
     }
     Ok(lock)
@@ -2289,6 +2301,113 @@ mod tests {
         assert!(page.records().is_empty());
         assert_eq!(page.dropped_before(), None);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn telemetry_file_lock_preserves_shared_and_exclusive_contention() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-telemetry-lock-{}.jsonl",
+            std::process::id()
+        ));
+        let lock_path = path.with_extension("lock");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&lock_path);
+
+        let first_shared = lock_telemetry_file(&path, false).expect("first shared lock");
+        let second_shared = lock_telemetry_file(&path, false).expect("second shared lock");
+        let blocked_exclusive =
+            lock_telemetry_file(&path, true).expect_err("shared locks block exclusive lock");
+        assert_eq!(blocked_exclusive.kind(), io::ErrorKind::WouldBlock);
+        assert!(lock_path.exists());
+        assert!(!path.exists());
+
+        drop(first_shared);
+        drop(second_shared);
+        let exclusive = lock_telemetry_file(&path, true).expect("exclusive after shared locks");
+        let blocked_shared =
+            lock_telemetry_file(&path, false).expect_err("exclusive lock blocks shared lock");
+        assert_eq!(blocked_shared.kind(), io::ErrorKind::WouldBlock);
+
+        drop(exclusive);
+        let shared_after_exclusive =
+            lock_telemetry_file(&path, false).expect("shared lock after exclusive drop");
+        drop(shared_after_exclusive);
+        let _ = fs::remove_file(lock_path);
+    }
+
+    #[test]
+    fn telemetry_file_lock_retries_after_contention_releases() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-telemetry-lock-retry-{}.jsonl",
+            std::process::id()
+        ));
+        let lock_path = path.with_extension("lock");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&lock_path);
+
+        let blocker = lock_telemetry_file(&path, true).expect("initial exclusive lock");
+        let contender_path = path.clone();
+        let contender = std::thread::spawn(move || {
+            let mut blocker = Some(blocker);
+            let mut observed_contention = false;
+            // Freeze retry time so scheduler delays cannot expire the production
+            // 100ms window before this contender reaches its first try_lock.
+            let retry_started = Instant::now();
+            let acquired = lock_telemetry_file_with_retry_and_clock(
+                &contender_path,
+                true,
+                || retry_started,
+                || {
+                    observed_contention = true;
+                    drop(blocker.take());
+                },
+            );
+            (acquired, observed_contention)
+        });
+
+        let (acquired, observed_contention) =
+            contender.join().expect("contender thread should finish");
+        let acquired = acquired.map(drop);
+
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(lock_path);
+        assert!(
+            observed_contention,
+            "contender should first observe WouldBlock"
+        );
+        acquired.expect("contender should acquire after release");
+    }
+
+    #[test]
+    fn telemetry_file_lock_retry_stops_at_100ms_deadline() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-telemetry-lock-deadline-{}.jsonl",
+            std::process::id()
+        ));
+        let lock_path = path.with_extension("lock");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&lock_path);
+
+        let blocker = lock_telemetry_file(&path, true).expect("initial exclusive lock");
+        let retry_started = Instant::now();
+        let simulated_elapsed = std::cell::Cell::new(Duration::ZERO);
+        let mut observed_contention = false;
+        let blocked = lock_telemetry_file_with_retry_and_clock(
+            &path,
+            true,
+            || retry_started + simulated_elapsed.get(),
+            || {
+                observed_contention = true;
+                simulated_elapsed.set(Duration::from_millis(100));
+            },
+        )
+        .expect_err("lock retry should stop when the 100ms deadline expires");
+
+        drop(blocker);
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(lock_path);
+        assert_eq!(blocked.kind(), io::ErrorKind::WouldBlock);
+        assert!(observed_contention, "retry should observe contention once");
     }
 
     #[test]

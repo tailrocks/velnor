@@ -16,9 +16,12 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicUsize, Ordering},
 };
-use velnor_model::action_reference::{
-    is_runner_local_action_reference, resolve_action_path, ActionImageReference,
-    RepositoryActionReference, SafeActionPath,
+use velnor_model::{
+    action_reference::{
+        is_runner_local_action_reference, resolve_action_path, ActionImageReference,
+        RepositoryActionReference, SafeActionPath,
+    },
+    ContextValue,
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2179,7 +2182,7 @@ pub fn local_action_plans(
 pub fn local_action_plans_with_context(
     steps: &[ActionStep],
     workspace_host: &Path,
-    context_data: &[(String, serde_json::Value)],
+    context_data: &[(String, ContextValue)],
 ) -> Result<Vec<LocalActionPlan>> {
     let mut plans = Vec::new();
     for step in steps {
@@ -3301,7 +3304,7 @@ fn input_value_as_str(value: &serde_json::Value) -> Option<&str> {
 
 fn render_inputs(
     inputs: &BTreeMap<String, String>,
-    context_data: &[(String, serde_json::Value)],
+    context_data: &[(String, ContextValue)],
 ) -> Result<BTreeMap<String, String>> {
     inputs
         .iter()
@@ -4771,7 +4774,8 @@ runs:
         .unwrap();
         let context = vec![(
             "needs".to_string(),
-            serde_json::json!({ "check": { "result": "success" } }),
+            ContextValue::from_json(serde_json::json!({ "check": { "result": "success" } }))
+                .unwrap(),
         )];
 
         let plans =
@@ -4802,10 +4806,11 @@ runs:
         .unwrap();
         let context = vec![(
             "needs".to_string(),
-            serde_json::json!({
+            ContextValue::from_json(serde_json::json!({
                 "check": { "result": "success" },
                 "build": { "result": "failure" }
-            }),
+            }))
+            .unwrap(),
         )];
 
         let plans =
@@ -4837,7 +4842,7 @@ runs:
         .unwrap();
         let context = vec![(
             "github".to_string(),
-            serde_json::json!({ "token": "ghs_token" }),
+            ContextValue::from_json(serde_json::json!({ "token": "ghs_token" })).unwrap(),
         )];
 
         let plans =
@@ -4872,7 +4877,8 @@ runs:
         .unwrap();
         let context = vec![(
             "github".to_string(),
-            serde_json::json!({ "repository": "jackin-project/jackin" }),
+            ContextValue::from_json(serde_json::json!({ "repository": "jackin-project/jackin" }))
+                .unwrap(),
         )];
 
         let plans =

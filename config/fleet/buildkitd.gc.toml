@@ -1,5 +1,6 @@
 # BuildKit GC policy for trusted docker hosts (Phase 6 §8).
-# Install beside the daemon or pass via buildkitd-config-inline on trusted jobs.
+# Install beside the daemon. Managed buildkitd-config-inline input is limited
+# to Velnor's reviewed mirror-only stanza and cannot carry this GC policy.
 #
 # Reference: https://github.com/moby/buildkit/blob/master/docs/buildkitd.toml.md
 

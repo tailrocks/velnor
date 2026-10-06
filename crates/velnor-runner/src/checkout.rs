@@ -1,8 +1,8 @@
 use crate::{
     executor::{CommandRunner, StepLogicFailure},
     job_message::{
-        ActionReferenceType, ActionStep, AgentJobRequestMessage, RepositoryResource,
-        ServiceEndpoint,
+        ActionReferenceType, ActionStep, AgentJobRequestMessage, OrderedContextData,
+        RepositoryResource, ServiceEndpoint,
     },
 };
 use anyhow::{bail, Context, Result};
@@ -10,13 +10,13 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rustix::fs::{flock, FlockOperation};
 use serde_json::{Map, Value};
 use std::{
-    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
 use url::Url;
+use velnor_model::ContextValue;
 
 // Tracing caches callsite interest globally. Parallel tests that exercise the
 // same checkout spans without installing a subscriber can therefore initialize
@@ -43,6 +43,11 @@ pub struct CheckoutPlan {
     pub display_name: String,
     pub clone_url: String,
     pub version: Option<String>,
+    /// Validated original self-repository PR ref. Used only if the run service
+    /// supplied an immutable SHA that the origin refuses as a direct fetch.
+    /// The mirror fetches this one exact ref, then verifies and pins `version`;
+    /// it never checks out the mutable ref tip in place of that SHA.
+    pub pull_request_fallback_ref: Option<String>,
     pub destination: PathBuf,
     pub token: Option<String>,
     pub fetch_depth: Option<u32>,
@@ -104,7 +109,12 @@ pub fn checkout_plans(
     workspace_host: &Path,
 ) -> Result<Vec<CheckoutPlan>> {
     let mut plans = Vec::new();
-    for (index, step) in job.steps.iter().enumerate() {
+    for (index, step) in job
+        .steps
+        .iter()
+        .enumerate()
+        .filter_map(|(index, step)| step.as_ref().map(|step| (index, step)))
+    {
         if !step.enabled || !is_checkout_step(step) {
             continue;
         }
@@ -121,9 +131,10 @@ pub(crate) fn checkout_plan(
 ) -> Result<CheckoutPlan> {
     let self_repository = self_repository(job)?;
     let checkout_repository = checkout_repository(step);
-    let server_url = checkout_server_url(job, &self_repository);
+    let server_url = checkout_server_url(job, &self_repository)?;
     let clone_url = checkout_clone_url(
         checkout_repository.as_deref(),
+        job_string(job, "github.repository").filter(|name| is_repository_name(name)),
         &self_repository,
         &server_url,
     )?;
@@ -147,20 +158,30 @@ pub(crate) fn checkout_plan(
             format!("Run {reference_name}@{reference_ref}")
         }
     });
-    let token = checkout_token(step, job)?.or_else(|| {
+    let system_connection = job.system_connection_single_or_default()?;
+    let token = checkout_token(step, job, system_connection)?.or_else(|| {
         // Prefer system.github.token (the GITHUB_TOKEN with repo access) over
         // SystemVssConnection's AccessToken (runner OAuth token, no repo scope).
         job.variables
             .get("system.github.token")
             .and_then(|v| v.value.clone())
             .filter(|v| !v.is_empty())
-            .or_else(|| system_access_token(job.system_connection()))
+            .or_else(|| system_access_token(system_connection))
     });
+    let is_self_checkout = is_self_checkout(job, checkout_repository.as_deref());
+    let pull_request_fallback_ref = if checkout_ref(step).is_none() && is_self_checkout {
+        job_string(job, "github.ref")
+            .and_then(validated_self_pull_request_ref)
+            .map(ToOwned::to_owned)
+    } else {
+        None
+    };
     Ok(CheckoutPlan {
         step_id: checkout_step_id(step, index),
         display_name,
         clone_url,
-        version: checkout_version(job, step, checkout_repository.as_deref(), &self_repository),
+        version: checkout_version(job, step, checkout_repository.as_deref(), &self_repository)?,
+        pull_request_fallback_ref,
         destination,
         token,
         fetch_depth: checkout_fetch_depth(step)?,
@@ -187,8 +208,8 @@ pub(crate) fn checkout_plan(
     clippy::unimplemented,
     reason = "tests may panic"
 )]
-fn has_unsupported_enabled_action(steps: &[ActionStep]) -> bool {
-    steps.iter().any(|step| {
+fn has_unsupported_enabled_action(steps: &[Option<ActionStep>]) -> bool {
+    steps.iter().filter_map(Option::as_ref).any(|step| {
         step.enabled
             && step.reference_type() != Some(ActionReferenceType::Script)
             && !is_checkout_step(step)
@@ -407,6 +428,7 @@ fn mirror_want(plan: &CheckoutPlan) -> crate::git_mirror::MirrorWant {
         git_ref: plan.version.clone().unwrap_or_else(|| "HEAD".to_string()),
         full_history: plan.fetch_depth.is_none(),
         tags: plan.fetch_tags,
+        pull_request_fallback_ref: plan.pull_request_fallback_ref.clone(),
     }
 }
 
@@ -570,7 +592,7 @@ fn credential_journal_dir() -> PathBuf {
     if let Some(dir) = TEST_JOURNAL_DIR.with(|dir| dir.borrow().clone()) {
         return dir;
     }
-    crate::storage::StorageLayout::resolve()
+    crate::storage::selected_or_resolved_layout()
         .or_else(|| crate::storage::StorageLayout::user_cli().ok())
         .map(|layout| layout.run_root)
         .unwrap_or_else(|| std::env::temp_dir().join("velnor"))
@@ -1493,12 +1515,11 @@ fn contains_step_context_expression(value: &str) -> bool {
 }
 
 fn self_repository(job: &AgentJobRequestMessage) -> Result<RepositoryResource> {
-    if let Some(repository) = job
-        .resources
-        .repositories
-        .iter()
+    let mut repositories = job.resources.repositories.iter().filter_map(Option::as_ref);
+    if let Some(repository) = repositories
+        .clone()
         .find(|repository| repository.alias.as_deref() == Some("self"))
-        .or_else(|| job.resources.repositories.first())
+        .or_else(|| repositories.next())
     {
         return Ok(repository.clone());
     }
@@ -1514,15 +1535,17 @@ fn self_repository(job: &AgentJobRequestMessage) -> Result<RepositoryResource> {
         server_url.trim_end_matches('/'),
         name.trim_start_matches('/')
     );
-    let mut properties = BTreeMap::new();
-    properties.insert("cloneUrl".to_string(), clone_url);
+    let mut properties = vec![("url".to_string(), ContextValue::String(clone_url))];
+    if let Some(version) = job_string(job, "github.sha") {
+        properties.push((
+            "version".to_string(),
+            ContextValue::String(version.to_owned()),
+        ));
+    }
     Ok(RepositoryResource {
         alias: Some("self".to_string()),
-        name: Some(name.to_string()),
-        git_ref: job_string(job, "github.ref").map(ToOwned::to_owned),
-        version: job_string(job, "github.sha").map(ToOwned::to_owned),
-        url: None,
-        properties,
+        endpoint: None,
+        properties: ContextValue::object(properties)?,
     })
 }
 
@@ -1551,43 +1574,55 @@ fn checkout_version(
     step: &ActionStep,
     checkout_repository: Option<&str>,
     self_repository: &RepositoryResource,
-) -> Option<String> {
+) -> Result<Option<String>> {
     if let Some(reference) = checkout_ref(step) {
-        return Some(reference);
+        return Ok(Some(reference));
     }
 
-    let is_self_checkout = checkout_repository.is_none_or(|repository| {
-        self_repository
-            .name
-            .as_deref()
-            .is_some_and(|self_name| repository.eq_ignore_ascii_case(self_name))
-    });
+    let is_self_checkout = is_self_checkout(job, checkout_repository);
     if !is_self_checkout {
-        return None;
+        return Ok(None);
     }
 
-    // RepositoryResource.version is the server-selected immutable revision.
-    // PR merge/head refs are mutable pointers and remain only as a fallback
-    // for incomplete job messages that lack the immutable version.
-    self_repository.version.clone().or_else(|| {
-        self_repository
-            .git_ref
-            .as_deref()
-            .or_else(|| job_string(job, "github.ref"))
-            .filter(|reference| is_pull_request_ref(reference))
-            .map(ToOwned::to_owned)
+    // The pinned runner stores RepositoryResource.Version in the case-
+    // insensitive Properties bag. PR refs remain only a fallback for
+    // incomplete messages without that immutable version.
+    if let Some(version) = repository_property_string(self_repository, "version")? {
+        return Ok(Some(version));
+    }
+    Ok(job_string(job, "github.ref")
+        .and_then(validated_self_pull_request_ref)
+        .map(ToOwned::to_owned))
+}
+
+fn is_self_checkout(job: &AgentJobRequestMessage, checkout_repository: Option<&str>) -> bool {
+    checkout_repository.is_none_or(|repository| {
+        job_string(job, "github.repository")
+            .filter(|self_name| is_repository_name(self_name))
+            .is_some_and(|self_name| repository.eq_ignore_ascii_case(self_name))
     })
 }
 
-fn is_pull_request_ref(reference: &str) -> bool {
-    let mut parts = reference.split('/');
-    matches!(
-        (parts.next(), parts.next(), parts.next(), parts.next(), parts.next()),
-        (Some("refs"), Some("pull"), Some(number), Some(kind), None)
-            if !number.is_empty()
-                && number.bytes().all(|byte| byte.is_ascii_digit())
-                && matches!(kind, "merge" | "head")
-    )
+/// Read a typed string property without hiding an invalid structured value.
+/// ResourceProperties permits arbitrary JSON, but the upstream typed getter
+/// fails when a non-null object or array is requested as a string.
+fn repository_property_string(
+    repository: &RepositoryResource,
+    name: &str,
+) -> Result<Option<String>> {
+    match repository.property_value(name) {
+        None | Some(ContextValue::Null) => Ok(None),
+        Some(_) => repository
+            .property_string(name)
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("self repository property '{name}' is not scalar")),
+    }
+}
+
+fn validated_self_pull_request_ref(reference: &str) -> Option<&str> {
+    crate::git_mirror::validated_pull_request_ref(reference)
+        .ok()
+        .map(|_| reference)
 }
 
 fn checkout_repository(step: &ActionStep) -> Option<String> {
@@ -1600,6 +1635,7 @@ fn checkout_repository(step: &ActionStep) -> Option<String> {
 
 fn checkout_clone_url(
     requested_repository: Option<&str>,
+    self_repository_name: Option<&str>,
     self_repository: &RepositoryResource,
     server_url: &str,
 ) -> Result<String> {
@@ -1608,9 +1644,7 @@ fn checkout_clone_url(
             bail!("unsupported checkout repository '{repository}'")
         }
         Some(repository)
-            if self_repository
-                .name
-                .as_deref()
+            if self_repository_name
                 .is_some_and(|self_name| repository.eq_ignore_ascii_case(self_name)) =>
         {
             self_clone_url(self_repository)
@@ -1631,11 +1665,12 @@ fn checkout_clone_url(
 fn checkout_server_url(
     job: &AgentJobRequestMessage,
     self_repository: &RepositoryResource,
-) -> String {
-    self_clone_url(self_repository)
-        .ok()
+) -> Result<String> {
+    let repository_url = repository_url_property(self_repository)?;
+    Ok(repository_url
+        .as_deref()
         .and_then(|url| {
-            let parsed = Url::parse(&url).ok()?;
+            let parsed = Url::parse(url).ok()?;
             let host = parsed.host_str()?;
             Some(match parsed.port() {
                 Some(port) => format!("{}://{host}:{port}", parsed.scheme()),
@@ -1643,16 +1678,27 @@ fn checkout_server_url(
             })
         })
         .or_else(|| job_string(job, "github.server_url").map(ToOwned::to_owned))
-        .unwrap_or_else(|| "https://github.com".to_string())
+        .unwrap_or_else(|| "https://github.com".to_string()))
 }
 
 fn self_clone_url(repository: &RepositoryResource) -> Result<String> {
-    repository
-        .properties
-        .get("cloneUrl")
-        .or(repository.url.as_ref())
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("self repository missing clone URL"))
+    repository_url_property(repository)?
+        .ok_or_else(|| anyhow::anyhow!("self repository missing URL property"))
+}
+
+/// `RepositoryResource.Url` is a `Uri` typed getter upstream: only a JSON
+/// string (or null/absence) can produce one. Keep arbitrary provider values
+/// in the map, but fail this consumer on a different value shape.
+fn repository_url_property(repository: &RepositoryResource) -> Result<Option<String>> {
+    match repository.property_value("url") {
+        None | Some(ContextValue::Null | ContextValue::Undefined) => Ok(None),
+        Some(ContextValue::String(value)) if !value.trim().is_empty() => repository
+            .property_string("url")
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("self repository URL property is invalid")),
+        Some(ContextValue::String(_)) => bail!("self repository URL property is empty"),
+        Some(_) => bail!("self repository URL property is not a string"),
+    }
 }
 
 fn is_repository_name(repository: &str) -> bool {
@@ -1736,7 +1782,11 @@ fn checkout_clean(step: &ActionStep) -> bool {
         .unwrap_or(true)
 }
 
-fn checkout_token(step: &ActionStep, job: &AgentJobRequestMessage) -> Result<Option<String>> {
+fn checkout_token(
+    step: &ActionStep,
+    job: &AgentJobRequestMessage,
+    system_connection: Option<&ServiceEndpoint>,
+) -> Result<Option<String>> {
     let Some(token) = step
         .inputs
         .as_ref()
@@ -1748,14 +1798,19 @@ fn checkout_token(step: &ActionStep, job: &AgentJobRequestMessage) -> Result<Opt
     if contains_step_context_expression(&token) {
         return Ok(Some(token));
     }
-    let Some(resolved) = resolve_token_expression(&token, job).filter(|value| !value.is_empty())
+    let Some(resolved) =
+        resolve_token_expression(&token, job, system_connection).filter(|value| !value.is_empty())
     else {
         bail!("explicit checkout token expression did not resolve");
     };
     Ok(Some(resolved))
 }
 
-fn resolve_token_expression(token: &str, job: &AgentJobRequestMessage) -> Option<String> {
+fn resolve_token_expression(
+    token: &str,
+    job: &AgentJobRequestMessage,
+    system_connection: Option<&ServiceEndpoint>,
+) -> Option<String> {
     let expression = token
         .trim()
         .strip_prefix("${{")
@@ -1774,7 +1829,7 @@ fn resolve_token_expression(token: &str, job: &AgentJobRequestMessage) -> Option
             .get("system.github.token")
             .and_then(|v| v.value.clone())
             .filter(|v| !v.is_empty())
-            .or_else(|| system_access_token(job.system_connection()));
+            .or_else(|| system_access_token(system_connection));
     }
     for prefix in ["secrets.", "secret."] {
         if let Some(name) = expression.strip_prefix(prefix) {
@@ -1792,13 +1847,8 @@ fn resolve_token_expression(token: &str, job: &AgentJobRequestMessage) -> Option
 fn system_access_token(endpoint: Option<&ServiceEndpoint>) -> Option<String> {
     endpoint
         .and_then(|endpoint| endpoint.authorization.as_ref())
-        .and_then(|authorization| {
-            authorization
-                .parameters
-                .get("AccessToken")
-                .or_else(|| authorization.parameters.get("accessToken"))
-        })
-        .cloned()
+        .and_then(|authorization| authorization.parameter_string("AccessToken"))
+        .map(ToOwned::to_owned)
 }
 
 fn input_string<'a>(value: &'a Value, names: &[&str]) -> Option<&'a str> {
@@ -1894,7 +1944,7 @@ fn job_string<'a>(job: &'a AgentJobRequestMessage, name: &str) -> Option<&'a str
         .or_else(|| context_string(&job.context_data, name))
 }
 
-fn context_string<'a>(context_data: &'a BTreeMap<String, Value>, path: &str) -> Option<&'a str> {
+fn context_string<'a>(context_data: &'a OrderedContextData<Value>, path: &str) -> Option<&'a str> {
     let mut parts = path.split('.');
     let root = parts.next()?;
     let mut value = context_data.get(root)?;
@@ -2000,6 +2050,8 @@ fn format_git_args(args: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::executor::{CommandResult, ProcessCommandRunner};
+    use std::collections::BTreeMap;
+    use velnor_model::NonFinite;
 
     #[derive(Default)]
     struct RecordingRunner {
@@ -2030,7 +2082,8 @@ mod tests {
 
     #[test]
     fn detects_supported_and_unsupported_actions() {
-        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+        let steps: Vec<Option<ActionStep>> = serde_json::from_value(serde_json::json!([
+            null,
             { "reference": { "type": "Repository", "name": "actions/checkout" } },
             { "reference": { "type": "Script" }, "inputs": { "script": "echo ok" } }
         ]))
@@ -2038,12 +2091,25 @@ mod tests {
 
         assert!(!has_unsupported_enabled_action(&steps));
 
-        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+        let steps: Vec<Option<ActionStep>> = serde_json::from_value(serde_json::json!([
             { "reference": { "type": "Repository", "name": "actions/cache" } }
         ]))
         .unwrap();
 
         assert!(has_unsupported_enabled_action(&steps));
+    }
+
+    #[test]
+    fn checkout_pr_ref_validation_rejects_signed_numbers() {
+        assert_eq!(
+            validated_self_pull_request_ref("refs/pull/408/merge"),
+            Some("refs/pull/408/merge")
+        );
+        assert_eq!(
+            validated_self_pull_request_ref("refs/pull/+408/merge"),
+            None
+        );
+        assert_eq!(validated_self_pull_request_ref("refs/pull/-408/head"), None);
     }
 
     #[test]
@@ -2055,6 +2121,7 @@ mod tests {
             display_name: String::new(),
             clone_url: "https://github.com/acme/repo.git".into(),
             version: Some("abc123".into()),
+            pull_request_fallback_ref: None,
             destination: temp.clone(),
             token: Some("token".into()),
             fetch_depth: Some(1),
@@ -2109,17 +2176,13 @@ mod tests {
 
     #[test]
     fn an_external_repository_is_cloned_from_the_job_own_server() {
-        let mut properties = BTreeMap::new();
-        properties.insert(
-            "cloneUrl".to_string(),
-            "https://ghe.acme.test/acme/repo.git".to_string(),
-        );
+        let properties = ContextValue::from_json_root_case_insensitive(serde_json::json!({
+            "URL": "https://ghe.acme.test/acme/repo.git"
+        }))
+        .unwrap();
         let self_repository = RepositoryResource {
             alias: Some("self".to_string()),
-            name: Some("acme/repo".to_string()),
-            git_ref: None,
-            version: None,
-            url: None,
+            endpoint: None,
             properties,
         };
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
@@ -2134,14 +2197,154 @@ mod tests {
             "steps": []
         }))
         .unwrap();
-        let server = checkout_server_url(&job, &self_repository);
+        let server = checkout_server_url(&job, &self_repository).unwrap();
         assert_eq!(server, "https://ghe.acme.test");
         // Hardcoding github.com here made a GHES job fetch a public repository
         // of the same name instead of its own server's.
         assert_eq!(
-            checkout_clone_url(Some("other/tool"), &self_repository, &server).unwrap(),
+            checkout_clone_url(
+                Some("other/tool"),
+                Some("acme/repo"),
+                &self_repository,
+                &server,
+            )
+            .unwrap(),
             "https://ghe.acme.test/other/tool.git"
         );
+    }
+
+    #[test]
+    fn repository_checkout_values_come_from_properties_bag() {
+        let repository = |properties| RepositoryResource {
+            alias: Some("self".to_string()),
+            endpoint: None,
+            properties,
+        };
+
+        let nested = ContextValue::case_sensitive_object(vec![
+            (
+                "MixedKey".to_string(),
+                ContextValue::String("upper".to_string()),
+            ),
+            (
+                "mixedkey".to_string(),
+                ContextValue::String("lower".to_string()),
+            ),
+            (
+                "nonfinite".to_string(),
+                ContextValue::non_finite(NonFinite::NaN),
+            ),
+            (
+                "literal".to_string(),
+                ContextValue::String("NaN".to_string()),
+            ),
+        ])
+        .unwrap();
+        let properties = ContextValue::object(vec![
+            (
+                "URL".to_string(),
+                ContextValue::String("https://clone.test/acme/repo.git".to_string()),
+            ),
+            (
+                "VeRsIoN".to_string(),
+                ContextValue::String("selected-sha".to_string()),
+            ),
+            ("arbitrary-provider-key".to_string(), nested.clone()),
+        ])
+        .unwrap();
+        let repository = repository(properties);
+        assert_eq!(
+            self_clone_url(&repository).unwrap(),
+            "https://clone.test/acme/repo.git"
+        );
+        assert_eq!(
+            repository_property_string(&repository, "version")
+                .unwrap()
+                .as_deref(),
+            Some("selected-sha")
+        );
+        assert_eq!(
+            repository.property_value("ARBITRARY-PROVIDER-KEY"),
+            Some(&nested)
+        );
+        assert_eq!(
+            nested.get("MixedKey"),
+            Some(&ContextValue::String("upper".to_string()))
+        );
+        assert_eq!(
+            nested.get("mixedkey"),
+            Some(&ContextValue::String("lower".to_string()))
+        );
+        assert!(matches!(
+            nested.get("nonfinite"),
+            Some(ContextValue::NonFinite(NonFinite::NaN))
+        ));
+        assert_eq!(
+            nested.get("literal"),
+            Some(&ContextValue::String("NaN".to_string()))
+        );
+
+        let wire = serde_json::to_value(&repository.properties).unwrap();
+        let restored: ContextValue = serde_json::from_value(wire).unwrap();
+        assert_eq!(restored, repository.properties);
+    }
+
+    #[test]
+    fn undefined_repository_url_is_null_but_undefined_version_is_invalid() {
+        let repository = RepositoryResource {
+            alias: Some("self".to_string()),
+            endpoint: None,
+            properties: ContextValue::object(vec![
+                ("url".to_owned(), ContextValue::Undefined),
+                ("version".to_owned(), ContextValue::Undefined),
+            ])
+            .unwrap(),
+        };
+
+        assert_eq!(repository_url_property(&repository).unwrap(), None);
+        assert!(repository_property_string(&repository, "version").is_err());
+
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "variables": {
+                "github.server_url": { "value": "https://fallback.example" }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            checkout_server_url(&job, &repository).unwrap(),
+            "https://fallback.example"
+        );
+    }
+
+    #[test]
+    fn malformed_typed_repository_properties_fail_checkout() {
+        let repository = |properties| RepositoryResource {
+            alias: Some("self".to_string()),
+            endpoint: None,
+            properties,
+        };
+
+        let missing_url = ContextValue::from_json_root_case_insensitive(serde_json::json!({
+            "providerData": {"opaque": true}
+        }))
+        .unwrap();
+        assert!(self_clone_url(&repository(missing_url)).is_err());
+
+        let malformed_url = ContextValue::from_json_root_case_insensitive(serde_json::json!({
+            "URL": {"href": "https://github.com/acme/repo"}
+        }))
+        .unwrap();
+        assert!(self_clone_url(&repository(malformed_url)).is_err());
+
+        let scalar_url =
+            ContextValue::object(vec![("url".to_string(), ContextValue::Bool(true))]).unwrap();
+        assert!(self_clone_url(&repository(scalar_url)).is_err());
+
+        let malformed_version = ContextValue::from_json_root_case_insensitive(serde_json::json!({
+            "version": ["not", "scalar"]
+        }))
+        .unwrap();
+        assert!(repository_property_string(&repository(malformed_version), "version").is_err());
     }
 
     fn write_credentialed_config(destination: &Path) -> PathBuf {
@@ -2642,6 +2845,7 @@ mod tests {
                 display_name: "Checkout".into(),
                 clone_url: format!("file://{}", self.origin.display()),
                 version: Some(self.sha.clone()),
+                pull_request_fallback_ref: None,
                 destination,
                 token: None,
                 fetch_depth: Some(1),
@@ -3277,6 +3481,7 @@ mod tests {
             display_name: "Checkout".into(),
             clone_url: "https://github.com/acme/repo.git".into(),
             version: Some("abc123".into()),
+            pull_request_fallback_ref: None,
             destination,
             token: None,
             fetch_depth: Some(1),
@@ -3303,6 +3508,7 @@ mod tests {
             display_name: String::new(),
             clone_url: "https://github.com/acme/repo.git".into(),
             version: Some("abc123".into()),
+            pull_request_fallback_ref: None,
             destination: temp.clone(),
             token: Some("token".into()),
             fetch_depth: Some(1),
@@ -3336,6 +3542,7 @@ mod tests {
             display_name: String::new(),
             clone_url: "https://github.com/acme/repo.git".into(),
             version: Some("abc123".into()),
+            pull_request_fallback_ref: None,
             destination: PathBuf::from("/tmp/nonexistent-velnor-cleanup-test"),
             token: Some("token".into()),
             fetch_depth: Some(1),
@@ -3368,6 +3575,7 @@ mod tests {
             display_name: String::new(),
             clone_url: "https://github.com/acme/repo.git".into(),
             version: Some("main".into()),
+            pull_request_fallback_ref: None,
             destination: temp.clone(),
             token: None,
             fetch_depth: None,
@@ -3600,11 +3808,11 @@ mod tests {
 
     #[test]
     fn plans_external_checkout_with_path_ref_token_and_full_fetch() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let job: AgentJobRequestMessage = AgentJobRequestMessage::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
             "jobDisplayName": "Release",
             "requestId": 1,
             "variables": {
@@ -3616,9 +3824,10 @@ mod tests {
             "resources": {
                 "repositories": [{
                     "alias": "self",
-                    "name": "jackin-project/jackin",
-                    "version": "abc123",
-                    "properties": { "cloneUrl": "https://github.com/jackin-project/jackin.git" }
+                    "properties": {
+                        "url": "https://github.com/jackin-project/jackin.git",
+                        "version": "abc123"
+                    }
                 }]
             },
             "steps": [{
@@ -3652,25 +3861,26 @@ mod tests {
 
     #[test]
     fn plans_self_checkout_defaults() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let job: AgentJobRequestMessage = AgentJobRequestMessage::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
             "jobDisplayName": "CI",
             "requestId": 1,
             "resources": {
                 "endpoints": [{
                     "name": "SystemVssConnection",
                     "authorization": {
-                        "parameters": { "AccessToken": "ghs-token" }
+                        "parameters": { "aCcEsStOkEn": "ghs-token" }
                     }
                 }],
                 "repositories": [{
                     "alias": "self",
-                    "name": "acme/repo",
-                    "version": "abc123",
-                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                    "properties": {
+                        "url": "https://github.com/acme/repo.git",
+                        "version": "abc123"
+                    }
                 }]
             },
             "steps": [{
@@ -3692,12 +3902,49 @@ mod tests {
     }
 
     #[test]
-    fn plans_self_pull_request_checkout_from_immutable_repository_version() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+    fn explicit_self_repository_uses_github_repository_and_property_url() {
+        let job: AgentJobRequestMessage = AgentJobRequestMessage::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "jobDisplayName": "CI",
+            "requestId": 1,
+            "variables": {
+                "github.repository": { "value": "acme/repo" },
+                "github.server_url": { "value": "https://github.com" }
+            },
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "ignored/wire-name",
+                    "url": "https://ignored.example/wrong/repo.git",
+                    "properties": {
+                        "uRl": "https://ghe.acme.test/acme/repo.git",
+                        "version": "immutable-sha"
+                    }
+                }]
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" },
+                "inputs": { "repository": "ACME/REPO" }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans[0].clone_url, "https://ghe.acme.test/acme/repo.git");
+        assert_eq!(plans[0].version.as_deref(), Some("immutable-sha"));
+    }
+
+    #[test]
+    fn plans_self_pull_request_checkout_from_immutable_repository_version() {
+        let job: AgentJobRequestMessage = AgentJobRequestMessage::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
             "jobDisplayName": "PR",
             "requestId": 1,
             "variables": {
@@ -3706,10 +3953,10 @@ mod tests {
             "resources": {
                 "repositories": [{
                     "alias": "self",
-                    "name": "acme/repo",
-                    "ref": "refs/pull/408/merge",
-                    "version": "immutable-merge-sha",
-                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                    "properties": {
+                        "url": "https://github.com/acme/repo.git",
+                        "version": "immutable-merge-sha"
+                    }
                 }]
             },
             "steps": [{
@@ -3721,23 +3968,28 @@ mod tests {
         let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
 
         assert_eq!(plans[0].version.as_deref(), Some("immutable-merge-sha"));
+        assert_eq!(
+            plans[0].pull_request_fallback_ref.as_deref(),
+            Some("refs/pull/408/merge")
+        );
     }
 
     #[test]
     fn plans_self_pull_request_checkout_from_remote_ref_without_version() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let job: AgentJobRequestMessage = AgentJobRequestMessage::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
             "jobDisplayName": "PR",
             "requestId": 1,
+            "variables": {
+                "github.ref": { "value": "refs/pull/408/merge" }
+            },
             "resources": {
                 "repositories": [{
                     "alias": "self",
-                    "name": "acme/repo",
-                    "ref": "refs/pull/408/merge",
-                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                    "properties": { "url": "https://github.com/acme/repo.git" }
                 }]
             },
             "steps": [{
@@ -3749,24 +4001,28 @@ mod tests {
         let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
 
         assert_eq!(plans[0].version.as_deref(), Some("refs/pull/408/merge"));
+        assert_eq!(
+            plans[0].pull_request_fallback_ref.as_deref(),
+            Some("refs/pull/408/merge")
+        );
     }
 
     #[test]
     fn plans_self_push_checkout_from_exact_sha() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let job: AgentJobRequestMessage = AgentJobRequestMessage::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
             "jobDisplayName": "Push",
             "requestId": 1,
             "resources": {
                 "repositories": [{
                     "alias": "self",
-                    "name": "acme/repo",
-                    "ref": "refs/heads/main",
-                    "version": "push-commit-sha",
-                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                    "properties": {
+                        "url": "https://github.com/acme/repo.git",
+                        "version": "push-commit-sha"
+                    }
                 }]
             },
             "steps": [{
@@ -3782,20 +4038,20 @@ mod tests {
 
     #[test]
     fn explicit_checkout_ref_overrides_pull_request_remote_ref() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let job: AgentJobRequestMessage = AgentJobRequestMessage::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
             "jobDisplayName": "PR",
             "requestId": 1,
             "resources": {
                 "repositories": [{
                     "alias": "self",
-                    "name": "acme/repo",
-                    "ref": "refs/pull/408/merge",
-                    "version": "ephemeral-merge-sha",
-                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                    "properties": {
+                        "url": "https://github.com/acme/repo.git",
+                        "version": "ephemeral-merge-sha"
+                    }
                 }]
             },
             "steps": [{
@@ -3808,6 +4064,7 @@ mod tests {
         let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
 
         assert_eq!(plans[0].version.as_deref(), Some("refs/tags/v1.2.3"));
+        assert_eq!(plans[0].pull_request_fallback_ref, None);
     }
 
     #[test]
@@ -3933,11 +4190,11 @@ mod tests {
 
     #[test]
     fn checkout_can_disable_credential_persistence_and_clean() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let job: AgentJobRequestMessage = AgentJobRequestMessage::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
             "jobDisplayName": "CI",
             "requestId": 1,
             "resources": {
@@ -3949,9 +4206,7 @@ mod tests {
                 }],
                 "repositories": [{
                     "alias": "self",
-                    "name": "acme/repo",
-                    "version": "abc123",
-                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                    "properties": { "url": "https://github.com/acme/repo.git" }
                 }]
             },
             "steps": [{
@@ -3997,31 +4252,32 @@ mod tests {
 
     #[test]
     fn checkout_ref_from_previous_step_requires_runtime_context() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let job: AgentJobRequestMessage = AgentJobRequestMessage::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
             "jobDisplayName": "Preview",
             "requestId": 1,
             "resources": {
                 "repositories": [{
                     "alias": "self",
-                    "name": "jackin-project/jackin",
-                    "version": "abc123",
-                    "properties": { "cloneUrl": "https://github.com/jackin-project/jackin.git" }
+                    "properties": {
+                        "url": "https://github.com/jackin-project/jackin.git",
+                        "version": "abc123"
+                    }
                 }]
             },
             "steps": [
                 {
-                    "id": "source",
+                    "id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
                     "reference": { "type": "Script" },
                     "inputs": { "script": "echo sha=def456 >> \"$GITHUB_OUTPUT\"" }
                 },
                 {
                     "reference": { "type": "Repository", "name": "actions/checkout" },
                     "inputs": {
-                        "ref": "${{ steps.source.outputs.sha }}",
+                        "ref": "${{ steps.dddddddd-dddd-dddd-dddd-dddddddddddd.outputs.sha }}",
                         "fetch-depth": "0"
                     }
                 }
@@ -4035,7 +4291,7 @@ mod tests {
         assert_eq!(plans[0].step_id, "checkout2");
         assert_eq!(
             plans[0].version.as_deref(),
-            Some("${{ steps.source.outputs.sha }}")
+            Some("${{ steps.dddddddd-dddd-dddd-dddd-dddddddddddd.outputs.sha }}")
         );
         assert!(plans[0].requires_runtime_context());
         assert_eq!(plans[0].fetch_depth, None);
@@ -4043,30 +4299,31 @@ mod tests {
 
     #[test]
     fn checkout_with_condition_requires_runtime_context() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let job: AgentJobRequestMessage = AgentJobRequestMessage::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
             "jobDisplayName": "Preview",
             "requestId": 1,
             "resources": {
                 "repositories": [{
                     "alias": "self",
-                    "name": "ChainArgos/java-monorepo",
-                    "version": "abc123",
-                    "properties": { "cloneUrl": "https://github.com/ChainArgos/java-monorepo.git" }
+                    "properties": {
+                        "url": "https://github.com/ChainArgos/java-monorepo.git",
+                        "version": "abc123"
+                    }
                 }]
             },
             "steps": [
                 {
-                    "id": "plan",
+                    "id": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
                     "reference": { "type": "Script" },
                     "inputs": { "script": "echo run-tests=false >> \"$GITHUB_OUTPUT\"" }
                 },
                 {
                     "reference": { "type": "Repository", "name": "actions/checkout" },
-                    "condition": "${{ steps.plan.outputs.run-tests == 'true' }}"
+                    "condition": "${{ steps.eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee.outputs.run-tests == 'true' }}"
                 }
             ]
         }))
@@ -4130,19 +4387,20 @@ mod tests {
         // GitHub sets `Condition: "success()"` on every step in the job
         // message; the trivial default must not defer the checkout, or jobs
         // using local composite actions can never resolve them.
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+        let job: AgentJobRequestMessage = AgentJobRequestMessage::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
+            "plan": { "planId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            "timeline": { "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            "jobId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
             "jobDisplayName": "Compat",
             "requestId": 1,
             "resources": {
                 "repositories": [{
                     "alias": "self",
-                    "name": "tailrocks/velnor-actions-fixture",
-                    "version": "abc123",
-                    "properties": { "cloneUrl": "https://github.com/tailrocks/velnor-actions-fixture.git" }
+                    "properties": {
+                        "url": "https://github.com/tailrocks/velnor-actions-fixture.git",
+                        "version": "abc123"
+                    }
                 }]
             },
             "steps": [
@@ -4167,15 +4425,17 @@ mod tests {
     fn rejects_malformed_checkout_repository() {
         let repository = RepositoryResource {
             alias: Some("self".into()),
-            name: Some("acme/repo".into()),
-            git_ref: None,
-            version: None,
-            url: None,
-            properties: Default::default(),
+            endpoint: None,
+            properties: ContextValue::object(Vec::new()).unwrap(),
         };
 
-        let error =
-            checkout_clone_url(Some("../bad"), &repository, "https://github.com").unwrap_err();
+        let error = checkout_clone_url(
+            Some("../bad"),
+            Some("acme/repo"),
+            &repository,
+            "https://github.com",
+        )
+        .unwrap_err();
 
         assert!(error
             .to_string()

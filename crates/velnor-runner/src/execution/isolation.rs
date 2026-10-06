@@ -71,7 +71,7 @@ pub fn is_host_docker_control_socket(path: &Path) -> bool {
 /// `/var/lib/velnor/microvm` path.
 #[must_use]
 pub fn microvm_isolation_root() -> PathBuf {
-    crate::storage::StorageLayout::resolve()
+    crate::storage::selected_or_resolved_layout()
         .map(|layout| layout.lib_root.join("microvm"))
         .unwrap_or_else(|| PathBuf::from(MICROVM_ISOLATION_ROOT))
 }

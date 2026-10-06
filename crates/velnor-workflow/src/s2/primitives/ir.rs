@@ -305,6 +305,7 @@ mod tests {
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         }
     }
 
@@ -1011,6 +1012,7 @@ mod tests {
             automatic_providers: ProviderId::ALL.into_iter().collect(),
             selectors: crate::s2::scan::default_selectors(),
             ci_required: true,
+            declared_ruleset_contexts: "Policy,ci-required".to_owned(),
             empty_selection_proof: false,
             repository: repository.to_owned(),
             workflow_revision: "0".repeat(40),
@@ -1024,7 +1026,6 @@ mod tests {
             mise_lock_keys: BTreeSet::new(),
             mise_lock_backends: BTreeMap::new(),
             mise_install_deps: MiseInstallDeps::default(),
-            declared_ruleset_contexts: String::new(),
             rust_pin: None,
         }
     }
@@ -6859,6 +6860,8 @@ pub(crate) mod provider_input {
     /// the kind spans more than one channel; every caller of such a kind
     /// passes its unit's channel so the provision legs gate on it.
     pub(crate) const TOOLCHAIN: &str = "toolchain";
+    /// JSON-encoded Homebrew candidate tap, formula, and native matrix.
+    pub(crate) const HOMEBREW_PREVIEW: &str = "homebrew_preview";
 
     /// Every per-unit input, in declaration order.
     pub(crate) const ALL: &[&str] = &[
@@ -6893,6 +6896,7 @@ pub(crate) mod provider_input {
         VALIDATION_PHASES,
         FULL_HISTORY,
         TOOLCHAIN,
+        HOMEBREW_PREVIEW,
     ];
 
     /// The inputs declared as `type: boolean`. Callers pass them unquoted so
@@ -7458,10 +7462,10 @@ impl WorkflowIr {
             automatic_providers: config.automatic_providers.clone(),
             selectors: config.selectors.clone(),
             ci_required: config.ci_required,
+            declared_ruleset_contexts: crate::s2::declared_ruleset_contexts_literal(config),
             empty_selection_proof: config.empty_selection_proof,
             repository: config.repository.clone(),
             workflow_revision: config.workflow_revision.clone(),
-            declared_ruleset_contexts: crate::s2::declared_ruleset_contexts_literal(config),
             rust_needs: config.rust_needs,
             concurrency_group: config.concurrency_group.clone(),
             serial_stack_groups: config.serial_stack_groups,
@@ -7601,15 +7605,21 @@ impl WorkflowIr {
             .providers
             .iter()
             .filter(|job| provider_supports_unit(job.provider, unit))
-            .map(|job| UnitProviderCaller {
-                job_id: unit_job_id(job.provider, &unit.id),
-                unit_id: unit.id.clone(),
-                name: unit_job_display_name(unit, job.provider),
-                provider: job.provider,
-                file: file.to_owned(),
-                inputs: self
+            .map(|job| {
+                let mut inputs = self
                     .unit_provider_facts(unit, &contract, job.provider)
-                    .input_values(),
+                    .input_values();
+                if let Some(preview) = &unit.homebrew_preview {
+                    inputs.push((provider_input::HOMEBREW_PREVIEW, preview.workflow_input()));
+                }
+                UnitProviderCaller {
+                    job_id: unit_job_id(job.provider, &unit.id),
+                    unit_id: unit.id.clone(),
+                    name: unit_job_display_name(unit, job.provider),
+                    provider: job.provider,
+                    file: file.to_owned(),
+                    inputs,
+                }
             })
             .collect()
     }
@@ -7766,6 +7776,18 @@ impl WorkflowIr {
             "({})",
             self.provider_admission_expression(ProviderAdmission::for_unit(provider, unit))
         ));
+        let preview_checkout_inputs = if unit.homebrew_preview.is_some()
+            && provider == ProviderId::GithubHosted
+        {
+            "\n      homebrew_preview_head_sha: ${{ github.event.pull_request.head.sha || '' }}\n      homebrew_preview_head_repository: ${{ github.event.pull_request.head.repo.full_name || '' }}"
+        } else {
+            ""
+        };
+        let caller_inputs = format!(
+            "{}{}",
+            render_caller_inputs(&caller.inputs),
+            preview_checkout_inputs
+        );
         let _ = writeln!(
             output,
             "  {}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{}\n    with:\n      unit: {}\n      provider: {}\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      selected_unit_ids: ${{{{ needs.plan.outputs.unit_ids }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n      plan_digest: ${{{{ needs.plan.outputs.plan_digest }}}}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}{}",
@@ -7776,7 +7798,7 @@ impl WorkflowIr {
             caller.file,
             yaml_scalar(&caller.unit_id),
             caller.provider.as_str(),
-            render_caller_inputs(&caller.inputs),
+            caller_inputs,
         );
     }
 
@@ -8110,6 +8132,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             "name: {}\non:\n  workflow_call:\n    inputs:\n      unit:\n        required: true\n        type: string\n      selected_units:\n        required: true\n        type: string\n      selected_unit_ids:\n        required: true\n        type: string\n      scope:\n        required: true\n        type: string\n      full_units:\n        required: true\n        type: string\n      base_sha:\n        required: true\n        type: string\n      head_sha:\n        required: true\n        type: string\n      plan_digest:\n        required: true\n        type: string\n      provider:\n        required: true\n        type: string",
             yaml_scalar(unit_group(kind))
         );
+        if kind == UnitKind::Homebrew && members.iter().any(|unit| unit.homebrew_preview.is_some())
+        {
+            output.push_str(
+                "      homebrew_preview_head_sha:\n        required: false\n        type: string\n        default: \"\"\n      homebrew_preview_head_repository:\n        required: false\n        type: string\n        default: \"\"\n",
+            );
+        }
         for name in provider_input::ALL {
             // The prepared-tools input is declared only when a member needs
             // it: an unconditional declaration would rewrite every kind
@@ -8148,6 +8176,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             // header for a feature only diff-aware gates use.
             if *name == provider_input::FULL_HISTORY
                 && !members.iter().any(|unit| unit.full_history)
+            {
+                continue;
+            }
+            // Candidate formula inputs are declared only for Homebrew kinds
+            // with a repository-owned preview contract. Other generated
+            // workflows stay byte-identical and accept no unused input.
+            if *name == provider_input::HOMEBREW_PREVIEW
+                && !members.iter().any(|unit| unit.homebrew_preview.is_some())
             {
                 continue;
             }
@@ -8199,7 +8235,108 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let mut output = Self::render_kind_units_header(kind, &members, &env);
         self.append_provider_cargo_prep_jobs(&mut output, &members, contracts);
         self.render_collapsed_kind_verify_job(&mut output, &members, contracts)?;
+        if kind == UnitKind::Homebrew {
+            let preview_units = members
+                .iter()
+                .copied()
+                .filter(|unit| unit.homebrew_preview.is_some())
+                .collect::<Vec<_>>();
+            if !preview_units.is_empty()
+                && !self.automatic_providers.contains(&ProviderId::GithubHosted)
+            {
+                return Err(GeneratorError::usage(
+                    "Homebrew candidate checks require GitHub-hosted automatic provider admission",
+                ));
+            }
+            for unit in &preview_units {
+                let contract = self.contract_for(unit, contracts);
+                if !contract.providers.iter().any(|job| {
+                    job.provider == ProviderId::GithubHosted
+                        && provider_supports_unit(job.provider, unit)
+                }) {
+                    return Err(GeneratorError::usage(format!(
+                        "Homebrew candidate unit `{}` must run on the GitHub-hosted provider",
+                        unit.id
+                    )));
+                }
+            }
+            self.render_homebrew_candidate_jobs(&mut output, &members, &env);
+        }
         Ok(Some((kind_unit_workflow_file(kind), output)))
+    }
+
+    /// Native, read-only formula installation checks against the exact PR
+    /// head. The caller already belongs to the generated required CI graph;
+    /// the sibling result gate makes a skipped, cancelled, or failed matrix a
+    /// failing reusable-workflow result.
+    fn render_homebrew_candidate_jobs(
+        &self,
+        output: &mut String,
+        members: &[&Unit],
+        inherited_env: &BTreeMap<String, String>,
+    ) {
+        let configured_units = members
+            .iter()
+            .filter(|unit| unit.homebrew_preview.is_some())
+            .map(|unit| {
+                let unit_selector = format!("inputs.unit == '{}'", unit.id.replace('\'', "''"));
+                let admission = self.provider_admission_expression(ProviderAdmission::for_unit(
+                    ProviderId::GithubHosted,
+                    unit,
+                ));
+                format!("({unit_selector} && ({admission}))")
+            })
+            .collect::<Vec<_>>();
+        if configured_units.is_empty() {
+            return;
+        }
+        let unit_gate = format!(
+            "inputs.provider == '{}' && ({})",
+            ProviderId::GithubHosted.as_str(),
+            configured_units.join(" || ")
+        );
+        let mut shadowed_env = String::new();
+        for name in inherited_env.keys() {
+            if matches!(
+                name.as_str(),
+                "HOMEBREW_NO_AUTO_UPDATE" | "HOMEBREW_NO_INSTALL_CLEANUP" | "TAP" | "FORMULA"
+            ) {
+                continue;
+            }
+            let _ = writeln!(shadowed_env, "      {name}: \"\"");
+        }
+        let mut shadowed_result_env = String::new();
+        if !inherited_env.is_empty() {
+            let _ = writeln!(shadowed_result_env, "    env:");
+            for name in inherited_env.keys() {
+                let _ = writeln!(shadowed_result_env, "      {name}: \"\"");
+            }
+        }
+        let _ = writeln!(
+            output,
+            "  homebrew-candidate-install:\n    name: Homebrew candidate · ${{{{ matrix.platform.id }}}}\n    if: ${{{{ github.event_name == 'pull_request' && ({unit_gate}) }}}}\n    runs-on: ${{{{ matrix.platform.runner }}}}\n    timeout-minutes: 120\n    permissions:\n      contents: read\n    strategy:\n      fail-fast: false\n      matrix:\n        platform:"
+        );
+        for platform in crate::s2::provider::HomebrewPlatform::ALL {
+            let _ = writeln!(
+                output,
+                "          - id: {}\n            runner: {}\n            os: {}\n            arch: {}\n            machine: {}",
+                platform.as_str(),
+                platform.runner(),
+                platform.runner_os(),
+                platform.runner_arch(),
+                platform.machine(),
+            );
+        }
+        let _ = writeln!(
+            output,
+            "    env:\n      HOMEBREW_NO_AUTO_UPDATE: \"1\"\n      HOMEBREW_NO_INSTALL_CLEANUP: \"1\"\n      TAP: ${{{{ fromJSON(inputs.homebrew_preview).tap }}}}\n      FORMULA: ${{{{ fromJSON(inputs.homebrew_preview).formula }}}}\n{1}    steps:\n      - name: Require GitHub-hosted candidate runner\n        shell: bash\n        run: |\n          set -euo pipefail\n          [[ \"$RUNNER_ENVIRONMENT\" == github-hosted ]] || {{ echo \"candidate formula checks require a GitHub-hosted runner\" >&2; exit 1; }}\n      - name: Validate candidate pull request identity\n        env:\n          CANDIDATE_HEAD_SHA: ${{{{ inputs.homebrew_preview_head_sha }}}}\n          CANDIDATE_HEAD_REPOSITORY: ${{{{ inputs.homebrew_preview_head_repository }}}}\n          EVENT_HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}\n          EVENT_HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          [[ \"$CANDIDATE_HEAD_SHA\" =~ ^[0-9a-f]{{40}}$ ]] || {{ echo \"candidate PR head SHA must be 40 lowercase hex characters\" >&2; exit 1; }}\n          [[ \"$CANDIDATE_HEAD_REPOSITORY\" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || {{ echo \"candidate PR head repository must be owner/repository\" >&2; exit 1; }}\n          [[ \"$CANDIDATE_HEAD_SHA\" == \"$EVENT_HEAD_SHA\" ]] || {{ echo \"candidate SHA does not match pull_request.head.sha\" >&2; exit 1; }}\n          [[ \"$CANDIDATE_HEAD_REPOSITORY\" == \"$EVENT_HEAD_REPOSITORY\" ]] || {{ echo \"candidate repository does not match pull_request.head.repo.full_name\" >&2; exit 1; }}\n      - name: Verify Homebrew candidate runner\n        env:\n          EXPECTED_PLATFORM: ${{{{ matrix.platform.id }}}}\n          EXPECTED_RUNNER_OS: ${{{{ matrix.platform.os }}}}\n          EXPECTED_RUNNER_ARCH: ${{{{ matrix.platform.arch }}}}\n          EXPECTED_MACHINE: ${{{{ matrix.platform.machine }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          case \"$EXPECTED_PLATFORM\" in\n            macos-arm64|macos-x64|linux-x64|linux-arm64) ;;\n            *) echo \"unsupported candidate platform: $EXPECTED_PLATFORM\" >&2; exit 1 ;;\n          esac\n          actual_machine=\"$(uname -m)\"\n          [[ \"$RUNNER_OS\" == \"$EXPECTED_RUNNER_OS\" ]] || {{ echo \"runner OS mismatch: $RUNNER_OS != $EXPECTED_RUNNER_OS\" >&2; exit 1; }}\n          [[ \"$RUNNER_ARCH\" == \"$EXPECTED_RUNNER_ARCH\" ]] || {{ echo \"runner architecture mismatch: $RUNNER_ARCH != $EXPECTED_RUNNER_ARCH\" >&2; exit 1; }}\n          [[ \"$actual_machine\" == \"$EXPECTED_MACHINE\" ]] || {{ echo \"machine mismatch: $actual_machine != $EXPECTED_MACHINE\" >&2; exit 1; }}\n      - name: Checkout candidate tap head\n        uses: {0}\n        with:\n          repository: ${{{{ inputs.homebrew_preview_head_repository }}}}\n          path: .\n          ref: ${{{{ inputs.homebrew_preview_head_sha }}}}\n          persist-credentials: false\n      - name: Verify candidate checkout SHA\n        env:\n          EXPECTED_HEAD_SHA: ${{{{ inputs.homebrew_preview_head_sha }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          actual_head=\"$(git rev-parse HEAD)\"\n          [[ \"$actual_head\" == \"$EXPECTED_HEAD_SHA\" ]] || {{ echo \"candidate checkout mismatch: $actual_head != $EXPECTED_HEAD_SHA\" >&2; exit 1; }}\n      - name: Set up Homebrew candidate tap\n        shell: bash\n        run: |\n          set -euo pipefail\n          if [[ \"$RUNNER_OS\" == Linux ]]; then\n            linux_brew=/home/linuxbrew/.linuxbrew/bin/brew\n            [[ -x \"$linux_brew\" ]] || {{ echo \"Homebrew is unavailable at $linux_brew\" >&2; exit 1; }}\n            eval \"$(\"$linux_brew\" shellenv)\"\n            printf '%s\\n' \"$HOMEBREW_PREFIX/bin\" \"$HOMEBREW_PREFIX/sbin\" >> \"$GITHUB_PATH\"\n          fi\n          command -v brew\n          brew --version\n          [[ -f \"$GITHUB_WORKSPACE/Formula/$FORMULA.rb\" ]] || {{ echo \"candidate formula file is missing\" >&2; exit 1; }}\n          tap_path=\"$(brew --repository \"$TAP\")\"\n          [[ -n \"$tap_path\" ]] || {{ echo \"Homebrew returned an empty tap path\" >&2; exit 1; }}\n          if [[ -e \"$tap_path\" || -L \"$tap_path\" ]]; then\n            echo \"candidate tap path already exists: $tap_path\" >&2\n            exit 1\n          fi\n          mkdir -p \"$(dirname \"$tap_path\")\"\n          ln -s \"$GITHUB_WORKSPACE\" \"$tap_path\"\n      - name: Verify, install, and test candidate formula\n        env:\n          SERVICE_REQUIRED: ${{{{ fromJSON(inputs.homebrew_preview).service_required }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          formula_file=\"$GITHUB_WORKSPACE/Formula/$FORMULA.rb\"\n          tap_path=\"$(brew --repository \"$TAP\")\"\n          tap_formula_file=\"$tap_path/Formula/$FORMULA.rb\"\n          expected_formula_blob=\"$(git rev-parse \"HEAD:Formula/$FORMULA.rb\")\"\n          verify_candidate_formula_bytes() {{\n            [[ ! -L \"$formula_file\" && -f \"$formula_file\" ]] || {{ echo \"candidate formula path must be a regular file\" >&2; exit 1; }}\n            actual_formula_blob=\"$(git hash-object --no-filters \"$formula_file\")\"\n            [[ \"$actual_formula_blob\" == \"$expected_formula_blob\" ]] || {{ echo \"candidate formula bytes differ from checked-out Git blob\" >&2; exit 1; }}\n            brew ruby -e 'formula_file = File.expand_path(ARGV.fetch(1)); workspace = File.realpath(ARGV.fetch(2)); tap_formula_file = File.expand_path(ARGV.fetch(3)); abort \"candidate formula must not be a symlink\" if File.symlink?(formula_file); expected = File.realpath(formula_file); workspace_prefix = workspace.end_with?(File::SEPARATOR) ? workspace : workspace + File::SEPARATOR; abort \"candidate formula path escapes checkout\" unless expected.start_with?(workspace_prefix); abort \"Homebrew tap formula path does not resolve to candidate checkout\" unless File.realpath(tap_formula_file) == expected' \"$TAP/$FORMULA\" \"$formula_file\" \"$GITHUB_WORKSPACE\" \"$tap_formula_file\"\n            final_formula_blob=\"$(git hash-object --no-filters \"$formula_file\")\"\n            [[ \"$final_formula_blob\" == \"$expected_formula_blob\" ]] || {{ echo \"candidate formula bytes changed during validation\" >&2; exit 1; }}\n          }}\n          verify_candidate_formula_bytes\n          brew install --build-from-source --verbose \"$TAP/$FORMULA\"\n          verify_candidate_formula_bytes\n          brew test --verbose \"$TAP/$FORMULA\"\n          verify_candidate_formula_bytes\n          if [[ \"$SERVICE_REQUIRED\" == true ]]; then\n            verify_candidate_formula_bytes\n            brew ruby -e 'formula = Formulary.factory(ARGV.fetch(0)); abort \"candidate formula has no service declaration\" unless formula.service?' \"$TAP/$FORMULA\"\n            verify_candidate_formula_bytes\n          fi",
+            self.pins.checkout,
+            shadowed_env,
+        );
+        let _ = writeln!(
+            output,
+            "  homebrew-candidate-result:\n    name: Homebrew candidate result\n    if: ${{{{ always() && github.event_name == 'pull_request' && ({unit_gate}) }}}}\n    needs: [homebrew-candidate-install]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n    permissions:\n      contents: read\n{shadowed_result_env}    steps:\n      - name: Require every native candidate cell\n        env:\n          CANDIDATE_RESULT: ${{{{ needs.homebrew-candidate-install.result }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          if [[ \"$CANDIDATE_RESULT\" != success ]]; then\n            echo \"Homebrew candidate matrix did not succeed: $CANDIDATE_RESULT\" >&2\n            exit 1\n          fi"
+        );
     }
 
     fn contract_for(
@@ -9842,10 +9979,42 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             trusted_gate: gate.as_deref(),
             default_branch: &self.default_branch,
             declared_ruleset_contexts: &self.declared_ruleset_contexts,
+            #[cfg(test)]
             candidate_artifact_wiring: crate::candidate_artifact_wiring_enabled(
                 &self.workflow_revision,
             ),
         }));
+    }
+
+    /// YAML job key to REST display name for every caller that can publish
+    /// the candidate generator product. The policy transport resolves the
+    /// producer job's REST name through this map, so the entries must use
+    /// the same job-id and display derivation as the rendered callers, and
+    /// the same publish predicate as the collapsed callee facts.
+    pub(crate) fn candidate_publisher_profiles(
+        &self,
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+    ) -> BTreeMap<String, String> {
+        let mut profiles = BTreeMap::new();
+        for unit in &self.units {
+            let contract = self.contract_for(unit, contracts);
+            for job in &contract.providers {
+                if !provider_supports_unit(job.provider, unit) {
+                    continue;
+                }
+                if !self
+                    .unit_provider_facts(unit, &contract, job.provider)
+                    .candidate_publish
+                {
+                    continue;
+                }
+                profiles.insert(
+                    unit_job_id(job.provider, &unit.id),
+                    unit_job_display_name(unit, job.provider),
+                );
+            }
+        }
+        profiles
     }
 
     /// The trusted-event predicate every admission class shares: fork and bot

@@ -620,3 +620,60 @@ pub fn from_serde_json(value: &serde_json::Value) -> Value {
         )),
     }
 }
+
+/// Convert the lossless host/guest context tree into expression values. JSON
+/// integer representation stays exact in [`velnor_model::ContextValue`]; the
+/// evaluator uses `f64`, matching Actions' expression number semantics.
+pub fn from_context_value(value: &velnor_model::ContextValue) -> Value {
+    use velnor_model::{ContextValue, NonFinite};
+
+    match value {
+        ContextValue::Null => Value::Null,
+        // PipelineContextDataJsonConverter projects Undefined and StartConstructor
+        // nodes as JSON null before ExpressionValues sees them.
+        ContextValue::Undefined | ContextValue::Constructor { .. } => Value::Null,
+        ContextValue::Bool(value) => Value::Boolean(*value),
+        ContextValue::Number(value) => Value::Number(value.as_f64().unwrap_or(f64::NAN)),
+        ContextValue::BigInteger(value) => Value::Number(big_integer_to_f64(value)),
+        ContextValue::NonFinite(value) => Value::Number(match value {
+            NonFinite::NaN => f64::NAN,
+            NonFinite::PositiveInfinity => f64::INFINITY,
+            NonFinite::NegativeInfinity => f64::NEG_INFINITY,
+        }),
+        ContextValue::String(value) => Value::String(value.clone()),
+        ContextValue::Array(values) => Value::Array(ArrayValue::new(
+            values.iter().map(from_context_value).collect(),
+        )),
+        ContextValue::Object {
+            case_sensitive,
+            entries,
+        } => {
+            let entries = entries
+                .iter()
+                .map(|(name, value)| (name.clone(), from_context_value(value)))
+                .collect();
+            Value::Object(if *case_sensitive {
+                ObjectValue::case_sensitive(entries)
+            } else {
+                ObjectValue::new(entries)
+            })
+        }
+    }
+}
+
+fn big_integer_to_f64(value: &str) -> f64 {
+    if let Ok(number) = value.parse::<f64>() {
+        return number;
+    }
+
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        if value.starts_with('-') {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        }
+    } else {
+        f64::NAN
+    }
+}
