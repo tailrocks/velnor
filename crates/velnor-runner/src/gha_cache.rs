@@ -921,10 +921,14 @@ impl CacheService {
         let additional_files = active_files
             .saturating_add(1)
             .saturating_add(usize::from(!lease_dir.is_dir()));
+        // The lease record itself is control-plane metadata outside the
+        // tenant: like reservation claims, it is file-limited, never
+        // byte-budgeted. Only the admitted data bytes project against the
+        // entry budget.
         let (projected_bytes, projected_files) = self.evict_lru_for_capacity_locked(
             namespace,
             Some(id),
-            reserved_bytes.saturating_add(record_bytes.len() as u64),
+            reserved_bytes,
             additional_files,
             _namespace_lock,
         )?;
@@ -984,7 +988,7 @@ impl CacheService {
         if std::fs::symlink_metadata(&tenant_root).is_ok() {
             total_files = total_files.saturating_add(1);
         }
-        for directory in ["blobs", "entries", "reservations", "uploads"] {
+        for directory in ["blobs", "entries", "uploads"] {
             scan_cache_files(
                 &tenant_root.join(directory),
                 directory == "blobs",
@@ -992,6 +996,16 @@ impl CacheService {
                 &mut total_files,
             )?;
         }
+        // Reservation claims are transient control-plane metadata reaped by
+        // TTL; they count toward the file limit but must not consume the
+        // entry byte budget, or reserves would starve the uploads they claim.
+        let mut reservation_bytes = 0u64;
+        scan_cache_files(
+            &tenant_root.join("reservations"),
+            false,
+            &mut reservation_bytes,
+            &mut total_files,
+        )?;
         Ok((total_bytes, total_files))
     }
 
@@ -2245,6 +2259,7 @@ struct V2Reservation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct V2UploadBlock {
     block_id: String,
     attempt: String,
@@ -2336,13 +2351,6 @@ impl UploadAdmission {
         service.reap_stale_upload_admissions_locked(namespace)?;
         service.cleanup_json_temporary_files_locked(namespace)?;
 
-        let current_file_len = self
-            .lease_file
-            .as_ref()
-            .context("cache upload admission lease was released")?
-            .metadata()
-            .context("stat active cache admission lease")?
-            .len();
         let record = json!({
             "namespace": namespace.unwrap_or_default(),
             "id": self.id.as_str(),
@@ -2352,10 +2360,9 @@ impl UploadAdmission {
             "reservedFiles": self.reserved_files,
         });
         let record_bytes = record.to_string().into_bytes();
-        let record_growth = (record_bytes.len() as u64).saturating_sub(current_file_len);
-        let projected_delta = requested_bytes
-            .saturating_sub(self.reserved_bytes)
-            .saturating_add(record_growth);
+        // Control-plane record growth is never byte-budgeted; only the
+        // newly admitted data bytes project against the entry budget.
+        let projected_delta = requested_bytes.saturating_sub(self.reserved_bytes);
         let (projected_bytes, projected_files) = service.evict_lru_for_capacity_locked(
             namespace,
             Some(&self.id),
@@ -4198,13 +4205,18 @@ async fn lock_file_with_deadline(
 
 /// Try the same stable entry flock without waiting. Cleanup skips an entry
 /// whenever an upload, reservation recovery, or finalize currently owns it.
+///
+/// The namespace half is shared: per-entry exclusion comes from the shard,
+/// so one busy entry must not make its whole namespace look busy to a sweep.
+/// Namespace-exclusive transitions (admission, tenant GC) still wait out
+/// every shared holder.
 fn try_lock_cache_entry_at(
     cache_root: &Path,
     namespace: Option<&str>,
     id: &str,
 ) -> Result<Option<CacheEntryLock>> {
     validate_cache_id(id)?;
-    let Some(namespace_lock) = try_lock_cache_namespace_at(cache_root, namespace)? else {
+    let Some(namespace_lock) = try_lock_cache_namespace_shared_at(cache_root, namespace)? else {
         return Ok(None);
     };
     let path = cache_entry_lock_path(cache_root, namespace, id);
@@ -4244,6 +4256,21 @@ fn try_lock_cache_namespace_at(
         Ok(()) => Ok(Some(CacheNamespaceLock { _file: file })),
         Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
         Err(error) => Err(anyhow::Error::new(error).context("try-lock cache namespace")),
+    }
+}
+
+/// Shared half of [`try_lock_cache_entry_at`]: compatible with other entry
+/// holders, still fenced out by namespace-exclusive transitions.
+fn try_lock_cache_namespace_shared_at(
+    cache_root: &Path,
+    namespace: Option<&str>,
+) -> Result<Option<CacheNamespaceLock>> {
+    let path = cache_namespace_lock_path(cache_root, namespace);
+    let file = open_cache_entry_lock(&path)?;
+    match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockShared) {
+        Ok(()) => Ok(Some(CacheNamespaceLock { _file: file })),
+        Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
+        Err(error) => Err(anyhow::Error::new(error).context("try-lock cache namespace shared")),
     }
 }
 
@@ -4373,8 +4400,14 @@ fn reservation_record_is_expired(value: &Value, id: &str, modified_ms: u64, now_
                 v2_reservation_is_expired(&reservation, now_ms)
             }),
         None => {
+            // Every persist bumps both the content clock and the file
+            // mtime, so in production they agree. Either one stale means
+            // no live writer refreshed the claim: expire on the older.
             let record_updated_ms = if parse_v1_reservation(value.clone(), id).is_ok() {
-                value["updatedMs"].as_u64().unwrap_or(modified_ms)
+                value["updatedMs"]
+                    .as_u64()
+                    .map(|updated_ms| updated_ms.min(modified_ms))
+                    .unwrap_or(modified_ms)
             } else {
                 modified_ms
             };
@@ -4686,6 +4719,12 @@ fn parse_v1_reservation(value: Value, id: &str) -> Result<V1Reservation> {
     let version = value["version"]
         .as_str()
         .context("v1 cache reservation has no version")?;
+    // Identity first: a reservation for another key never reaches field
+    // validation, so a mismatched binding reports the id mismatch rather
+    // than whichever newer field the foreign record lacks.
+    if entry_hash(key, version) != id {
+        anyhow::bail!("v1 cache reservation does not match cache id");
+    }
     let cache_id = value["cacheId"]
         .as_u64()
         .context("v1 cache reservation has no valid cacheId")?;
@@ -4748,9 +4787,6 @@ fn parse_v1_reservation(value: Value, id: &str) -> Result<V1Reservation> {
         Some(_) => anyhow::bail!("v1 cache reservation has an invalid commit attempt"),
     };
     let active_uploads = parse_attempt_list(&value, "activeUploads")?;
-    if entry_hash(key, version) != id {
-        anyhow::bail!("v1 cache reservation does not match cache id");
-    }
     Ok(V1Reservation {
         key: key.to_owned(),
         version: version.to_owned(),
@@ -5903,11 +5939,48 @@ fn prune_stale_sessions(sessions: &Path, now: std::time::SystemTime) {
 }
 
 impl CacheService {
-    /// Resolve a request token without creating fallback marker or tenant
-    /// state. A valid write later refreshes its fallback marker only after
-    /// request syntax has been checked; isolated reads and misses stay inert.
+    /// Resolve a request token to its lookup chain: the registered identity
+    /// namespaces, or the isolated per-token namespace plus one forensic
+    /// line when the session is missing or invalid. Never empty.
     fn resolve_namespaces(&self, token: &str) -> Vec<String> {
-        resolve_job_cache_namespaces(&self.root, token)
+        let token_hash = cache_namespace(token);
+        if let Some(session) = read_session(&self.root, &token_hash) {
+            return session.identity.namespaces();
+        }
+        self.note_isolated_fallback(&token_hash);
+        vec![token_hash]
+    }
+
+    /// Record that a token fell back to its isolated namespace. Exactly once
+    /// per token: the marker file is the dedupe state, durable across
+    /// restarts so a restarted daemon does not re-log live jobs. Strictly
+    /// additive — it never fails the request — and the line names only the
+    /// token hash, never the token.
+    fn note_isolated_fallback(&self, token_hash: &str) {
+        let sessions = self.root.join("sessions");
+        if std::fs::create_dir_all(&sessions).is_err() {
+            return;
+        }
+        let noted = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(sessions.join(format!("{token_hash}.isolated")))
+            .is_ok();
+        if !noted {
+            return;
+        }
+        let message = format!(
+            "gha-cache isolated fallback: no job session for token hash {token_hash}; serving per-token namespace"
+        );
+        match &self.forensic_log_dir {
+            Some(dir) => crate::slot_log::append_log_line(
+                dir,
+                crate::slot_log::DAEMON_LOG,
+                &format!("gha-cache pid={}", std::process::id()),
+                &message,
+            ),
+            None => eprintln!("Warning: {message}"),
+        }
     }
 }
 
@@ -6001,13 +6074,7 @@ where
         };
         (vec![namespace], vec![activity])
     } else {
-        let token = req
-            .headers()
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .filter(|token| !token.is_empty())
-            .map(ToOwned::to_owned);
+        let token = request_bearer_token(&req);
         let Some(token) = token else {
             return Ok(respond_unauthorized());
         };
@@ -6510,13 +6577,15 @@ where
         .tenant_root(Some(namespace))
         .join("reservations/by-id");
     let new_files = 2 + usize::from(!index_directory.is_dir());
-    let metadata_bytes = u64::try_from(key.len().saturating_add(version.len()).saturating_add(512))
-        .context("v1 reservation metadata size overflow")?;
+    // The claim itself is control-plane metadata: enforce the file limit so
+    // reserves cannot proliferate unboundedly, but do not charge its bytes
+    // against the entry budget — the budget polices uploaded data, and a
+    // reservation must remain attainable no matter how full the cache is.
     ctx.service.ensure_namespace_capacity_locked(
         Some(namespace),
         new_files,
         CACHE_ADMISSION_TRANSITION_HEADROOM,
-        metadata_bytes,
+        0,
         _lock.namespace_guard(),
     )?;
     let cache_id = allocate_v1_cache_id(&ctx.service, namespace, &hash)?;
@@ -6594,12 +6663,13 @@ where
         updated_ms: now_unix_millis()?,
     };
     let reservation_record = reservation.as_json();
-    let reservation_bytes = reservation_record.to_string().len() as u64;
+    // Control-plane metadata like the v1 claim: file-limited, never
+    // byte-budgeted, so a reserve stays attainable in a full cache.
     ctx.service.ensure_namespace_capacity_locked(
         Some(namespace),
         1,
         CACHE_ADMISSION_TRANSITION_HEADROOM,
-        reservation_bytes,
+        0,
         _lock.namespace_guard(),
     )?;
     if !atomically_create_json(
@@ -8704,7 +8774,10 @@ where
         if ctx.service.entry_path(id, Some(namespace)).exists() {
             anyhow::bail!("v2 cache entry already exists");
         }
-        remove_unpublished_cache_blob(&ctx.service, id, namespace)?;
+        // Do not clear a previously published blob here: publication refuses
+        // to overwrite different bytes, so a replayed upload with identical
+        // bytes stays idempotent while the same claim can never replace its
+        // blob. Crash recovery replays identical bytes; finalization commits.
         if let Some(previous_attempt) = reservation.assembly_scratch_attempt.take() {
             release_global_assembly_scratch(
                 &ctx.service.root,
@@ -9458,10 +9531,9 @@ where
         actual_size = actual_size
             .checked_add(frame_size)
             .context("cache upload size overflow")?;
-        if declared_size.is_some_and(|size| actual_size > size) {
-            return Err(anyhow::Error::new(CacheBadRequest)
-                .context("actual cache upload size exceeds declared Content-Length"));
-        }
+        // Declared-size mismatches are reported once at end of stream
+        // ("declared {n}, received {m}"); only the reservation and the
+        // absolute budget abort mid-stream.
         if expected_size.is_some_and(|size| actual_size > size) {
             return Err(anyhow::Error::new(CacheBadRequest)
                 .context("actual cache upload size exceeds expected cache size"));
@@ -9920,17 +9992,40 @@ fn lookup_v1<B>(req: &Request<B>, ctx: &Ctx, namespaces: &[&str]) -> Result<Opti
     // scope rules describe (current branch fully, then the fallback branch).
     for namespace in namespaces {
         if let Some(hit) = ctx.service.lookup(&keys, &version, Some(namespace))? {
-            let capability = ctx
-                .service
-                .create_read_capability(namespace, &hit.hash, 1)?;
+            // The route requires a Bearer [REDACTED] before lookup runs, so production
+            // hits always carry a signed download URL. Without caller auth
+            // there is no authenticated download to authorize: return the
+            // plain public URL instead of minting a capability.
+            let archive_location = match request_bearer_token(req) {
+                Some(_) => {
+                    let capability = ctx
+                        .service
+                        .create_read_capability(namespace, &hit.hash, 1)?;
+                    format!(
+                        "{}/_results/download/{}?sig={capability}",
+                        ctx.public_base, hit.hash
+                    )
+                }
+                None => format!("{}/_results/download/{}", ctx.public_base, hit.hash),
+            };
             return Ok(Some(json!({
-                "archiveLocation": format!("{}/_results/download/{}?sig={capability}", ctx.public_base, hit.hash),
+                "archiveLocation": archive_location,
                 "cacheKey": hit.key,
                 "cacheVersion": version,
             })));
         }
     }
     Ok(None)
+}
+
+/// Caller Bearer [REDACTED] on an ordinary (non-capability) route, if present.
+fn request_bearer_token<B>(req: &Request<B>) -> Option<String> {
+    req.headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .filter(|token| !token.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 async fn lookup_v2<B>(req: Request<B>, ctx: &mut Ctx, namespaces: &[&str]) -> Result<Value>
@@ -10741,17 +10836,10 @@ mod tests {
 
         let first_id = entry_hash("admission-a", "v1");
         let first_attempt = "00112233445566778899aabbccddeeff";
-        let record_bytes = json!({
-            "namespace": "tenant-a",
-            "id": first_id.as_str(),
-            "attempt": first_attempt,
-            "reservedBytes": 124,
-            "scratchBytes": 0,
-            "reservedFiles": 1,
-        })
-        .to_string()
-        .len() as u64;
-        service.budget_bytes = 900 + 124 + record_bytes;
+        // Data-only accounting: reservation and lease records do not consume
+        // the byte budget (file limits still apply), so the boundary is the
+        // exact staged-bytes-plus-declared total.
+        service.budget_bytes = 900 + 124;
         let too_large = service
             .try_admit_upload(
                 Some("tenant-a"),
@@ -11863,6 +11951,7 @@ mod tests {
     async fn generic_size_gc_skips_fallback_bearer_activity_without_scope_lease() {
         let dir = tempfile_dir();
         let layout = crate::storage::StorageLayout::from_prefix(&dir.path().join("storage"));
+        std::fs::create_dir_all(layout.lib_root.join("work")).unwrap();
         let service = test_service(&crate::store_catalog::gha_cache_root(&layout));
         let token = "active-fallback-bearer-gc-token";
         let namespace = job_cache_fallback_namespace(token);
@@ -14422,10 +14511,13 @@ mod tests {
             .unwrap();
         let id = entry_hash(key, version);
         let attempt = uuid::Uuid::new_v4().simple().to_string();
+        let namespace = cache_namespace("client-fixture-token");
         let mut temp = {
-            let _lock = lock_cache_entry(&ctx.service, &id, "tenant").await.unwrap();
-            let temp = create_upload_temp(&ctx.service, &id, Some("tenant"), &attempt).unwrap();
-            begin_v2_upload_attempt(&ctx.service, &id, "tenant", &nonce, &attempt).unwrap();
+            let _lock = lock_cache_entry(&ctx.service, &id, &namespace)
+                .await
+                .unwrap();
+            let temp = create_upload_temp(&ctx.service, &id, Some(&namespace), &attempt).unwrap();
+            begin_v2_upload_attempt(&ctx.service, &id, &namespace, &nonce, &attempt).unwrap();
             temp
         };
         let temp_path = temp.path.clone();
@@ -14434,7 +14526,7 @@ mod tests {
         temp.writer.sync_all().await.unwrap();
         let blob_path = ctx
             .service
-            .tenant_root(Some("tenant"))
+            .tenant_root(Some(&namespace))
             .join("blobs")
             .join(&id);
         std::fs::hard_link(&temp_path, &blob_path).unwrap();
@@ -14455,7 +14547,7 @@ mod tests {
             temp_path.exists(),
             "a live temp lease must remain untouched"
         );
-        assert!(ctx.service.reservation_path(&id, Some("tenant")).exists());
+        assert!(ctx.service.reservation_path(&id, Some(&namespace)).exists());
 
         // Model a crash after canonical blob publication: the lease unlocks,
         // while both hard links and the active marker remain on disk.
@@ -14472,7 +14564,7 @@ mod tests {
         let retry = finalize_v2(
             post_v2(json!({"key": key, "version": version, "size_bytes": 3})),
             &ctx,
-            "tenant",
+            &namespace,
         )
         .await
         .unwrap();

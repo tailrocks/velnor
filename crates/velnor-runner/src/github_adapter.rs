@@ -474,6 +474,11 @@ fn job_container_image(job: &AgentJobRequestMessage) -> anyhow::Result<Option<St
     let Some(container) = expanded_job_container(job)? else {
         return Ok(None);
     };
+    if matches!(container, ContextValue::Object { .. })
+        && exact_object_member(&container, "image").is_none()
+    {
+        return Ok(None);
+    }
     container_image(&container)
 }
 
@@ -481,7 +486,12 @@ fn job_container_env(job: &AgentJobRequestMessage) -> anyhow::Result<Vec<(String
     let Some(container) = expanded_job_container(job)? else {
         return Ok(Vec::new());
     };
-    container_env(&container)
+    // The job container's env merges under the authoritative job env and is
+    // name-sorted (serde_json::Map iteration order on main); service env and
+    // the shared reader keep template order.
+    let mut env = container_env(&container)?;
+    env.sort();
+    Ok(env)
 }
 
 fn expanded_job_container(job: &AgentJobRequestMessage) -> anyhow::Result<Option<ContextValue>> {
@@ -632,7 +642,7 @@ fn service_containers(
             anyhow::bail!("job service container aliases must be non-empty strings");
         }
         validate_container_schema(container, ContainerSchema::Service)
-            .with_context(|| format!("service container {alias:?}"))?;
+            .map_err(|error| anyhow::anyhow!("service container {alias:?}: {error:#}"))?;
         let image = container_image(container)?;
         let env = container_env(container)?;
         // Validate every workflow-schema field even if an empty image means
@@ -1084,6 +1094,15 @@ fn filter_privileged_container_options(
     let mut index = 0;
     while index < options.len() {
         let option = options[index].as_str();
+        if !option.starts_with('-') {
+            // A bare token reached directly — not consumed as a dropped
+            // flag's value — carries no option semantics (scalar-stringified
+            // workflow options such as `23` arrive this way). Only flag-shaped
+            // tokens are subject to the allowlist.
+            filtered.push(options[index].clone());
+            index += 1;
+            continue;
+        }
         let name = option.split_once('=').map_or(option, |(name, _)| name);
         if safe_container_option(name) {
             if container_option_takes_value(name) && !option.contains('=') {

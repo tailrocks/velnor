@@ -412,6 +412,10 @@ impl<'a> ClrJsonParser<'a> {
                 values.push(OrderedJsonValue::Undefined);
                 self.skip_ignored()?;
                 if self.consume_byte(b']') {
+                    // `,]` after a hole closes the elision's own empty slot
+                    // too: `[,]` is two holes, not one. A trailing comma
+                    // after a value stays a terminator (handled below).
+                    values.push(OrderedJsonValue::Undefined);
                     return Ok(OrderedJsonValue::Array(values));
                 }
                 continue;
@@ -447,6 +451,9 @@ impl<'a> ClrJsonParser<'a> {
                 arguments.push(OrderedJsonValue::Undefined);
                 self.skip_ignored()?;
                 if self.consume_byte(b')') {
+                    // Same elision rule as arrays: `,)` after a hole closes
+                    // the elision's own empty slot too.
+                    arguments.push(OrderedJsonValue::Undefined);
                     return Ok(OrderedJsonValue::Constructor { name, arguments });
                 }
                 continue;

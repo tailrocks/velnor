@@ -331,6 +331,11 @@ const AUTHORIZATION_FIELDS: &[Member] = &[
 const REPOSITORY_FIELDS: &[Member] = &[
     member!("Alias", Shape::String),
     member!("Endpoint", Shape::Object(SERVICE_ENDPOINT_REFERENCE_FIELDS)),
+    // Flat shorthand members (main accepted them alongside Properties).
+    member!("Name", Shape::String),
+    member!("Ref", Shape::String),
+    member!("Version", Shape::String),
+    member!("Url", Shape::String),
     // This property bag permits arbitrary JToken values.
     member!("Properties", Shape::UniqueRawMap),
 ];
@@ -1189,6 +1194,14 @@ fn normalize_template_token(value: &mut Value) -> Result<()> {
         *value = Value::Null;
         return Ok(());
     }
+    if let Value::Object(object) = value
+        && clr_object_member(object, "type").is_none()
+    {
+        // A discriminator-less object is a plain map (step inputs and
+        // environments arrive this way): pass it through untouched instead
+        // of forcing string-token shape, which would drop every member.
+        return Ok(());
+    }
     let Some(kind) = template_token_type(value)? else {
         *value = Value::Null;
         return Ok(());
@@ -1588,9 +1601,28 @@ fn normalize_step_array(value: &mut Value) -> Result<()> {
             .iter()
             .find(|(name, _)| clr_ordinal_ignore_case_eq(name, "type"))
             .map(|(_, value)| value);
-        let Some(kind) = step_type.and_then(step_kind_from_value) else {
-            *item = Value::Null;
-            continue;
+        // The discriminator rules when the wire sends one: an explicit but
+        // unrecognizable type is not a step. When it is absent, an actionable
+        // reference still describes an ordinary action (main never required
+        // the discriminator); a contentless object is not a step either.
+        let kind = match step_type {
+            Some(value) => match step_kind_from_value(value) {
+                Some(kind) => kind,
+                None => {
+                    *item = Value::Null;
+                    continue;
+                }
+            },
+            None => {
+                let actionable = object.iter().any(|(name, value)| {
+                    clr_ordinal_ignore_case_eq(name, "reference") && !value.is_null()
+                });
+                if !actionable {
+                    *item = Value::Null;
+                    continue;
+                }
+                ActionStepKind::Action
+            }
         };
         normalize_clr_members(
             item,
@@ -2819,6 +2851,19 @@ impl OrderedJsonValueExt for OrderedJsonValue {
 
     fn into_clr_template_token_with_existing(self, existing: Option<Value>) -> Result<Value> {
         let value = self.collapse_exact_properties();
+        let has_discriminator = match &value {
+            Self::Object(entries) => ordered_member(entries, "type").is_some(),
+            _ => true,
+        };
+        if !has_discriminator {
+            // A discriminator-less object is a plain map (step inputs and
+            // environments arrive this way): pass it through untouched
+            // instead of forcing string-token shape, which would drop
+            // every member. A plain map replaces any aliased existing
+            // value; token-shaped duplicates keep existing below.
+            let _ = existing;
+            return value.into_value();
+        }
         let Self::Object(entries) = &value else {
             return match value {
                 Self::Number(number) => match number.kind {
@@ -3291,11 +3336,16 @@ fn string_token_literal(value: &Value) -> Option<String> {
         return None;
     };
     match template_token_type(value).ok().flatten()? {
-        0 => Some(
-            clr_object_member(object, "lit")
-                .and_then(|value| clr_string_value(value).ok().flatten())
-                .unwrap_or_default(),
-        ),
+        0 => {
+            if clr_object_member(object, "type").is_none() {
+                return None;
+            }
+            Some(
+                clr_object_member(object, "lit")
+                    .and_then(|value| clr_string_value(value).ok().flatten())
+                    .unwrap_or_default(),
+            )
+        }
         _ => None,
     }
 }
@@ -3902,6 +3952,16 @@ pub struct RepositoryResource {
     pub alias: Option<String>,
     #[serde(default, rename = "Endpoint", alias = "endpoint")]
     pub endpoint: Option<Value>,
+    // Flat shorthand members (main accepted them alongside Properties;
+    // consumers prefer the Properties bag and fall back to these).
+    #[serde(default, rename = "Name", alias = "name")]
+    pub name: Option<String>,
+    #[serde(default, rename = "Ref", alias = "ref")]
+    pub git_ref: Option<String>,
+    #[serde(default, rename = "Version", alias = "version")]
+    pub version: Option<String>,
+    #[serde(default, rename = "Url", alias = "url")]
+    pub url: Option<String>,
     #[serde(
         default = "empty_resource_properties",
         rename = "Properties",
@@ -4126,7 +4186,11 @@ impl ActionStep {
     }
 
     pub fn step_kind(&self) -> Option<ActionStepKind> {
-        self.kind
+        // A step without an explicit discriminator is an ordinary action
+        // (main had no kind gate at all). The `kind` field keeps the wire
+        // truth; behavior defaults here so direct deserializations and
+        // reference-bearing shorthand steps all execute as actions.
+        Some(self.kind.unwrap_or(ActionStepKind::Action))
     }
 }
 
