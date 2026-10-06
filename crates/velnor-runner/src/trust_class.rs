@@ -14,9 +14,9 @@
 //! Derivation rules:
 //!
 //! * A missing, empty, or malformed event signal fails closed to
-//!   [`TrustClass::Unknown`]: no event name, no base repository, no plan
-//!   reference (scope identifier on V1 orchestration messages, plan id on V2
-//!   broker messages), no head repository on a pull-request or `workflow_run`
+//!   [`TrustClass::Unknown`]: no event name, no base repository, no plan id
+//!   (required on both V1 orchestration and V2 broker messages), no head
+//!   repository on a pull-request or `workflow_run`
 //!   event, an unparseable event payload, repository numeric ids that
 //!   contradict equal full names, or a repository resource that contradicts
 //!   the base repository.
@@ -326,21 +326,17 @@ fn base_repository<'a>(
     normalize_full_name(raw)
 }
 
-/// The plan scope identifier must be present and non-blank. It carries no
-/// trust content of its own; it proves the message is structurally complete
-/// enough to bind the job to its collection scope.
+/// The plan id must be present and non-blank. It carries no trust content
+/// of its own; it proves the message is structurally complete enough to bind
+/// the job to its collection scope.
 fn plan_scope_present(job: &AgentJobRequestMessage) -> bool {
-    // V1 orchestration messages carry a `ScopeIdentifier` GUID alongside the
-    // plan id; V2 broker messages carry only the plan id (`Version: 0`,
-    // `ScopeIdentifier` absent). Requiring the scope alone classified every
-    // real V2 job as `TrustClass::Unknown`, so the whole estate ran under the
-    // untrusted floor. The plan reference is complete when either identity is
-    // present; a message with neither is not a real plan and stays fail-closed.
-    job.plan
-        .scope_identifier
-        .as_deref()
-        .is_some_and(|scope| !scope.trim().is_empty())
-        || !job.plan.plan_id.trim().is_empty()
+    // The plan id is the required plan reference on both wire shapes: V1
+    // orchestration messages carry it alongside a `ScopeIdentifier` GUID, V2
+    // broker messages carry only the plan id (`Version: 0`,
+    // `ScopeIdentifier` absent). The scope identifier corroborates but never
+    // suffices alone: a message with no plan id is not a real plan and stays
+    // fail-closed.
+    !job.plan.plan_id.trim().is_empty()
 }
 
 /// `owner/repo` with both sides non-empty and no inner whitespace, trimmed.
@@ -477,8 +473,9 @@ fn json_id(value: &ContextValue) -> Option<String> {
 }
 
 /// Whether the self repository resource contradicts the base repository. The
-/// resource block is what the runner actually clones, so its typed `url`
-/// property must name the same repository and server as the event claims.
+/// resource block is what the runner actually clones, so its typed clone URL
+/// property (`url`, or the orchestration spelling `cloneUrl`) must name the
+/// same repository and server as the event claims.
 /// Repository identity itself comes from `github.repository`; the upstream
 /// RepositoryResource has no wire `name` member. An absent resource block is
 /// no contradiction: checkout hydrates it from the same `github.*` signals
@@ -496,7 +493,13 @@ fn repository_resources_contradict(
     let Some(self_repo) = self_repo else {
         return false;
     };
-    let url = match self_repo.property_value("url") {
+    // The clone URL property key differs by producer: orchestration
+    // messages carry `cloneUrl`, broker messages carry `url`. Accept either
+    // spelling; both name the repository the runner actually clones.
+    let url = match self_repo
+        .property_value("url")
+        .or_else(|| self_repo.property_value("cloneUrl"))
+    {
         None | Some(ContextValue::Null) => return true,
         Some(ContextValue::String(url)) => url,
         // The typed upstream getter is Uri; structured and other non-string
