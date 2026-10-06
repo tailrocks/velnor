@@ -9714,6 +9714,11 @@ impl DockerLeaseGuard {
     /// resolved local Docker daemon socket. A Docker VM path, when needed, is
     /// only used by the container bind mount; it must never be passed here as
     /// the listener path.
+    ///
+    /// Production only: unit tests bind through
+    /// `bind_to_with_test_volume_lock_root`, which scopes volume locks under
+    /// a fixture temp root instead of the process-global storage layout.
+    #[cfg(not(test))]
     pub fn bind(listen_path: PathBuf, job_id: String, daemon_id: String) -> Result<Self> {
         let host_socket = crate::docker::engine::resolve_docker_endpoint()
             .context("resolve Docker endpoint for job lease")?

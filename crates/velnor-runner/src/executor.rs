@@ -7461,14 +7461,39 @@ where
         {
             container.validate_docker_host_path_mapping()?;
             let lease_paths = container.docker_lease_paths()?;
-            self.docker_lease = Some(crate::docker_lease::DockerLeaseGuard::bind(
-                // The runner owns the listener on its host-visible path.
-                // Docker gets the separately mapped daemon-visible source in
-                // the job container's -v argument.
-                lease_paths.host_visible,
-                container.name.clone(),
-                container.daemon_id.clone(),
-            )?);
+            #[cfg(test)]
+            {
+                // Unit tests never select the process-global storage layout
+                // that production lease binding derives its volume-lock root
+                // from; scope test locks under this attempt's temp root so
+                // lease binding is deterministic under any test order.
+                let host_socket = crate::docker::engine::resolve_docker_endpoint()
+                    .context("resolve Docker endpoint for test job lease")?
+                    .socket;
+                self.docker_lease = Some(
+                    crate::docker_lease::DockerLeaseGuard::bind_to_with_test_volume_lock_root(
+                        // The runner owns the listener on its host-visible path.
+                        // Docker gets the separately mapped daemon-visible source in
+                        // the job container's -v argument.
+                        lease_paths.host_visible,
+                        host_socket,
+                        container.name.clone(),
+                        container.daemon_id.clone(),
+                        container.temp_host.join("_velnor-test-host-volume-locks"),
+                    )?,
+                );
+            }
+            #[cfg(not(test))]
+            {
+                self.docker_lease = Some(crate::docker_lease::DockerLeaseGuard::bind(
+                    // The runner owns the listener on its host-visible path.
+                    // Docker gets the separately mapped daemon-visible source in
+                    // the job container's -v argument.
+                    lease_paths.host_visible,
+                    container.name.clone(),
+                    container.daemon_id.clone(),
+                )?);
+            }
         }
         // Hold the host-wide Docker permit only for state-changing Engine
         // calls. Readiness polling below can take up to 30s and does not

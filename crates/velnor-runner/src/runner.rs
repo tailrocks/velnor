@@ -35401,6 +35401,7 @@ runs:
         fs::create_dir_all(&root).unwrap();
         let (socket_dir, listen) = short_lease_socket("drop");
         let listen_for_starter = listen.clone();
+        let volume_lock_root = root.join("volume-locks");
         // Unique object names: Drop runs a real (best-effort, docker-CLI)
         // cleanup, which must never target objects of anything else.
         let mut spec = lease_test_container_spec(&root);
@@ -35409,12 +35410,15 @@ runs:
         {
             let _environment = PrecreatedJobEnvironment::spawn_with(spec, move |_container| {
                 Ok(JobEnvironmentGuards {
-                    docker_lease: Some(crate::docker_lease::DockerLeaseGuard::bind_to(
-                        listen_for_starter,
-                        PathBuf::from("/nonexistent-host-docker.sock"),
-                        "job".into(),
-                        "daemon".into(),
-                    )?),
+                    docker_lease: Some(
+                        crate::docker_lease::DockerLeaseGuard::bind_to_with_test_volume_lock_root(
+                            listen_for_starter,
+                            PathBuf::from("/nonexistent-host-docker.sock"),
+                            "job".into(),
+                            "daemon".into(),
+                            volume_lock_root,
+                        )?,
+                    ),
                     job_network: None,
                     docker_objects: crate::docker_lease::DockerObjectIds::default(),
                 })
