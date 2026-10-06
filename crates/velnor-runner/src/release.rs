@@ -87,6 +87,34 @@ const PACKAGE_TRANSACTION_LOCK: &str = "/run/velnor/package-transaction.lock";
 const DEBIAN_PACKAGE_NAME: &str = "velnor-runner";
 
 static EXTERNAL_OUTPUT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+/// Package channels and embedded build kinds use different vocabularies:
+/// a tagged `release` build emits a `stable` package, while a `preview`
+/// build emits a `preview` package. Keep that conversion at one boundary.
+#[derive(Clone, Copy)]
+enum PackageKind {
+    Stable,
+    Preview,
+}
+
+impl PackageKind {
+    fn from_identity(identity: &EmbeddedIdentity) -> Option<Self> {
+        if identity.source_sha == "development" {
+            return None;
+        }
+        match identity.kind.as_str() {
+            "release" => Some(Self::Stable),
+            "preview" => Some(Self::Preview),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => PACKAGE_KIND_STABLE,
+            Self::Preview => PACKAGE_KIND_PREVIEW,
+        }
+    }
+}
 
 /// Canonical source repository the release chain is anchored to.
 pub const SOURCE_REPOSITORY: &str = "tailrocks/velnor";
@@ -387,7 +415,8 @@ pub struct PackageRecord {
 pub struct PackageBuildIdentity {
     pub repository: String,
     /// [`PACKAGE_KIND_STABLE`] or [`PACKAGE_KIND_PREVIEW`]. Emission refuses a
-    /// record whose kind is not the emitting binary's own embedded build kind.
+    /// record whose channel does not match the emitting binary's build kind:
+    /// `release` builds emit `stable` packages; `preview` builds emit previews.
     pub kind: String,
     pub commit: SourceSha,
     pub crate_version: String,
@@ -1450,8 +1479,8 @@ pub struct PackageRecordEmission<'a> {
     pub binary: &'a Path,
 }
 
-/// Emit a deb's own package record. The record's `kind` must be the emitting
-/// binary's own embedded build kind: a preview record only ever comes from a
+/// Emit a deb's own package record. Its channel must correspond to the emitting
+/// binary's build kind: a preview record only ever comes from a
 /// binary bound to the exact preview commit (`VELNOR_PREVIEW_SOURCE_SHA`), a
 /// stable package record only from a tagged `release-build` binary. A
 /// development binary emits nothing, so no package record can be produced from
@@ -1466,17 +1495,15 @@ pub fn emit_package_record(emission: PackageRecordEmission<'_>) -> Result<()> {
     // build is deliberately not a release build), but never from a development
     // build, whose bytes name no source at all. This is strictly weaker than
     // [`EmbeddedIdentity::is_development`] only in allowing kind=preview.
-    if identity.source_sha == "development"
-        || (identity.kind != "release" && identity.kind != PACKAGE_KIND_PREVIEW)
-    {
+    let Some(package_kind) = PackageKind::from_identity(identity) else {
         bail!(
             "refusing to emit a package record from a development build \
              (source={}, kind={}); build with --features release-build",
             identity.source_sha,
             identity.kind
         );
-    }
-    if record.build.kind != identity.kind {
+    };
+    if record.build.kind != package_kind.as_str() {
         bail!(
             "package record kind {} does not match this binary's embedded build kind {}",
             record.build.kind,
