@@ -4664,8 +4664,8 @@ mod tests {
         let work = root.join("work");
         let layout = crate::storage::StorageLayout::from_prefix(&root);
         let trust_key = crate::trust_scope::filesystem_key("trusted");
-        let actions_cache = StoreCatalog::for_work_root_with_layout(&work, &layout)
-            .actions_cache("trusted");
+        let actions_cache =
+            StoreCatalog::for_work_root_with_layout(&work, &layout).actions_cache("trusted");
         let active = actions_cache.join("active/key");
         let first = actions_cache.join("first/key");
         let second = actions_cache.join("second/key");
