@@ -980,6 +980,31 @@ pub struct Unit {
     /// carry the contract.
     #[serde(skip_serializing)]
     pub(crate) prepared_tools: Vec<PreparedToolNeed>,
+    /// Native candidate formula install/test configuration. Generation-only:
+    /// pinned Planning runtimes never receive this future field.
+    #[serde(skip_serializing)]
+    pub(crate) homebrew_preview: Option<HomebrewPreview>,
+}
+
+/// Closed native-platform Homebrew candidate check compiled into the
+/// Homebrew reusable workflow and caller input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HomebrewPreview {
+    pub(crate) tap: String,
+    pub(crate) formula: String,
+    pub(crate) service_required: bool,
+}
+
+impl HomebrewPreview {
+    /// The one JSON workflow input consumed by the candidate matrix job.
+    pub(crate) fn workflow_input(&self) -> String {
+        serde_json::json!({
+            "tap": self.tap,
+            "formula": self.formula,
+            "service_required": self.service_required,
+        })
+        .to_string()
+    }
 }
 
 /// A validated repository-local Docker build context.
@@ -3616,9 +3641,15 @@ fn apply_unit_row(
     let Some(id) = row.id() else {
         return Ok(());
     };
+    let homebrew_preview = row.validated_homebrew_preview(id, &config.repository)?;
     let existing = config.units.iter_mut().find(|unit| unit.id == id);
     let Some(unit) = existing else {
         let Some(kind) = row.kind().and_then(UnitKind::from_prefix) else {
+            if homebrew_preview.is_some() {
+                return Err(GeneratorError::usage(format!(
+                    "[[units]] {id} homebrew_preview requires `kind = \"homebrew\"` when adding a unit"
+                )));
+            }
             if !row.docker_contexts().is_empty() {
                 return Err(GeneratorError::usage(format!(
                     "[[units.docker_contexts]] {id} requires `kind = \"docker\"` when adding a unit"
@@ -3629,6 +3660,11 @@ fn apply_unit_row(
         if !row.docker_contexts().is_empty() && kind != UnitKind::Docker {
             return Err(GeneratorError::usage(format!(
                 "[[units.docker_contexts]] {id} applies to a non-Docker unit"
+            )));
+        }
+        if homebrew_preview.is_some() && kind != UnitKind::Homebrew {
+            return Err(GeneratorError::usage(format!(
+                "[[units]] {id} homebrew_preview applies only to a Homebrew unit"
             )));
         }
         let products = row.named_products(id)?;
@@ -3715,6 +3751,7 @@ fn apply_unit_row(
             env,
             mbx: row.mbx(),
             prepared_tools: Vec::new(),
+            homebrew_preview,
         });
         return Ok(());
     };
@@ -3723,6 +3760,14 @@ fn apply_unit_row(
     }
     if let Some(kind) = row.kind().and_then(UnitKind::from_prefix) {
         unit.kind = kind;
+    }
+    if let Some(preview) = homebrew_preview {
+        if unit.kind != UnitKind::Homebrew {
+            return Err(GeneratorError::usage(format!(
+                "[[units]] {id} homebrew_preview applies only to a Homebrew unit"
+            )));
+        }
+        unit.homebrew_preview = Some(preview);
     }
     // After the kind arm, so a row that flips the kind judges membership
     // against the final kind. The declared channel replaces the whole pin:
@@ -13989,6 +14034,7 @@ mod tests {
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         };
         let mut config = ProjectConfig {
             units: vec![
@@ -17215,6 +17261,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         });
         config.units.push(Unit {
             xcode: None,
@@ -17246,6 +17293,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         });
         config.units.push(Unit {
             xcode: None,
@@ -17277,6 +17325,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         });
         let ir = WorkflowIr::from_config(&config);
         let facts = |id: &str| {
@@ -17662,6 +17711,7 @@ channel = "stable"
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         };
         let validate = |unit: Unit| {
             validate_unit_phases(&ProjectConfig {
@@ -22067,6 +22117,7 @@ lockfile = true
                 env: std::collections::BTreeMap::new(),
                 mbx: None,
                 prepared_tools: Vec::new(),
+                homebrew_preview: None,
             };
             if kind == UnitKind::Swift {
                 unit.platform = provider::Platform::MacosArm64;
@@ -22159,6 +22210,7 @@ lockfile = true
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         };
         let config = ProjectConfig {
             repository: String::new(),
@@ -24415,6 +24467,7 @@ lockfile = true
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         });
         let kind = must_some(
             must(
@@ -24752,6 +24805,7 @@ lockfile = true
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         });
         let ir = WorkflowIr::from_config(&config);
         let rust = must_some(
@@ -24881,6 +24935,7 @@ lockfile = true
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         });
         let ir = WorkflowIr::from_config(&config);
         let kind = must_some(
@@ -24990,6 +25045,7 @@ lockfile = true
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         };
         let independent = Unit {
             root: "crates/contract".to_owned(),
@@ -25095,6 +25151,7 @@ lockfile = true
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         };
         let config = ProjectConfig {
             providers: std::collections::BTreeSet::from([crate::s2::provider::ProviderId::Velnor]),
@@ -25203,6 +25260,7 @@ lockfile = true
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         };
         let config = ProjectConfig {
             providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
@@ -25366,6 +25424,7 @@ lockfile = true
                     env: std::collections::BTreeMap::new(),
                     mbx: None,
                     prepared_tools: Vec::new(),
+                    homebrew_preview: None,
                 },
                 Unit {
                     xcode: None,
@@ -25397,6 +25456,7 @@ lockfile = true
                     env: std::collections::BTreeMap::new(),
                     mbx: None,
                     prepared_tools: Vec::new(),
+                    homebrew_preview: None,
                 },
             ],
             ..header_fixture_config()
@@ -30281,6 +30341,7 @@ lockfile = true
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         };
         let product = |name: &str, outputs: &[&str]| platform::NamedProduct {
             name: name.to_owned(),

@@ -734,6 +734,7 @@ mod tests {
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         };
         let config = crate::s2::ProjectConfig {
             repository: "example/project".to_owned(),
