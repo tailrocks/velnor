@@ -171,6 +171,12 @@ esac
     )
     .unwrap();
     fs::set_permissions(&busctl, fs::Permissions::from_mode(0o755)).unwrap();
+    // The live-process scan must not observe sibling tests: the node suites
+    // spawn the real velnor-runner binary, which the packaged scan would
+    // (correctly, in production) refuse. Redirect the exe scan at a fixture
+    // proc root; /proc/locks stays real so the lock proofs are genuine.
+    let fake_proc = root.join("fake-proc");
+    fs::create_dir_all(&fake_proc).unwrap();
     let script_source = include_str!("../../debian/preinst")
         .replace(
             "PACKAGE_TRANSACTION_LOCK=/run/velnor/package-transaction.lock",
@@ -179,7 +185,22 @@ esac
         .replace(
             "[ -d /run/systemd/system ]",
             &format!("[ -d {} ]", systemd_dir.display()),
+        )
+        .replace(
+            "for executable_link in /proc/[0-9]*/exe",
+            &format!("for executable_link in {}/[0-9]*/exe", fake_proc.display()),
+        )
+        .replace(
+            "[ \"$executable_link\" != \"/proc/$$/exe\" ]",
+            &format!(
+                "[ \"$executable_link\" != \"{}/$$/exe\" ]",
+                fake_proc.display()
+            ),
         );
+    assert!(
+        !script_source.contains("/proc/[0-9]*/exe"),
+        "live-process scan redirect must apply to the packaged script"
+    );
     fs::write(&script, script_source).unwrap();
 
     let marker_spoof = Command::new("sh")
@@ -217,6 +238,25 @@ esac
         "a shared package lock must fail: {}",
         String::from_utf8_lossy(&shared_spoof.stderr)
     );
+    // Positive control: a synthetic live runner in the fixture proc root
+    // must still refuse the install.
+    let spoof_pid = fake_proc.join("424242");
+    fs::create_dir_all(&spoof_pid).unwrap();
+    let spoof_exe_target = root.join("velnor-runner");
+    fs::write(&spoof_exe_target, b"spoof").unwrap();
+    std::os::unix::fs::symlink(&spoof_exe_target, spoof_pid.join("exe")).unwrap();
+    let live_spoof = run_wrapped("exclusive");
+    assert!(
+        !live_spoof.status.success(),
+        "a live packaged runner must refuse the install: {}",
+        String::from_utf8_lossy(&live_spoof.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&live_spoof.stderr).contains("live-velnor-runner-process"),
+        "refusal must name the live process: {}",
+        String::from_utf8_lossy(&live_spoof.stderr)
+    );
+    fs::remove_dir_all(&spoof_pid).unwrap();
     let exclusive_wrapper = run_wrapped("exclusive");
     assert!(
         exclusive_wrapper.status.success(),
