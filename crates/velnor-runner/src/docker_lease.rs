@@ -5292,6 +5292,7 @@ pub fn guest_docker_socket_host(job_id: &str, unique: &Path) -> PathBuf {
 pub fn list_owned_containers_args(job_id: &str) -> Vec<String> {
     vec![
         "ps".into(),
+        "--no-trunc".into(),
         "--all".into(),
         "--filter".into(),
         format!("label={JOB_ID_LABEL}={job_id}"),
