@@ -46,6 +46,7 @@ toml = { workspace = true }
 # Dev-only: the shipped generator never links the runner.
 [dev-dependencies]
 velnor-runner = { path = "../velnor-runner", features = ["test-support"] }
+velnor-tools = { path = "../velnor-tools" }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["process"] }
