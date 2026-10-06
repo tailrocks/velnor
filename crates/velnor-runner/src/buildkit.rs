@@ -227,6 +227,10 @@ pub(crate) struct PersistentBuildKitDomain {
     /// this path and deliberately omit the storage UUID from their key.
     pub(crate) identity_root: PathBuf,
     pub(crate) root: PathBuf,
+    /// Fixture-only Engine-volume lock namespace. Production domains always
+    /// use the shared host namespace (`None`); fixture constructors scope
+    /// locks under their own storage root so tests never touch `/run/velnor`.
+    pub(crate) host_volume_lock_namespace: Option<PathBuf>,
 }
 
 impl PersistentBuildKitDomain {
@@ -238,7 +242,10 @@ impl PersistentBuildKitDomain {
     ) -> Result<Self> {
         let endpoint = crate::docker::engine::resolve_docker_endpoint()
             .context("resolve Docker endpoint for BuildKit domain fixture")?;
-        Self::from_identities_at_endpoint(identity_root, storage_id, engine_id, endpoint)
+        let mut domain =
+            Self::from_identities_at_endpoint(identity_root, storage_id, engine_id, endpoint)?;
+        domain.host_volume_lock_namespace = Some(identity_root.join("test-host-volume-locks"));
+        Ok(domain)
     }
 
     fn from_identities_at_endpoint(
@@ -296,6 +303,7 @@ impl PersistentBuildKitDomain {
             endpoint,
             identity_root: identity_root.to_path_buf(),
             root,
+            host_volume_lock_namespace: None,
         })
     }
 

@@ -14230,6 +14230,7 @@ fn resolve_buildkit_domain(
                 .context("resolve Docker endpoint for test BuildKit domain")?,
             identity_root: slot_temp_root.join("_velnor-test-buildkit-storage"),
             root: slot_temp_root.join("_velnor-test-buildkit-domain"),
+            host_volume_lock_namespace: Some(slot_temp_root.join("_velnor-test-host-volume-locks")),
         })
     }
     #[cfg(not(test))]

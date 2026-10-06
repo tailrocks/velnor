@@ -10010,7 +10010,7 @@ pub(crate) fn lock_host_volume_name_for_domain(
     domain: &crate::buildkit::PersistentBuildKitDomain,
     volume: &str,
 ) -> Result<VolumeOperationLocks> {
-    let root = docker_volume_lock_root_for_domain(&domain.identity_root, &domain.engine_id)?;
+    let root = docker_volume_lock_root_for_domain(domain)?;
     let policy =
         DockerLeasePolicy::new_with_volume_lock_root("velnor-host-volume-lock", Some(root))?;
     policy.lock_volume_names_with_create_access(
@@ -10026,7 +10026,7 @@ pub(crate) fn lock_host_volume_name_for_pending_create(
     volume: &str,
     access: &crate::buildkit::PendingBuildKitCreateAccess,
 ) -> Result<VolumeOperationLocks> {
-    let root = docker_volume_lock_root_for_domain(&domain.identity_root, &domain.engine_id)?;
+    let root = docker_volume_lock_root_for_domain(domain)?;
     let policy = DockerLeasePolicy::new_with_volume_lock_root(
         "velnor-buildkit-create-recovery",
         Some(root),
@@ -10113,7 +10113,7 @@ fn docker_volume_lock_root(host_socket: &Path) -> Result<PathBuf> {
     let engine_id = require_volume_lock_engine_id(
         crate::docker::engine::daemon_identity_blocking(host_socket).map(|identity| identity.id),
     )?;
-    docker_volume_lock_root_for_domain(&identity_root, &engine_id)
+    docker_volume_lock_root_for_parts(&identity_root, &engine_id, None)
 }
 
 fn require_volume_lock_storage_layout(
@@ -10131,26 +10131,36 @@ fn require_volume_lock_engine_id(engine_id: Option<String>) -> Result<String> {
 }
 
 #[cfg(unix)]
-fn docker_volume_lock_root_for_domain(identity_root: &Path, engine_id: &str) -> Result<PathBuf> {
+fn docker_volume_lock_root_for_domain(
+    domain: &crate::buildkit::PersistentBuildKitDomain,
+) -> Result<PathBuf> {
     // Domain-explicit: the caller supplies the identity root and engine ID,
-    // so no global storage layout is required. The storage identity below
-    // is validated against the passed root, not ambient configuration.
-    let xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
-    docker_volume_lock_root_for_layout(identity_root, engine_id, xdg_runtime_dir.as_deref())
+    // so no global storage layout is required. Fixture domains carry their
+    // own lock namespace so tests never touch the shared host namespace;
+    // production domains always share it.
+    docker_volume_lock_root_for_parts(
+        &domain.identity_root,
+        &domain.engine_id,
+        domain.host_volume_lock_namespace.as_deref(),
+    )
 }
 
-fn docker_volume_lock_root_for_layout(
+fn docker_volume_lock_root_for_parts(
     identity_root: &Path,
     engine_id: &str,
-    xdg_runtime_dir: Option<&Path>,
+    lock_namespace: Option<&Path>,
 ) -> Result<PathBuf> {
     if engine_id.trim().is_empty() || engine_id.chars().any(char::is_control) {
         bail!("Docker Engine /info.ID is empty or malformed");
     }
     crate::storage::ensure_buildkit_storage_identity(identity_root)
         .context("validate durable Velnor storage identity for Docker volume locking")?;
-    let lock_namespace = shared_host_volume_lock_namespace(identity_root, xdg_runtime_dir)?;
-    docker_volume_lock_root_under(&lock_namespace, engine_id)
+    if let Some(namespace) = lock_namespace {
+        return docker_volume_lock_root_under(namespace, engine_id);
+    }
+    let xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    let shared = shared_host_volume_lock_namespace(identity_root, xdg_runtime_dir.as_deref())?;
+    docker_volume_lock_root_under(&shared, engine_id)
 }
 
 fn shared_host_volume_lock_namespace(
@@ -10924,8 +10934,7 @@ fn handle_client_with(
                 .as_ref()
                 .context("persistent BuildKit create has no Engine-volume lock root")?
                 .clone();
-            let expected_lock_root =
-                docker_volume_lock_root_for_domain(&domain.identity_root, &engine_id)?;
+            let expected_lock_root = docker_volume_lock_root_for_domain(&domain)?;
             let expected_lock_root =
                 crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(
                     &expected_lock_root,
@@ -15516,7 +15525,7 @@ mod tests {
         assert!(require_volume_lock_storage_layout(None).is_err());
         assert!(require_volume_lock_engine_id(None).is_err());
         assert!(require_volume_lock_engine_id(Some(" \n".to_owned())).is_err());
-        assert!(docker_volume_lock_root_for_domain(Path::new("/tmp"), " ").is_err());
+        assert!(docker_volume_lock_root_for_parts(Path::new("/tmp"), " ", None).is_err());
     }
 
     #[cfg(unix)]
