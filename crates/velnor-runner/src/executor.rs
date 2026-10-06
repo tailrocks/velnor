@@ -19132,7 +19132,15 @@ mod tests {
         let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let temp_root = std::env::temp_dir();
         let temp_root = temp_root.canonicalize().unwrap_or(temp_root);
-        temp_root.join(format!(
+        // One private level between the system temp dir and the fixture:
+        // step-file staging requires its parent to be user-owned and not
+        // group/other-writable, which never holds for /tmp itself. Pin the
+        // mode explicitly so no ambient umask can weaken it.
+        let scope = temp_root.join("velnor-executor-tests");
+        std::fs::create_dir_all(&scope).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&scope, std::fs::Permissions::from_mode(0o700)).unwrap();
+        scope.join(format!(
             "velnor-executor-test-{}-{nonce}-{sequence}",
             std::process::id()
         ))

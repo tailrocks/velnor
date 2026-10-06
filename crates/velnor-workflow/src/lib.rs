@@ -1522,6 +1522,11 @@ pub(crate) fn is_contained_repository_path(path: &str) -> bool {
     if path.is_empty() || path.starts_with('/') || path.contains('\\') {
         return false;
     }
+    // Bare "." is the repository root itself (the standard docker build
+    // context); it is contained by definition and cannot traverse anywhere.
+    if path == "." {
+        return true;
+    }
     let normalized = windows_name_comparison_key(path);
     if normalized.starts_with('/') || normalized.contains('\\') {
         return false;
@@ -26473,6 +26478,10 @@ channel = "stable"
             );
         }
         assert!(is_contained_repository_path("café/assets"));
+        assert!(
+            is_contained_repository_path("."),
+            "bare dot is the repository root, e.g. a docker build context"
+        );
     }
 
     #[cfg(unix)]

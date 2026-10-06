@@ -4465,9 +4465,13 @@ mod tests {
         scope: &str,
         slots: Option<usize>,
     ) -> crate::daemon_instance::DaemonInstance {
+        // Clamp the walk above the filesystem root: with a shallow TMPDIR
+        // (e.g. /tmp on Linux CI) the third ancestor is `/`, which is never
+        // a writable fixture root, so fall back to the cache root itself.
         let storage_root = cache_root
             .ancestors()
             .nth(3)
+            .filter(|candidate| candidate.parent().is_some())
             .unwrap_or(&cache_root)
             .to_path_buf();
         let layout = crate::storage::StorageLayout::from_prefix(&storage_root);
