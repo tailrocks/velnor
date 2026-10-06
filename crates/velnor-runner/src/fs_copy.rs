@@ -1905,10 +1905,7 @@ impl NoFollowDestinationDir {
                         }
                         Err(other) => {
                             return Err(std::io::Error::from(other)).with_context(|| {
-                                format!(
-                                    "open lock file {}",
-                                    self.display_path.join(name).display()
-                                )
+                                format!("open lock file {}", self.display_path.join(name).display())
                             });
                         }
                     }
@@ -1917,20 +1914,14 @@ impl NoFollowDestinationDir {
                     Some(file) => file,
                     None => {
                         return Err(std::io::Error::from(last)).with_context(|| {
-                            format!(
-                                "open lock file {}",
-                                self.display_path.join(name).display()
-                            )
+                            format!("open lock file {}", self.display_path.join(name).display())
                         });
                     }
                 }
             }
             Err(error) => {
                 return Err(std::io::Error::from(error)).with_context(|| {
-                    format!(
-                        "open lock file {}",
-                        self.display_path.join(name).display()
-                    )
+                    format!("open lock file {}", self.display_path.join(name).display())
                 });
             }
         };
