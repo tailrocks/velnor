@@ -502,6 +502,43 @@ pub(crate) fn is_persistent_builder_name(builder: &str) -> bool {
     builder.starts_with(PERSISTENT_BUILDER_PREFIX)
 }
 
+fn is_legacy_capped_builder_name(builder: &str) -> bool {
+    let Some(rest) = builder.strip_prefix(PERSISTENT_BUILDER_PREFIX) else {
+        return false;
+    };
+    if builder.starts_with(CURRENT_PERSISTENT_BUILDER_PREFIX) || rest.starts_with("unbounded-") {
+        return false;
+    }
+    [TRUST_TIER_BRANCH, TRUST_TIER_RELEASE, TRUST_TIER_UNKNOWN]
+        .into_iter()
+        .any(|tier| {
+            let marker = format!("-{tier}-");
+            rest.match_indices(&marker).any(|(offset, _)| {
+                let scope = &rest[..offset];
+                let tail = &rest[offset + marker.len()..];
+                is_old_builder_segment(scope) && is_old_repo_and_requested(tail)
+            })
+        })
+}
+
+fn is_old_builder_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment.len() <= 128
+        && !matches!(segment, "." | "..")
+        && segment.chars().all(|character| {
+            character.is_ascii_alphanumeric() || "-_".contains(character) || character == '.'
+        })
+}
+
+fn is_old_repo_and_requested(value: &str) -> bool {
+    if is_old_builder_segment(value) {
+        return true;
+    }
+    value.match_indices('-').any(|(offset, _)| {
+        is_old_builder_segment(&value[..offset]) && is_old_builder_segment(&value[offset + 1..])
+    })
+}
+
 /// True when a buildkitd container or state volume belongs to a persistent
 /// builder. Generated object names embed the builder name
 /// (`buildx_buildkit_<builder><node>[_state]`), so the marker survives the
@@ -2526,6 +2563,23 @@ fn read_claims_for_reaping(
     builder: &str,
     registry_root: Option<&Path>,
 ) -> Result<Option<BuilderClaims>, OwnershipReadError> {
+    // Stat before the hardened no-follow read: a wiped run directory (e.g.
+    // after a reboot) must follow the missing-claim owner-record branch
+    // below, not fail inside the reader. Only present files go through the
+    // hardened read, so its symlink/regular-file checks still apply to
+    // everything actually on disk.
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return missing_claim_owner_status(path, builder, registry_root);
+        }
+        Err(error) => {
+            return Err(OwnershipReadError::claims(
+                path,
+                anyhow::Error::new(error).context(format!("stat {}", path.display())),
+            ));
+        }
+    }
     if let Some(claims) = read_registered_claims(path, builder)
         .map_err(|source| OwnershipReadError::claims(path, source))?
     {
@@ -2540,16 +2594,17 @@ fn read_claims_for_reaping(
         }
         return Ok(Some(claims));
     }
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => return Ok(None),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(OwnershipReadError::claims(
-                path,
-                anyhow::Error::new(error).context(format!("stat {}", path.display())),
-            ));
-        }
-    }
+    Ok(None)
+}
+
+/// Ownership status when the runtime claim file is absent. A present durable
+/// owner record pins the builder: without the claim, nothing can prove it
+/// has no holders.
+fn missing_claim_owner_status(
+    path: &Path,
+    builder: &str,
+    registry_root: Option<&Path>,
+) -> Result<Option<BuilderClaims>, OwnershipReadError> {
     if is_current_domained_persistent_builder(builder)
         && let Some(registry_root) = registry_root
         && read_owner_record(registry_root, builder)
@@ -5208,6 +5263,37 @@ fn reap_idle_builders_with_domain(
     clippy::too_many_arguments,
     reason = "injected Docker operations keep destructive reaper paths hermetic in tests"
 )]
+fn report_legacy_builder_status(
+    run_root: &Path,
+    builder: &str,
+    active_job_container: bool,
+    report: &mut HorizonReport,
+) {
+    let path = claims_file(run_root, builder);
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if active_job_container {
+                report.failures.push(format!(
+                    "leave old BuildKit builder {builder} untouched: a running job container prevents reboot quiescence proof"
+                ));
+            }
+        }
+        Err(error) => {
+            report
+                .failures
+                .push(format!("stat ownership for {builder}: {error:#}"));
+        }
+        Ok(_) => {
+            if let Err(error) = read_registered_claims(&path, builder) {
+                report
+                    .failures
+                    .push(format!("read ownership for {builder}: {error:#}"));
+                report.unreadable_claims.push(path.display().to_string());
+            }
+        }
+    }
+}
+
 fn reap_idle_builders_with_domain_and_volume_gate(
     run_root: &Path,
     registry_root: Option<&Path>,
@@ -5240,6 +5326,9 @@ fn reap_idle_builders_with_domain_and_volume_gate(
             return report;
         }
     };
+    let active_job_container = present
+        .iter()
+        .any(|name| name.starts_with(crate::docker_lease::JOB_CONTAINER_NAME_PREFIX));
     if let Some(registry_root) = registry_root {
         builders.extend(reconcile_claims_without_owner(
             run_root,
@@ -5256,8 +5345,15 @@ fn reap_idle_builders_with_domain_and_volume_gate(
         domain_token.map_or_else(
             || is_current_domained_persistent_builder(builder),
             |token| is_current_domain_builder_name(builder, token),
-        )
+        ) || is_legacy_capped_builder_name(builder)
     }) {
+        if !domain_token.map_or_else(
+            || is_current_domained_persistent_builder(&builder),
+            |token| is_current_domain_builder_name(&builder, token),
+        ) {
+            report_legacy_builder_status(run_root, &builder, active_job_container, &mut report);
+            continue;
+        }
         if let Err(error) = check_volume_gate(&builder) {
             report.failures.push(format!(
                 "keep BuildKit builder {builder}: Engine-volume create fence blocks reaping: {error:#}"
