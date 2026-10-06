@@ -205,6 +205,12 @@ impl GitFixture {
             .env("BASE_SHA", before)
             .env("HEAD_SHA", head)
             .env("VELNOR_RESULT_REPOSITORY", REPOSITORY)
+            .env("VELNOR_RESULT_SOURCE_SHA", head)
+            // Poison the ambient CI fallback: aggregate prefers GITHUB_SHA
+            // when VELNOR_RESULT_SOURCE_SHA is absent, so a leaked runner
+            // SHA would masquerade as the fixture head. Pinning it to a
+            // bogus value keeps this hermeticity pinned down locally too.
+            .env("GITHUB_SHA", "0000000000000000000000000000000000000000")
             .env("VELNOR_RESULT_RUN_ID", RESULT_RUN_ID)
             .env("VELNOR_RESULT_RUN_ATTEMPT", RESULT_RUN_ATTEMPT)
             .env("VELNOR_RESULT_PLAN_DIGEST", plan_digest)
