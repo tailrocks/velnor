@@ -8,6 +8,7 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Deserializer};
+use velnor_model::action_reference::ActionImageReference;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -682,19 +683,6 @@ pub struct NativeActionInvocation {
     pub env: Vec<(String, String)>,
 }
 
-/// Strip a `docker://` scheme prefix, ASCII case-insensitively.
-///
-/// URI schemes are case-insensitive (RFC 3986 §3.1) and upstream matches this
-/// prefix with OrdinalIgnoreCase, while `runs.image` itself is passed verbatim.
-/// `.get(..len)` keeps this boundary-safe for short or non-ASCII inputs.
-fn strip_docker_scheme(image: &str) -> Option<&str> {
-    const SCHEME: &str = "docker://";
-    image
-        .get(..SCHEME.len())
-        .filter(|prefix| prefix.eq_ignore_ascii_case(SCHEME))
-        .map(|_| &image[SCHEME.len()..])
-}
-
 impl ResolvedAction {
     pub fn native_invocation(&self) -> Result<Option<NativeActionInvocation>> {
         native_invocation_from_plan(&self.plan)
@@ -790,23 +778,17 @@ impl ResolvedAction {
                 .map(|(name, value)| (input_env_name(name), value.clone())),
         );
 
-        let (image, build_context_host, dockerfile_host) =
-            if let Some(image) = strip_docker_scheme(image) {
-                // `runs.image` is repository content, so in the fork-PR case it
-                // is attacker-controlled. Without a grammar check a value like
-                // `docker://--privileged` reaches the host `docker run` as a
-                // flag and hands the workflow root on a shared runner host.
-                // Reject anything that is not an OCI reference here, at the
-                // one place the scheme is stripped.
-                let image = crate::docker_argv::ImageReference::parse(image).map_err(|error| {
-                    anyhow::anyhow!(
-                        "action '{}' declares an invalid Docker image: {error}",
-                        self.plan.repository
-                    )
-                })?;
-                (image.as_str().to_string(), None, None)
-            } else {
-                let dockerfile_host = self.plan.action_dir.join(image);
+        let (image, build_context_host, dockerfile_host) = match
+            ActionImageReference::parse(image).map_err(|error| {
+                anyhow::anyhow!(
+                    "action '{}' declares an invalid Docker image: {error}",
+                    self.plan.repository
+                )
+            })?
+        {
+            ActionImageReference::DockerImage(image) => (image.as_str().to_owned(), None, None),
+            ActionImageReference::Dockerfile(path) => {
+                let dockerfile_host = self.plan.action_dir.join(path);
                 let tag = docker_action_tag(
                     &self.plan.repository,
                     &self.plan.git_ref,
@@ -817,7 +799,8 @@ impl ResolvedAction {
                     Some(self.plan.action_dir.clone()),
                     Some(dockerfile_host),
                 )
-            };
+            }
+        };
         let entrypoint = self
             .metadata
             .runs

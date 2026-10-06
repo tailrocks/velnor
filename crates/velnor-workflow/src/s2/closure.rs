@@ -83,6 +83,7 @@ pub(crate) const PRODUCT_TAG_PREFIX: &str = "velnor-workflow-runtime-v1-";
 /// files inside these directories are covered without updating this list.
 pub(crate) const CLOSURE_PATHS: &[&str] = &[
     "crates/velnor-workflow",
+    "crates/velnor-model",
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain.toml",
