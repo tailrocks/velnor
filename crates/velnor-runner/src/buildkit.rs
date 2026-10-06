@@ -96,6 +96,12 @@ use std::time::{Duration, Instant, SystemTime};
 /// Velnor's destroy/orphan decisions.
 pub(crate) const PERSISTENT_BUILDER_PREFIX: &str = "velnor-builder-shared-";
 
+/// Legacy daemon scope segment. Legacy daemon names nest the builder id
+/// under it (`buildx_buildkit_velnor-builder-<id><node>`); a persistent
+/// builder name can appear nested there too, so the persistent marker is
+/// recognized both at the builder root and one scope segment deeper.
+const LEGACY_BUILDER_SCOPE_PREFIX: &str = "velnor-builder-";
+
 /// Namespace for builders created with a durable Engine/storage domain.
 /// Changing the generation leaves every pre-domain resource for explicit
 /// operator cleanup instead of attributing an old owner to this domain.
@@ -542,13 +548,22 @@ fn is_old_repo_and_requested(value: &str) -> bool {
 /// True when a buildkitd container or state volume belongs to a persistent
 /// builder. Generated object names embed the builder name
 /// (`buildx_buildkit_<builder><node>[_state]`), so the marker survives the
-/// embedding. Retired generations and generated numeric child nodes stay
-/// quarantined for explicit operator cleanup rather than infer ownership.
-/// Custom `--node` names carry no parent-domain proof; the Docker lease denies
+/// embedding. A persistent builder listed under the legacy daemon scope
+/// (`buildx_buildkit_velnor-builder-velnor-builder-shared-…`) nests the
+/// same marker one segment deeper; both positions denote reserved objects.
+/// Retired generations and generated numeric child nodes stay quarantined
+/// for explicit operator cleanup rather than infer ownership. Custom
+/// `--node` names carry no parent-domain proof; the Docker lease denies
 /// their privileged Buildx create path instead of adopting them here.
 pub(crate) fn is_persistent_builder_object(name: &str) -> bool {
-    name.split(',')
-        .any(|name| buildkit_daemon_builder_name(name).is_some_and(is_persistent_builder_name))
+    name.split(',').any(|name| {
+        buildkit_daemon_builder_name(name).is_some_and(|builder| {
+            is_persistent_builder_name(builder)
+                || builder
+                    .strip_prefix(LEGACY_BUILDER_SCOPE_PREFIX)
+                    .is_some_and(is_persistent_builder_name)
+        })
+    })
 }
 
 /// Return the structurally encoded Velnor Buildx builder part of a daemon
