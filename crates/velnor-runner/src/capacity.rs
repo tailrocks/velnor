@@ -1,7 +1,8 @@
 use std::{
     collections::BTreeSet,
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Seek, SeekFrom, Write},
+    os::unix::fs::MetadataExt as _,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -16,12 +17,116 @@ const DOCKER_LIFECYCLE_RETRY: Duration = Duration::from_millis(25);
 /// turns an unbounded fan-out into 10–70s tail latency, so a wait past one
 /// second means a peer is holding every slot through a slow mutation.
 const DOCKER_LIFECYCLE_TELEMETRY_AFTER: Duration = Duration::from_secs(1);
+// Versioned roots bind one persisted schema to its reader. Package upgrades
+// drain every Velnor service before replacing the binary, so old records need
+// no compatibility scan after owner metadata becomes mandatory.
+const SCOPE_LEASE_ROOT: &str = "leases__trust_scope_v2";
+
+/// Canonical UUID that owns a job-scoped lease. It is stored outside the
+/// hashed scope so liveness can identify a workspace without decoding names.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(transparent)]
+pub(crate) struct JobOwnerId(String);
+
+impl JobOwnerId {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
+        let parsed = uuid::Uuid::parse_str(value).context("job owner id is not a UUID")?;
+        let canonical = parsed.hyphenated().to_string();
+        anyhow::ensure!(
+            value == canonical,
+            "job owner id is not a canonical lowercase UUID"
+        );
+        Ok(Self(canonical))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for JobOwnerId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct LeaseRecord {
     scope: String,
     pid: u32,
     created_unix: u64,
+    owner_job_id: RequiredOwnerJobId,
+}
+
+/// A present nullable field: explicit `null` means a generic lease, while an
+/// omitted field is malformed evidence and must not be treated as ownerless.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+struct RequiredOwnerJobId(Option<JobOwnerId>);
+
+impl<'de> Deserialize<'de> for RequiredOwnerJobId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct OwnerJobIdVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for OwnerJobIdVisitor {
+            type Value = RequiredOwnerJobId;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("null or a canonical lowercase job UUID")
+            }
+
+            fn visit_unit<E>(self) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(RequiredOwnerJobId(None))
+            }
+
+            fn visit_none<E>(self) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(RequiredOwnerJobId(None))
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                JobOwnerId::parse(value)
+                    .map(|owner| RequiredOwnerJobId(Some(owner)))
+                    .map_err(E::custom)
+            }
+
+            fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                self.visit_str(&value)
+            }
+        }
+
+        deserializer.deserialize_any(OwnerJobIdVisitor)
+    }
+}
+
+impl From<Option<JobOwnerId>> for RequiredOwnerJobId {
+    fn from(owner_job_id: Option<JobOwnerId>) -> Self {
+        Self(owner_job_id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActiveScopeLease {
+    pub(crate) scope: String,
+    pub(crate) owner_job_id: Option<JobOwnerId>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -175,10 +280,10 @@ impl StoreBudgetPolicy {
     /// holds `pr_cargo_store_bytes` (D18, [`crate::storage::seed_cargo_store`]).
     ///
     /// The seeded `pr` Cargo store counts against the same number as the
-    /// compiler stores: the seed may bring it up to
-    /// [`Self::compiler_store_budget_bytes`] and no further, saturating at
-    /// zero. One bound for every store class the daemon itself grows, derived
-    /// from the admission policy that already promises each slot its peak.
+    /// compiler stores. Each seed pass applies the remaining allowance as a
+    /// best-effort cap when its size measurements succeed, saturating at zero.
+    /// One bound for every store class the daemon itself grows, derived from
+    /// the admission policy that already promises each slot its peak.
     pub fn cargo_seed_headroom_bytes(&self, pr_cargo_store_bytes: u64) -> u64 {
         self.compiler_store_budget_bytes()
             .saturating_sub(pr_cargo_store_bytes)
@@ -392,6 +497,62 @@ pub fn host_capacity_timeout_reason(
 #[derive(Debug)]
 pub struct ScopeLease {
     path: PathBuf,
+    // Keep the kernel lock for the whole job lifetime. A live holder remains
+    // active regardless of record age, and kernel ownership avoids PID reuse
+    // ambiguity.
+    _file: fs::File,
+}
+
+/// Stable, per-lease serialization lock. This sibling is deliberately kept
+/// after lease removal: deleting and recreating it would let contenders flock
+/// different inodes and reopen the same pathname race.
+#[derive(Debug)]
+struct ScopeLeaseNameLock {
+    _file: fs::File,
+}
+
+fn scope_lease_name_lock_path(path: &Path) -> Result<PathBuf> {
+    let parent = path.parent().context("scope lease path has no parent")?;
+    let filename = path
+        .file_name()
+        .context("scope lease path has no file name")?
+        .to_string_lossy();
+    Ok(parent.join(format!(".{filename}.lock")))
+}
+
+fn lock_scope_lease_name(path: &Path) -> Result<ScopeLeaseNameLock> {
+    let lock_path = scope_lease_name_lock_path(path)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("open scope lease name lock {}", lock_path.display()))?;
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+        .with_context(|| format!("lock scope lease name {}", path.display()))?;
+    Ok(ScopeLeaseNameLock { _file: file })
+}
+
+/// Remove a name only when it still refers to the inode owned by `file`.
+/// Callers serialize cooperative pathname changes with the persistent
+/// per-name lock; this identity check also makes cleanup fail closed if a
+/// pathname was replaced outside that protocol.
+fn remove_path_if_same_inode(path: &Path, file: &fs::File) -> Result<bool> {
+    let opened = file.metadata()?;
+    let named = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).with_context(|| format!("stat lease {}", path.display())),
+    };
+    if opened.dev() != named.dev() || opened.ino() != named.ino() {
+        return Ok(false);
+    }
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("remove lease {}", path.display())),
+    }
 }
 
 /// Serializes lease publication against destructive cache snapshots.
@@ -659,54 +820,166 @@ impl ScopeLease {
         scope: &str,
         stale_after: Duration,
     ) -> Result<Self> {
+        Self::acquire_with_job_owner(run_root, class, scope, None, stale_after)
+    }
+
+    /// Acquire a lease owned by one GitHub job. The raw job id is persisted
+    /// separately from the privacy-preserving hashed scope component so
+    /// workspace reclamation can identify live checkout directories.
+    pub(crate) fn acquire_for_job(
+        run_root: &Path,
+        class: &str,
+        scope: &str,
+        owner_job_id: JobOwnerId,
+        stale_after: Duration,
+    ) -> Result<Self> {
+        Self::acquire_with_job_owner(run_root, class, scope, Some(owner_job_id), stale_after)
+    }
+
+    fn acquire_with_job_owner(
+        run_root: &Path,
+        class: &str,
+        scope: &str,
+        owner_job_id: Option<JobOwnerId>,
+        stale_after: Duration,
+    ) -> Result<Self> {
         let _coordinator = FilesystemCoordinator::lock_shared(run_root)?;
-        let dir = run_root
-            .join("leases")
-            .join(crate::container::sanitize_store_key(class));
+        let dir = scope_lease_root(run_root).join(crate::container::sanitize_store_key(class));
         fs::create_dir_all(&dir)?;
         let path = dir.join(format!(
             "{}.json",
-            crate::container::sanitize_store_key(scope)
+            crate::trust_scope::filesystem_key(scope)
         ));
-        if path.exists() && lease_is_stale(&path, stale_after)? {
-            fs::remove_file(&path)
-                .with_context(|| format!("remove stale lease {}", path.display()))?;
-        }
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .with_context(|| format!("scope lease already held: {class}/{scope}"))?;
-        serde_json::to_writer(
-            &mut file,
-            &LeaseRecord {
-                scope: scope.to_string(),
-                pid: std::process::id(),
-                created_unix: unix_now(),
-            },
-        )?;
-        file.flush()?;
-        Ok(Self { path })
+        // Serialize the entire open/check/reap/publish sequence. A flock on
+        // the lease inode alone cannot do this: a waiter may have opened the
+        // old inode before it is unlinked, then acquire that stale descriptor
+        // after a new lease has been published at the same pathname.
+        let _name_lock = lock_scope_lease_name(&path)?;
+        reap_stale_lease_locked(&path, stale_after, &_name_lock)?;
+        let record = LeaseRecord {
+            scope: scope.to_string(),
+            pid: std::process::id(),
+            created_unix: unix_now(),
+            owner_job_id: owner_job_id.into(),
+        };
+        let (temporary_path, file) = prepare_scope_lease(&path, &record)?;
+        publish_scope_lease(&temporary_path, &path, file)
+            .with_context(|| format!("publish scope lease: {class}/{scope}"))
+            .map(|file| Self { path, _file: file })
     }
+}
+
+fn prepare_scope_lease(path: &Path, record: &LeaseRecord) -> Result<(PathBuf, fs::File)> {
+    let parent = path.parent().context("scope lease path has no parent")?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("scope lease path has no file name")?;
+    let temporary_path = parent.join(format!(".{filename}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&temporary_path)
+        .context("create temporary scope lease")?;
+    if let Err(error) = rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive) {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(error).context("lock temporary scope lease");
+    }
+    let write_result = (|| -> Result<()> {
+        serde_json::to_writer(&mut file, record).context("write scope lease record")?;
+        file.write_all(b"\n")
+            .context("terminate scope lease record")?;
+        file.flush().context("flush scope lease record")?;
+        file.sync_all().context("sync scope lease record")?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        drop(file);
+        let _ = fs::remove_file(&temporary_path);
+        return Err(error);
+    }
+    Ok((temporary_path, file))
+}
+
+fn publish_scope_lease(temporary_path: &Path, path: &Path, file: fs::File) -> Result<fs::File> {
+    match fs::hard_link(temporary_path, path) {
+        Ok(()) => {}
+        Err(error) => {
+            let _ = fs::remove_file(temporary_path);
+            return Err(error).with_context(|| format!("publish lease at {}", path.display()));
+        }
+    }
+    if let Err(error) = fs::remove_file(temporary_path) {
+        let _ = remove_path_if_same_inode(path, &file);
+        return Err(error).with_context(|| {
+            format!(
+                "remove temporary link for published lease {}",
+                path.display()
+            )
+        });
+    }
+    Ok(file)
 }
 
 impl Drop for ScopeLease {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        // Keep the lock through the inode check and unlink. If a replacement
+        // lease ever owns this pathname, an old holder must not remove it.
+        let Ok(_name_lock) = lock_scope_lease_name(&self.path) else {
+            return;
+        };
+        let _ = remove_path_if_same_inode(&self.path, &self._file);
     }
 }
 
-fn lease_is_stale(path: &Path, stale_after: Duration) -> Result<bool> {
-    let record: LeaseRecord = serde_json::from_slice(&fs::read(path)?)?;
+/// Reap an expired lease only after taking its exclusive kernel lock. A live
+/// ScopeLease retains that lock even if its record is more than a day old.
+/// The persistent name lock must be held by the caller across open/check/unlink
+/// so the lease path cannot be replaced between those operations.
+fn reap_stale_lease_locked(
+    path: &Path,
+    stale_after: Duration,
+    _name_lock: &ScopeLeaseNameLock,
+) -> Result<bool> {
+    let mut file = match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).with_context(|| format!("open lease {}", path.display())),
+    };
+    match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => {}
+        Err(rustix::io::Errno::WOULDBLOCK) => return Ok(false),
+        Err(error) => return Err(error).context("lock scope lease for stale check"),
+    }
+    reap_stale_lease_file_locked(path, stale_after, &mut file, _name_lock)
+}
+
+fn reap_stale_lease_file_locked(
+    path: &Path,
+    stale_after: Duration,
+    file: &mut fs::File,
+    _name_lock: &ScopeLeaseNameLock,
+) -> Result<bool> {
+    file.seek(SeekFrom::Start(0))?;
+    let record: LeaseRecord = serde_json::from_reader(&mut *file)?;
     let age_stale = unix_now().saturating_sub(record.created_unix) > stale_after.as_secs();
     let proc_root = Path::new("/proc");
     let pid_gone = proc_root.exists() && !proc_root.join(record.pid.to_string()).exists();
-    Ok(age_stale || pid_gone)
+    if age_stale || pid_gone {
+        remove_path_if_same_inode(path, file)
+            .with_context(|| format!("remove stale lease {}", path.display()))
+    } else {
+        Ok(false)
+    }
 }
 
-pub fn active_scopes(run_root: &Path, stale_after: Duration) -> Result<BTreeSet<String>> {
-    let root = run_root.join("leases");
-    let mut active = BTreeSet::new();
+pub(crate) fn active_scope_leases(
+    run_root: &Path,
+    stale_after: Duration,
+) -> Result<Vec<ActiveScopeLease>> {
+    let root = scope_lease_root(run_root);
+    let mut active = Vec::new();
     if !root.exists() {
         return Ok(active);
     }
@@ -719,15 +992,38 @@ pub fn active_scopes(run_root: &Path, stale_after: Duration) -> Result<BTreeSet<
         let class = class.file_name().to_string_lossy().to_string();
         for entry in fs::read_dir(class_path)? {
             let path = entry?.path();
-            if lease_is_stale(&path, stale_after)? {
-                let _ = fs::remove_file(path);
+            if path.extension().is_none_or(|extension| extension != "json") {
                 continue;
             }
-            let record: LeaseRecord = serde_json::from_slice(&fs::read(path)?)?;
-            active.insert(format!("{class}/{}", record.scope));
+            let _name_lock = lock_scope_lease_name(&path)?;
+            if reap_stale_lease_locked(&path, stale_after, &_name_lock)? {
+                continue;
+            }
+            let record: LeaseRecord = match fs::read(&path) {
+                Ok(bytes) => serde_json::from_slice(&bytes)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| format!("read lease {}", path.display()))
+                }
+            };
+            active.push(ActiveScopeLease {
+                scope: format!("{class}/{}", record.scope),
+                owner_job_id: record.owner_job_id.0,
+            });
         }
     }
     Ok(active)
+}
+
+pub fn active_scopes(run_root: &Path, stale_after: Duration) -> Result<BTreeSet<String>> {
+    Ok(active_scope_leases(run_root, stale_after)?
+        .into_iter()
+        .map(|lease| lease.scope)
+        .collect())
+}
+
+fn scope_lease_root(run_root: &Path) -> PathBuf {
+    run_root.join(SCOPE_LEASE_ROOT)
 }
 
 #[derive(Debug)]
@@ -957,6 +1253,40 @@ mod tests {
     }
 
     #[test]
+    fn job_owner_id_requires_canonical_lowercase_uuid() {
+        let canonical = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        assert_eq!(JobOwnerId::parse(canonical).unwrap().as_str(), canonical);
+        assert!(JobOwnerId::parse("AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE").is_err());
+        assert!(JobOwnerId::parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee").is_err());
+    }
+
+    #[test]
+    fn lease_owner_field_requires_presence_but_accepts_explicit_null() {
+        #[derive(Deserialize)]
+        struct Record {
+            owner_job_id: RequiredOwnerJobId,
+        }
+
+        assert!(serde_json::from_str::<Record>("{}").is_err());
+        assert!(serde_json::from_str::<Record>(r#"{"owner_job_id":null}"#)
+            .unwrap()
+            .owner_job_id
+            .0
+            .is_none());
+        assert_eq!(
+            serde_json::from_str::<Record>(
+                r#"{"owner_job_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"}"#
+            )
+            .unwrap()
+            .owner_job_id
+            .0
+            .unwrap()
+            .as_str(),
+            "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        );
+    }
+
+    #[test]
     fn lease_excludes_second_acquirer_and_drop_releases() {
         let root = root("lease");
         let first =
@@ -972,6 +1302,255 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_acquirers_leave_one_visible_lease_after_reaping_orphan() {
+        const CONTENDERS: usize = 12;
+        let root = root("lease-stale-contended");
+        let scope = "trusted/racing";
+        let path = scope_lease_root(&root).join("cargo").join(format!(
+            "{}.json",
+            crate::trust_scope::filesystem_key(scope)
+        ));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_vec(&LeaseRecord {
+                scope: scope.to_string(),
+                pid: std::process::id(),
+                created_unix: unix_now().saturating_sub(2 * 24 * 60 * 60),
+                owner_job_id: RequiredOwnerJobId(None),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(CONTENDERS + 1));
+        let handles: Vec<_> = (0..CONTENDERS)
+            .map(|_| {
+                let root = root.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    ScopeLease::acquire(&root, "cargo", scope, Duration::from_secs(24 * 3600))
+                })
+            })
+            .collect();
+        barrier.wait();
+        let mut leases: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter_map(|result| result.ok())
+            .collect();
+
+        assert_eq!(leases.len(), 1, "exactly one contender owns the scope");
+        assert_eq!(
+            active_scopes(&root, Duration::from_secs(24 * 3600)).unwrap(),
+            BTreeSet::from([format!("cargo/{scope}")]),
+            "the winning lease must remain visible after every contender returns"
+        );
+        drop(leases.pop());
+        assert!(active_scopes(&root, Duration::from_secs(24 * 3600))
+            .unwrap()
+            .is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scope_lease_name_lock_is_shared_across_processes() {
+        const CHILD_MODE: &str = "VELNOR_TEST_SCOPE_LEASE_NAME_LOCK_CHILD";
+        const LEASE_PATH: &str = "VELNOR_TEST_SCOPE_LEASE_NAME_LOCK_PATH";
+        if std::env::var_os(CHILD_MODE).is_some() {
+            let path = PathBuf::from(std::env::var_os(LEASE_PATH).unwrap());
+            let lock_path = scope_lease_name_lock_path(&path).unwrap();
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(lock_path)
+                .unwrap();
+            match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+                Err(rustix::io::Errno::WOULDBLOCK) => return,
+                Ok(()) => panic!("parent process holds the scope lease name lock"),
+                Err(error) => panic!("probe cross-process scope lease lock: {error}"),
+            }
+        }
+
+        let root = root("lease-name-lock-process");
+        let path = scope_lease_root(&root).join("cargo").join("scope.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let _parent_lock = lock_scope_lease_name(&path).unwrap();
+        let test_binary = std::env::current_exe().unwrap();
+        let test_name = std::thread::current().name().unwrap().to_owned();
+        let status = std::process::Command::new(test_binary)
+            .args(["--exact", &test_name, "--nocapture"])
+            .env(CHILD_MODE, "1")
+            .env(LEASE_PATH, &path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        drop(_parent_lock);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_scope_lease_drop_does_not_unlink_replacement_inode() {
+        let root = root("lease-drop-replacement");
+        let scope = "trusted/replaced";
+        let old =
+            ScopeLease::acquire(&root, "cargo", scope, Duration::from_secs(24 * 3600)).unwrap();
+        let path = old.path.clone();
+        let displaced = path.with_file_name(format!(
+            ".displaced-{}.lease",
+            uuid::Uuid::new_v4().simple()
+        ));
+        // Model a pathname replacement while the old descriptor remains open.
+        // Drop must compare the current name with the inode it owns.
+        fs::rename(&path, &displaced).unwrap();
+        let replacement =
+            ScopeLease::acquire(&root, "cargo", scope, Duration::from_secs(24 * 3600)).unwrap();
+
+        drop(old);
+        assert!(path.exists(), "the replacement lease must remain published");
+        assert_eq!(
+            active_scopes(&root, Duration::from_secs(24 * 3600)).unwrap(),
+            BTreeSet::from([format!("cargo/{scope}")])
+        );
+
+        drop(replacement);
+        fs::remove_file(displaced).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_reaper_does_not_unlink_a_replacement_inode() {
+        let root = root("lease-reap-replacement");
+        let scope = "trusted/replaced";
+        let path = scope_lease_root(&root).join("cargo").join(format!(
+            "{}.json",
+            crate::trust_scope::filesystem_key(scope)
+        ));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_vec(&LeaseRecord {
+                scope: scope.to_string(),
+                pid: std::process::id(),
+                created_unix: unix_now().saturating_sub(2),
+                owner_job_id: RequiredOwnerJobId(None),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let _name_lock = lock_scope_lease_name(&path).unwrap();
+        let mut old_inode = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let displaced = path.with_file_name(format!(
+            ".displaced-{}.lease",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::rename(&path, &displaced).unwrap();
+        let replacement_created = unix_now();
+        fs::write(
+            &path,
+            serde_json::to_vec(&LeaseRecord {
+                scope: scope.to_string(),
+                pid: std::process::id(),
+                created_unix: replacement_created,
+                owner_job_id: RequiredOwnerJobId(None),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            !reap_stale_lease_file_locked(&path, Duration::ZERO, &mut old_inode, &_name_lock,)
+                .unwrap()
+        );
+        assert!(
+            path.exists(),
+            "stale cleanup must not remove the replacement"
+        );
+        let replacement: LeaseRecord = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(replacement.created_unix, replacement_created);
+        fs::remove_file(&path).unwrap();
+        fs::remove_file(displaced).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn active_scope_snapshot_sees_no_partial_lease_publication() {
+        let root = root("lease-atomic-publication");
+        let scope = "trusted/repo/job";
+        let directory = scope_lease_root(&root).join("cargo");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(format!(
+            "{}.json",
+            crate::trust_scope::filesystem_key(scope)
+        ));
+        let record = LeaseRecord {
+            scope: scope.to_owned(),
+            pid: std::process::id(),
+            created_unix: unix_now(),
+            owner_job_id: RequiredOwnerJobId(None),
+        };
+        let (temporary_path, file) = prepare_scope_lease(&path, &record).unwrap();
+        assert!(!path.exists(), "the final name stays hidden until complete");
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader_root = root.clone();
+        let reader_barrier = barrier.clone();
+        let reader = std::thread::spawn(move || {
+            reader_barrier.wait();
+            sender
+                .send(active_scopes(&reader_root, Duration::from_secs(60)))
+                .unwrap();
+            reader_barrier.wait();
+            sender
+                .send(active_scopes(&reader_root, Duration::from_secs(60)))
+                .unwrap();
+        });
+
+        barrier.wait();
+        assert!(
+            receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap()
+                .is_empty(),
+            "readers must ignore the unpublished temporary file"
+        );
+        let mut file = publish_scope_lease(&temporary_path, &path, file).unwrap();
+        barrier.wait();
+        assert_eq!(
+            receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap(),
+            BTreeSet::from([format!("cargo/{scope}")]),
+            "the final name must expose the complete locked record"
+        );
+        reader.join().unwrap();
+        file.set_len(0).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        serde_json::to_writer(
+            &mut file,
+            &LeaseRecord {
+                scope: scope.to_owned(),
+                pid: std::process::id(),
+                created_unix: unix_now().saturating_sub(2),
+                owner_job_id: RequiredOwnerJobId(None),
+            },
+        )
+        .unwrap();
+        file.flush().unwrap();
+        drop(file);
+        assert!(active_scopes(&root, Duration::ZERO).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn active_scopes_are_typed_by_cache_class() {
         let root = root("typed-lease");
         let _cargo = ScopeLease::acquire(&root, "cargo", "cache", Duration::from_secs(60)).unwrap();
@@ -981,6 +1560,55 @@ mod tests {
             active_scopes(&root, Duration::from_secs(60)).unwrap(),
             BTreeSet::from(["cargo/cache".into(), "mise/cache".into()])
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn trust_key_lease_is_disjoint_from_a_valid_old_raw_scope() {
+        let root = root("lease-key-collision");
+        let trust_key = crate::trust_scope::filesystem_key("trusted");
+        // This is the exact old collision: a valid raw scope had the same
+        // spelling as the new hashed key for `trusted`, so both flat lease
+        // grammars would publish the same filename under the old lease root.
+        let raw_old_scope = trust_key.clone();
+        let new_scope = "trusted";
+        let legacy_root = root.join("leases");
+        let old_path = legacy_root.join("actions-cache").join(format!(
+            "{}.json",
+            crate::container::sanitize_store_key(&raw_old_scope)
+        ));
+        fs::create_dir_all(old_path.parent().unwrap()).unwrap();
+        fs::write(
+            &old_path,
+            serde_json::to_vec(&LeaseRecord {
+                scope: raw_old_scope,
+                pid: std::process::id(),
+                // A supported package upgrade drains old writers first; this
+                // is a stale pre-rotation record left on disk after upgrade.
+                created_unix: 0,
+                owner_job_id: RequiredOwnerJobId(None),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let lease = ScopeLease::acquire(&root, "actions-cache", new_scope, Duration::from_secs(60))
+            .unwrap();
+        let versioned_root = scope_lease_root(&root);
+        assert_eq!(old_path.file_name(), lease.path.file_name());
+        assert_ne!(lease.path, old_path);
+        assert!(lease.path.starts_with(&versioned_root));
+        assert!(!lease.path.starts_with(&legacy_root));
+        assert!(!old_path.starts_with(&versioned_root));
+        assert!(
+            old_path.is_file(),
+            "flat pre-rotation lease remains untouched"
+        );
+        assert_eq!(
+            active_scopes(&root, Duration::from_secs(60)).unwrap(),
+            BTreeSet::from([format!("actions-cache/{new_scope}")])
+        );
+        drop(lease);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1095,18 +1723,65 @@ mod tests {
     }
 
     #[test]
-    fn stale_lease_is_reaped() {
-        let root = root("stale");
-        let lease = ScopeLease::acquire(&root, "cache", "trusted/old", Duration::ZERO).unwrap();
-        let (release_sender, release_receiver) = std::sync::mpsc::channel();
-        let holder = std::thread::spawn(move || {
-            release_receiver.recv().unwrap();
-            drop(lease);
-        });
-        std::thread::sleep(Duration::from_secs(1));
+    fn live_scope_lease_survives_a_record_older_than_24_hours() {
+        let root = root("stale-live");
+        let owner = JobOwnerId::parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee").unwrap();
+        let mut lease = ScopeLease::acquire_for_job(
+            &root,
+            "cache",
+            "trusted/active/hashed-holder",
+            owner.clone(),
+            Duration::ZERO,
+        )
+        .unwrap();
+        lease._file.set_len(0).unwrap();
+        lease._file.seek(SeekFrom::Start(0)).unwrap();
+        serde_json::to_writer(
+            &mut lease._file,
+            &LeaseRecord {
+                scope: "trusted/active/hashed-holder".to_string(),
+                pid: std::process::id(),
+                created_unix: unix_now().saturating_sub(25 * 60 * 60),
+                owner_job_id: RequiredOwnerJobId(Some(owner.clone())),
+            },
+        )
+        .unwrap();
+        lease._file.flush().unwrap();
+
+        let active = active_scopes(&root, Duration::from_secs(24 * 3600)).unwrap();
+        assert!(active.contains("cache/trusted/active/hashed-holder"));
+        let records = active_scope_leases(&root, Duration::from_secs(24 * 3600)).unwrap();
+        assert_eq!(records[0].owner_job_id.as_ref(), Some(&owner));
+        assert!(lease.path.exists());
+
+        drop(lease);
         assert!(active_scopes(&root, Duration::ZERO).unwrap().is_empty());
-        release_sender.send(()).unwrap();
-        holder.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_orphan_scope_lease_is_reaped_without_a_live_lock() {
+        let root = root("stale-orphan");
+        let scope = "trusted/orphan";
+        let path = scope_lease_root(&root).join("cache").join(format!(
+            "{}.json",
+            crate::trust_scope::filesystem_key(scope)
+        ));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_vec(&LeaseRecord {
+                scope: scope.to_string(),
+                pid: std::process::id(),
+                created_unix: unix_now().saturating_sub(2),
+                owner_job_id: RequiredOwnerJobId(None),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(active_scopes(&root, Duration::ZERO).unwrap().is_empty());
+        assert!(!path.exists());
         fs::remove_dir_all(root).unwrap();
     }
 

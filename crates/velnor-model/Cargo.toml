@@ -8,13 +8,13 @@ description = "Shared versioned model types for the Velnor control plane and ope
 
 [dependencies]
 aho-corasick.workspace = true
+icu_casemap = { version = "=1.4.0", default-features = false, features = ["compiled_data"] }
 serde = { workspace = true }
 serde_json.workspace = true
 sha2.workspace = true
 time = { workspace = true, features = ["macros"] }
 toml.workspace = true
 url = { workspace = true }
-rustix.workspace = true
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -16,11 +16,15 @@ pub(crate) mod canonical;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{content_digest_bytes, GeneratorError};
+use crate::{
+    content_digest_bytes, ensure_no_symlinked_path_ancestors, is_contained_repository_path,
+    GeneratorError,
+};
 
 /// Location of the repository-owned generation config, relative to the
 /// repository root.
@@ -35,6 +39,14 @@ const CONFIG_SCHEMA: i64 = 1;
 /// # Errors
 /// Returns filesystem errors and parse errors with the affected path.
 pub(crate) fn load(path: &Path) -> Result<RepoGenerationConfig, GeneratorError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| GeneratorError::io("inspect generation config", path, &error))?;
+    if !metadata.file_type().is_file() {
+        return Err(GeneratorError::usage(format!(
+            "generation config is not a regular file: {}",
+            path.display()
+        )));
+    }
     let bytes = fs::read(path)
         .map_err(|error| GeneratorError::io("read generation config", path, &error))?;
     parse(path, &bytes)
@@ -48,13 +60,35 @@ pub(crate) fn load(path: &Path) -> Result<RepoGenerationConfig, GeneratorError> 
 /// # Errors
 /// Returns filesystem errors and parse errors with the affected path.
 pub(crate) fn discover(root: &Path) -> Result<Option<RepoGenerationConfig>, GeneratorError> {
+    match fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.file_type().is_dir() => (),
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(GeneratorError::usage(format!(
+                "refusing symlinked repository root: {}",
+                root.display()
+            )));
+        }
+        Ok(_) => {
+            return Err(GeneratorError::usage(format!(
+                "repository root is not a directory: {}",
+                root.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(GeneratorError::io("inspect repository root", root, &error)),
+    }
     let path = root.join(GENERATION_CONFIG_PATH);
-    match fs::metadata(&path) {
-        Ok(metadata) if metadata.is_dir() => Err(GeneratorError::usage(format!(
-            "generation config is a directory: {}",
+    ensure_no_symlinked_path_ancestors(root, Path::new(GENERATION_CONFIG_PATH))?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => load(&path).map(Some),
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(GeneratorError::usage(format!(
+            "generation config must not be a symlink: {}",
             path.display()
         ))),
-        Ok(_) => load(&path).map(Some),
+        Ok(_) => Err(GeneratorError::usage(format!(
+            "generation config is not a regular file: {}",
+            path.display()
+        ))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(GeneratorError::io(
             "inspect generation config",
@@ -78,6 +112,7 @@ pub(crate) fn parse(path: &Path, bytes: &[u8]) -> Result<RepoGenerationConfig, G
         ))
     })?;
     config.schema_error(path)?;
+    validate_cache_host(&config.cache.host)?;
     Ok(config)
 }
 
@@ -135,22 +170,39 @@ pub(crate) struct CacheGithubSection {
     pub(crate) mbx_generation_bound: Option<u32>,
 }
 
-/// Velnor host persistent-store budgets (`[cache.velnor]`). An explicit
-/// override emits the fleet `velnor.env` snippet; never serialized into
+/// Host persistent-store budgets (`[cache.host]`). An explicit override may
+/// emit the repository-declared cache artifact; never serialized into
 /// `.github/ci/project.toml`.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CacheVelnorSection {
+pub(crate) struct CacheHostSection {
     pub(crate) budget_bytes: Option<u64>,
     pub(crate) producer_window_seconds: Option<u64>,
     pub(crate) mbx_generation_bound: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    artifact: Option<CacheArtifactSection>,
 }
 
-impl CacheVelnorSection {
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CacheArtifactSection {
+    /// Repository-relative path owned by the generator when the host profile
+    /// has an explicit override.
+    pub(crate) path: Option<String>,
+    /// Repository-declared artifact template. The generic substitutions
+    /// `{budget_bytes}` and `{mbx_generation_bound}` are supported.
+    pub(crate) template: Option<String>,
+}
+
+impl CacheHostSection {
     pub(crate) fn has_overrides(&self) -> bool {
         self.budget_bytes.is_some()
             || self.producer_window_seconds.is_some()
             || self.mbx_generation_bound.is_some()
+    }
+
+    pub(crate) fn artifact(&self) -> Option<&CacheArtifactSection> {
+        self.artifact.as_ref()
     }
 }
 
@@ -160,7 +212,7 @@ struct CacheRootSection {
     #[serde(default)]
     github: CacheGithubSection,
     #[serde(default)]
-    velnor: CacheVelnorSection,
+    host: CacheHostSection,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -1597,28 +1649,24 @@ impl DeclareRow {
     }
 }
 
-/// Default Velnor host cache budget: 50 GiB (`[cache.velnor].budget_bytes`).
-pub(crate) const DEFAULT_VELNOR_HOST_CACHE_BYTES: u64 = 53_687_091_200;
+/// Default host cache budget: 50 GiB (`[cache.host].budget_bytes`).
+pub(crate) const DEFAULT_HOST_CACHE_BYTES: u64 = 53_687_091_200;
 
-/// Render the fleet host env snippet from `[cache.velnor]` overrides.
-pub(crate) fn render_velnor_host_env(section: &CacheVelnorSection) -> String {
-    let budget_caches = section
-        .budget_bytes
-        .unwrap_or(DEFAULT_VELNOR_HOST_CACHE_BYTES);
+/// Render a repository-declared cache artifact from host cache overrides.
+pub(crate) fn render_cache_artifact(section: &CacheHostSection) -> Option<(PathBuf, String)> {
+    let artifact = section.artifact()?;
+    let budget_caches = section.budget_bytes.unwrap_or(DEFAULT_HOST_CACHE_BYTES);
     let mbx_generation_bound = section.mbx_generation_bound.unwrap_or(6);
-    format!(
-        "# Generated by velnor-workflow. Merge into /etc/velnor/velnor.env on fleet hosts.\n\
-         # Generator-only [cache.velnor]; never written to .github/ci/project.toml.\n\
-         VELNOR_STORAGE_ROOT=/var\n\
-         VELNOR_BUDGET_CACHES_BYTES={budget_caches}\n\
-         VELNOR_BUDGET_CARGO_BYTES=21474836480\n\
-         VELNOR_BUDGET_MISE_BYTES=21474836480\n\
-         VELNOR_BUDGET_ARTIFACTS_BYTES=21474836480\n\
-         VELNOR_BUDGET_TARGETS_BYTES=214748364800\n\
-         MBX_GC_MAX_TOTAL_SIZE=50GiB\n\
-         # Same-repo PR jobs write the pr scope only; trusted events write trusted (D18).\n\
-         VELNOR_MBX_GENERATION_BOUND={mbx_generation_bound}\n"
-    )
+    let content = artifact
+        .template
+        .as_deref()
+        .unwrap_or_default()
+        .replace("{budget_bytes}", &budget_caches.to_string())
+        .replace("{mbx_generation_bound}", &mbx_generation_bound.to_string());
+    Some((
+        PathBuf::from(artifact.path.as_deref().unwrap_or_default()),
+        content,
+    ))
 }
 
 impl RepoGenerationConfig {
@@ -1784,9 +1832,9 @@ impl RepoGenerationConfig {
         &self.cache.github
     }
 
-    /// Velnor host cache budget overrides from `[cache.velnor]`.
-    pub(crate) fn cache_velnor(&self) -> &CacheVelnorSection {
-        &self.cache.velnor
+    /// Host cache budget overrides from `[cache.host]`.
+    pub(crate) fn cache_host(&self) -> &CacheHostSection {
+        &self.cache.host
     }
 
     /// The declared repository-local files the generated output owns.
@@ -1920,6 +1968,7 @@ impl RepoGenerationConfig {
             self.workflow.version_bump_units.as_deref(),
             unit_ids,
         )?;
+        validate_cache_host(&self.cache.host)?;
         validate_static_files(&self.static_files)?;
         validate_reviewers(&self.reviewers)?;
         self.validate_release()?;
@@ -2600,10 +2649,47 @@ fn validate_unit_references(
     Ok(())
 }
 
+fn validate_cache_host(section: &CacheHostSection) -> Result<(), GeneratorError> {
+    if section.has_overrides() && section.artifact().is_none() {
+        return Err(GeneratorError::usage(
+            "[cache.host.artifact] path and template are required when host cache overrides are declared"
+                .to_owned(),
+        ));
+    }
+    let Some(artifact) = section.artifact() else {
+        return Ok(());
+    };
+    let path = artifact.path.as_deref().unwrap_or_default();
+    if !is_contained_repository_path(path)
+        || path
+            .split('/')
+            .any(|component| component.is_empty() || component == ".")
+        || !Path::new(path)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+        || !crate::path_spelling_is_supported(path)
+        || starts_with_generated_github_tree(path)
+        || starts_with_generation_config_tree(Path::new(path))
+        || path == crate::OWNERSHIP_STATE
+    {
+        return Err(GeneratorError::usage(format!(
+            "[cache.host.artifact] path must be a safe repository-relative path: `{path}`"
+        )));
+    }
+    if artifact.template.is_none() {
+        return Err(GeneratorError::usage(
+            "[cache.host.artifact] template is required when an artifact path is declared"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Static file rows write inside `.github/` only, from a repository file that
 /// stays inside the repository: anything else would turn configuration into an
 /// arbitrary filesystem write.
 fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorError> {
+    let mut declared_outputs: Vec<&str> = Vec::new();
     for row in rows {
         let file = row.file.as_deref().unwrap_or_default();
         let source = row.source.as_deref().unwrap_or_default();
@@ -2612,11 +2698,30 @@ fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorErro
                 "[[static_file]] file must be a repository-relative path inside `.github/`, found `{file}`"
             )));
         }
-        if !crate::path_spelling_is_supported(file) {
+        if let Some(reserved) = crate::generator_owned_static_file_path(file) {
+            return Err(GeneratorError::usage(format!(
+                "remove the `[[static_files]]` row for `{reserved}`: the generator owns this path"
+            )));
+        }
+        if !crate::path_spelling_is_supported(file)
+            || file
+                .split('/')
+                .any(|component| component.is_empty() || component == ".")
+        {
             return Err(GeneratorError::usage(format!(
                 "[[static_file]] file uses an unsupported generated path spelling: {file}"
             )));
         }
+        if let Some(existing) = declared_outputs
+            .iter()
+            .copied()
+            .find(|existing| crate::path_spellings_alias(existing, file))
+        {
+            return Err(GeneratorError::usage(format!(
+                "[[static_files]] paths `{existing}` and `{file}` alias the same output; declare one path"
+            )));
+        }
+        declared_outputs.push(file);
         if !is_contained_repository_path(source) {
             return Err(GeneratorError::usage(format!(
                 "[[static_file]] source must be a repository-relative path, found `{source}`"
@@ -2625,11 +2730,6 @@ fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorErro
         if starts_with_generated_github_tree(source) {
             return Err(GeneratorError::usage(format!(
                 "[[static_file]] source must stay outside `.github/`, found `{source}`"
-            )));
-        }
-        if let Some(reserved) = crate::generator_owned_static_file_path(file) {
-            return Err(GeneratorError::usage(format!(
-                "remove the `[[static_files]]` row for `{reserved}`: the generator owns this path"
             )));
         }
         let duplicate = rows
@@ -2655,7 +2755,7 @@ fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorErro
 /// generated tree. Callers must read the returned canonical path, rather than
 /// the original spelling, so validation and the read operate on the same
 /// resolved object.
-pub(crate) fn validate_static_file_source(
+pub(crate) fn resolve_static_file_source(
     root: &Path,
     source: &str,
 ) -> Result<PathBuf, GeneratorError> {
@@ -2669,12 +2769,6 @@ pub(crate) fn validate_static_file_source(
             "[[static_file]] source must stay outside `.github/`, found `{source}`"
         )));
     }
-    if let Some(directory) = scanner_pruned_directory(Path::new(source)) {
-        return Err(GeneratorError::usage(format!(
-            "[[static_file]] source must stay inside the scanner input: `{source}` is under pruned directory `{directory}`"
-        )));
-    }
-
     let root_metadata = fs::symlink_metadata(root)
         .map_err(|error| GeneratorError::io("inspect repository root", root, &error))?;
     if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
@@ -2695,7 +2789,7 @@ pub(crate) fn validate_static_file_source(
             "[[static_file]] source resolves outside the repository: `{source}`"
         ))
     })?;
-    if let Some(directory) = scanner_pruned_directory(relative) {
+    if let Some(directory) = scanner_pruned_directory(&canonical_root, relative) {
         return Err(GeneratorError::usage(format!(
             "[[static_file]] source must stay inside the scanner input: `{source}` resolves under pruned directory `{directory}`"
         )));
@@ -2713,6 +2807,110 @@ pub(crate) fn validate_static_file_source(
             "[[static_file]] source must resolve to a regular file: `{source}`"
         )));
     }
+    Ok(resolved)
+}
+
+/// Validate static declarations and resolve every source before the first
+/// scanner pass. Scanner membership is checked against that pass's file list.
+pub(crate) fn preflight_static_files(
+    root: &Path,
+    generation: &RepoGenerationConfig,
+) -> Result<crate::StaticFilePreflight, GeneratorError> {
+    validate_static_files(generation.static_files())?;
+    if generation.static_files().is_empty() {
+        return Ok(crate::StaticFilePreflight::default());
+    }
+    let canonical_root = fs::canonicalize(root)
+        .map_err(|error| GeneratorError::io("resolve repository root", root, &error))?;
+    let mut preflight = crate::StaticFilePreflight {
+        source_root: Some(canonical_root.clone()),
+        source_root_identity: Some(crate::static_source_root_identity(&canonical_root)?),
+        ..crate::StaticFilePreflight::default()
+    };
+    for row in generation.static_files() {
+        let file = row.file().ok_or_else(|| {
+            GeneratorError::usage("[[static_file]] row is missing `file`".to_owned())
+        })?;
+        let source = row.source().ok_or_else(|| {
+            GeneratorError::usage("[[static_file]] row is missing `source`".to_owned())
+        })?;
+        let resolved = resolve_static_file_source(root, source)?;
+        let relative = resolved.strip_prefix(&canonical_root).map_err(|_| {
+            GeneratorError::usage(format!(
+                "[[static_file]] source resolves outside the repository: `{source}`"
+            ))
+        })?;
+        let relative_text = crate::static_source_relative_path(relative)?;
+        if let Some(cache_path) = generation
+            .cache_host()
+            .artifact()
+            .and_then(|artifact| artifact.path.as_deref())
+        {
+            let cache_output = canonical_root.join(cache_path);
+            let cache_output_exists = match fs::symlink_metadata(&cache_output) {
+                Ok(_) => true,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    return Err(GeneratorError::io(
+                        "inspect generated cache output",
+                        &cache_output,
+                        &error,
+                    ));
+                }
+            };
+            if cache_output_exists
+                && generation.cache_host().has_overrides()
+                && crate::static_source_paths_alias(&resolved, &cache_output)?
+            {
+                return Err(GeneratorError::usage(format!(
+                    "[[static_files]] cannot source `{cache_path}` while the declared host cache artifact emits that generated file; remove the host cache overrides before migrating it to a static source"
+                )));
+            }
+        }
+        preflight.output_paths.push(file.to_owned());
+        preflight.source_paths.push(relative_text.clone());
+        let content = fs::read_to_string(&resolved).map_err(|error| {
+            GeneratorError::io("read declared static file source", &resolved, &error)
+        })?;
+        if preflight
+            .resolved_sources
+            .get(source)
+            .is_some_and(|previous| previous != &resolved)
+            || preflight
+                .source_contents
+                .get(source)
+                .is_some_and(|previous| previous != &content)
+        {
+            return Err(GeneratorError::usage(format!(
+                "declared static source changed during preflight: `{source}`"
+            )));
+        }
+        preflight
+            .resolved_sources
+            .insert(source.to_owned(), resolved);
+        preflight.source_contents.insert(source.to_owned(), content);
+    }
+    preflight.output_paths.sort();
+    preflight.source_paths.sort();
+    preflight.source_paths.dedup();
+    Ok(preflight)
+}
+
+/// Compatibility validator for direct callers and tests. The production
+/// generation path validates membership against its existing scan snapshot.
+#[cfg(test)]
+pub(crate) fn validate_static_file_source(
+    root: &Path,
+    source: &str,
+) -> Result<PathBuf, GeneratorError> {
+    let resolved = resolve_static_file_source(root, source)?;
+    let canonical_root = fs::canonicalize(root)
+        .map_err(|error| GeneratorError::io("resolve repository root", root, &error))?;
+    let relative = resolved.strip_prefix(&canonical_root).map_err(|_| {
+        GeneratorError::usage(format!(
+            "[[static_file]] source resolves outside the repository: `{source}`"
+        ))
+    })?;
     validate_static_source_in_scanner(root, relative)?;
     Ok(resolved)
 }
@@ -2720,38 +2918,35 @@ pub(crate) fn validate_static_file_source(
 /// The scanner never treats tool output, dependency trees, or VCS metadata as
 /// repository inputs. Keep static passthrough sources on that same boundary so
 /// an unreviewed build result cannot become generated workflow input.
-fn scanner_pruned_directory(path: &Path) -> Option<&'static str> {
-    let mut components = path.components();
-    let first = components.next();
-    let Component::Normal(first) = first? else {
-        return None;
-    };
-    let first = first.to_str()?;
-    for directory in [
-        ".git",
-        ".output",
-        "target",
-        "node_modules",
-        ".build",
-        ".gradle",
-        ".terraform",
-        "dist",
-        "coverage",
-    ] {
-        if crate::path_spellings_alias(first, directory) {
-            return Some(directory);
-        }
-    }
-    for component in components {
+fn scanner_pruned_directory(root: &Path, path: &Path) -> Option<&'static str> {
+    let mut parent = root.to_path_buf();
+    for (index, component) in path.components().enumerate() {
         let Component::Normal(component) = component else {
             continue;
         };
-        let component = component.to_str()?;
-        for directory in [".git", "node_modules"] {
-            if crate::path_spellings_alias(component, directory) {
+        let directories: &[&str] = if index == 0 {
+            &[
+                ".git",
+                ".output",
+                "target",
+                "node_modules",
+                ".build",
+                ".gradle",
+                ".terraform",
+                "dist",
+                "coverage",
+            ]
+        } else {
+            &[".git", "node_modules"]
+        };
+        let candidate = parent.join(component);
+        let candidate = fs::canonicalize(&candidate).ok()?;
+        for directory in directories {
+            if fs::canonicalize(parent.join(directory)).ok().as_ref() == Some(&candidate) {
                 return Some(directory);
             }
         }
+        parent.push(component);
     }
     None
 }
@@ -2759,13 +2954,13 @@ fn scanner_pruned_directory(path: &Path) -> Option<&'static str> {
 /// The scanner's file set is the single source of truth for repository input:
 /// it applies the Git index boundary, scanner-pruned roots, dependency
 /// filtering, generator-owned output filtering, and `[scan] exclude` rows.
+#[cfg(test)]
 fn validate_static_source_in_scanner(root: &Path, relative: &Path) -> Result<(), GeneratorError> {
     let generation = discover(root)?;
     let excludes = match generation.as_ref() {
         Some(generation) => generation.scan_exclude()?,
         None => &[],
     };
-    let files = crate::scan::file_walk::repository_files(root, excludes)?;
     relative.to_str().ok_or_else(|| {
         GeneratorError::usage(format!(
             "[[static_file]] source path is not valid UTF-8: {}",
@@ -2773,7 +2968,15 @@ fn validate_static_source_in_scanner(root: &Path, relative: &Path) -> Result<(),
         ))
     })?;
     let relative = crate::scan::file_walk::normalize_relative_path(relative)?;
-    if files.iter().any(|file| file == &relative) {
+    let files = crate::scan::file_walk::repository_files_with_static_sources(
+        root,
+        excludes,
+        std::slice::from_ref(&relative),
+    )?;
+    let resolved = fs::canonicalize(root.join(&relative)).map_err(|error| {
+        GeneratorError::io("resolve static source for scanner membership", root, &error)
+    })?;
+    if crate::static_source_is_scanner_input(root, &resolved, &relative, &files)? {
         return Ok(());
     }
     Err(GeneratorError::usage(format!(
@@ -2844,6 +3047,17 @@ fn starts_with_generated_github_tree(path: &str) -> bool {
     starts_with_generated_github_path(Path::new(path))
 }
 
+fn starts_with_generation_config_tree(path: &Path) -> bool {
+    let mut components = path
+        .components()
+        .filter(|component| !matches!(component, Component::CurDir));
+    matches!(
+        components.next(),
+        Some(Component::Normal(component))
+            if component.to_string_lossy().eq_ignore_ascii_case(".github-gen")
+    )
+}
+
 fn starts_with_generated_github_path(path: &Path) -> bool {
     let mut components = path
         .components()
@@ -2853,13 +3067,6 @@ fn starts_with_generated_github_path(path: &Path) -> bool {
         Some(Component::Normal(component))
             if component.to_string_lossy().eq_ignore_ascii_case(".github")
     )
-}
-
-fn is_contained_repository_path(path: &str) -> bool {
-    !path.is_empty()
-        && !path.starts_with('/')
-        && !path.contains('\\')
-        && !path.split('/').any(|segment| segment == "..")
 }
 
 /// The publishers the renderer implements, and the contract fields each one
@@ -4832,6 +5039,36 @@ mod tests {
         must(fs::remove_dir_all(root), "remove pruned source fixture");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn static_file_source_resolution_uses_filesystem_pruned_identity() {
+        let root = scanned_root("static-source-case-distinct-unicode");
+        let source_name = "café.txt";
+        let source = root.join("TARGET").join(source_name);
+        must(
+            fs::create_dir_all(source.parent().unwrap_or(&root)),
+            "create case-distinct source parent",
+        );
+        must(
+            fs::write(&source, "static source\n"),
+            "write case-distinct Unicode source",
+        );
+        if fs::canonicalize(root.join("TARGET")).ok() == fs::canonicalize(root.join("target")).ok()
+        {
+            let _ = fs::remove_dir_all(root);
+            return;
+        }
+        let resolved = must(
+            validate_static_file_source(&root, &format!("TARGET/{source_name}")),
+            "case-distinct Unicode source must remain a scanner input",
+        );
+        assert_eq!(resolved, must(fs::canonicalize(&source), "resolve source"));
+        must(
+            fs::remove_dir_all(root),
+            "remove case-distinct Unicode source fixture",
+        );
+    }
+
     #[test]
     fn static_file_source_resolution_rejects_declared_scan_excludes() {
         let root = scanned_root("static-source-excluded");
@@ -5208,7 +5445,7 @@ mod tests {
              default_branch = \"trunk\"\n\
              \n\
              [scan]\n\
-             exclude = [\"config/fleet/**\", \"docs/**\"]\n\
+             exclude = [\"vendor/**\", \"docs/**\"]\n\
              \n\
              [policy]\n\
              dco_required = true\n\
@@ -6406,19 +6643,158 @@ mod tests {
 
     #[test]
     fn cache_sections_parse_and_stay_generator_only() {
-        assert!(!config_for("schema = 1\n").cache_velnor().has_overrides());
+        assert!(!config_for("schema = 1\n").cache_host().has_overrides());
         let config = config_for(
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [cache.github]\nbudget_bytes = 8589934592\nproducer_window_seconds = 7200\n\
-             mbx_generation_bound = 2\n\n[cache.velnor]\nbudget_bytes = 53687091200\n\
-             mbx_generation_bound = 6\n",
+             mbx_generation_bound = 2\n\n[cache.host]\nbudget_bytes = 53687091200\n\
+             mbx_generation_bound = 6\n\n[cache.host.artifact]\npath = \"state/cache.env\"\n\
+             template = \"BUDGET={budget_bytes}\\nGEN={mbx_generation_bound}\\n\"\n",
         );
         assert_eq!(config.cache_github().budget_bytes, Some(8_589_934_592));
-        assert_eq!(config.cache_velnor().budget_bytes, Some(53_687_091_200));
-        assert!(config.cache_velnor().has_overrides());
-        let env = super::render_velnor_host_env(config.cache_velnor());
-        assert!(env.contains("VELNOR_STORAGE_ROOT=/var"));
-        assert!(env.contains("VELNOR_BUDGET_CACHES_BYTES=53687091200"));
+        assert_eq!(config.cache_host().budget_bytes, Some(53_687_091_200));
+        assert!(config.cache_host().has_overrides());
+        let (path, artifact) =
+            super::render_cache_artifact(config.cache_host()).unwrap_or_default();
+        assert_eq!(path, PathBuf::from("state/cache.env"));
+        assert_eq!(artifact, "BUDGET=53687091200\nGEN=6\n");
+    }
+
+    #[test]
+    fn cache_artifact_paths_reject_git_directory_components() {
+        for path in [
+            ".git",
+            ".git/cache.env",
+            ".GIT/cache.env",
+            "nested/.git/cache.env",
+            "nested/.GIT/cache.env",
+        ] {
+            let config = format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [cache.host.artifact]\npath = {path:?}\ntemplate = \"cache=1\\n\"\n"
+            );
+            let error = must_fail(
+                super::parse(
+                    Path::new(".github-gen/velnor-workflow.toml"),
+                    config.as_bytes(),
+                ),
+                "cache artifact path into Git metadata must fail at ingestion",
+            );
+            assert!(
+                error.to_string().contains("safe repository-relative path"),
+                "{path} must be rejected by config ingestion: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn static_source_cannot_consume_cache_generated_artifact() {
+        let root = scanned_root("static-source-cache-coexistence");
+        let source = root.join("state/cache.env");
+        must(
+            fs::create_dir_all(source.parent().unwrap_or(&root)),
+            "create cache source directory",
+        );
+        must(fs::write(&source, "MANUAL=1\n"), "write cache source");
+        let generation = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [[static_files]]\nfile = \".github/notes/cache.env\"\nsource = \"state/cache.env\"\n\n\
+             [cache.host]\nbudget_bytes = 53687091200\n\n[cache.host.artifact]\npath = \"state/cache.env\"\n\
+             template = \"BUDGET={budget_bytes}\\n\"\n",
+        );
+        let error = must_fail(
+            preflight_static_files(&root, &generation),
+            "cache/static source coexistence must fail closed",
+        );
+        assert!(error.to_string().contains("cannot source"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn case_distinct_cache_source_does_not_hide_generated_output() {
+        let root = scanned_root("static-source-cache-case-distinct");
+        let generated = root.join("state/cache.env");
+        let source = root.join("state/CACHE.env");
+        must(
+            fs::create_dir_all(generated.parent().unwrap_or(&root)),
+            "create cache case directory",
+        );
+        must(
+            fs::write(&generated, "GENERATED=1\n"),
+            "write generated cache output",
+        );
+        must(
+            fs::write(&source, "STATIC=1\n"),
+            "write case-distinct source",
+        );
+        if fs::canonicalize(&generated).ok() == fs::canonicalize(&source).ok() {
+            let _ = fs::remove_dir_all(root);
+            return;
+        }
+        let generation = config_for(concat!(
+            "schema = 1\n\n",
+            "[generator]\nrepository = \"example/fixture\"\n\n",
+            "[[static_files]]\nfile = \".github/notes/cache.env\"\n",
+            "source = \"state/CACHE.env\"\n\n",
+            "[cache.host]\nbudget_bytes = 53687091200\n\n",
+            "[cache.host.artifact]\npath = \"state/cache.env\"\n",
+            "template = \"BUDGET={budget_bytes}\\n\"\n",
+        ));
+        must(
+            preflight_static_files(&root, &generation),
+            "case-distinct source must not alias generated cache output",
+        );
+        let fixed = must(
+            crate::s2::generator_fixed_output_paths_with_static_files(
+                &root,
+                &["state/CACHE.env".to_owned()],
+                &[],
+                &[crate::s2::GeneratedAliasPath::new("state/cache.env")],
+            ),
+            "resolve fixed output paths",
+        );
+        assert!(fixed.contains(std::path::Path::new("state/cache.env")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn static_source_hardlink_cannot_consume_cache_generated_artifact() {
+        let root = scanned_root("static-source-cache-hardlink");
+        let generated = root.join("state/cache.env");
+        let source = root.join("state/static-alias.env");
+        must(
+            fs::create_dir_all(generated.parent().unwrap_or(&root)),
+            "create generated cache directory",
+        );
+        must(
+            fs::create_dir_all(source.parent().unwrap_or(&root)),
+            "create static source directory",
+        );
+        must(
+            fs::write(&generated, "MANUAL=1\n"),
+            "write generated cache file",
+        );
+        must(
+            fs::hard_link(&generated, &source),
+            "create static/cache hardlink",
+        );
+        let generation = config_for(concat!(
+            "schema = 1\n\n",
+            "[generator]\nrepository = \"example/fixture\"\n\n",
+            "[[static_files]]\nfile = \".github/notes/cache.env\"\n",
+            "source = \"state/static-alias.env\"\n\n",
+            "[cache.host]\nbudget_bytes = 53687091200\n\n",
+            "[cache.host.artifact]\npath = \"state/cache.env\"\n",
+            "template = \"BUDGET={budget_bytes}\\n\"\n",
+        ));
+        let error = must_fail(
+            preflight_static_files(&root, &generation),
+            "cache/static hardlink coexistence must fail closed",
+        );
+        assert!(error.to_string().contains("cannot source"), "{error}");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -6525,6 +6901,64 @@ mod tests {
         );
         let discovered = must(discover(&root), "discover present config");
         assert!(discovered.is_some());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_rejects_symlinked_config_parent_and_repository_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = scanned_root("discovery-symlink-guard");
+        let path = root.join(GENERATION_CONFIG_PATH);
+        let git_config = root.join(".git/velnor-workflow.toml");
+        must(
+            fs::create_dir_all(path.parent().unwrap_or(&root)),
+            "create config directory",
+        );
+        must(
+            fs::create_dir_all(git_config.parent().unwrap_or(&root)),
+            "create Git metadata directory",
+        );
+        must(
+            fs::write(
+                &git_config,
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n",
+            ),
+            "write Git metadata config",
+        );
+        must(
+            symlink("../.git/velnor-workflow.toml", &path),
+            "symlink config into Git metadata",
+        );
+        let load_error = must_some_error(load(&path).err(), "load must reject config symlink");
+        assert!(load_error.contains("not a regular file"), "{load_error}");
+        let leaf_error = must_some_error(discover(&root).err(), "reject config symlink");
+        assert!(leaf_error.contains("symlink"), "{leaf_error}");
+
+        must(fs::remove_file(&path), "remove config symlink");
+        must(
+            fs::remove_dir(path.parent().unwrap_or(&root)),
+            "remove config directory",
+        );
+        must(
+            symlink(".git", root.join(".github-gen")),
+            "symlink config parent into Git metadata",
+        );
+        let parent_error = must_some_error(discover(&root).err(), "reject config parent symlink");
+        assert!(
+            parent_error.contains("symlinked ancestor"),
+            "{parent_error}"
+        );
+
+        let root_alias = root.with_extension("root-link");
+        must(symlink(&root, &root_alias), "symlink repository root");
+        let root_error = must_some_error(discover(&root_alias).err(), "reject root symlink");
+        assert!(
+            root_error.contains("symlinked repository root"),
+            "{root_error}"
+        );
+        let _ = fs::remove_file(root_alias);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -7015,6 +7449,35 @@ mod tests {
             "enabled docs with a non-https site_url must fail",
         );
         assert!(bad_url.to_string().contains("site_url"), "{bad_url}");
+    }
+
+    #[test]
+    fn docs_paths_reject_portable_repository_escapes_and_keep_unicode() {
+        for path in [
+            "C:/outside",
+            "C:outside",
+            "Ｃ：／outside",
+            "//server/share",
+            "\\\\server\\share",
+            "settings:stream",
+            "NUL",
+            "CON.txt",
+            "COM¹",
+            "LPT²",
+            ".git/config",
+            ".g\u{0131}t/config",
+            "dir/.git.",
+            "dir/.git ",
+        ] {
+            assert!(
+                validate_docs_path(path, "site_dir").is_err(),
+                "unsafe docs path must fail on every host: {path:?}"
+            );
+        }
+        must(
+            validate_docs_path("café/assets", "site_dir"),
+            "Unicode docs paths remain supported",
+        );
     }
 
     #[test]

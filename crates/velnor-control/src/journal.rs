@@ -24,18 +24,116 @@ use crate::store::error::{StoreError, StoreResult};
 pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
 
 /// Current journal schema. Older writers seeing a higher `PRAGMA user_version`
-/// must not apply events (N-1 must not clobber an N writer's log).
+/// must not apply events (N-1 must not clobber an N writer's log). Version 10
+/// fences pre-baseline schema-8 writers that would otherwise delete the
+/// replay anchor from `meta` during their next state persist, and adds durable
+/// disk-pressure episodes, launch fences, and both bounded pressure deadlines.
+/// Version 11 binds each fleet journal to one service instance and fences old
+/// writers from changing or ignoring that identity. Version 12 adds the
+/// selected run-service endpoint to acquisition-resolution events and fences
+/// writers that cannot replay that event vocabulary.
 ///
 /// Every terminal-affecting event rides a bump here. `Journal::open` stamps
 /// the current version onto an older journal *before* any event may be
 /// written, so a binary that predates the bump refuses the file outright
 /// instead of decoding it with an incomplete event vocabulary.
-pub const JOURNAL_SCHEMA_VERSION: u32 = 8;
+///
+/// This migration is forward-only. To recover with a v8 binary, stop every
+/// journal writer and restore a consistent pre-v9 SQLite backup as one set:
+/// the main database plus its `-wal` and `-shm` sidecars when present. Never
+/// lower `user_version`, drop the replay-baseline keys, or delete the fence on
+/// a live v12 database; those actions destroy the migration boundary.
+pub const JOURNAL_SCHEMA_VERSION: u32 = 12;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const SETUP_RETRIES: u32 = 5;
 const SETUP_BACKOFF_STEP: Duration = Duration::from_millis(40);
 const MAX_TERMINAL_ACK_SCAN_ROWS: i64 = 1_024;
+const REPLAY_BASELINE_KEY: &str = "replay_baseline_v1";
+const REPLAY_BASELINE_CHECKSUM_KEY: &str = "replay_baseline_sha256_v1";
+const JOURNAL_WRITE_GATE_TABLE: &str = "journal_write_gate";
+const JOURNAL_WRITE_FENCE_REASON: &str = "journal.write.fenced";
+const PRESSURE_TERMINAL_RECOVERY_WORKER_PREFIX: &str = "velnor-pressure-terminal-recovery:";
+const LEGACY_REPLAY_BASELINE_DELETE_FENCE_TRIGGER: &str = "replay_baseline_delete_fence";
+const LEGACY_REPLAY_BASELINE_RENAME_FENCE_TRIGGER: &str = "replay_baseline_rename_fence";
+
+const JOURNAL_WRITE_FENCE_TRIGGERS: [(&str, &str, &str); 27] = [
+    ("journal_write_fence_events_insert", "events", "INSERT"),
+    ("journal_write_fence_events_update", "events", "UPDATE"),
+    ("journal_write_fence_events_delete", "events", "DELETE"),
+    ("journal_write_fence_slots_insert", "slots", "INSERT"),
+    ("journal_write_fence_slots_update", "slots", "UPDATE"),
+    ("journal_write_fence_slots_delete", "slots", "DELETE"),
+    ("journal_write_fence_jobs_insert", "jobs", "INSERT"),
+    ("journal_write_fence_jobs_update", "jobs", "UPDATE"),
+    ("journal_write_fence_jobs_delete", "jobs", "DELETE"),
+    ("journal_write_fence_outbox_insert", "outbox", "INSERT"),
+    ("journal_write_fence_outbox_update", "outbox", "UPDATE"),
+    ("journal_write_fence_outbox_delete", "outbox", "DELETE"),
+    ("journal_write_fence_meta_insert", "meta", "INSERT"),
+    ("journal_write_fence_meta_update", "meta", "UPDATE"),
+    ("journal_write_fence_meta_delete", "meta", "DELETE"),
+    (
+        "journal_write_fence_disk_pressure_episodes_insert",
+        "disk_pressure_episodes",
+        "INSERT",
+    ),
+    (
+        "journal_write_fence_disk_pressure_episodes_update",
+        "disk_pressure_episodes",
+        "UPDATE",
+    ),
+    (
+        "journal_write_fence_disk_pressure_episodes_delete",
+        "disk_pressure_episodes",
+        "DELETE",
+    ),
+    (
+        "journal_write_fence_disk_pressure_launches_insert",
+        "disk_pressure_launches",
+        "INSERT",
+    ),
+    (
+        "journal_write_fence_disk_pressure_launches_update",
+        "disk_pressure_launches",
+        "UPDATE",
+    ),
+    (
+        "journal_write_fence_disk_pressure_launches_delete",
+        "disk_pressure_launches",
+        "DELETE",
+    ),
+    (
+        "journal_write_fence_disk_pressure_observations_insert",
+        "disk_pressure_observations",
+        "INSERT",
+    ),
+    (
+        "journal_write_fence_disk_pressure_observations_update",
+        "disk_pressure_observations",
+        "UPDATE",
+    ),
+    (
+        "journal_write_fence_disk_pressure_observations_delete",
+        "disk_pressure_observations",
+        "DELETE",
+    ),
+    (
+        "journal_write_fence_identity_insert",
+        "journal_identity",
+        "INSERT",
+    ),
+    (
+        "journal_write_fence_identity_update",
+        "journal_identity",
+        "UPDATE",
+    ),
+    (
+        "journal_write_fence_identity_delete",
+        "journal_identity",
+        "DELETE",
+    ),
+];
 
 /// Durable send attempts a completion may burn before it is unresolvable.
 /// Each attempt is one full transport retry loop, not one HTTP request.
@@ -119,9 +217,94 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS journal_write_gate (
+    id INTEGER PRIMARY KEY CHECK (id = 1)
+);
+CREATE TABLE IF NOT EXISTS disk_pressure_episodes (
+    service_instance TEXT NOT NULL,
+    filesystem_id TEXT NOT NULL,
+    volume_fingerprint TEXT,
+    episode_id TEXT NOT NULL,
+    started_unix INTEGER NOT NULL,
+    deadline_unix INTEGER NOT NULL,
+    drain_deadline_unix INTEGER NOT NULL,
+    last_observed_unix INTEGER NOT NULL,
+    reclaim_attempted INTEGER NOT NULL DEFAULT 0,
+    revision INTEGER NOT NULL,
+    draining INTEGER NOT NULL DEFAULT 0,
+    terminal INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (service_instance, filesystem_id)
+);
+CREATE TABLE IF NOT EXISTS disk_pressure_launches (
+    service_instance TEXT NOT NULL,
+    slot_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    launch_nonce TEXT NOT NULL,
+    issued_unix INTEGER NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (service_instance, slot_id)
+);
+CREATE TABLE IF NOT EXISTS disk_pressure_observations (
+    service_instance TEXT NOT NULL,
+    filesystem_id TEXT NOT NULL,
+    volume_fingerprint TEXT,
+    identity_confirmed INTEGER NOT NULL DEFAULT 0,
+    last_observed_unix INTEGER NOT NULL,
+    PRIMARY KEY (service_instance, filesystem_id)
+);
+CREATE TABLE IF NOT EXISTS journal_identity (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    service_instance TEXT NOT NULL
+);
 ";
 
 /// Fleet materialization the reducer reads and writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskPressureEpisode {
+    pub episode_id: String,
+    pub started_unix: u64,
+    /// Degraded admission cutoff (D). It never moves during this episode.
+    pub deadline_unix: u64,
+    /// Fixed end of the drain window. It never moves during this episode.
+    pub drain_deadline_unix: u64,
+    /// Latched once an observation reaches the degraded deadline.
+    pub draining: bool,
+    pub last_observed_unix: u64,
+    pub reclaim_attempted: bool,
+    pub revision: u64,
+    pub terminal: bool,
+    /// Stable volume UUID captured from the pinned descriptor. `None` means
+    /// the configured root has not yet yielded a trustworthy volume identity.
+    pub volume_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskPressureObservation {
+    /// `None` means the host is healthy and no episode remains active.
+    pub episode: Option<DiskPressureEpisode>,
+    pub cleared: bool,
+    /// Exactly the first low observation claims the episode's one reclaim.
+    /// The claim commits before cleanup; a crash after it may skip reclaim and
+    /// still proceeds through the persisted D/E fail-closed timeline.
+    pub reclaim_needed: bool,
+}
+
+/// One root measurement folded into the current pressure episode batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskPressureFilesystemSample {
+    /// Physical `unix-device:<st_dev>` episode key, or a stable `root:<hash>`
+    /// key while the configured root cannot be pinned to a device.
+    pub filesystem_id: String,
+    /// Configured-root keys that the current pinned batch proves belong to
+    /// this physical device. Any unpinnable-root episode is merged into the
+    /// device episode without moving the earliest deadline.
+    pub alias_ids: Vec<String>,
+    /// `None` is unknown capacity; it never authorizes reclaim or clearing.
+    pub available_bytes: Option<u64>,
+    pub min_free_bytes: u64,
+    pub volume_fingerprint: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FleetState {
     pub control_live: bool,
@@ -425,8 +608,8 @@ pub struct JobRecord {
     /// refuses a provisional row, so no completion can ever be sent against
     /// one. `JobOwned` clears it.
     pub provisional: bool,
-    /// Run-service plan holding this job. Empty until `JobAcquisitionResolved`
-    /// retargets the row onto the identity the acquire reply carried: the
+    /// Run-service plan holding this job. Empty until an acquisition
+    /// resolution event retargets the row onto the identity the acquire reply carried: the
     /// broker message that opens the acquisition names no plan, and `renewjob`
     /// needs one, so a row without this cannot be probed.
     pub plan_id: String,
@@ -495,6 +678,269 @@ impl OutboxRecord {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ReplayBaselineSource {
+    Empty,
+    LegacyMaterialized,
+}
+
+/// Versioned, closed baseline envelope. Keep this shape strict: a baseline is
+/// replay input, so silently accepting a missing or future semantic field
+/// would produce a state that only looks valid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayBaseline {
+    format_version: u32,
+    source: ReplayBaselineSource,
+    state: ReplayBaselineState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayBaselineState {
+    control_live: bool,
+    journal_writable: bool,
+    github_reachable: bool,
+    routing_valid: bool,
+    runner_group_valid: bool,
+    desired_ready: u32,
+    canary: CanaryStatus,
+    package_generation: u64,
+    package_apt_version: String,
+    execution_backend: ExecutionBackendKind,
+    capacity_declared: bool,
+    capacity_invalid: bool,
+    slots: Vec<ReplayBaselineSlot>,
+    jobs: Vec<ReplayBaselineJob>,
+    outbox: Vec<ReplayBaselineOutbox>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayBaselineSlot {
+    slot_id: SlotId,
+    generation: Generation,
+    phase: SlotPhase2,
+    permit_held: bool,
+    routing_valid: bool,
+    session_live: bool,
+    executor_proven: bool,
+    registered: bool,
+    pid: Option<u32>,
+    heartbeat_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayBaselineJob {
+    job_id: JobId,
+    slot_id: SlotId,
+    generation: Generation,
+    attempt: u32,
+    worker: String,
+    phase: JobPhase2,
+    accepted_unix: u64,
+    terminal_conclusion: Option<String>,
+    provisional: bool,
+    plan_id: String,
+    run_service_url: String,
+    probe_attempts: u32,
+    probe_deadline_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayBaselineOutbox {
+    job_id: JobId,
+    slot_id: SlotId,
+    generation: Generation,
+    payload_sha256: String,
+    intended: bool,
+    send_started: bool,
+    remote_acked: bool,
+    created_unix: u64,
+    attempts: u32,
+    deadline_unix: u64,
+    permanent: bool,
+    abandoned: bool,
+}
+
+impl ReplayBaselineState {
+    fn from_fleet(state: &FleetState) -> Self {
+        Self {
+            control_live: state.control_live,
+            journal_writable: state.journal_writable,
+            github_reachable: state.github_reachable,
+            routing_valid: state.routing_valid,
+            runner_group_valid: state.runner_group_valid,
+            desired_ready: state.desired_ready,
+            canary: state.canary,
+            package_generation: state.package_generation,
+            package_apt_version: state.package_apt_version.clone(),
+            execution_backend: state.execution_backend,
+            capacity_declared: state.capacity_declared,
+            capacity_invalid: state.capacity_invalid,
+            slots: state
+                .slots
+                .iter()
+                .cloned()
+                .map(ReplayBaselineSlot::from)
+                .collect(),
+            jobs: state
+                .jobs
+                .iter()
+                .cloned()
+                .map(ReplayBaselineJob::from)
+                .collect(),
+            outbox: state
+                .outbox
+                .iter()
+                .cloned()
+                .map(ReplayBaselineOutbox::from)
+                .collect(),
+        }
+    }
+
+    fn into_fleet(self) -> FleetState {
+        FleetState {
+            control_live: self.control_live,
+            journal_writable: self.journal_writable,
+            github_reachable: self.github_reachable,
+            routing_valid: self.routing_valid,
+            runner_group_valid: self.runner_group_valid,
+            // Drain and admission are lifecycle meta overlays, not replay
+            // events. They are read from the current materialized snapshot.
+            drain_active: false,
+            drain_version: 0,
+            admission_blocked: false,
+            admission_version: 0,
+            desired_ready: self.desired_ready,
+            canary: self.canary,
+            package_generation: self.package_generation,
+            package_apt_version: self.package_apt_version,
+            execution_backend: self.execution_backend,
+            capacity_declared: self.capacity_declared,
+            capacity_invalid: self.capacity_invalid,
+            slots: self.slots.into_iter().map(Into::into).collect(),
+            jobs: self.jobs.into_iter().map(Into::into).collect(),
+            outbox: self.outbox.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<SlotRecord> for ReplayBaselineSlot {
+    fn from(slot: SlotRecord) -> Self {
+        Self {
+            slot_id: slot.slot_id,
+            generation: slot.generation,
+            phase: slot.phase,
+            permit_held: slot.permit_held,
+            routing_valid: slot.routing_valid,
+            session_live: slot.session_live,
+            executor_proven: slot.executor_proven,
+            registered: slot.registered,
+            pid: slot.pid,
+            heartbeat_unix: slot.heartbeat_unix,
+        }
+    }
+}
+
+impl From<ReplayBaselineSlot> for SlotRecord {
+    fn from(slot: ReplayBaselineSlot) -> Self {
+        Self {
+            slot_id: slot.slot_id,
+            generation: slot.generation,
+            phase: slot.phase,
+            permit_held: slot.permit_held,
+            routing_valid: slot.routing_valid,
+            session_live: slot.session_live,
+            executor_proven: slot.executor_proven,
+            registered: slot.registered,
+            pid: slot.pid,
+            heartbeat_unix: slot.heartbeat_unix,
+        }
+    }
+}
+
+impl From<JobRecord> for ReplayBaselineJob {
+    fn from(job: JobRecord) -> Self {
+        Self {
+            job_id: job.job_id,
+            slot_id: job.slot_id,
+            generation: job.generation,
+            attempt: job.attempt,
+            worker: job.worker,
+            phase: job.phase,
+            accepted_unix: job.accepted_unix,
+            terminal_conclusion: job.terminal_conclusion,
+            provisional: job.provisional,
+            plan_id: job.plan_id,
+            run_service_url: job.run_service_url,
+            probe_attempts: job.probe_attempts,
+            probe_deadline_unix: job.probe_deadline_unix,
+        }
+    }
+}
+
+impl From<ReplayBaselineJob> for JobRecord {
+    fn from(job: ReplayBaselineJob) -> Self {
+        Self {
+            job_id: job.job_id,
+            slot_id: job.slot_id,
+            generation: job.generation,
+            attempt: job.attempt,
+            worker: job.worker,
+            phase: job.phase,
+            accepted_unix: job.accepted_unix,
+            terminal_conclusion: job.terminal_conclusion,
+            provisional: job.provisional,
+            plan_id: job.plan_id,
+            run_service_url: job.run_service_url,
+            probe_attempts: job.probe_attempts,
+            probe_deadline_unix: job.probe_deadline_unix,
+        }
+    }
+}
+
+impl From<OutboxRecord> for ReplayBaselineOutbox {
+    fn from(row: OutboxRecord) -> Self {
+        Self {
+            job_id: row.job_id,
+            slot_id: row.slot_id,
+            generation: row.generation,
+            payload_sha256: row.payload_sha256,
+            intended: row.intended,
+            send_started: row.send_started,
+            remote_acked: row.remote_acked,
+            created_unix: row.created_unix,
+            attempts: row.attempts,
+            deadline_unix: row.deadline_unix,
+            permanent: row.permanent,
+            abandoned: row.abandoned,
+        }
+    }
+}
+
+impl From<ReplayBaselineOutbox> for OutboxRecord {
+    fn from(row: ReplayBaselineOutbox) -> Self {
+        Self {
+            job_id: row.job_id,
+            slot_id: row.slot_id,
+            generation: row.generation,
+            payload_sha256: row.payload_sha256,
+            intended: row.intended,
+            send_started: row.send_started,
+            remote_acked: row.remote_acked,
+            created_unix: row.created_unix,
+            attempts: row.attempts,
+            deadline_unix: row.deadline_unix,
+            permanent: row.permanent,
+            abandoned: row.abandoned,
+        }
+    }
+}
+
 /// Intent events. The reducer never performs I/O.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -560,9 +1006,9 @@ pub enum Event {
         /// `JobOwned` stamps `accepted_unix`.
         intended_unix: u64,
     },
-    /// The acquire reply came back and named the job. Retargets the provisional
-    /// row from the broker message identity onto the run-service identity, and
-    /// records the plan so `renewjob` becomes possible.
+    /// Original resolution record retained for replay of journals written
+    /// before the selected endpoint was recorded separately. New acquire
+    /// responses use `JobAcquisitionResolvedAtEndpoint`.
     ///
     /// One event, because the alternative is two: drop the message-keyed row
     /// and create the job-keyed one. That pair frees the slot in between, which
@@ -577,6 +1023,17 @@ pub enum Event {
         acquired_job_id: JobId,
         plan_id: String,
         generation: Generation,
+    },
+    /// The acquire reply supplied the job's SystemVssConnection. Record that
+    /// endpoint with the acquired identity so every later renew and completion,
+    /// including after recovery, addresses the selected run service instead of
+    /// the broker URL that opened acquisition.
+    JobAcquisitionResolvedAtEndpoint {
+        provisional_job_id: JobId,
+        acquired_job_id: JobId,
+        plan_id: String,
+        generation: Generation,
+        run_service_url: String,
     },
     /// One recovery probe was spent without reaching a verdict. Charged to the
     /// row's durable budget so an unreachable run service cannot make this node
@@ -683,6 +1140,13 @@ pub enum Event {
         pid: u32,
     },
     SlotStale {
+        slot_id: SlotId,
+        generation: Generation,
+    },
+    /// Terminal host-pressure deadline fence. Unlike `SlotStale`, this
+    /// revokes the slot generation even while its job row remains occupied;
+    /// the controller stops the actor and resolves job/outbox ownership next.
+    DiskPressureTerminalFence {
         slot_id: SlotId,
         generation: Generation,
     },
@@ -1003,6 +1467,31 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 _ => rejected = true,
             }
         }
+        Event::JobAcquisitionResolvedAtEndpoint {
+            provisional_job_id,
+            acquired_job_id,
+            plan_id,
+            generation,
+            run_service_url,
+        } => {
+            let target_taken = acquired_job_id != provisional_job_id
+                && state.jobs.iter().any(|job| job.job_id == acquired_job_id);
+            let row = state.jobs.iter_mut().find(|job| {
+                job.job_id == provisional_job_id && job.generation == generation && job.provisional
+            });
+            match row {
+                Some(row)
+                    if !target_taken
+                        && !plan_id.trim().is_empty()
+                        && !run_service_url.trim().is_empty() =>
+                {
+                    row.job_id = acquired_job_id;
+                    row.plan_id = plan_id;
+                    row.run_service_url = run_service_url;
+                }
+                _ => rejected = true,
+            }
+        }
         Event::AcquisitionProbeFailed { job_id, generation } => {
             let row = state.jobs.iter_mut().find(|job| {
                 job.job_id == job_id && job.generation == generation && job.provisional
@@ -1048,10 +1537,17 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             let other_live = state.jobs.iter().any(|job| {
                 job.slot_id == slot_id && job.job_id != job_id && job.phase.occupies_slot()
             });
-            if newer_job
-                || slot_generation != Some(generation)
-                || slot_phase != Some(SlotPhase2::Assigned)
-                || other_live
+            let terminal_handoff_row = worker.starts_with(PRESSURE_TERMINAL_RECOVERY_WORKER_PREFIX)
+                && state.jobs.iter().any(|job| {
+                    job.job_id == job_id
+                        && job.slot_id == slot_id
+                        && job.generation == generation
+                        && job.provisional
+                        && !job.plan_id.is_empty()
+                });
+            let slot_phase_allowed = slot_phase == Some(SlotPhase2::Assigned)
+                || (slot_phase == Some(SlotPhase2::Fenced) && terminal_handoff_row);
+            if newer_job || slot_generation != Some(generation) || !slot_phase_allowed || other_live
             {
                 rejected = true;
             } else {
@@ -1085,8 +1581,20 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             }
         }
         Event::JobStarted { job_id, generation } => {
+            let job_slot_id = state
+                .jobs
+                .iter()
+                .find(|job| job.job_id == job_id)
+                .map(|job| job.slot_id.clone());
+            let slot_generation = job_slot_id.and_then(|slot_id| {
+                state
+                    .slots
+                    .iter()
+                    .find(|slot| slot.slot_id == slot_id)
+                    .map(|slot| slot.generation)
+            });
             if let Some(job) = state.jobs.iter_mut().find(|job| job.job_id == job_id) {
-                if job.generation != generation {
+                if job.generation != generation || slot_generation != Some(generation) {
                     rejected = true;
                 } else {
                     job.phase = JobPhase2::Running;
@@ -1217,12 +1725,25 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
         }
         Event::RemoteAcked { job_id, generation }
         | Event::RemoteObservedTerminal { job_id, generation } => {
+            let job_slot_generation =
+                state
+                    .jobs
+                    .iter()
+                    .find(|job| job.job_id == job_id)
+                    .and_then(|job| {
+                        state
+                            .slots
+                            .iter()
+                            .find(|slot| slot.slot_id == job.slot_id)
+                            .map(|slot| (job.generation, slot.generation))
+                    });
             if let Some(index) = state.outbox.iter().position(|row| row.job_id == job_id) {
                 let valid = {
                     let row = &state.outbox[index];
                     row.generation == generation
                         && row.is_pending()
                         && row.send_started
+                        && job_slot_generation == Some((generation, generation))
                         && outbox_owner_is_proven(&state, row)
                 };
                 if valid {
@@ -1338,7 +1859,14 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
         Event::JobWorkerLost { job_id, generation } => {
             let job = state.jobs.iter().find(|job| job.job_id == job_id);
             match job {
-                Some(job) if job.generation == generation => {
+                Some(job)
+                    if job.generation == generation
+                        && state
+                            .slots
+                            .iter()
+                            .find(|slot| slot.slot_id == job.slot_id)
+                            .is_some_and(|slot| slot.generation == generation) =>
+                {
                     // A completing job may still have an outbox payload to
                     // send; preserve its slot ownership until remote
                     // terminal acknowledgement supplies the second proof.
@@ -1400,6 +1928,21 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 });
             }
         }
+        Event::DiskPressureTerminalFence {
+            slot_id,
+            generation,
+        } => {
+            let slot = state.slot_mut(&slot_id);
+            if generation != slot.generation {
+                rejected = true;
+            } else {
+                slot.phase = SlotPhase2::Fenced;
+                commands.push(SideEffect::FenceSlot {
+                    slot_id,
+                    generation,
+                });
+            }
+        }
         Event::CanaryObserved { status } => state.canary = status,
         Event::PackageActivated {
             apt_version,
@@ -1426,10 +1969,119 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
 }
 
 /// Opened journal on local disk only.
+#[derive(Debug, Clone)]
+struct WorkerLaunchFence {
+    service_instance: String,
+    slot_id: SlotId,
+    generation: i64,
+    launch_nonce: String,
+}
+
+#[derive(Debug, Clone)]
+struct AcquisitionIntentFence {
+    service_instance: String,
+    slot_id: SlotId,
+    generation: i64,
+    launch_nonce: String,
+    provisional_job_id: JobId,
+    message_id: String,
+    run_service_url: String,
+}
+
+#[derive(Debug, Clone)]
+struct AcquisitionResponseFence {
+    service_instance: String,
+    slot_id: SlotId,
+    generation: i64,
+    launch_nonce: String,
+    provisional_job_id: JobId,
+    message_id: String,
+    run_service_url: String,
+}
+
+#[derive(Debug, Clone)]
+struct AcquisitionResolutionFence {
+    slot_id: SlotId,
+    generation: i64,
+    provisional_job_id: JobId,
+    acquired_job_id: JobId,
+    plan_id: String,
+    message_id: String,
+    acquire_run_service_url: String,
+    job_run_service_url: String,
+}
+
+#[derive(Debug, Clone)]
+struct AcquisitionLossFence {
+    slot_id: SlotId,
+    generation: i64,
+    provisional_job_id: JobId,
+    message_id: String,
+    run_service_url: String,
+}
+
+#[derive(Debug, Clone)]
+struct AcquisitionAbandonFence {
+    service_instance: String,
+    slot_id: SlotId,
+    generation: i64,
+    launch_nonce: String,
+    provisional_job_id: JobId,
+    message_id: String,
+    run_service_url: String,
+}
+
+#[derive(Debug, Clone)]
+struct AcquisitionRecoveryFence {
+    service_instance: String,
+    slot_id: SlotId,
+    generation: i64,
+    acquired_job_id: JobId,
+    plan_id: String,
+    run_service_url: String,
+}
+
 #[derive(Debug)]
 pub struct Journal {
     conn: Connection,
     path: PathBuf,
+    worker_launch: Option<WorkerLaunchFence>,
+    service_instance: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct JournalWriterContext {
+    service_instance: Option<String>,
+}
+
+impl JournalWriterContext {
+    fn validate(&self, conn: &Connection) -> StoreResult<()> {
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT service_instance FROM journal_identity WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match (stored.as_deref(), self.service_instance.as_deref()) {
+            (None, None) => Ok(()),
+            (Some(stored), Some(requested)) if stored == requested => Ok(()),
+            (Some(_), None) => Err(journal_service_instance_mismatch(
+                "an unbound journal handle cannot mutate a service-owned database",
+            )),
+            (None, Some(_)) => Err(journal_service_instance_mismatch(
+                "the journal has no owner row for this service context",
+            )),
+            (Some(_), Some(_)) => Err(journal_service_instance_mismatch(
+                "the journal belongs to a different service context",
+            )),
+        }
+    }
+
+    fn begin_write(&self, tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+        begin_journal_write_gate(tx)?;
+        self.validate(tx)
+    }
 }
 
 impl Journal {
@@ -1438,7 +2090,100 @@ impl Journal {
     /// # Errors
     /// Missing parent, SQLite older than the WAL-reset fix, or schema setup.
     pub fn open(path: impl AsRef<Path>) -> StoreResult<Self> {
-        let path = path.as_ref();
+        Self::open_inner(path.as_ref(), None, None)
+    }
+
+    /// Open a controller journal bound to the sole service instance that owns
+    /// this fleet database. Fleet events and materialized rows are global, so a
+    /// second service identity cannot safely share this database. Supported
+    /// mutations enforce the binding inside their write transaction; direct SQL
+    /// writes are outside the journal API contract.
+    pub fn open_for_service_instance(
+        path: impl AsRef<Path>,
+        service_instance: &str,
+    ) -> StoreResult<Self> {
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        let mut journal = Self::open_inner(path.as_ref(), None, Some(service_instance))?;
+        let transaction = journal
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        validate_replay_baseline_before_write(&transaction)?;
+        begin_journal_write_gate(&transaction)?;
+        bind_journal_service_instance(&transaction, service_instance)?;
+        end_journal_write_gate(&transaction)?;
+        transaction.commit()?;
+        journal.service_instance = Some(service_instance.to_owned());
+        Ok(journal)
+    }
+
+    /// Open a journal handle whose every mutation is atomically fenced by one
+    /// slot generation and launch nonce.
+    pub fn open_for_launch(
+        path: impl AsRef<Path>,
+        service_instance: &str,
+        slot_id: &SlotId,
+        generation: Generation,
+        launch_nonce: &str,
+    ) -> StoreResult<Self> {
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        validate_disk_pressure_key(&slot_id.0, "slot id")?;
+        validate_disk_pressure_key(launch_nonce, "launch nonce")?;
+        let fence = WorkerLaunchFence {
+            service_instance: service_instance.to_owned(),
+            slot_id: slot_id.clone(),
+            generation: disk_pressure_sql_integer(generation.0, "launch generation")?,
+            launch_nonce: launch_nonce.to_owned(),
+        };
+        Self::open_worker_inner(path.as_ref(), fence)
+    }
+
+    /// Open a bound worker handle from controller-supplied launch metadata.
+    /// No metadata means the caller is a controller or an administrative
+    /// process; a partial set is an error and cannot become an unbound writer.
+    pub fn open_for_launch_from_environment(path: impl AsRef<Path>) -> StoreResult<Self> {
+        const SERVICE: &str = "VELNOR_DISK_PRESSURE_INSTANCE";
+        const SLOT: &str = "VELNOR_DISK_PRESSURE_SLOT_ID";
+        const GENERATION: &str = "VELNOR_DISK_PRESSURE_GENERATION";
+        const NONCE: &str = "VELNOR_DISK_PRESSURE_LAUNCH_NONCE";
+        let service = std::env::var(SERVICE).ok();
+        let slot = std::env::var(SLOT).ok();
+        let generation = std::env::var(GENERATION).ok();
+        let nonce = std::env::var(NONCE).ok();
+        let count = [
+            service.is_some(),
+            slot.is_some(),
+            generation.is_some(),
+            nonce.is_some(),
+        ]
+        .into_iter()
+        .filter(|present| *present)
+        .count();
+        if count == 0 {
+            return Self::open(path);
+        }
+        if count != 4 {
+            return Err(disk_pressure_state_invalid(
+                "worker launch environment is incomplete".to_owned(),
+            ));
+        }
+        let generation = generation
+            .as_deref()
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| disk_pressure_state_invalid("invalid launch generation".to_owned()))?;
+        Self::open_for_launch(
+            path,
+            service.as_deref().unwrap_or_default(),
+            &SlotId(slot.unwrap_or_default()),
+            Generation(generation),
+            nonce.as_deref().unwrap_or_default(),
+        )
+    }
+
+    fn open_inner(
+        path: &Path,
+        worker_launch: Option<WorkerLaunchFence>,
+        requested_service_instance: Option<&str>,
+    ) -> StoreResult<Self> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
             && !parent.is_dir()
@@ -1457,7 +2202,7 @@ impl Journal {
         conn.busy_timeout(BUSY_TIMEOUT)?;
         let mut attempt = 0;
         loop {
-            match setup_journal(&mut conn) {
+            match setup_journal(&mut conn, requested_service_instance) {
                 Ok(()) => break,
                 Err(error) if is_transient_contention(&error) && attempt < SETUP_RETRIES => {
                     attempt += 1;
@@ -1469,6 +2214,8 @@ impl Journal {
         let journal = Self {
             conn,
             path: path.to_path_buf(),
+            worker_launch,
+            service_instance: None,
         };
         // Verify all existing event checksums once. The controller's steady
         // state must not replay an ever-growing log every two seconds.
@@ -1476,9 +2223,1406 @@ impl Journal {
         Ok(journal)
     }
 
+    fn open_worker_inner(path: &Path, worker_launch: WorkerLaunchFence) -> StoreResult<Self> {
+        if !path.is_file() {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Unavailable,
+                "journal.file.missing",
+            )
+            .with_remediation("controller must initialize the journal before launching a worker"));
+        }
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        configure_journal_connection(&conn)?;
+        let transaction = conn.unchecked_transaction().map_err(StoreError::from)?;
+        validate_replay_integrity_before_read(&transaction)?;
+        validate_journal_service_instance(&transaction, &worker_launch.service_instance)?;
+        let bound_service: Option<String> = transaction
+            .query_row(
+                "SELECT service_instance FROM journal_identity WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if bound_service.as_deref() != Some(&worker_launch.service_instance) {
+            return Err(journal_service_instance_mismatch(
+                "controller must bind the fleet journal before opening a worker launch",
+            ));
+        }
+        if !disk_pressure_launch_is_current(
+            &transaction,
+            &worker_launch.service_instance,
+            &worker_launch.slot_id,
+            worker_launch.generation,
+            &worker_launch.launch_nonce,
+        )? {
+            return Err(disk_pressure_launch_fenced());
+        }
+        transaction.commit()?;
+        let journal = Self {
+            conn,
+            path: path.to_path_buf(),
+            worker_launch: Some(worker_launch),
+            service_instance: None,
+        };
+        journal.load_state()?;
+        Ok(journal)
+    }
+
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    fn validate_worker_context(
+        &self,
+        service_instance: &str,
+        slot_id: &SlotId,
+        generation: Generation,
+        launch_nonce: &str,
+    ) -> StoreResult<()> {
+        if let Some(fence) = &self.worker_launch {
+            if fence.service_instance != service_instance
+                || fence.slot_id != *slot_id
+                || fence.generation != disk_pressure_sql_integer(generation.0, "launch generation")?
+                || fence.launch_nonce != launch_nonce
+            {
+                return Err(disk_pressure_launch_fenced());
+            }
+        } else if self.service_instance.as_deref() != Some(service_instance) {
+            return Err(journal_service_instance_mismatch(
+                "launch-scoped mutation requires this service's bound controller or worker handle",
+            ));
+        }
+        Ok(())
+    }
+
+    fn require_controller_authority(&self) -> StoreResult<()> {
+        if self.worker_launch.is_some() {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.disk_pressure.worker_authority",
+            )
+            .with_remediation(
+                "worker-bound journal handles cannot perform controller operations",
+            ));
+        }
+        self.writer_context().validate(&self.conn)
+    }
+
+    fn writer_context(&self) -> JournalWriterContext {
+        JournalWriterContext {
+            service_instance: self
+                .worker_launch
+                .as_ref()
+                .map(|fence| fence.service_instance.as_str())
+                .or(self.service_instance.as_deref())
+                .map(str::to_owned),
+        }
+    }
+
+    fn validate_acquisition_handle(
+        &self,
+        service_instance: &str,
+        slot_id: &SlotId,
+        generation: Generation,
+        launch_nonce: &str,
+    ) -> StoreResult<()> {
+        if self.worker_launch.is_some() {
+            self.validate_worker_context(service_instance, slot_id, generation, launch_nonce)
+        } else if self.service_instance.as_deref() == Some(service_instance) {
+            Ok(())
+        } else {
+            Err(journal_service_instance_mismatch(
+                "acquisition operations require a journal bound to this service instance and launch",
+            ))
+        }
+    }
+
+    fn validate_pressure_service_instance(&self, service_instance: &str) -> StoreResult<()> {
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        let writer_context = self.writer_context();
+        if writer_context.service_instance.as_deref() != Some(service_instance) {
+            return Err(journal_service_instance_mismatch(
+                "pressure operations require this service's bound controller or worker handle",
+            ));
+        }
+        validate_journal_service_instance(&self.conn, service_instance)
+    }
+
+    /// Issue the single current writer lease for a slot launch. A new nonce
+    /// fences every worker from the previous launch, including one that wakes
+    /// after generation reuse.
+    pub fn issue_disk_pressure_launch(
+        &self,
+        service_instance: &str,
+        slot_id: &SlotId,
+        generation: Generation,
+        issued_unix: u64,
+    ) -> StoreResult<String> {
+        self.require_controller_authority()?;
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        self.validate_pressure_service_instance(service_instance)?;
+        validate_disk_pressure_key(&slot_id.0, "slot id")?;
+        let generation_sql = disk_pressure_sql_integer(generation.0, "generation")?;
+        let issued_sql = disk_pressure_sql_integer(issued_unix, "launch time")?;
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let writer_context = self.writer_context();
+        let transaction = self.conn.unchecked_transaction()?;
+        validate_replay_baseline_before_write(&transaction)?;
+        writer_context.begin_write(&transaction)?;
+        bind_journal_service_instance(&transaction, service_instance)?;
+        let pressure_active: i64 = transaction.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM disk_pressure_episodes
+                 WHERE service_instance = ?1
+             )",
+            [service_instance],
+            |row| row.get(0),
+        )?;
+        if disk_pressure_bool(pressure_active, "active pressure episode")? {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.disk_pressure.launch.pressure",
+            )
+            .with_remediation(
+                "refuse a worker launch while any configured filesystem pressure episode remains active",
+            ));
+        }
+        let state = load_materialized_state(&transaction)?;
+        if state.capacity_invalid || state.drain_active || state.admission_blocked {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.disk_pressure.launch.stale",
+            )
+            .with_remediation(
+                "refuse a pressure writer lease while slot materialization or fleet admission is fenced",
+            ));
+        }
+        let current = state.slots.iter().find(|slot| slot.slot_id == *slot_id);
+        if !current.is_some_and(|slot| {
+            slot.generation == generation
+                && matches!(slot.phase, SlotPhase2::Ready | SlotPhase2::Assigned)
+        }) {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.disk_pressure.launch.stale",
+            )
+            .with_remediation(
+                "re-read the current ready or assigned slot generation before issuing a pressure launch lease",
+            ));
+        }
+        let existing_launch: Option<(i64, String, i64)> = transaction
+            .query_row(
+                "SELECT generation, launch_nonce, active FROM disk_pressure_launches
+                 WHERE service_instance = ?1 AND slot_id = ?2",
+                params![service_instance, slot_id.0],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let has_provisional_row = state
+            .jobs
+            .iter()
+            .any(|job| job.slot_id == *slot_id && job.generation == generation && job.provisional);
+        if let Some((existing_generation, existing_nonce, active)) = &existing_launch
+            && *existing_generation == generation_sql
+            && disk_pressure_bool(*active, "launch active")?
+            && has_provisional_row
+        {
+            // A durable provisional row pins its intent to this lease. Reuse
+            // the nonce only while that row exists, so terminal response
+            // recovery can prove the handoff without a second nonce copy in
+            // the event schema.
+            end_journal_write_gate(&transaction)?;
+            transaction.commit()?;
+            return Ok(existing_nonce.clone());
+        }
+        if has_provisional_row {
+            return Err(disk_pressure_launch_fenced());
+        }
+        transaction.execute(
+            "INSERT INTO disk_pressure_launches (
+                 service_instance, slot_id, generation, launch_nonce, issued_unix, active
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 1)
+             ON CONFLICT (service_instance, slot_id) DO UPDATE SET
+                 generation = excluded.generation,
+                 launch_nonce = excluded.launch_nonce,
+                 issued_unix = excluded.issued_unix,
+                 active = 1",
+            params![
+                service_instance,
+                slot_id.0,
+                generation_sql,
+                nonce,
+                issued_sql
+            ],
+        )?;
+        end_journal_write_gate(&transaction)?;
+        transaction.commit()?;
+        Ok(nonce)
+    }
+
+    /// Revoke a slot writer lease at the terminal pressure deadline before
+    /// signaling its worker. Every bound Journal mutation rechecks `active`
+    /// under its immediate transaction, so revocation is the durable fence
+    /// that orders before process termination.
+    pub fn revoke_disk_pressure_launch(
+        &self,
+        service_instance: &str,
+        slot_id: &SlotId,
+        generation: Generation,
+    ) -> StoreResult<bool> {
+        self.require_controller_authority()?;
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        self.validate_pressure_service_instance(service_instance)?;
+        validate_disk_pressure_key(&slot_id.0, "slot id")?;
+        let generation_sql = disk_pressure_sql_integer(generation.0, "generation")?;
+        let writer_context = self.writer_context();
+        let transaction = self.conn.unchecked_transaction()?;
+        validate_replay_baseline_before_write(&transaction)?;
+        writer_context.begin_write(&transaction)?;
+        bind_journal_service_instance(&transaction, service_instance)?;
+        let revoked = transaction.execute(
+            "UPDATE disk_pressure_launches SET active = 0
+             WHERE service_instance = ?1 AND slot_id = ?2
+               AND generation = ?3 AND active = 1",
+            params![service_instance, slot_id.0, generation_sql],
+        )?;
+        end_journal_write_gate(&transaction)?;
+        transaction.commit()?;
+        Ok(revoked == 1)
+    }
+
+    /// Reject a worker that does not own the current pressure-writer lease.
+    /// Call at process entry before the worker can publish job or slot state.
+    pub fn validate_disk_pressure_launch(
+        &mut self,
+        service_instance: &str,
+        slot_id: &SlotId,
+        generation: Generation,
+        launch_nonce: &str,
+    ) -> StoreResult<()> {
+        self.validate_worker_context(service_instance, slot_id, generation, launch_nonce)?;
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        self.validate_pressure_service_instance(service_instance)?;
+        validate_disk_pressure_key(&slot_id.0, "slot id")?;
+        let generation_sql = disk_pressure_sql_integer(generation.0, "generation")?;
+        let transaction = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        validate_replay_integrity_before_read(&transaction)?;
+        let is_current = disk_pressure_launch_is_current(
+            &transaction,
+            service_instance,
+            slot_id,
+            generation_sql,
+            launch_nonce,
+        )?;
+        if !is_current {
+            return Err(disk_pressure_launch_fenced());
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Read the current launch nonce for a non-fenced slot generation. A
+    /// revoked or stale lease is absent to process adoption; recovery must
+    /// prove any recorded process identity dead before issuing a replacement.
+    pub fn disk_pressure_launch_nonce(
+        &self,
+        service_instance: &str,
+        slot_id: &SlotId,
+        generation: Generation,
+    ) -> StoreResult<Option<String>> {
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        self.validate_pressure_service_instance(service_instance)?;
+        validate_disk_pressure_key(&slot_id.0, "slot id")?;
+        let generation_sql = disk_pressure_sql_integer(generation.0, "generation")?;
+        let transaction = self.conn.unchecked_transaction()?;
+        validate_replay_integrity_before_read(&transaction)?;
+        let launch: Option<(i64, String, i64)> = transaction
+            .query_row(
+                "SELECT generation, launch_nonce, active FROM disk_pressure_launches
+                 WHERE service_instance = ?1 AND slot_id = ?2",
+                params![service_instance, slot_id.0],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let nonce = match launch {
+            Some((stored_generation, nonce, active))
+                if disk_pressure_bool(active, "launch active")?
+                    && stored_generation == generation_sql =>
+            {
+                validate_disk_pressure_key(&nonce, "launch nonce")?;
+                disk_pressure_launch_is_current(
+                    &transaction,
+                    service_instance,
+                    slot_id,
+                    generation_sql,
+                    &nonce,
+                )?
+                .then_some(nonce)
+            }
+            Some((_, _, active)) => {
+                let _ = disk_pressure_bool(active, "launch active")?;
+                None
+            }
+            None => None,
+        };
+        transaction.commit()?;
+        Ok(nonce)
+    }
+
+    /// Persist a launcher's first job mutation only if its nonce is still
+    /// current. Validation and event reduction share the same immediate write
+    /// transaction, so a replacement launch cannot race between the check and
+    /// `JobStarted`.
+    pub fn apply_with_disk_pressure_launch(
+        &mut self,
+        service_instance: &str,
+        slot_id: &SlotId,
+        generation: Generation,
+        launch_nonce: &str,
+        event: Event,
+    ) -> StoreResult<ReduceOutcome> {
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        self.validate_pressure_service_instance(service_instance)?;
+        validate_disk_pressure_key(&slot_id.0, "slot id")?;
+        let generation_sql = disk_pressure_sql_integer(generation.0, "generation")?;
+        let mut outcomes = self.apply_many_inner(
+            std::iter::once(event),
+            Some((service_instance, slot_id, generation_sql, launch_nonce)),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )?;
+        #[allow(clippy::expect_used, reason = "one event always yields one outcome")]
+        Ok(outcomes
+            .pop()
+            .expect("one event must produce one reduction outcome"))
+    }
+
+    /// Durably record the exact acquisition intent only while this service's
+    /// launch lease is current and no service pressure episode is active.
+    /// The lease, pressure admission, and reducer write share one immediate
+    /// transaction, ordering this intent against pressure observation and
+    /// terminal revocation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn intend_acquisition_with_disk_pressure_launch(
+        &mut self,
+        service_instance: &str,
+        slot_id: SlotId,
+        generation: Generation,
+        launch_nonce: &str,
+        provisional_job_id: JobId,
+        message_id: String,
+        run_service_url: String,
+        intended_unix: u64,
+    ) -> StoreResult<ReduceOutcome> {
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        validate_disk_pressure_key(&slot_id.0, "slot id")?;
+        validate_disk_pressure_key(launch_nonce, "launch nonce")?;
+        validate_disk_pressure_key(&provisional_job_id.0, "provisional job id")?;
+        validate_disk_pressure_key(&message_id, "acquisition message id")?;
+        validate_disk_pressure_key(&run_service_url, "run service URL")?;
+        self.validate_acquisition_handle(service_instance, &slot_id, generation, launch_nonce)?;
+        let generation_sql = disk_pressure_sql_integer(generation.0, "launch generation")?;
+        let intent_fence = AcquisitionIntentFence {
+            service_instance: service_instance.to_owned(),
+            slot_id: slot_id.clone(),
+            generation: generation_sql,
+            launch_nonce: launch_nonce.to_owned(),
+            provisional_job_id: provisional_job_id.clone(),
+            message_id: message_id.clone(),
+            run_service_url: run_service_url.clone(),
+        };
+        let mut outcomes = self.apply_many_inner(
+            std::iter::once(Event::JobAcquisitionIntended {
+                slot_id: slot_id.clone(),
+                job_id: provisional_job_id,
+                generation,
+                message_id,
+                run_service_url,
+                intended_unix,
+            }),
+            Some((service_instance, &slot_id, generation_sql, launch_nonce)),
+            Some(intent_fence),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )?;
+        #[allow(clippy::expect_used, reason = "one event always yields one outcome")]
+        Ok(outcomes
+            .pop()
+            .expect("one event must produce one reduction outcome"))
+    }
+
+    /// Retarget the exact durable provisional row named by an acquirejob 200.
+    /// This accepts either its still-current launch lease or that same nonce
+    /// after a terminal pressure fence. The latter is a response handoff only:
+    /// it cannot create or retarget any other acquisition.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_acquisition_response(
+        &mut self,
+        service_instance: &str,
+        slot_id: SlotId,
+        generation: Generation,
+        launch_nonce: &str,
+        provisional_job_id: JobId,
+        message_id: &str,
+        acquired_job_id: JobId,
+        acquire_run_service_url: &str,
+        job_run_service_url: &str,
+        plan_id: &str,
+    ) -> StoreResult<ReduceOutcome> {
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        validate_disk_pressure_key(&slot_id.0, "slot id")?;
+        validate_disk_pressure_key(launch_nonce, "launch nonce")?;
+        validate_disk_pressure_key(&provisional_job_id.0, "provisional job id")?;
+        validate_disk_pressure_key(message_id, "acquisition message id")?;
+        validate_disk_pressure_key(&acquired_job_id.0, "acquired job id")?;
+        validate_disk_pressure_key(acquire_run_service_url, "acquire run service URL")?;
+        validate_disk_pressure_key(job_run_service_url, "job run service URL")?;
+        validate_disk_pressure_key(plan_id, "run service plan id")?;
+        self.validate_acquisition_handle(service_instance, &slot_id, generation, launch_nonce)?;
+        let generation_sql = disk_pressure_sql_integer(generation.0, "launch generation")?;
+        let response_fence = AcquisitionResponseFence {
+            service_instance: service_instance.to_owned(),
+            slot_id,
+            generation: generation_sql,
+            launch_nonce: launch_nonce.to_owned(),
+            provisional_job_id: provisional_job_id.clone(),
+            message_id: message_id.to_owned(),
+            run_service_url: acquire_run_service_url.to_owned(),
+        };
+        let mut outcomes = self.apply_many_inner(
+            std::iter::once(Event::JobAcquisitionResolvedAtEndpoint {
+                provisional_job_id,
+                acquired_job_id,
+                plan_id: plan_id.to_owned(),
+                generation,
+                run_service_url: job_run_service_url.to_owned(),
+            }),
+            None,
+            None,
+            Some(response_fence),
+            None,
+            None,
+            None,
+            None,
+        )?;
+        #[allow(clippy::expect_used, reason = "one event always yields one outcome")]
+        Ok(outcomes
+            .pop()
+            .expect("one event must produce one reduction outcome"))
+    }
+
+    /// Resolve an unmanaged acquire reply only while its exact broker intent
+    /// still names the provisional row. The selected job URL is stored by the
+    /// same event that retargets the row.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_acquisition_response_at_endpoint(
+        &mut self,
+        slot_id: SlotId,
+        generation: Generation,
+        provisional_job_id: JobId,
+        message_id: &str,
+        acquired_job_id: JobId,
+        acquire_run_service_url: &str,
+        job_run_service_url: &str,
+        plan_id: &str,
+    ) -> StoreResult<ReduceOutcome> {
+        validate_disk_pressure_key(&slot_id.0, "slot id")?;
+        validate_disk_pressure_key(&provisional_job_id.0, "provisional job id")?;
+        validate_disk_pressure_key(message_id, "acquisition message id")?;
+        validate_disk_pressure_key(&acquired_job_id.0, "acquired job id")?;
+        validate_disk_pressure_key(acquire_run_service_url, "acquire run service URL")?;
+        validate_disk_pressure_key(job_run_service_url, "job run service URL")?;
+        validate_disk_pressure_key(plan_id, "run service plan id")?;
+        let fence = AcquisitionResolutionFence {
+            slot_id,
+            generation: disk_pressure_sql_integer(generation.0, "launch generation")?,
+            provisional_job_id: provisional_job_id.clone(),
+            acquired_job_id: acquired_job_id.clone(),
+            plan_id: plan_id.to_owned(),
+            message_id: message_id.to_owned(),
+            acquire_run_service_url: acquire_run_service_url.to_owned(),
+            job_run_service_url: job_run_service_url.to_owned(),
+        };
+        let mut outcomes = self.apply_many_inner(
+            std::iter::once(Event::JobAcquisitionResolvedAtEndpoint {
+                provisional_job_id,
+                acquired_job_id,
+                plan_id: plan_id.to_owned(),
+                generation,
+                run_service_url: job_run_service_url.to_owned(),
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(fence),
+            None,
+        )?;
+        #[allow(clippy::expect_used, reason = "one event always yields one outcome")]
+        Ok(outcomes
+            .pop()
+            .expect("one event must produce one reduction outcome"))
+    }
+
+    /// Abandon an unmanaged acquire reply only while its exact broker message
+    /// still owns the latest provisional intent. Validation and `JobAcquisitionLost`
+    /// share one immediate transaction, so a stale typed-404 cannot erase a
+    /// newer intent that reused the provisional request id.
+    pub fn abandon_acquisition_response_at_endpoint(
+        &mut self,
+        slot_id: SlotId,
+        generation: Generation,
+        provisional_job_id: JobId,
+        message_id: &str,
+        run_service_url: &str,
+        reason: String,
+    ) -> StoreResult<ReduceOutcome> {
+        validate_disk_pressure_key(&slot_id.0, "slot id")?;
+        validate_disk_pressure_key(&provisional_job_id.0, "provisional job id")?;
+        validate_disk_pressure_key(message_id, "acquisition message id")?;
+        validate_disk_pressure_key(run_service_url, "acquire run service URL")?;
+        let fence = AcquisitionLossFence {
+            slot_id,
+            generation: disk_pressure_sql_integer(generation.0, "launch generation")?,
+            provisional_job_id: provisional_job_id.clone(),
+            message_id: message_id.to_owned(),
+            run_service_url: run_service_url.to_owned(),
+        };
+        let mut outcomes = self.apply_many_inner(
+            std::iter::once(Event::JobAcquisitionLost {
+                job_id: provisional_job_id,
+                generation,
+                reason,
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(fence),
+        )?;
+        #[allow(clippy::expect_used, reason = "one event always yields one outcome")]
+        Ok(outcomes
+            .pop()
+            .expect("one event must produce one reduction outcome"))
+    }
+
+    /// Abandon the exact provisional acquisition only after this worker's
+    /// launch was revoked by a terminal disk-pressure fence. This narrow
+    /// handoff exists for a typed run-service-gone response that arrives after
+    /// the controller has fenced the slot; ordinary stale worker writes remain
+    /// rejected by the launch lease.
+    #[allow(clippy::too_many_arguments)]
+    pub fn abandon_acquisition_after_disk_pressure_terminal(
+        &mut self,
+        service_instance: &str,
+        slot_id: SlotId,
+        generation: Generation,
+        launch_nonce: &str,
+        provisional_job_id: JobId,
+        message_id: &str,
+        run_service_url: &str,
+        reason: String,
+    ) -> StoreResult<ReduceOutcome> {
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        validate_disk_pressure_key(&slot_id.0, "slot id")?;
+        validate_disk_pressure_key(launch_nonce, "launch nonce")?;
+        validate_disk_pressure_key(&provisional_job_id.0, "provisional job id")?;
+        validate_disk_pressure_key(message_id, "acquisition message id")?;
+        validate_disk_pressure_key(run_service_url, "run service URL")?;
+        let Some(bound) = &self.worker_launch else {
+            return Err(acquisition_abandon_fenced());
+        };
+        let generation_sql = disk_pressure_sql_integer(generation.0, "launch generation")?;
+        if bound.service_instance != service_instance
+            || bound.slot_id != slot_id
+            || bound.generation != generation_sql
+            || bound.launch_nonce != launch_nonce
+        {
+            return Err(acquisition_abandon_fenced());
+        }
+        let abandon_fence = AcquisitionAbandonFence {
+            service_instance: service_instance.to_owned(),
+            slot_id: slot_id.clone(),
+            generation: generation_sql,
+            launch_nonce: launch_nonce.to_owned(),
+            provisional_job_id: provisional_job_id.clone(),
+            message_id: message_id.to_owned(),
+            run_service_url: run_service_url.to_owned(),
+        };
+        let mut outcomes = self.apply_many_inner(
+            std::iter::once(Event::JobAcquisitionLost {
+                job_id: provisional_job_id,
+                generation,
+                reason,
+            }),
+            None,
+            None,
+            None,
+            Some(abandon_fence),
+            None,
+            None,
+            None,
+        )?;
+        #[allow(clippy::expect_used, reason = "one event always yields one outcome")]
+        Ok(outcomes
+            .pop()
+            .expect("one event must produce one reduction outcome"))
+    }
+
+    /// Promote a recovered, plan-bearing acquisition after `renewjob` proved
+    /// this runner still owns it, even when terminal pressure fenced its slot.
+    /// The journal derives the original intent and nonce association from the
+    /// checked event chain and the non-rotating generation lease invariant.
+    pub fn confirm_acquisition_after_disk_pressure_terminal(
+        &mut self,
+        service_instance: &str,
+        slot_id: SlotId,
+        generation: Generation,
+        acquired_job_id: JobId,
+        plan_id: &str,
+        run_service_url: &str,
+    ) -> StoreResult<ReduceOutcome> {
+        self.require_controller_authority()?;
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        validate_disk_pressure_key(&slot_id.0, "slot id")?;
+        validate_disk_pressure_key(&acquired_job_id.0, "acquired job id")?;
+        validate_disk_pressure_key(plan_id, "run service plan id")?;
+        validate_disk_pressure_key(run_service_url, "run service URL")?;
+        self.validate_pressure_service_instance(service_instance)?;
+        let generation_sql = disk_pressure_sql_integer(generation.0, "launch generation")?;
+        let recovery_fence = AcquisitionRecoveryFence {
+            service_instance: service_instance.to_owned(),
+            slot_id: slot_id.clone(),
+            generation: generation_sql,
+            acquired_job_id: acquired_job_id.clone(),
+            plan_id: plan_id.to_owned(),
+            run_service_url: run_service_url.to_owned(),
+        };
+        let mut outcomes = self.apply_many_inner(
+            std::iter::once(Event::JobOwned {
+                job_id: acquired_job_id.clone(),
+                slot_id,
+                attempt: 1,
+                generation,
+                worker: pressure_terminal_recovery_worker(&acquired_job_id),
+                accepted_unix: 0,
+            }),
+            None,
+            None,
+            None,
+            None,
+            Some(recovery_fence),
+            None,
+            None,
+        )?;
+        #[allow(clippy::expect_used, reason = "one event always yields one outcome")]
+        Ok(outcomes
+            .pop()
+            .expect("one event must produce one reduction outcome"))
+    }
+
+    /// Observe all admission filesystems under one writer fence and one SQLite
+    /// transaction. Reclaim claims therefore cannot be committed for only a
+    /// prefix of roots when a later root has corrupt or unwritable state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn observe_disk_pressure_roots(
+        &self,
+        service_instance: &str,
+        slot_id: &SlotId,
+        generation: Generation,
+        launch_nonce: &str,
+        samples: &[DiskPressureFilesystemSample],
+        degraded_seconds: u64,
+        drain_seconds: u64,
+        now_unix: u64,
+    ) -> StoreResult<Vec<(String, DiskPressureObservation)>> {
+        self.validate_worker_context(service_instance, slot_id, generation, launch_nonce)?;
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        self.validate_pressure_service_instance(service_instance)?;
+        validate_disk_pressure_key(&slot_id.0, "slot id")?;
+        validate_disk_pressure_key(launch_nonce, "launch nonce")?;
+        if samples.is_empty() {
+            return Err(disk_pressure_state_invalid(
+                "empty filesystem observation batch".to_owned(),
+            ));
+        }
+        let mut filesystem_ids = Vec::<String>::new();
+        for sample in samples {
+            if let Some(fingerprint) = &sample.volume_fingerprint {
+                validate_disk_pressure_key(fingerprint, "volume fingerprint")?;
+            }
+            for filesystem_id in std::iter::once(&sample.filesystem_id).chain(&sample.alias_ids) {
+                validate_disk_pressure_key(filesystem_id, "filesystem identity")?;
+                if filesystem_ids.contains(filesystem_id) {
+                    return Err(disk_pressure_state_invalid(format!(
+                        "duplicate filesystem observation {filesystem_id}"
+                    )));
+                }
+                filesystem_ids.push(filesystem_id.clone());
+            }
+        }
+        let _ = disk_pressure_sql_integer(now_unix, "observation time")?;
+        let generation_sql = disk_pressure_sql_integer(generation.0, "generation")?;
+        let degraded_sql = disk_pressure_sql_integer(degraded_seconds, "degraded deadline")?;
+        let drain_sql = disk_pressure_sql_integer(drain_seconds, "drain deadline")?;
+        let writer_context = self.writer_context();
+        let transaction = self.conn.unchecked_transaction()?;
+        validate_replay_baseline_before_write(&transaction)?;
+        writer_context.begin_write(&transaction)?;
+        bind_journal_service_instance(&transaction, service_instance)?;
+        if !disk_pressure_launch_is_current(
+            &transaction,
+            service_instance,
+            slot_id,
+            generation_sql,
+            launch_nonce,
+        )? {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.disk_pressure.launch.fenced",
+            )
+            .with_remediation(
+                "discard this worker's observation; a newer slot launch owns the pressure writer lease",
+            ));
+        }
+        let mut observations = Vec::with_capacity(samples.len());
+        for sample in samples {
+            let observation = observe_disk_pressure_in_transaction(
+                &transaction,
+                service_instance,
+                sample,
+                degraded_sql,
+                drain_sql,
+                now_unix,
+            )?;
+            observations.push((sample.filesystem_id.clone(), observation));
+        }
+        if observations.iter().any(|(_, observation)| {
+            observation
+                .episode
+                .as_ref()
+                .is_some_and(|episode| episode.terminal)
+        }) {
+            // Latch, revoke leases, and fence all slots in this transaction.
+            // This closes the gap where another slot could issue a nonce or
+            // reserve a permit after the terminal observation commits.
+            persist_pressure_terminal_slot_fences(&transaction, service_instance)?;
+        }
+        end_journal_write_gate(&transaction)?;
+        transaction.commit()?;
+        Ok(observations)
+    }
+
+    /// Advance persisted low episodes through D (draining) and E (terminal)
+    /// from controller observations. This does not need a live worker nonce,
+    /// so silent or crashed workers cannot stretch either deadline.
+    pub fn advance_disk_pressure_roots(
+        &self,
+        service_instance: &str,
+        samples: &[DiskPressureFilesystemSample],
+        degraded_seconds: u64,
+        drain_seconds: u64,
+        now_unix: u64,
+    ) -> StoreResult<()> {
+        self.require_controller_authority()?;
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        self.validate_pressure_service_instance(service_instance)?;
+        if samples.is_empty() {
+            return Err(disk_pressure_state_invalid(
+                "empty controller filesystem observation batch".to_owned(),
+            ));
+        }
+        let _ = disk_pressure_sql_integer(now_unix, "controller observation time")?;
+        let degraded_sql = disk_pressure_sql_integer(degraded_seconds, "degraded deadline")?;
+        let drain_sql = disk_pressure_sql_integer(drain_seconds, "drain deadline")?;
+        let mut filesystem_ids = Vec::<String>::new();
+        for sample in samples {
+            if let Some(fingerprint) = &sample.volume_fingerprint {
+                validate_disk_pressure_key(fingerprint, "volume fingerprint")?;
+            }
+            for filesystem_id in std::iter::once(&sample.filesystem_id).chain(&sample.alias_ids) {
+                validate_disk_pressure_key(filesystem_id, "filesystem identity")?;
+                if filesystem_ids.contains(filesystem_id) {
+                    return Err(disk_pressure_state_invalid(format!(
+                        "duplicate controller filesystem observation {filesystem_id}"
+                    )));
+                }
+                filesystem_ids.push(filesystem_id.clone());
+            }
+        }
+        let writer_context = self.writer_context();
+        let transaction = self.conn.unchecked_transaction()?;
+        validate_replay_baseline_before_write(&transaction)?;
+        writer_context.begin_write(&transaction)?;
+        bind_journal_service_instance(&transaction, service_instance)?;
+        for sample in samples {
+            advance_controller_pressure_sample(
+                &transaction,
+                service_instance,
+                sample,
+                degraded_sql,
+                drain_sql,
+                now_unix,
+            )?;
+        }
+        persist_pressure_terminal_slot_fences(&transaction, service_instance)?;
+        end_journal_write_gate(&transaction)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Advance every stored episode conservatively when the controller cannot
+    /// measure configured roots. Unknown capacity never clears an episode.
+    pub fn advance_unmeasurable_disk_pressure(
+        &self,
+        service_instance: &str,
+        degraded_seconds: u64,
+        drain_seconds: u64,
+        now_unix: u64,
+    ) -> StoreResult<(bool, bool)> {
+        self.require_controller_authority()?;
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        self.validate_pressure_service_instance(service_instance)?;
+        let _ = disk_pressure_sql_integer(now_unix, "controller observation time")?;
+        let degraded_sql = disk_pressure_sql_integer(degraded_seconds, "degraded deadline")?;
+        let drain_sql = disk_pressure_sql_integer(drain_seconds, "drain deadline")?;
+        let writer_context = self.writer_context();
+        let transaction = self.conn.unchecked_transaction()?;
+        validate_replay_baseline_before_write(&transaction)?;
+        writer_context.begin_write(&transaction)?;
+        bind_journal_service_instance(&transaction, service_instance)?;
+        let filesystem_ids = {
+            let mut statement = transaction.prepare(
+                "SELECT filesystem_id FROM disk_pressure_episodes
+                 WHERE service_instance = ?1
+                 ORDER BY filesystem_id",
+            )?;
+            let rows = statement.query_map([service_instance], |row| row.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        for filesystem_id in filesystem_ids {
+            advance_controller_pressure_sample(
+                &transaction,
+                service_instance,
+                &DiskPressureFilesystemSample {
+                    filesystem_id,
+                    alias_ids: Vec::new(),
+                    available_bytes: None,
+                    min_free_bytes: 0,
+                    volume_fingerprint: None,
+                },
+                degraded_sql,
+                drain_sql,
+                now_unix,
+            )?;
+        }
+        persist_pressure_terminal_slot_fences(&transaction, service_instance)?;
+        let (draining, terminal) = pressure_episode_stages(&transaction, service_instance)?;
+        end_journal_write_gate(&transaction)?;
+        transaction.commit()?;
+        Ok((draining, terminal))
+    }
+
+    /// Retire episodes for physical/root identities absent from a complete,
+    /// measurable current-root batch. Absence is not evidence while any root
+    /// is unknown. Retiring an old identity first fences every slot and waits
+    /// for all occupied jobs to recover.
+    pub fn retire_unobserved_disk_pressure_episodes(
+        &self,
+        service_instance: &str,
+        observed_filesystem_ids: &[String],
+        complete_identity_batch: bool,
+    ) -> StoreResult<()> {
+        self.require_controller_authority()?;
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        self.validate_pressure_service_instance(service_instance)?;
+        if !complete_identity_batch {
+            return Ok(());
+        }
+        if observed_filesystem_ids.is_empty() {
+            return Err(disk_pressure_state_invalid(
+                "complete filesystem observation batch is empty".to_owned(),
+            ));
+        }
+        for id in observed_filesystem_ids {
+            validate_disk_pressure_key(id, "observed filesystem identity")?;
+        }
+        let writer_context = self.writer_context();
+        let transaction = self.conn.unchecked_transaction()?;
+        validate_replay_baseline_before_write(&transaction)?;
+        writer_context.begin_write(&transaction)?;
+        bind_journal_service_instance(&transaction, service_instance)?;
+        let mut statement = transaction.prepare(
+            "SELECT filesystem_id, revision FROM disk_pressure_episodes
+             WHERE service_instance = ?1 ORDER BY filesystem_id",
+        )?;
+        let rows = statement.query_map([service_instance], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut unobserved = Vec::new();
+        for row in rows {
+            let (filesystem_id, revision) = row?;
+            if !observed_filesystem_ids.contains(&filesystem_id) {
+                unobserved.push((filesystem_id, revision));
+            }
+        }
+        drop(statement);
+        if unobserved.is_empty() {
+            end_journal_write_gate(&transaction)?;
+            transaction.commit()?;
+            return Ok(());
+        }
+        for (filesystem_id, revision) in &unobserved {
+            let revision = disk_pressure_u64(*revision, "episode revision")?;
+            let next_revision = revision.checked_add(1).ok_or_else(|| {
+                disk_pressure_state_invalid("episode revision overflow".to_owned())
+            })?;
+            transaction.execute(
+                "UPDATE disk_pressure_episodes
+                 SET draining = 1, terminal = 1, revision = ?1
+                 WHERE service_instance = ?2 AND filesystem_id = ?3 AND revision = ?4",
+                params![
+                    disk_pressure_sql_integer(next_revision, "episode revision")?,
+                    service_instance,
+                    filesystem_id,
+                    disk_pressure_sql_integer(revision, "episode revision")?,
+                ],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE disk_pressure_launches SET active = 0 WHERE service_instance = ?1",
+            [service_instance],
+        )?;
+        persist_pressure_terminal_slot_fences(&transaction, service_instance)?;
+        let state = load_materialized_state(&transaction)?;
+        if pressure_state_slots_are_safe(&state) {
+            for (filesystem_id, _) in &unobserved {
+                transaction.execute(
+                    "DELETE FROM disk_pressure_episodes
+                     WHERE service_instance = ?1 AND filesystem_id = ?2 AND terminal = 1",
+                    params![service_instance, filesystem_id],
+                )?;
+            }
+        }
+        end_journal_write_gate(&transaction)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Aggregate active episode stages, including identities no longer
+    /// present in the controller's current filesystem batch.
+    pub fn disk_pressure_state(&self, service_instance: &str) -> StoreResult<(bool, bool, bool)> {
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        self.validate_pressure_service_instance(service_instance)?;
+        let transaction = self.conn.unchecked_transaction()?;
+        validate_replay_integrity_before_read(&transaction)?;
+        let mut statement = transaction.prepare(
+            "SELECT draining, terminal FROM disk_pressure_episodes
+             WHERE service_instance = ?1",
+        )?;
+        let rows = statement.query_map([service_instance], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut any = false;
+        let mut draining = false;
+        let mut terminal = false;
+        for row in rows {
+            let (row_draining, row_terminal) = row?;
+            any = true;
+            draining |= disk_pressure_bool(row_draining, "draining")?;
+            terminal |= disk_pressure_bool(row_terminal, "terminal")?;
+        }
+        drop(statement);
+        transaction.commit()?;
+        Ok((any, draining, terminal))
+    }
+
+    /// Read the current host episode through the checked v11 journal boundary.
+    pub fn disk_pressure_episode(
+        &self,
+        service_instance: &str,
+        filesystem_id: &str,
+    ) -> StoreResult<Option<DiskPressureEpisode>> {
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        self.validate_pressure_service_instance(service_instance)?;
+        validate_disk_pressure_key(filesystem_id, "filesystem identity")?;
+        let transaction = self.conn.unchecked_transaction()?;
+        validate_replay_integrity_before_read(&transaction)?;
+        let episode = load_disk_pressure_episode(&transaction, service_instance, filesystem_id)?;
+        transaction.commit()?;
+        Ok(episode)
+    }
+
+    /// Claim a controller-side maintenance reclaim for a measured-low root.
+    /// The durable CAS lets the controller recover cleanup even when every
+    /// worker is correctly blocked from admission by this episode.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_disk_pressure_reclaim(
+        &self,
+        service_instance: &str,
+        filesystem_id: &str,
+        alias_ids: &[String],
+        expected: &DiskPressureEpisode,
+        available_bytes: u64,
+        min_free_bytes: u64,
+        volume_fingerprint: &str,
+        now_unix: u64,
+    ) -> StoreResult<bool> {
+        self.require_controller_authority()?;
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        self.validate_pressure_service_instance(service_instance)?;
+        validate_disk_pressure_key(filesystem_id, "filesystem identity")?;
+        for alias in alias_ids {
+            validate_disk_pressure_key(alias, "filesystem alias")?;
+        }
+        validate_disk_pressure_key(volume_fingerprint, "volume fingerprint")?;
+        let _ = disk_pressure_sql_integer(now_unix, "reclaim claim time")?;
+        if available_bytes >= min_free_bytes {
+            return Ok(false);
+        }
+        let writer_context = self.writer_context();
+        let transaction = self.conn.unchecked_transaction()?;
+        validate_replay_baseline_before_write(&transaction)?;
+        writer_context.begin_write(&transaction)?;
+        bind_journal_service_instance(&transaction, service_instance)?;
+        let Some(clock_high_water) = confirmed_pressure_observation_group_high_water(
+            &transaction,
+            service_instance,
+            filesystem_id,
+            alias_ids,
+            volume_fingerprint,
+        )?
+        else {
+            end_journal_write_gate(&transaction)?;
+            transaction.commit()?;
+            return Ok(false);
+        };
+        if now_unix < clock_high_water {
+            end_journal_write_gate(&transaction)?;
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let Some(mut current) =
+            load_disk_pressure_episode(&transaction, service_instance, filesystem_id)?
+        else {
+            end_journal_write_gate(&transaction)?;
+            transaction.commit()?;
+            return Ok(false);
+        };
+        if current.episode_id != expected.episode_id
+            || current.revision != expected.revision
+            || current.volume_fingerprint.as_deref() != Some(volume_fingerprint)
+            || current.reclaim_attempted
+            || current.draining
+            || current.terminal
+            || now_unix < current.started_unix
+            || now_unix >= current.deadline_unix
+        {
+            end_journal_write_gate(&transaction)?;
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let old_revision = current.revision;
+        current.reclaim_attempted = true;
+        current.last_observed_unix = current.last_observed_unix.max(now_unix);
+        current.revision = current
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| disk_pressure_state_invalid("episode revision overflow".to_owned()))?;
+        let updated = transaction.execute(
+            "UPDATE disk_pressure_episodes
+             SET reclaim_attempted = 1, revision = ?1, last_observed_unix = ?2
+             WHERE service_instance = ?3 AND filesystem_id = ?4
+               AND episode_id = ?5 AND revision = ?6
+               AND reclaim_attempted = 0 AND draining = 0 AND terminal = 0",
+            params![
+                disk_pressure_sql_integer(current.revision, "episode revision")?,
+                disk_pressure_sql_integer(current.last_observed_unix, "last observation")?,
+                service_instance,
+                filesystem_id,
+                current.episode_id,
+                disk_pressure_sql_integer(old_revision, "episode revision")?,
+            ],
+        )?;
+        end_journal_write_gate(&transaction)?;
+        transaction.commit()?;
+        Ok(updated == 1)
+    }
+
+    /// Clear only the exact durable episode after this caller measured healthy
+    /// free space. A rollback observation instead makes the episode terminal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn clear_disk_pressure_episode_if_healthy(
+        &self,
+        service_instance: &str,
+        filesystem_id: &str,
+        alias_ids: &[String],
+        expected: &DiskPressureEpisode,
+        available_bytes: u64,
+        min_free_bytes: u64,
+        volume_fingerprint: &str,
+        now_unix: u64,
+    ) -> StoreResult<bool> {
+        self.require_controller_authority()?;
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        self.validate_pressure_service_instance(service_instance)?;
+        validate_disk_pressure_key(filesystem_id, "filesystem identity")?;
+        for alias in alias_ids {
+            validate_disk_pressure_key(alias, "filesystem alias")?;
+        }
+        if available_bytes < min_free_bytes {
+            return Ok(false);
+        }
+        let writer_context = self.writer_context();
+        let transaction = self.conn.unchecked_transaction()?;
+        validate_replay_baseline_before_write(&transaction)?;
+        writer_context.begin_write(&transaction)?;
+        bind_journal_service_instance(&transaction, service_instance)?;
+        let Some(clock_high_water) = confirmed_pressure_observation_group_high_water(
+            &transaction,
+            service_instance,
+            filesystem_id,
+            alias_ids,
+            volume_fingerprint,
+        )?
+        else {
+            end_journal_write_gate(&transaction)?;
+            transaction.commit()?;
+            return Ok(false);
+        };
+        let current = load_disk_pressure_episode(&transaction, service_instance, filesystem_id)?;
+        let Some(mut current) = current else {
+            end_journal_write_gate(&transaction)?;
+            transaction.commit()?;
+            return Ok(false);
+        };
+        if current.episode_id != expected.episode_id || current.revision != expected.revision {
+            end_journal_write_gate(&transaction)?;
+            transaction.commit()?;
+            return Ok(false);
+        }
+        current.last_observed_unix = current.last_observed_unix.max(clock_high_water);
+        if current.volume_fingerprint.as_deref() != Some(volume_fingerprint)
+            || expected.volume_fingerprint.as_deref() != Some(volume_fingerprint)
+        {
+            end_journal_write_gate(&transaction)?;
+            transaction.commit()?;
+            return Ok(false);
+        }
+        if current.terminal {
+            let state = load_materialized_state(&transaction)?;
+            if !pressure_state_slots_are_safe(&state) {
+                end_journal_write_gate(&transaction)?;
+                transaction.commit()?;
+                return Ok(false);
+            }
+        }
+        if now_unix < current.last_observed_unix || now_unix < current.started_unix {
+            let old_revision = current.revision;
+            current.revision = current.revision.checked_add(1).ok_or_else(|| {
+                disk_pressure_state_invalid("episode revision overflow".to_owned())
+            })?;
+            transaction.execute(
+                "UPDATE disk_pressure_episodes
+                 SET revision = ?1, draining = 1, terminal = 1,
+                     last_observed_unix = ?2
+                 WHERE service_instance = ?3 AND filesystem_id = ?4
+                   AND episode_id = ?5 AND revision = ?6",
+                params![
+                    disk_pressure_sql_integer(current.revision, "episode revision")?,
+                    disk_pressure_sql_integer(current.last_observed_unix, "last observation")?,
+                    service_instance,
+                    filesystem_id,
+                    current.episode_id,
+                    disk_pressure_sql_integer(old_revision, "episode revision")?,
+                ],
+            )?;
+            end_journal_write_gate(&transaction)?;
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let revision_sql = disk_pressure_sql_integer(current.revision, "episode revision")?;
+        let mut deleted_primary = 0;
+        for id in std::iter::once(filesystem_id).chain(alias_ids.iter().map(String::as_str)) {
+            let deleted = transaction.execute(
+                "DELETE FROM disk_pressure_episodes
+                 WHERE service_instance = ?1 AND filesystem_id = ?2
+                   AND episode_id = ?3 AND revision = ?4",
+                params![service_instance, id, current.episode_id, revision_sql],
+            )?;
+            if id == filesystem_id {
+                deleted_primary = deleted;
+            }
+        }
+        end_journal_write_gate(&transaction)?;
+        transaction.commit()?;
+        Ok(deleted_primary == 1)
+    }
+
+    /// Retire an episode whose configured path now resolves to another volume
+    /// incarnation. The old generation must already be fenced and drained;
+    /// a low new volume starts a fresh immutable D/E timeline at `now_unix`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rebind_disk_pressure_episode_if_safe(
+        &self,
+        service_instance: &str,
+        filesystem_id: &str,
+        alias_ids: &[String],
+        expected: &DiskPressureEpisode,
+        available_bytes: Option<u64>,
+        min_free_bytes: u64,
+        volume_fingerprint: &str,
+        degraded_seconds: u64,
+        drain_seconds: u64,
+        now_unix: u64,
+    ) -> StoreResult<bool> {
+        self.require_controller_authority()?;
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        self.validate_pressure_service_instance(service_instance)?;
+        validate_disk_pressure_key(filesystem_id, "filesystem identity")?;
+        validate_disk_pressure_key(volume_fingerprint, "volume fingerprint")?;
+        let now_sql = disk_pressure_sql_integer(now_unix, "volume rebind time")?;
+        if expected.volume_fingerprint.as_deref() == Some(volume_fingerprint) {
+            return Ok(false);
+        }
+        for alias in alias_ids {
+            validate_disk_pressure_key(alias, "filesystem alias")?;
+        }
+
+        let writer_context = self.writer_context();
+        let transaction = self.conn.unchecked_transaction()?;
+        validate_replay_baseline_before_write(&transaction)?;
+        writer_context.begin_write(&transaction)?;
+        bind_journal_service_instance(&transaction, service_instance)?;
+        let current = load_disk_pressure_episode(&transaction, service_instance, filesystem_id)?;
+        let Some(current) = current else {
+            end_journal_write_gate(&transaction)?;
+            transaction.commit()?;
+            return Ok(false);
+        };
+        if current.episode_id != expected.episode_id
+            || current.revision != expected.revision
+            || !current.terminal
+            || current.volume_fingerprint != expected.volume_fingerprint
+        {
+            end_journal_write_gate(&transaction)?;
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let root_identity: Option<(Option<String>, i64, i64)> = transaction
+            .query_row(
+                "SELECT volume_fingerprint, identity_confirmed, last_observed_unix
+                 FROM disk_pressure_observations
+                 WHERE service_instance = ?1 AND filesystem_id = ?2",
+                params![service_instance, filesystem_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((persisted_fingerprint, identity_confirmed, last_observed)) = root_identity else {
+            end_journal_write_gate(&transaction)?;
+            transaction.commit()?;
+            return Ok(false);
+        };
+        if persisted_fingerprint != expected.volume_fingerprint
+            || disk_pressure_bool(identity_confirmed, "pressure identity confirmed")?
+        {
+            end_journal_write_gate(&transaction)?;
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let state = load_materialized_state(&transaction)?;
+        if !pressure_state_slots_are_safe(&state) {
+            end_journal_write_gate(&transaction)?;
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let high_water = disk_pressure_u64(last_observed, "pressure clock high-water")?;
+        if now_unix < high_water || now_unix < current.started_unix {
+            end_journal_write_gate(&transaction)?;
+            transaction.commit()?;
+            return Ok(false);
+        }
+
+        let revision_sql = disk_pressure_sql_integer(current.revision, "episode revision")?;
+        let deleted = transaction.execute(
+            "DELETE FROM disk_pressure_episodes
+             WHERE service_instance = ?1 AND filesystem_id = ?2
+               AND episode_id = ?3 AND revision = ?4",
+            params![
+                service_instance,
+                filesystem_id,
+                current.episode_id,
+                revision_sql
+            ],
+        )?;
+        if deleted != 1 {
+            return Err(disk_pressure_state_invalid(
+                "volume rebind episode compare-and-swap missed".to_owned(),
+            ));
+        }
+        let observed_roots =
+            std::iter::once(filesystem_id).chain(alias_ids.iter().map(String::as_str));
+        for root_id in observed_roots {
+            let updated = transaction.execute(
+                "UPDATE disk_pressure_observations
+                 SET volume_fingerprint = ?1, identity_confirmed = 1,
+                     last_observed_unix = MAX(last_observed_unix, ?2)
+                 WHERE service_instance = ?3 AND filesystem_id = ?4",
+                params![volume_fingerprint, now_sql, service_instance, root_id],
+            )?;
+            if root_id == filesystem_id && updated != 1 {
+                return Err(disk_pressure_state_invalid(
+                    "volume rebind observation compare-and-swap missed".to_owned(),
+                ));
+            }
+        }
+        transaction.execute(
+            "UPDATE disk_pressure_launches SET active = 0 WHERE service_instance = ?1",
+            [service_instance],
+        )?;
+
+        if available_bytes.is_none_or(|available| available < min_free_bytes) {
+            let deadline = now_unix.checked_add(degraded_seconds).ok_or_else(|| {
+                disk_pressure_state_invalid("cleanup deadline overflow".to_owned())
+            })?;
+            let drain_deadline = deadline
+                .checked_add(drain_seconds)
+                .ok_or_else(|| disk_pressure_state_invalid("drain deadline overflow".to_owned()))?;
+            transaction.execute(
+                "INSERT INTO disk_pressure_episodes (
+                     service_instance, filesystem_id, volume_fingerprint, episode_id,
+                     started_unix, deadline_unix, drain_deadline_unix, last_observed_unix,
+                     reclaim_attempted, revision, draining, terminal
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, 1, 0, 0)",
+                params![
+                    service_instance,
+                    filesystem_id,
+                    volume_fingerprint,
+                    uuid::Uuid::new_v4().to_string(),
+                    disk_pressure_sql_integer(now_unix, "episode start")?,
+                    disk_pressure_sql_integer(deadline, "cleanup deadline")?,
+                    disk_pressure_sql_integer(drain_deadline, "drain deadline")?,
+                    disk_pressure_sql_integer(now_unix, "last observation")?,
+                ],
+            )?;
+        }
+        end_journal_write_gate(&transaction)?;
+        transaction.commit()?;
+        Ok(true)
     }
 
     /// Read the current materialized state without replaying the event log.
@@ -1491,6 +3635,7 @@ impl Journal {
     /// SQLite reads or invalid materialized values.
     pub fn materialized_state(&self) -> StoreResult<FleetState> {
         let transaction = self.conn.unchecked_transaction()?;
+        validate_replay_integrity_before_read(&transaction)?;
         let state = load_materialized_state(&transaction)?;
         transaction.commit()?;
         Ok(state)
@@ -1543,17 +3688,228 @@ impl Journal {
     where
         I: IntoIterator<Item = Event>,
     {
+        self.apply_many_inner(events, None, None, None, None, None, None, None)
+    }
+
+    fn apply_many_inner<'a, I>(
+        &mut self,
+        events: I,
+        launch_fence: Option<(&'a str, &'a SlotId, i64, &'a str)>,
+        acquisition_intent_fence: Option<AcquisitionIntentFence>,
+        acquisition_response_fence: Option<AcquisitionResponseFence>,
+        acquisition_abandon_fence: Option<AcquisitionAbandonFence>,
+        acquisition_recovery_fence: Option<AcquisitionRecoveryFence>,
+        acquisition_resolution_fence: Option<AcquisitionResolutionFence>,
+        acquisition_loss_fence: Option<AcquisitionLossFence>,
+    ) -> StoreResult<Vec<ReduceOutcome>>
+    where
+        I: IntoIterator<Item = Event>,
+    {
+        if (acquisition_response_fence.is_some() && acquisition_abandon_fence.is_some())
+            || (acquisition_resolution_fence.is_some()
+                && (acquisition_intent_fence.is_some()
+                    || acquisition_response_fence.is_some()
+                    || acquisition_abandon_fence.is_some()
+                    || acquisition_recovery_fence.is_some()))
+            || (acquisition_loss_fence.is_some()
+                && (acquisition_intent_fence.is_some()
+                    || acquisition_response_fence.is_some()
+                    || acquisition_abandon_fence.is_some()
+                    || acquisition_recovery_fence.is_some()
+                    || acquisition_resolution_fence.is_some()))
+            || (acquisition_recovery_fence.is_some()
+                && (acquisition_intent_fence.is_some()
+                    || acquisition_response_fence.is_some()
+                    || acquisition_abandon_fence.is_some()
+                    || self.worker_launch.is_some()))
+        {
+            return Err(acquisition_response_fenced());
+        }
+        let launch_fence = if let Some(bound) = &self.worker_launch {
+            if let Some((service_instance, slot_id, generation, launch_nonce)) = launch_fence
+                && (bound.service_instance != service_instance
+                    || bound.slot_id != *slot_id
+                    || bound.generation != generation
+                    || bound.launch_nonce != launch_nonce)
+            {
+                return Err(disk_pressure_launch_fenced());
+            }
+            if let Some(response) = &acquisition_response_fence {
+                if bound.service_instance != response.service_instance
+                    || bound.slot_id != response.slot_id
+                    || bound.generation != response.generation
+                    || bound.launch_nonce != response.launch_nonce
+                {
+                    return Err(disk_pressure_launch_fenced());
+                }
+                // The exact-response validator below decides whether this
+                // existing intent may be handed off after terminal revocation.
+                None
+            } else if let Some(abandon) = &acquisition_abandon_fence {
+                if bound.service_instance != abandon.service_instance
+                    || bound.slot_id != abandon.slot_id
+                    || bound.generation != abandon.generation
+                    || bound.launch_nonce != abandon.launch_nonce
+                {
+                    return Err(acquisition_abandon_fenced());
+                }
+                // Only the exact terminal-fenced provisional row validator
+                // below may authorize this stale-launch cleanup.
+                None
+            } else {
+                Some((
+                    bound.service_instance.as_str(),
+                    &bound.slot_id,
+                    bound.generation,
+                    bound.launch_nonce.as_str(),
+                ))
+            }
+        } else {
+            if acquisition_abandon_fence.is_some() {
+                return Err(acquisition_abandon_fenced());
+            }
+            launch_fence
+        };
+        if let Some(fence) = &acquisition_intent_fence
+            && !launch_fence.is_some_and(|(service_instance, slot_id, generation, launch_nonce)| {
+                service_instance == fence.service_instance
+                    && slot_id == &fence.slot_id
+                    && generation == fence.generation
+                    && launch_nonce == fence.launch_nonce
+            })
+        {
+            return Err(disk_pressure_launch_fenced());
+        }
         let mut events = events.into_iter();
         let Some(first_event) = events.next() else {
             return Ok(Vec::new());
         };
+        if (acquisition_intent_fence.is_some()
+            || acquisition_response_fence.is_some()
+            || acquisition_abandon_fence.is_some()
+            || acquisition_recovery_fence.is_some()
+            || acquisition_resolution_fence.is_some()
+            || acquisition_loss_fence.is_some())
+            && events.next().is_some()
+        {
+            return Err(acquisition_response_fenced());
+        }
+        if let Some(fence) = &acquisition_intent_fence
+            && !matches!(
+                &first_event,
+                Event::JobAcquisitionIntended {
+                    slot_id,
+                    job_id,
+                    generation,
+                    message_id,
+                    run_service_url,
+                    ..
+                } if slot_id == &fence.slot_id
+                    && job_id == &fence.provisional_job_id
+                    && generation.0 as i64 == fence.generation
+                    && message_id == &fence.message_id
+                    && run_service_url == &fence.run_service_url
+            )
+        {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.acquisition.intent.fenced",
+            ));
+        }
+        if let Some(fence) = &acquisition_abandon_fence
+            && !matches!(
+                &first_event,
+                Event::JobAcquisitionLost {
+                    job_id,
+                    generation,
+                    ..
+                } if job_id == &fence.provisional_job_id
+                    && generation.0 as i64 == fence.generation
+            )
+        {
+            return Err(acquisition_abandon_fenced());
+        }
+        if let Some(fence) = &acquisition_recovery_fence
+            && !matches!(
+                &first_event,
+                Event::JobOwned {
+                    job_id,
+                    slot_id,
+                    generation,
+                    worker,
+                    ..
+                } if job_id == &fence.acquired_job_id
+                    && slot_id == &fence.slot_id
+                    && generation.0 as i64 == fence.generation
+                    && worker == &pressure_terminal_recovery_worker(&fence.acquired_job_id)
+            )
+        {
+            return Err(acquisition_recovery_fenced());
+        }
+        if let Some(fence) = &acquisition_resolution_fence
+            && !matches!(
+                &first_event,
+                Event::JobAcquisitionResolvedAtEndpoint {
+                    provisional_job_id,
+                    acquired_job_id,
+                    plan_id,
+                    generation,
+                    run_service_url,
+                } if provisional_job_id == &fence.provisional_job_id
+                    && acquired_job_id == &fence.acquired_job_id
+                    && plan_id == &fence.plan_id
+                    && generation.0 as i64 == fence.generation
+                    && run_service_url == &fence.job_run_service_url
+            )
+        {
+            return Err(acquisition_response_fenced());
+        }
+        if let Some(fence) = &acquisition_loss_fence
+            && !matches!(
+                &first_event,
+                Event::JobAcquisitionLost {
+                    job_id,
+                    generation,
+                    ..
+                } if job_id == &fence.provisional_job_id
+                    && generation.0 as i64 == fence.generation
+            )
+        {
+            return Err(acquisition_abandon_fenced());
+        }
 
         // Lock before reading materialized state. Controller, job, guardian,
         // and completion processes can overlap; a snapshot taken before the
         // write lock could otherwise clobber a concurrent committed event.
+        let writer_context = self.writer_context();
         let transaction = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        validate_replay_baseline_before_write(&transaction)?;
+        writer_context.begin_write(&transaction)?;
+        if let Some(fence) = &acquisition_intent_fence {
+            validate_journal_service_instance(&transaction, &fence.service_instance)?;
+        }
+        if let Some(fence) = &acquisition_response_fence {
+            validate_journal_service_instance(&transaction, &fence.service_instance)?;
+        }
+        if let Some(fence) = &acquisition_abandon_fence {
+            validate_journal_service_instance(&transaction, &fence.service_instance)?;
+        }
+        if let Some(fence) = &acquisition_recovery_fence {
+            validate_journal_service_instance(&transaction, &fence.service_instance)?;
+        }
+        if let Some((service_instance, slot_id, generation_sql, launch_nonce)) = launch_fence
+            && !disk_pressure_launch_is_current(
+                &transaction,
+                service_instance,
+                slot_id,
+                generation_sql,
+                launch_nonce,
+            )?
+        {
+            return Err(disk_pressure_launch_fenced());
+        }
         let mut state = load_materialized_state(&transaction)?;
         if state.capacity_invalid {
             return Err(StoreError::new(
@@ -1566,10 +3922,131 @@ impl Journal {
         }
         let mut outcomes = Vec::new();
         let mut pending = Vec::new();
+        let mut launch_deactivations = Vec::new();
+        let pressure_service_instance = launch_fence
+            .map(|(service_instance, _, _, _)| service_instance)
+            .or_else(|| {
+                self.worker_launch
+                    .as_ref()
+                    .map(|fence| fence.service_instance.as_str())
+            })
+            .or(self.service_instance.as_deref());
+        let active_pressure_episode: i64 = if let Some(service_instance) = pressure_service_instance
+        {
+            transaction.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM disk_pressure_episodes
+                     WHERE service_instance = ?1
+                 )",
+                [service_instance],
+                |row| row.get(0),
+            )?
+        } else {
+            // An unbound administrative handle has no safe service identity.
+            // Preserve its conservative global admission fence.
+            transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM disk_pressure_episodes)",
+                [],
+                |row| row.get(0),
+            )?
+        };
+        let active_pressure_episode =
+            disk_pressure_bool(active_pressure_episode, "active pressure episode")?;
+        if let Some(fence) = &acquisition_response_fence {
+            validate_acquisition_response_fence(&transaction, &state, fence)?;
+        }
+        if let Some(fence) = &acquisition_resolution_fence {
+            validate_acquisition_resolution_fence(&transaction, &state, fence)?;
+        }
+        if let Some(fence) = &acquisition_loss_fence {
+            validate_acquisition_loss_fence(&transaction, &state, fence)?;
+        }
+        if let Some(fence) = &acquisition_abandon_fence {
+            validate_acquisition_abandon_fence(&transaction, &state, fence)?;
+        }
+        if let Some(fence) = &acquisition_recovery_fence {
+            validate_acquisition_recovery_fence(&transaction, &state, fence)?;
+        }
+        if let Some(fence) = &acquisition_intent_fence
+            && exact_provisional_acquisition_row(&state, fence)
+            && acquisition_intent_event_is_exact(&transaction, fence)?
+        {
+            // The active nonce check above proves this durable row belongs to
+            // the current slot launch. Exact retries are a no-op; they do not
+            // create another event or bypass a changed message/URL/row.
+            end_journal_write_gate(&transaction)?;
+            transaction.commit()?;
+            return Ok(vec![ReduceOutcome {
+                state,
+                commands: Vec::new(),
+                rejected: false,
+            }]);
+        }
         for mut event in std::iter::once(first_event).chain(events) {
+            if let Some(fence) = &acquisition_intent_fence
+                && !matches!(
+                    &event,
+                    Event::JobAcquisitionIntended {
+                        slot_id,
+                        generation,
+                        ..
+                    } if slot_id == &fence.slot_id
+                        && generation.0 as i64 == fence.generation
+                )
+            {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.acquisition.intent.fenced",
+                ));
+            }
+            if self.worker_launch.is_some()
+                && matches!(&event, Event::DiskPressureTerminalFence { .. })
+            {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.disk_pressure.worker_authority",
+                )
+                .with_remediation(
+                    "only the controller may fence a slot at the terminal pressure deadline",
+                ));
+            }
+            if matches!(
+                &event,
+                Event::JobOwned { worker, .. }
+                    if worker.starts_with(PRESSURE_TERMINAL_RECOVERY_WORKER_PREFIX)
+            ) && acquisition_recovery_fence.is_none()
+            {
+                return Err(acquisition_recovery_fenced());
+            }
             stamp_event(&mut event);
-            let outcome = reduce(state.clone(), event.clone());
+            let pressure_blocks_admission = active_pressure_episode
+                && (matches!(&event, Event::PermitReserved { .. })
+                    || matches!(&event, Event::JobAcquisitionIntended { .. }));
+            let outcome = if pressure_blocks_admission {
+                ReduceOutcome {
+                    state: state.clone(),
+                    commands: Vec::new(),
+                    rejected: true,
+                }
+            } else {
+                reduce(state.clone(), event.clone())
+            };
             if !outcome.rejected {
+                if let Event::SlotStale {
+                    slot_id,
+                    generation,
+                }
+                | Event::DiskPressureTerminalFence {
+                    slot_id,
+                    generation,
+                } = &event
+                {
+                    launch_deactivations.push((
+                        pressure_service_instance.map(str::to_owned),
+                        slot_id.clone(),
+                        disk_pressure_sql_integer(generation.0, "stale launch generation")?,
+                    ));
+                }
                 let unchanged_without_commands =
                     outcome.commands.is_empty() && outcome.state == state;
                 state = outcome.state.clone();
@@ -1583,7 +4060,36 @@ impl Journal {
             }
             outcomes.push(outcome);
         }
+        for (service_instance, slot_id, generation) in launch_deactivations {
+            if let Some(service_instance) = service_instance {
+                transaction.execute(
+                    "UPDATE disk_pressure_launches SET active = 0
+                     WHERE service_instance = ?1 AND slot_id = ?2 AND generation = ?3",
+                    params![service_instance, slot_id.0, generation],
+                )?;
+            } else {
+                let matching_launch: bool = transaction.query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM disk_pressure_launches
+                         WHERE slot_id = ?1 AND generation = ?2 AND active = 1
+                     )",
+                    params![slot_id.0, generation],
+                    |row| row.get(0),
+                )?;
+                if matching_launch {
+                    return Err(StoreError::new(
+                        velnor_model::ExitClass::Conflict,
+                        "journal.disk_pressure.service_instance.required",
+                    )
+                    .with_remediation(
+                        "bind this controller journal to a service instance before revoking pressure launch leases",
+                    ));
+                }
+            }
+        }
         if pending.is_empty() {
+            end_journal_write_gate(&transaction)?;
+            transaction.commit()?;
             return Ok(outcomes);
         }
 
@@ -1596,6 +4102,7 @@ impl Journal {
             )?;
         }
         persist_state(&tx, &state)?;
+        end_journal_write_gate(&tx)?;
         tx.commit()?;
         Ok(outcomes)
     }
@@ -1605,7 +4112,7 @@ impl Journal {
     /// # Errors
     /// SQLite or payload decode failures.
     pub fn load_state(&self) -> StoreResult<FleetState> {
-        load_state_from_conn(&self.conn)
+        load_current_state_checked(&self.conn)
     }
 
     /// Check durable terminal acknowledgement evidence without replaying the
@@ -1617,7 +4124,7 @@ impl Journal {
         generation: Generation,
     ) -> StoreResult<bool> {
         let mut statement = self.conn.prepare(
-            "SELECT payload, checksum
+            "SELECT generation, kind, payload, checksum
              FROM events
              WHERE generation = ?1
                AND kind IN ('remote_acked', 'remote_observed_terminal')
@@ -1626,7 +4133,14 @@ impl Journal {
         )?;
         let rows = statement.query_map(
             params![generation.0 as i64, MAX_TERMINAL_ACK_SCAN_ROWS + 1],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
         )?;
         let mut scanned = 0;
         for row in rows {
@@ -1640,20 +4154,8 @@ impl Journal {
                     "the terminal acknowledgement history exceeded the bounded recovery scan; preserve the journal and compact it through the retention path",
                 ));
             }
-            let (payload, checksum) = row?;
-            if sha256_hex(payload.as_bytes()) != checksum {
-                return Err(StoreError::new(
-                    velnor_model::ExitClass::Conflict,
-                    "journal.checksum.mismatch",
-                )
-                .with_remediation(
-                    "the terminal acknowledgement event failed integrity verification",
-                ));
-            }
-            let event: Event = serde_json::from_str(&payload).map_err(|_| {
-                StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.invalid")
-                    .with_remediation("the terminal acknowledgement event could not be decoded")
-            })?;
+            let (generation_sql, kind, payload, checksum) = row?;
+            let event = decode_checked_event(generation_sql, &kind, &payload, &checksum)?;
             if matches!(
                 event,
                 Event::RemoteAcked {
@@ -1698,29 +4200,24 @@ impl Journal {
     /// SQLite reads, checksum mismatch, or an undecodable event.
     pub fn unresolvable_completions(&self) -> StoreResult<Vec<UnresolvableCompletion>> {
         let mut statement = self.conn.prepare(
-            "SELECT payload, checksum
+            "SELECT generation, kind, payload, checksum
              FROM events
              WHERE kind IN ('completion_unresolvable', 'completion_payload_lost')
              ORDER BY id DESC
              LIMIT ?1",
         )?;
         let rows = statement.query_map(params![MAX_TERMINAL_ACK_SCAN_ROWS], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
         })?;
         let mut found = Vec::new();
         for row in rows {
-            let (payload, checksum) = row?;
-            if sha256_hex(payload.as_bytes()) != checksum {
-                return Err(StoreError::new(
-                    velnor_model::ExitClass::Conflict,
-                    "journal.checksum.mismatch",
-                )
-                .with_remediation("an abandoned completion event failed integrity verification"));
-            }
-            let event: Event = serde_json::from_str(&payload).map_err(|_| {
-                StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.invalid")
-                    .with_remediation("an abandoned completion event could not be decoded")
-            })?;
+            let (generation_sql, kind, payload, checksum) = row?;
+            let event = decode_checked_event(generation_sql, &kind, &payload, &checksum)?;
             match event {
                 Event::CompletionUnresolvable {
                     job_id,
@@ -1760,15 +4257,19 @@ impl Journal {
     /// effective value is a no-op, and the recorded version never regresses.
     ///
     /// This is a direct `meta` write in its own immediate transaction, never a
-    /// new `Event` variant: older binaries must keep opening (and ignoring)
-    /// this state, and the event vocabulary is frozen for drain purposes.
+    /// new `Event` variant: v9-capable binaries that do not use this marker
+    /// may ignore it, while pre-v9 writers are fenced from state rewrites.
     ///
     /// # Errors
     /// SQLite write failures.
     pub fn set_drain(&mut self, version: u64) -> StoreResult<bool> {
+        self.require_controller_authority()?;
+        let writer_context = self.writer_context();
         let transaction = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        validate_replay_baseline_before_write(&transaction)?;
+        writer_context.begin_write(&transaction)?;
         let existing: Option<String> = transaction
             .query_row("SELECT value FROM meta WHERE key = 'drain'", [], |row| {
                 row.get(0)
@@ -1781,6 +4282,7 @@ impl Journal {
             .unwrap_or(version);
         let value = format!("requested:{effective}");
         if existing.as_deref() == Some(value.as_str()) {
+            end_journal_write_gate(&transaction)?;
             transaction.commit()?;
             return Ok(false);
         }
@@ -1789,6 +4291,7 @@ impl Journal {
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![value],
         )?;
+        end_journal_write_gate(&transaction)?;
         transaction.commit()?;
         Ok(true)
     }
@@ -1801,10 +4304,15 @@ impl Journal {
     /// # Errors
     /// SQLite write failures.
     pub fn clear_drain(&mut self) -> StoreResult<bool> {
+        self.require_controller_authority()?;
+        let writer_context = self.writer_context();
         let transaction = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        validate_replay_baseline_before_write(&transaction)?;
+        writer_context.begin_write(&transaction)?;
         let removed = transaction.execute("DELETE FROM meta WHERE key = 'drain'", [])? > 0;
+        end_journal_write_gate(&transaction)?;
         transaction.commit()?;
         Ok(removed)
     }
@@ -1818,9 +4326,13 @@ impl Journal {
     /// # Errors
     /// SQLite write failures.
     pub fn set_admission_blocked(&mut self, version: u64) -> StoreResult<bool> {
+        self.require_controller_authority()?;
+        let writer_context = self.writer_context();
         let transaction = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        validate_replay_baseline_before_write(&transaction)?;
+        writer_context.begin_write(&transaction)?;
         let existing: Option<String> = transaction
             .query_row(
                 "SELECT value FROM meta WHERE key = 'admission'",
@@ -1837,6 +4349,7 @@ impl Journal {
         };
         let value = format!("blocked:{effective}");
         if existing.as_deref() == Some(value.as_str()) {
+            end_journal_write_gate(&transaction)?;
             transaction.commit()?;
             return Ok(false);
         }
@@ -1845,6 +4358,7 @@ impl Journal {
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![value],
         )?;
+        end_journal_write_gate(&transaction)?;
         transaction.commit()?;
         Ok(true)
     }
@@ -1860,17 +4374,22 @@ impl Journal {
         &mut self,
         expected_version: Option<u64>,
     ) -> StoreResult<bool> {
+        self.require_controller_authority()?;
         let Some(expected_version) = expected_version else {
             return Ok(false);
         };
+        let writer_context = self.writer_context();
         let transaction = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        validate_replay_baseline_before_write(&transaction)?;
+        writer_context.begin_write(&transaction)?;
         let expected = format!("blocked:{expected_version}");
         let removed = transaction.execute(
             "DELETE FROM meta WHERE key = 'admission' AND value = ?1",
             params![expected],
         )? > 0;
+        end_journal_write_gate(&transaction)?;
         transaction.commit()?;
         Ok(removed)
     }
@@ -1984,7 +4503,10 @@ fn is_transient_contention(error: &StoreError) -> bool {
 
 /// Run the complete cold-start setup once. The caller retries only SQLite
 /// contention; schema, WAL, and integrity errors remain fail-closed.
-fn setup_journal(conn: &mut Connection) -> StoreResult<()> {
+fn setup_journal(
+    conn: &mut Connection,
+    requested_service_instance: Option<&str>,
+) -> StoreResult<()> {
     // Inspect before enabling WAL or mutating schema. This transaction is
     // read-only and preserves future, legacy, and malformed journals.
     preflight_schema(conn)?;
@@ -1996,8 +4518,7 @@ fn setup_journal(conn: &mut Connection) -> StoreResult<()> {
         )
         .with_remediation("the filesystem must support WAL journaling"));
     }
-    conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
-    assert_sqlite_version(conn)?;
+    configure_journal_connection(conn)?;
     // One immediate transaction owns the complete setup sequence. The
     // physical DDL and every version stamp become visible together, so a
     // concurrent opener cannot combine an old user_version with a newer
@@ -2008,6 +4529,21 @@ fn setup_journal(conn: &mut Connection) -> StoreResult<()> {
     let (stored, outbox_shape) = preflight_schema_snapshot(&transaction)?;
     repair_historic_jobs_shape(&transaction, stored)?;
     transaction.execute_batch(SCHEMA)?;
+    if !journal_identity_table_is_exact(&transaction)? {
+        return Err(
+            StoreError::new(velnor_model::ExitClass::Conflict, "journal.schema.mismatch")
+                .with_remediation(
+                "preserve the journal unchanged; service identity table does not match schema 11",
+            ),
+        );
+    }
+    // Older schemas may carry an earlier fence implementation. Remove it
+    // before migrations touch guarded tables. A v11 journal already has the
+    // complete fence; leave an exact installation byte-stable on reopen.
+    if stored < JOURNAL_SCHEMA_VERSION {
+        remove_journal_write_fence_triggers(&transaction)?;
+    }
+    let legacy_eventless = legacy_eventless_source(&transaction, stored, outbox_shape)?;
     if matches!(outbox_shape, OutboxSchema::V2) {
         migrate_v2_to_v3(&transaction)?;
     }
@@ -2020,7 +4556,131 @@ fn setup_journal(conn: &mut Connection) -> StoreResult<()> {
     migrate_v5_to_v6(&transaction)?;
     migrate_v6_to_v7(&transaction)?;
     migrate_v7_to_v8(&transaction)?;
+    migrate_v8_to_v9(&transaction, legacy_eventless)?;
+    migrate_v9_to_v10(&transaction)?;
+    migrate_v10_to_v11(&transaction, requested_service_instance)?;
+    migrate_v11_to_v12(&transaction)?;
+    ensure_journal_write_fence(&transaction)?;
     transaction.commit()?;
+    Ok(())
+}
+
+/// Apply and verify connection-local journal guarantees on every connection.
+/// WAL mode is persistent in the database; FULL sync and foreign keys are not.
+fn configure_journal_connection(conn: &Connection) -> StoreResult<()> {
+    let wal: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+    if !wal.eq_ignore_ascii_case("wal") {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Operation,
+            "journal.wal.unavailable",
+        )
+        .with_remediation("the filesystem must support WAL journaling"));
+    }
+    conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
+    let synchronous: i64 = conn.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
+    let foreign_keys: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+    if synchronous != 2 || foreign_keys != 1 {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Operation,
+            "journal.connection.settings",
+        )
+        .with_remediation(format!(
+            "journal connection requires synchronous=FULL and foreign_keys=ON; found synchronous={synchronous}, foreign_keys={foreign_keys}"
+        )));
+    }
+    assert_sqlite_version(conn)
+}
+
+/// The pre-event schema could contain live materialized rows without any
+/// corresponding event history. Record that fact before migrations alter the
+/// physical shape; setup installs the actual state snapshot after migrations.
+fn legacy_eventless_source(
+    tx: &rusqlite::Transaction<'_>,
+    stored: u32,
+    outbox_shape: OutboxSchema,
+) -> StoreResult<bool> {
+    if stored >= 9 {
+        return Ok(false);
+    }
+    let event_count: i64 = tx.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
+    if event_count != 0 {
+        return Ok(false);
+    }
+    let materialized_exists: i64 = tx.query_row(
+        "SELECT CASE WHEN EXISTS (SELECT 1 FROM slots)
+                          OR EXISTS (SELECT 1 FROM jobs)
+                          OR EXISTS (SELECT 1 FROM outbox)
+                          OR EXISTS (SELECT 1 FROM meta)
+                     THEN 1 ELSE 0 END",
+        [],
+        |row| row.get(0),
+    )?;
+    if materialized_exists == 0 {
+        return Ok(false);
+    }
+    // The pre-v8 version is the provenance boundary: those versions are the
+    // documented materialized-state migrations, including the v2 fixture.
+    // A nonempty eventless v8 (or a newer physical shape stamped as v8) could
+    // be a writer that lost its events, so guessing a replay origin would
+    // make deletion invisible. Preserve it unchanged and fail closed.
+    if stored < 8
+        && matches!(
+            outbox_shape,
+            OutboxSchema::V2 | OutboxSchema::V3 | OutboxSchema::V4
+        )
+    {
+        return Ok(true);
+    }
+    Err(replay_baseline_provenance(stored, outbox_shape))
+}
+
+/// Install a strict replay anchor. Legacy eventless files use their current
+/// materialized state; all other upgrades use the reducer's empty origin and
+/// replay their complete event log.
+fn install_replay_baseline(
+    tx: &rusqlite::Transaction<'_>,
+    legacy_eventless: bool,
+) -> StoreResult<()> {
+    let mut state = if legacy_eventless {
+        load_materialized_state(tx)?
+    } else {
+        FleetState {
+            journal_writable: true,
+            ..FleetState::default()
+        }
+    };
+    // These latches are lifecycle metadata, not event projections. The
+    // materialized read overlays the live values after replay validation.
+    state.drain_active = false;
+    state.drain_version = 0;
+    state.admission_blocked = false;
+    state.admission_version = 0;
+    let baseline = ReplayBaseline {
+        format_version: 1,
+        source: if legacy_eventless {
+            ReplayBaselineSource::LegacyMaterialized
+        } else {
+            ReplayBaselineSource::Empty
+        },
+        state: ReplayBaselineState::from_fleet(&state),
+    };
+    let serialized = serde_json::to_string(&baseline).map_err(|error| {
+        StoreError::new(
+            velnor_model::ExitClass::Operation,
+            "journal.replay.baseline.encode",
+        )
+        .with_remediation(error.to_string())
+    })?;
+    let checksum = sha256_hex(serialized.as_bytes());
+    tx.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2), (?3, ?4)",
+        params![
+            REPLAY_BASELINE_KEY,
+            serialized,
+            REPLAY_BASELINE_CHECKSUM_KEY,
+            checksum
+        ],
+    )?;
     Ok(())
 }
 
@@ -2044,7 +4704,12 @@ fn preflight_schema_snapshot(conn: &Connection) -> StoreResult<(u32, OutboxSchem
     // transaction: contaminated evidence must remain byte stable and must
     // never reach `persist_state`.
     let stored: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    let stored = u32::try_from(stored).unwrap_or(0);
+    if stored < 0 {
+        return Err(journal_schema_shape_mismatch(
+            "PRAGMA user_version is negative",
+        ));
+    }
+    let stored = u32::try_from(stored).map_err(|_| journal_schema_newer())?;
     let outbox_shape = outbox_schema_shape(conn)?;
     if stored == 1 {
         return Err(StoreError::new(
@@ -2055,8 +4720,35 @@ fn preflight_schema_snapshot(conn: &Connection) -> StoreResult<(u32, OutboxSchem
             "preserve the schema-v1 journal unchanged for forensics and perform an explicit verified migration",
         ));
     }
-    if stored > JOURNAL_SCHEMA_VERSION {
-        return Err(journal_schema_newer());
+    ensure_supported_schema(stored, JOURNAL_SCHEMA_VERSION)?;
+    if stored >= 10 {
+        if !journal_pressure_tables_are_exact(conn)? {
+            return Err(journal_schema_shape_mismatch(
+                "schema-10 disk-pressure tables are missing or invalid",
+            ));
+        }
+    } else if journal_pressure_table_exists(conn)? {
+        return Err(journal_schema_shape_mismatch(
+            "disk-pressure tables exist before their schema-10 introduction",
+        ));
+    }
+    if stored >= 11 {
+        if !journal_identity_table_is_exact(conn)? {
+            return Err(journal_schema_shape_mismatch(
+                "schema-11 service identity table is missing or invalid",
+            ));
+        }
+    } else if journal_identity_table_exists(conn)? {
+        return Err(journal_schema_shape_mismatch(
+            "service identity table exists before its schema-11 introduction",
+        ));
+    }
+    if stored == JOURNAL_SCHEMA_VERSION {
+        require_replay_baseline_keys(conn)?;
+        if load_replay_baseline(conn)?.is_none() {
+            return Err(replay_baseline_missing());
+        }
+        validate_current_schema_before_ddl(conn)?;
     }
     // Physical shape ahead of the recorded version means a writer mutated
     // the tables without stamping `PRAGMA user_version`. Refuse rather than
@@ -2088,43 +4780,2111 @@ fn preflight_schema_snapshot(conn: &Connection) -> StoreResult<(u32, OutboxSchem
     Ok((stored, outbox_shape))
 }
 
-fn load_state_from_conn(conn: &Connection) -> StoreResult<FleetState> {
-    // Journal open succeeded, so the file is writable unless a later apply
-    // fails; recovery treats an opened journal as writable.
-    let mut state = FleetState {
+fn ensure_supported_schema(stored: u32, supported: u32) -> StoreResult<()> {
+    if stored > supported {
+        return Err(journal_schema_newer());
+    }
+    Ok(())
+}
+
+fn require_replay_baseline_keys(conn: &Connection) -> StoreResult<()> {
+    let meta_exists: i64 = conn.query_row(
+        "SELECT EXISTS (
+             SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if meta_exists == 0 {
+        return Err(replay_baseline_missing());
+    }
+    let baseline_exists: i64 = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM meta WHERE key = ?1)",
+        [REPLAY_BASELINE_KEY],
+        |row| row.get(0),
+    )?;
+    let checksum_exists: i64 = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM meta WHERE key = ?1)",
+        [REPLAY_BASELINE_CHECKSUM_KEY],
+        |row| row.get(0),
+    )?;
+    if baseline_exists == 0 || checksum_exists == 0 {
+        return Err(replay_baseline_missing());
+    }
+    Ok(())
+}
+
+/// Remove all write-fence triggers while setup owns the immediate migration
+/// transaction. This also upgrades databases produced by the earlier
+/// baseline-delete-only fence.
+fn remove_journal_write_fence_triggers(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    for (name, _, _) in JOURNAL_WRITE_FENCE_TRIGGERS {
+        tx.execute_batch(&format!("DROP TRIGGER IF EXISTS {name};"))?;
+    }
+    tx.execute_batch(&format!(
+        "DROP TRIGGER IF EXISTS {delete_trigger};
+         DROP TRIGGER IF EXISTS {rename_trigger};",
+        delete_trigger = LEGACY_REPLAY_BASELINE_DELETE_FENCE_TRIGGER,
+        rename_trigger = LEGACY_REPLAY_BASELINE_RENAME_FENCE_TRIGGER,
+    ))?;
+    Ok(())
+}
+
+/// Install and verify the durable mixed-version fence after the replay anchor
+/// exists. `PRAGMA user_version` is only an open-time convention: an already
+/// open old connection can otherwise issue every DML write path after a
+/// different connection completes migration. The persistent gate row exists
+/// only inside a current writer's transaction; every guarded table-operation
+/// triggers reject writes made without that row. The complete replacement is
+/// one atomic setup transaction.
+fn ensure_journal_write_fence(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    if journal_write_fence_is_exact(tx)? {
+        // An older build used these names for a narrower baseline-only
+        // fence. They are harmless when absent and must not survive beside
+        // the complete table-operation fence.
+        tx.execute_batch(&format!(
+            "DROP TRIGGER IF EXISTS {delete_trigger};
+             DROP TRIGGER IF EXISTS {rename_trigger};",
+            delete_trigger = LEGACY_REPLAY_BASELINE_DELETE_FENCE_TRIGGER,
+            rename_trigger = LEGACY_REPLAY_BASELINE_RENAME_FENCE_TRIGGER,
+        ))?;
+        return Ok(());
+    }
+
+    // Replace an incomplete or malformed installation while the setup
+    // transaction owns the write lock. There is no observable interval in
+    // which the migrated tables are writable without the fence.
+    remove_journal_write_fence_triggers(tx)?;
+    tx.execute_batch(&format!(
+        "CREATE TABLE IF NOT EXISTS {gate} (
+             id INTEGER PRIMARY KEY CHECK (id = 1)
+         );",
+        gate = JOURNAL_WRITE_GATE_TABLE,
+    ))?;
+    for (name, table, operation) in JOURNAL_WRITE_FENCE_TRIGGERS {
+        let sql = journal_write_fence_trigger_sql(name, table, operation);
+        tx.execute_batch(&sql)?;
+    }
+
+    if !journal_write_fence_is_exact(tx)? {
+        return Err(journal_write_fence_invalid(
+            "installed trigger set or definition is not exact".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn journal_write_fence_is_exact(tx: &Connection) -> StoreResult<bool> {
+    let gate_schema: Option<String> = tx
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [JOURNAL_WRITE_GATE_TABLE],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(gate_schema) = gate_schema else {
+        return Ok(false);
+    };
+    if normalize_sql(&gate_schema) != normalize_sql(journal_write_gate_table_sql()) {
+        return Ok(false);
+    }
+    let gate_rows: i64 = tx.query_row("SELECT COUNT(*) FROM journal_write_gate", [], |row| {
+        row.get(0)
+    })?;
+    if gate_rows != 0 {
+        return Ok(false);
+    }
+
+    // The expected triggers are the complete schema boundary. Count every
+    // trigger attached to a guarded table, including the gate itself, so a
+    // differently named BEFORE/AFTER trigger cannot open the gate indirectly.
+    // Temporary triggers are connection-local and are never part of this
+    // journal schema; reject them on the same tables as well.
+    for catalog in ["sqlite_master", "sqlite_temp_master"] {
+        let trigger_count: i64 = tx.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {catalog}
+                 WHERE type = 'trigger'
+                   AND lower(tbl_name) IN (
+                       'events', 'slots', 'jobs', 'outbox', 'meta',
+                       'disk_pressure_episodes', 'disk_pressure_launches',
+                       'disk_pressure_observations',
+                       'journal_identity',
+                       'journal_write_gate'
+                   )"
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        let expected = if catalog == "sqlite_master" {
+            JOURNAL_WRITE_FENCE_TRIGGERS.len() as i64
+        } else {
+            0
+        };
+        if trigger_count != expected {
+            return Ok(false);
+        }
+    }
+
+    for (name, table, operation) in JOURNAL_WRITE_FENCE_TRIGGERS {
+        let actual: Option<(String, String)> = tx
+            .query_row(
+                "SELECT tbl_name, sql
+                 FROM sqlite_master
+                 WHERE type = 'trigger' AND name = ?1",
+                [name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((actual_table, actual_sql)) = actual else {
+            return Ok(false);
+        };
+        let expected = journal_write_fence_trigger_sql(name, table, operation);
+        if !actual_table.eq_ignore_ascii_case(table)
+            || normalize_sql(&actual_sql) != normalize_sql(&expected)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn journal_identity_table_is_exact(conn: &Connection) -> StoreResult<bool> {
+    let schema: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'table' AND lower(name) = lower(?1)",
+            ["journal_identity"],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(schema) = schema else {
+        return Ok(false);
+    };
+    if normalize_sql(&schema) != normalize_sql(journal_identity_table_sql()) {
+        return Ok(false);
+    }
+    let mut statement = conn.prepare("PRAGMA table_info(journal_identity)")?;
+    let columns = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(columns
+        == [
+            ("id".to_owned(), "INTEGER".to_owned(), 0, 1),
+            ("service_instance".to_owned(), "TEXT".to_owned(), 1, 0),
+        ])
+}
+
+fn validate_current_schema_before_ddl(conn: &Connection) -> StoreResult<()> {
+    if !journal_identity_table_is_exact(conn)? || !journal_write_fence_is_exact(conn)? {
+        return Err(journal_schema_shape_mismatch(
+            "schema-11 identity table or required write-fence schema is missing or invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn journal_schema_shape_mismatch(detail: &str) -> StoreError {
+    StoreError::new(velnor_model::ExitClass::Conflict, "journal.schema.mismatch")
+        .with_remediation(format!("preserve the journal unchanged; {detail}"))
+}
+
+fn journal_pressure_table_exists(conn: &Connection) -> StoreResult<bool> {
+    conn.query_row(
+        "SELECT EXISTS (
+             SELECT 1 FROM sqlite_master
+             WHERE type IN ('table', 'view') AND lower(name) IN (
+                 'disk_pressure_episodes',
+                 'disk_pressure_launches',
+                 'disk_pressure_observations'
+             )
+         )",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(StoreError::from)
+}
+
+fn journal_pressure_tables_are_exact(conn: &Connection) -> StoreResult<bool> {
+    for (name, expected) in [
+        (
+            "disk_pressure_episodes",
+            "CREATE TABLE disk_pressure_episodes (
+                 service_instance TEXT NOT NULL,
+                 filesystem_id TEXT NOT NULL,
+                 volume_fingerprint TEXT,
+                 episode_id TEXT NOT NULL,
+                 started_unix INTEGER NOT NULL,
+                 deadline_unix INTEGER NOT NULL,
+                 drain_deadline_unix INTEGER NOT NULL,
+                 last_observed_unix INTEGER NOT NULL,
+                 reclaim_attempted INTEGER NOT NULL DEFAULT 0,
+                 revision INTEGER NOT NULL,
+                 draining INTEGER NOT NULL DEFAULT 0,
+                 terminal INTEGER NOT NULL DEFAULT 0,
+                 PRIMARY KEY (service_instance, filesystem_id)
+             )",
+        ),
+        (
+            "disk_pressure_launches",
+            "CREATE TABLE disk_pressure_launches (
+                 service_instance TEXT NOT NULL,
+                 slot_id TEXT NOT NULL,
+                 generation INTEGER NOT NULL,
+                 launch_nonce TEXT NOT NULL,
+                 issued_unix INTEGER NOT NULL,
+                 active INTEGER NOT NULL DEFAULT 1,
+                 PRIMARY KEY (service_instance, slot_id)
+             )",
+        ),
+        (
+            "disk_pressure_observations",
+            "CREATE TABLE disk_pressure_observations (
+                 service_instance TEXT NOT NULL,
+                 filesystem_id TEXT NOT NULL,
+                 volume_fingerprint TEXT,
+                 identity_confirmed INTEGER NOT NULL DEFAULT 0,
+                 last_observed_unix INTEGER NOT NULL,
+                 PRIMARY KEY (service_instance, filesystem_id)
+             )",
+        ),
+    ] {
+        let schema: Option<String> = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'table' AND lower(name) = lower(?1)",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if schema
+            .as_deref()
+            .is_none_or(|schema| normalize_sql(schema) != normalize_sql(expected))
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn journal_identity_table_exists(conn: &Connection) -> StoreResult<bool> {
+    conn.query_row(
+        "SELECT EXISTS (
+             SELECT 1 FROM sqlite_master
+             WHERE type IN ('table', 'view') AND lower(name) = 'journal_identity'
+         )",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(StoreError::from)
+}
+
+fn journal_identity_table_sql() -> &'static str {
+    "CREATE TABLE journal_identity (
+         id INTEGER PRIMARY KEY CHECK (id = 1),
+         service_instance TEXT NOT NULL
+     )"
+}
+
+fn journal_write_gate_table_sql() -> &'static str {
+    "CREATE TABLE journal_write_gate (
+         id INTEGER PRIMARY KEY CHECK (id = 1)
+     );"
+}
+
+fn journal_write_fence_trigger_sql(name: &str, table: &str, operation: &str) -> String {
+    format!(
+        "CREATE TRIGGER {name}
+             BEFORE {operation} ON {table}
+             FOR EACH ROW
+             WHEN NOT EXISTS (
+                 SELECT 1 FROM {gate} WHERE id = 1
+             )
+             BEGIN
+                 SELECT RAISE(ROLLBACK, '{reason}');
+             END;",
+        gate = JOURNAL_WRITE_GATE_TABLE,
+        reason = JOURNAL_WRITE_FENCE_REASON,
+    )
+}
+
+fn normalize_sql(sql: &str) -> String {
+    sql.trim()
+        .trim_end_matches(';')
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn begin_journal_write_gate(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    if !journal_write_fence_is_exact(tx)? {
+        return Err(journal_write_fence_invalid(
+            "gate schema, trigger set, or empty gate row is not exact".to_owned(),
+        ));
+    }
+    let inserted = tx.execute("INSERT INTO journal_write_gate (id) VALUES (1)", [])?;
+    if inserted != 1 {
+        return Err(journal_write_fence_invalid(format!(
+            "gate insert affected {inserted} rows"
+        )));
+    }
+    let gate_rows: i64 = tx.query_row("SELECT COUNT(*) FROM journal_write_gate", [], |row| {
+        row.get(0)
+    })?;
+    if gate_rows != 1 {
+        return Err(journal_write_fence_invalid(format!(
+            "gate row count after insert is {gate_rows}"
+        )));
+    }
+    Ok(())
+}
+
+fn end_journal_write_gate(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    let deleted = tx.execute("DELETE FROM journal_write_gate WHERE id = 1", [])?;
+    if deleted != 1 {
+        return Err(journal_write_fence_invalid(format!(
+            "gate delete affected {deleted} rows"
+        )));
+    }
+    let gate_rows: i64 = tx.query_row("SELECT COUNT(*) FROM journal_write_gate", [], |row| {
+        row.get(0)
+    })?;
+    if gate_rows != 0 {
+        return Err(journal_write_fence_invalid(format!(
+            "gate row count after delete is {gate_rows}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_disk_pressure_key(value: &str, field: &str) -> StoreResult<()> {
+    if value.trim().is_empty() || value.len() > 512 {
+        return Err(disk_pressure_state_invalid(format!(
+            "{field} is empty or exceeds 512 bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn journal_service_instance_mismatch(detail: &str) -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.service_instance.mismatch",
+    )
+    .with_remediation(format!(
+        "open and mutate this fleet journal only as its bound service instance: {detail}"
+    ))
+}
+
+fn validate_journal_service_instance(conn: &Connection, service_instance: &str) -> StoreResult<()> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT service_instance FROM journal_identity WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if stored
+        .as_deref()
+        .is_some_and(|stored| stored != service_instance)
+    {
+        return Err(journal_service_instance_mismatch(
+            "another service instance already owns this database",
+        ));
+    }
+    let has_foreign_pressure_rows: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM disk_pressure_episodes WHERE service_instance <> ?1
+         ) OR EXISTS(
+             SELECT 1 FROM disk_pressure_launches WHERE service_instance <> ?1
+         ) OR EXISTS(
+             SELECT 1 FROM disk_pressure_observations WHERE service_instance <> ?1
+         )",
+        [service_instance],
+        |row| row.get(0),
+    )?;
+    if has_foreign_pressure_rows {
+        return Err(journal_service_instance_mismatch(
+            "pressure tables contain rows owned by another service instance",
+        ));
+    }
+    Ok(())
+}
+
+fn journal_is_provably_new_and_empty(conn: &Connection) -> StoreResult<bool> {
+    let serialized: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            [REPLAY_BASELINE_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(serialized) = serialized else {
+        return Ok(false);
+    };
+    let baseline: ReplayBaseline = serde_json::from_str(&serialized).map_err(|error| {
+        StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.replay.baseline.invalid",
+        )
+        .with_remediation(format!("preserve the journal unchanged; {error}"))
+    })?;
+    let empty_state = FleetState {
         journal_writable: true,
         ..FleetState::default()
     };
-    let mut stmt = conn.prepare("SELECT payload, checksum FROM events ORDER BY id ASC")?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    // Older empty journals may have gained a LegacyMaterialized anchor during
+    // upgrade. Its source label is safe here only because the checked state
+    // and the physical row counts below still prove the database is empty.
+    if !matches!(
+        baseline.source,
+        ReplayBaselineSource::Empty | ReplayBaselineSource::LegacyMaterialized
+    ) || baseline.state.into_fleet() != empty_state
+    {
+        return Ok(false);
+    }
+
+    for table in [
+        "events",
+        "slots",
+        "jobs",
+        "outbox",
+        "disk_pressure_episodes",
+        "disk_pressure_launches",
+        "disk_pressure_observations",
+    ] {
+        let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })?;
+        if count != 0 {
+            return Ok(false);
+        }
+    }
+    let ordinary_meta_rows: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM meta WHERE key NOT IN (?1, ?2)",
+        params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+        |row| row.get(0),
+    )?;
+    Ok(ordinary_meta_rows == 0)
+}
+
+fn bind_journal_service_instance(
+    tx: &rusqlite::Transaction<'_>,
+    service_instance: &str,
+) -> StoreResult<()> {
+    validate_journal_service_instance(tx, service_instance)?;
+    let already_bound: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM journal_identity WHERE id = 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if !already_bound {
+        if !journal_is_provably_new_and_empty(tx)? {
+            return Err(journal_service_instance_mismatch(
+                "an unowned journal may be bound only before it contains events, materialized state, or pressure history",
+            ));
+        }
+        tx.execute(
+            "INSERT INTO journal_identity (id, service_instance) VALUES (1, ?1)",
+            [service_instance],
+        )?;
+    }
+    Ok(())
+}
+
+fn disk_pressure_sql_integer(value: u64, field: &str) -> StoreResult<i64> {
+    i64::try_from(value).map_err(|_| {
+        disk_pressure_state_invalid(format!("{field} exceeds SQLite's signed integer range"))
+    })
+}
+
+fn disk_pressure_u64(value: i64, field: &str) -> StoreResult<u64> {
+    u64::try_from(value)
+        .map_err(|_| disk_pressure_state_invalid(format!("{field} is negative in the journal")))
+}
+
+fn disk_pressure_bool(value: i64, field: &str) -> StoreResult<bool> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(disk_pressure_state_invalid(format!(
+            "{field} is not a SQLite boolean"
+        ))),
+    }
+}
+
+fn disk_pressure_state_invalid(detail: String) -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.disk_pressure.state.invalid",
+    )
+    .with_remediation(format!(
+        "preserve the journal unchanged and refuse admission while disk pressure is low: {detail}"
+    ))
+}
+
+fn disk_pressure_launch_fenced() -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.disk_pressure.launch.fenced",
+    )
+    .with_remediation("discard this worker; a newer slot launch owns the pressure writer lease")
+}
+
+fn pressure_state_slots_are_safe(state: &FleetState) -> bool {
+    !state.capacity_invalid
+        && state
+            .slots
+            .iter()
+            .all(|slot| slot.phase == SlotPhase2::Fenced)
+        && state.jobs.iter().all(|job| !job.phase.occupies_slot())
+}
+
+fn disk_pressure_launch_is_current(
+    conn: &Connection,
+    service_instance: &str,
+    slot_id: &SlotId,
+    generation: i64,
+    launch_nonce: &str,
+) -> StoreResult<bool> {
+    let launch: Option<(i64, String, i64)> = conn
+        .query_row(
+            "SELECT generation, launch_nonce, active FROM disk_pressure_launches
+             WHERE service_instance = ?1 AND slot_id = ?2",
+            params![service_instance, slot_id.0],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let lease_matches = launch.is_some_and(|(stored_generation, stored_nonce, active)| {
+        stored_generation == generation && stored_nonce == launch_nonce && active == 1
+    });
+    if !lease_matches {
+        return Ok(false);
+    }
+    let generation_u64 = disk_pressure_u64(generation, "launch generation")?;
+    let state = load_materialized_state(conn)?;
+    Ok(!state.capacity_invalid
+        && state.slots.iter().any(|slot| {
+            slot.slot_id == *slot_id
+                && slot.generation.0 == generation_u64
+                && slot.phase != SlotPhase2::Fenced
+        }))
+}
+
+fn validate_acquisition_response_fence(
+    conn: &Connection,
+    state: &FleetState,
+    fence: &AcquisitionResponseFence,
+) -> StoreResult<()> {
+    let launch: Option<(i64, String, i64)> = conn
+        .query_row(
+            "SELECT generation, launch_nonce, active FROM disk_pressure_launches
+             WHERE service_instance = ?1 AND slot_id = ?2",
+            params![fence.service_instance, fence.slot_id.0],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((stored_generation, stored_nonce, active)) = launch else {
+        return Err(acquisition_response_fenced());
+    };
+    if stored_generation != fence.generation || stored_nonce != fence.launch_nonce {
+        return Err(acquisition_response_fenced());
+    }
+    let active = disk_pressure_bool(active, "launch active")?;
+    let intent_fence = AcquisitionIntentFence {
+        service_instance: fence.service_instance.clone(),
+        slot_id: fence.slot_id.clone(),
+        generation: fence.generation,
+        launch_nonce: fence.launch_nonce.clone(),
+        provisional_job_id: fence.provisional_job_id.clone(),
+        message_id: fence.message_id.clone(),
+        run_service_url: fence.run_service_url.clone(),
+    };
+    if !exact_provisional_acquisition_row(state, &intent_fence)
+        || !acquisition_intent_event_is_exact(conn, &intent_fence)?
+    {
+        return Err(acquisition_response_fenced());
+    }
+
+    if active {
+        if disk_pressure_launch_is_current(
+            conn,
+            &fence.service_instance,
+            &fence.slot_id,
+            fence.generation,
+            &fence.launch_nonce,
+        )? {
+            return Ok(());
+        }
+        return Err(acquisition_response_fenced());
+    }
+
+    let terminally_fenced = state.slots.iter().any(|slot| {
+        slot.slot_id == fence.slot_id
+            && slot.generation.0 == fence.generation as u64
+            && slot.phase == SlotPhase2::Fenced
+    });
+    if !terminally_fenced
+        || !has_disk_pressure_terminal_fence(conn, &fence.slot_id, fence.generation)?
+    {
+        return Err(acquisition_response_fenced());
+    }
+    Ok(())
+}
+
+fn exact_provisional_acquisition_row(state: &FleetState, fence: &AcquisitionIntentFence) -> bool {
+    state.jobs.iter().any(|job| {
+        job.job_id == fence.provisional_job_id
+            && job.slot_id == fence.slot_id
+            && job.generation.0 == fence.generation as u64
+            && job.provisional
+            && job.phase == JobPhase2::Assigned
+            && job.plan_id.is_empty()
+            && job.run_service_url == fence.run_service_url
+    })
+}
+
+fn validate_acquisition_resolution_fence(
+    conn: &Connection,
+    state: &FleetState,
+    fence: &AcquisitionResolutionFence,
+) -> StoreResult<()> {
+    let row_is_exact = state.jobs.iter().any(|job| {
+        job.job_id == fence.provisional_job_id
+            && job.slot_id == fence.slot_id
+            && job.generation.0 == fence.generation as u64
+            && job.provisional
+            && job.phase == JobPhase2::Assigned
+            && job.plan_id.is_empty()
+            && job.run_service_url == fence.acquire_run_service_url
+    });
+    if !row_is_exact
+        || !acquisition_intent_event_matches(
+            conn,
+            &fence.slot_id,
+            fence.generation,
+            &fence.provisional_job_id,
+            &fence.message_id,
+            &fence.acquire_run_service_url,
+        )?
+    {
+        return Err(acquisition_response_fenced());
+    }
+    Ok(())
+}
+
+fn validate_acquisition_loss_fence(
+    conn: &Connection,
+    state: &FleetState,
+    fence: &AcquisitionLossFence,
+) -> StoreResult<()> {
+    let row_is_exact = state.jobs.iter().any(|job| {
+        job.job_id == fence.provisional_job_id
+            && job.slot_id == fence.slot_id
+            && job.generation.0 == fence.generation as u64
+            && job.provisional
+            && job.phase == JobPhase2::Assigned
+            && job.plan_id.is_empty()
+            && job.run_service_url == fence.run_service_url
+    });
+    if !row_is_exact
+        || !acquisition_intent_event_matches(
+            conn,
+            &fence.slot_id,
+            fence.generation,
+            &fence.provisional_job_id,
+            &fence.message_id,
+            &fence.run_service_url,
+        )?
+    {
+        return Err(acquisition_abandon_fenced());
+    }
+    Ok(())
+}
+
+fn acquisition_intent_event_is_exact(
+    conn: &Connection,
+    fence: &AcquisitionIntentFence,
+) -> StoreResult<bool> {
+    acquisition_intent_event_matches(
+        conn,
+        &fence.slot_id,
+        fence.generation,
+        &fence.provisional_job_id,
+        &fence.message_id,
+        &fence.run_service_url,
+    )
+}
+
+fn acquisition_intent_event_matches(
+    conn: &Connection,
+    slot_id: &SlotId,
+    generation: i64,
+    provisional_job_id: &JobId,
+    message_id: &str,
+    run_service_url: &str,
+) -> StoreResult<bool> {
+    let mut statement = conn.prepare(
+        "SELECT generation, kind, payload, checksum FROM events
+         WHERE generation = ?1 AND kind = 'job_acquisition_intended'
+         ORDER BY id DESC",
+    )?;
+    let rows = statement.query_map([generation], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
     })?;
     for row in rows {
-        let (payload, checksum) = row?;
-        if sha256_hex(payload.as_bytes()) != checksum {
-            return Err(StoreError::new(
-                velnor_model::ExitClass::Conflict,
-                "journal.checksum.mismatch",
-            )
-            .with_remediation("the event log failed integrity verification"));
+        let (event_generation_sql, kind, payload, checksum) = row?;
+        if let Event::JobAcquisitionIntended {
+            slot_id: event_slot_id,
+            job_id: event_job_id,
+            generation: event_generation,
+            message_id: event_message_id,
+            run_service_url: event_run_service_url,
+            ..
+        } = decode_checked_event(event_generation_sql, &kind, &payload, &checksum)?
+            && event_job_id == *provisional_job_id
+        {
+            // A provisional id can be reused after a terminal loss. Only its
+            // latest durable intent may authorize this response; accepting an
+            // older message could resolve the newer attempt's row.
+            return Ok(event_slot_id == *slot_id
+                && event_generation.0 as i64 == generation
+                && event_message_id == message_id
+                && event_run_service_url == run_service_url);
         }
-        // The version gate in `open` already refused a journal newer than this
-        // binary and stamped the current version onto an older one, so every
-        // event in a journal we accepted must decode. An envelope that does
-        // not is a writer that changed the vocabulary without bumping
-        // `JOURNAL_SCHEMA_VERSION`; skipping it would silently drop terminal
-        // state and re-drive a completion that was already resolved.
-        let event: Event = serde_json::from_str(&payload).map_err(|error| {
-            StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.unknown")
-                .with_remediation(format!(
-                    "event could not be decoded by schema version {JOURNAL_SCHEMA_VERSION}; preserve the journal and reopen it with the binary that wrote it: {error}"
-                ))
+    }
+    Ok(false)
+}
+
+fn validate_acquisition_abandon_fence(
+    conn: &Connection,
+    state: &FleetState,
+    fence: &AcquisitionAbandonFence,
+) -> StoreResult<()> {
+    let launch: Option<(i64, String, i64)> = conn
+        .query_row(
+            "SELECT generation, launch_nonce, active FROM disk_pressure_launches
+             WHERE service_instance = ?1 AND slot_id = ?2",
+            params![fence.service_instance, fence.slot_id.0],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((stored_generation, stored_nonce, active)) = launch else {
+        return Err(acquisition_abandon_fenced());
+    };
+    if stored_generation != fence.generation || stored_nonce != fence.launch_nonce {
+        return Err(acquisition_abandon_fenced());
+    }
+    if disk_pressure_bool(active, "launch active")? {
+        if !disk_pressure_launch_is_current(
+            conn,
+            &fence.service_instance,
+            &fence.slot_id,
+            fence.generation,
+            &fence.launch_nonce,
+        )? {
+            return Err(acquisition_abandon_fenced());
+        }
+    } else {
+        let slot_is_terminally_fenced = state.slots.iter().any(|slot| {
+            slot.slot_id == fence.slot_id
+                && slot.generation.0 == fence.generation as u64
+                && slot.phase == SlotPhase2::Fenced
+        });
+        let active_terminal_episode: i64 = conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM disk_pressure_episodes
+                 WHERE service_instance = ?1 AND terminal = 1
+             )",
+            [&fence.service_instance],
+            |row| row.get(0),
+        )?;
+        if !slot_is_terminally_fenced
+            || !disk_pressure_bool(active_terminal_episode, "active terminal episode")?
+            || !has_disk_pressure_terminal_fence(conn, &fence.slot_id, fence.generation)?
+        {
+            return Err(acquisition_abandon_fenced());
+        }
+    }
+    let intent_fence = AcquisitionIntentFence {
+        service_instance: fence.service_instance.clone(),
+        slot_id: fence.slot_id.clone(),
+        generation: fence.generation,
+        launch_nonce: fence.launch_nonce.clone(),
+        provisional_job_id: fence.provisional_job_id.clone(),
+        message_id: fence.message_id.clone(),
+        run_service_url: fence.run_service_url.clone(),
+    };
+    if !exact_provisional_acquisition_row(state, &intent_fence)
+        || !acquisition_intent_event_is_exact(conn, &intent_fence)?
+    {
+        return Err(acquisition_abandon_fenced());
+    }
+    Ok(())
+}
+
+fn validate_acquisition_recovery_fence(
+    conn: &Connection,
+    state: &FleetState,
+    fence: &AcquisitionRecoveryFence,
+) -> StoreResult<()> {
+    let launch: Option<(i64, String, i64)> = conn
+        .query_row(
+            "SELECT generation, launch_nonce, active FROM disk_pressure_launches
+             WHERE service_instance = ?1 AND slot_id = ?2",
+            params![fence.service_instance, fence.slot_id.0],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((stored_generation, launch_nonce, active)) = launch else {
+        return Err(acquisition_recovery_fenced());
+    };
+    validate_disk_pressure_key(&launch_nonce, "launch nonce")?;
+    if stored_generation != fence.generation || disk_pressure_bool(active, "launch active")? {
+        return Err(acquisition_recovery_fenced());
+    }
+
+    let terminally_fenced = state.slots.iter().any(|slot| {
+        slot.slot_id == fence.slot_id
+            && slot.generation.0 == fence.generation as u64
+            && slot.phase == SlotPhase2::Fenced
+    });
+    let exact_row = state.jobs.iter().any(|job| {
+        job.job_id == fence.acquired_job_id
+            && job.slot_id == fence.slot_id
+            && job.generation.0 == fence.generation as u64
+            && job.phase == JobPhase2::Assigned
+            && job.provisional
+            && job.plan_id == fence.plan_id
+            && job.run_service_url == fence.run_service_url
+    });
+    if !terminally_fenced
+        || !has_disk_pressure_terminal_fence(conn, &fence.slot_id, fence.generation)?
+        || !exact_row
+        || !resolved_acquisition_intent_is_exact(conn, fence)?
+    {
+        return Err(acquisition_recovery_fenced());
+    }
+    Ok(())
+}
+
+fn resolved_acquisition_intent_is_exact(
+    conn: &Connection,
+    fence: &AcquisitionRecoveryFence,
+) -> StoreResult<bool> {
+    let mut statement = conn.prepare(
+        "SELECT generation, kind, payload, checksum FROM events
+         WHERE generation = ?1
+         AND kind IN (
+               'job_acquisition_intended', 'job_acquisition_resolved',
+               'job_acquisition_resolved_at_endpoint', 'job_acquisition_lost'
+           )
+         ORDER BY id ASC",
+    )?;
+    let rows = statement.query_map([fence.generation], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    let mut pending_intents = HashMap::<JobId, (SlotId, String)>::new();
+    for row in rows {
+        let (generation, kind, payload, checksum) = row?;
+        match decode_checked_event(generation, &kind, &payload, &checksum)? {
+            Event::JobAcquisitionIntended {
+                slot_id,
+                job_id,
+                generation: event_generation,
+                run_service_url,
+                ..
+            } if event_generation.0 as i64 == fence.generation => {
+                pending_intents.insert(job_id, (slot_id, run_service_url));
+            }
+            Event::JobAcquisitionLost {
+                job_id,
+                generation: event_generation,
+                ..
+            } if event_generation.0 as i64 == fence.generation => {
+                pending_intents.remove(&job_id);
+            }
+            Event::JobAcquisitionResolved {
+                provisional_job_id,
+                acquired_job_id,
+                plan_id,
+                generation: event_generation,
+            } if event_generation.0 as i64 == fence.generation => {
+                let intent = pending_intents.remove(&provisional_job_id);
+                if acquired_job_id == fence.acquired_job_id
+                    && plan_id == fence.plan_id
+                    && intent.is_some_and(|(slot_id, url)| {
+                        slot_id == fence.slot_id && url == fence.run_service_url
+                    })
+                {
+                    return Ok(true);
+                }
+            }
+            Event::JobAcquisitionResolvedAtEndpoint {
+                provisional_job_id,
+                acquired_job_id,
+                plan_id,
+                generation: event_generation,
+                run_service_url,
+            } if event_generation.0 as i64 == fence.generation => {
+                let intent = pending_intents.remove(&provisional_job_id);
+                if acquired_job_id == fence.acquired_job_id
+                    && plan_id == fence.plan_id
+                    && run_service_url == fence.run_service_url
+                    && intent.is_some_and(|(slot_id, _acquire_url)| slot_id == fence.slot_id)
+                {
+                    return Ok(true);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
+}
+
+fn has_disk_pressure_terminal_fence(
+    conn: &Connection,
+    slot_id: &SlotId,
+    generation: i64,
+) -> StoreResult<bool> {
+    let mut statement = conn.prepare(
+        "SELECT generation, kind, payload, checksum FROM events
+         WHERE generation = ?1 AND kind = 'disk_pressure_terminal_fence'
+         ORDER BY id DESC",
+    )?;
+    let rows = statement.query_map([generation], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (event_generation, kind, payload, checksum) = row?;
+        if matches!(
+            decode_checked_event(event_generation, &kind, &payload, &checksum)?,
+            Event::DiskPressureTerminalFence {
+                slot_id: ref fenced_slot,
+                generation: fenced_generation,
+            } if fenced_slot == slot_id && fenced_generation.0 == generation as u64
+        ) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn acquisition_response_fenced() -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.acquisition.response.fenced",
+    )
+    .with_remediation(
+        "preserve the acquirejob response and provisional row; only the exact recorded launch may resolve it",
+    )
+}
+
+fn acquisition_abandon_fenced() -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.acquisition.abandon.fenced",
+    )
+    .with_remediation(
+        "preserve the provisional row unless this worker's exact intent is terminal-fenced and its run-service response is typed gone",
+    )
+}
+
+fn acquisition_recovery_fenced() -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.acquisition.recovery.fenced",
+    )
+    .with_remediation(
+        "only a service-bound controller may confirm the exact terminal-fenced acquisition after renewjob proves ownership",
+    )
+}
+
+fn pressure_terminal_recovery_worker(job_id: &JobId) -> String {
+    format!("{PRESSURE_TERMINAL_RECOVERY_WORKER_PREFIX}{}", job_id.0)
+}
+
+#[derive(Debug, Clone)]
+struct PressureClockSample {
+    /// Highest persisted timestamp seen across this service's configured roots
+    /// before this observation.
+    high_water_before: Option<u64>,
+    rollback: bool,
+    fingerprint_changed: bool,
+    identity_confirmed: bool,
+    late_binding: bool,
+    /// The last trusted UUID. A changed or missing UUID never overwrites it.
+    trusted_fingerprint: Option<String>,
+}
+
+/// Return the highest clock observation only when the whole configured-root
+/// alias group has been confirmed on the same volume. Controller CAS paths
+/// run independently of the worker observation reducer, so they must enforce
+/// the same aggregate identity gate under their own transaction.
+fn confirmed_pressure_observation_group_high_water(
+    conn: &Connection,
+    service_instance: &str,
+    filesystem_id: &str,
+    alias_ids: &[String],
+    volume_fingerprint: &str,
+) -> StoreResult<Option<u64>> {
+    let mut roots = Vec::with_capacity(alias_ids.len() + 1);
+    roots.push(filesystem_id);
+    for alias in alias_ids {
+        if !roots.contains(&alias.as_str()) {
+            roots.push(alias);
+        }
+    }
+
+    let mut high_water = None;
+    for root_id in roots {
+        let identity: Option<(Option<String>, i64, i64)> = conn
+            .query_row(
+                "SELECT volume_fingerprint, identity_confirmed, last_observed_unix
+                 FROM disk_pressure_observations
+                 WHERE service_instance = ?1 AND filesystem_id = ?2",
+                params![service_instance, root_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((persisted_fingerprint, confirmed, observed)) = identity else {
+            return Ok(None);
+        };
+        if persisted_fingerprint.as_deref() != Some(volume_fingerprint)
+            || !disk_pressure_bool(confirmed, "pressure identity confirmed")?
+        {
+            return Ok(None);
+        }
+        let observed = disk_pressure_u64(observed, "pressure clock high-water")?;
+        high_water = Some(high_water.map_or(observed, |current: u64| current.max(observed)));
+    }
+    Ok(high_water)
+}
+
+fn persist_pressure_clock_sample(
+    transaction: &rusqlite::Transaction<'_>,
+    service_instance: &str,
+    sample: &DiskPressureFilesystemSample,
+    now_unix: u64,
+) -> StoreResult<PressureClockSample> {
+    let existing: Option<(Option<String>, i64, i64)> = transaction
+        .query_row(
+            "SELECT volume_fingerprint, identity_confirmed, last_observed_unix
+             FROM disk_pressure_observations
+             WHERE service_instance = ?1 AND filesystem_id = ?2",
+            params![service_instance, sample.filesystem_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let service_high_water: Option<i64> = transaction.query_row(
+        "SELECT MAX(last_observed_unix) FROM disk_pressure_observations
+         WHERE service_instance = ?1",
+        [service_instance],
+        |row| row.get(0),
+    )?;
+    let local_high_water = existing.as_ref().map(|(_, _, observed)| *observed);
+    let high_water_before_sql = match (service_high_water, local_high_water) {
+        (Some(service), Some(local)) => Some(service.max(local)),
+        (Some(service), None) => Some(service),
+        (None, Some(local)) => Some(local),
+        (None, None) => None,
+    };
+    let high_water_before = high_water_before_sql
+        .map(|value| disk_pressure_u64(value, "pressure clock high-water"))
+        .transpose()?;
+    let rollback = high_water_before.is_some_and(|high_water| now_unix < high_water);
+    let episode_exists: bool = transaction.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM disk_pressure_episodes
+             WHERE service_instance = ?1 AND filesystem_id = ?2
+         )",
+        params![service_instance, sample.filesystem_id],
+        |row| row.get(0),
+    )?;
+
+    let (trusted_fingerprint, identity_confirmed, fingerprint_changed, late_binding) =
+        match existing {
+            None => (
+                sample.volume_fingerprint.clone(),
+                sample.volume_fingerprint.is_some(),
+                false,
+                false,
+            ),
+            Some((previous, confirmed, _)) => {
+                let _ = disk_pressure_bool(confirmed, "pressure identity confirmed")?;
+                match (previous, sample.volume_fingerprint.as_ref()) {
+                    (Some(previous), Some(observed)) if previous == *observed => {
+                        (Some(previous), true, false, false)
+                    }
+                    (Some(_), Some(observed)) if !episode_exists => {
+                        (Some(observed.clone()), true, false, false)
+                    }
+                    (Some(previous), Some(_)) => (Some(previous), false, true, false),
+                    (Some(previous), None) => (Some(previous), false, false, false),
+                    (None, Some(observed)) if episode_exists => {
+                        (Some(observed.clone()), false, false, true)
+                    }
+                    (None, Some(observed)) => (Some(observed.clone()), true, false, false),
+                    (None, None) => (None, false, false, false),
+                }
+            }
+        };
+    let persisted_high_water = high_water_before.unwrap_or(now_unix).max(now_unix);
+    let persisted_high_water_sql =
+        disk_pressure_sql_integer(persisted_high_water, "pressure clock high-water")?;
+    transaction.execute(
+        "INSERT INTO disk_pressure_observations (
+             service_instance, filesystem_id, volume_fingerprint,
+             identity_confirmed, last_observed_unix
+         ) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT (service_instance, filesystem_id) DO UPDATE SET
+             volume_fingerprint = excluded.volume_fingerprint,
+             identity_confirmed = excluded.identity_confirmed,
+             last_observed_unix = MAX(
+                 disk_pressure_observations.last_observed_unix,
+                 excluded.last_observed_unix
+             )",
+        params![
+            service_instance,
+            sample.filesystem_id,
+            trusted_fingerprint,
+            if identity_confirmed { 1_i64 } else { 0_i64 },
+            persisted_high_water_sql,
+        ],
+    )?;
+    Ok(PressureClockSample {
+        high_water_before,
+        rollback,
+        fingerprint_changed,
+        identity_confirmed,
+        late_binding,
+        trusted_fingerprint,
+    })
+}
+
+fn persist_pressure_clock_samples(
+    transaction: &rusqlite::Transaction<'_>,
+    service_instance: &str,
+    sample: &DiskPressureFilesystemSample,
+    now_unix: u64,
+) -> StoreResult<PressureClockSample> {
+    let mut root_ids = vec![sample.filesystem_id.as_str()];
+    root_ids.extend(sample.alias_ids.iter().map(String::as_str));
+    let mut combined: Option<PressureClockSample> = None;
+    for root_id in root_ids {
+        let mut root_sample = sample.clone();
+        root_sample.filesystem_id = root_id.to_owned();
+        root_sample.alias_ids.clear();
+        let observed =
+            persist_pressure_clock_sample(transaction, service_instance, &root_sample, now_unix)?;
+        if let Some(combined) = combined.as_mut() {
+            combined.high_water_before =
+                match (combined.high_water_before, observed.high_water_before) {
+                    (Some(first), Some(second)) => Some(first.max(second)),
+                    (Some(value), None) | (None, Some(value)) => Some(value),
+                    (None, None) => None,
+                };
+            let fingerprint_conflicts = match (
+                combined.trusted_fingerprint.as_deref(),
+                observed.trusted_fingerprint.as_deref(),
+            ) {
+                (Some(first), Some(second)) => first != second,
+                _ => false,
+            };
+            if combined.trusted_fingerprint.is_none() {
+                combined.trusted_fingerprint = observed.trusted_fingerprint;
+            }
+            combined.rollback |= observed.rollback;
+            combined.fingerprint_changed |= observed.fingerprint_changed || fingerprint_conflicts;
+            combined.identity_confirmed &= observed.identity_confirmed && !fingerprint_conflicts;
+            combined.late_binding |= observed.late_binding;
+        } else {
+            combined = Some(observed);
+        }
+    }
+    combined.ok_or_else(|| disk_pressure_state_invalid("empty pressure root key set".to_owned()))
+}
+
+fn merge_pressure_alias_episodes(
+    transaction: &rusqlite::Transaction<'_>,
+    service_instance: &str,
+    sample: &DiskPressureFilesystemSample,
+    clocks: &PressureClockSample,
+) -> StoreResult<()> {
+    if sample.alias_ids.is_empty() {
+        return Ok(());
+    }
+    let mut roots = Vec::with_capacity(sample.alias_ids.len() + 1);
+    roots.push(sample.filesystem_id.clone());
+    for alias in &sample.alias_ids {
+        if !roots.contains(alias) {
+            roots.push(alias.clone());
+        }
+    }
+    let mut episodes = Vec::new();
+    for root in &roots {
+        if let Some(episode) = load_disk_pressure_episode(transaction, service_instance, root)? {
+            episodes.push((root.clone(), episode));
+        }
+    }
+    if episodes.is_empty() {
+        return Ok(());
+    }
+
+    episodes.sort_by_key(|(_, episode)| {
+        (
+            episode.started_unix,
+            episode.deadline_unix,
+            episode.drain_deadline_unix,
+        )
+    });
+    let (_, oldest) = &episodes[0];
+    let mut merged = oldest.clone();
+    let mut fingerprints = Vec::<String>::new();
+    for (_, episode) in &episodes {
+        if let Some(fingerprint) = &episode.volume_fingerprint
+            && !fingerprints.contains(fingerprint)
+        {
+            fingerprints.push(fingerprint.clone());
+        }
+        merged.deadline_unix = merged.deadline_unix.min(episode.deadline_unix);
+        merged.drain_deadline_unix = merged.drain_deadline_unix.min(episode.drain_deadline_unix);
+        merged.last_observed_unix = merged.last_observed_unix.max(episode.last_observed_unix);
+        merged.reclaim_attempted |= episode.reclaim_attempted;
+        merged.draining |= episode.draining;
+        merged.terminal |= episode.terminal;
+        merged.revision = merged.revision.max(episode.revision);
+    }
+    let identity_conflict = fingerprints.len() > 1
+        || fingerprints
+            .first()
+            .is_some_and(|stored| sample.volume_fingerprint.as_ref() != Some(stored));
+    merged.volume_fingerprint = fingerprints.first().cloned();
+    merged.draining |= identity_conflict || clocks.rollback || clocks.fingerprint_changed;
+    merged.terminal |= identity_conflict || clocks.rollback || clocks.fingerprint_changed;
+    merged.revision = merged
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| disk_pressure_state_invalid("episode revision overflow".to_owned()))?;
+
+    transaction.execute(
+        "INSERT INTO disk_pressure_episodes (
+             service_instance, filesystem_id, volume_fingerprint, episode_id, started_unix,
+             deadline_unix, drain_deadline_unix, last_observed_unix, reclaim_attempted,
+             revision, draining, terminal
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         ON CONFLICT (service_instance, filesystem_id) DO UPDATE SET
+             volume_fingerprint = excluded.volume_fingerprint,
+             episode_id = excluded.episode_id,
+             started_unix = excluded.started_unix,
+             deadline_unix = excluded.deadline_unix,
+             drain_deadline_unix = excluded.drain_deadline_unix,
+             last_observed_unix = excluded.last_observed_unix,
+             reclaim_attempted = excluded.reclaim_attempted,
+             revision = excluded.revision,
+             draining = excluded.draining,
+             terminal = excluded.terminal",
+        params![
+            service_instance,
+            sample.filesystem_id,
+            merged.volume_fingerprint,
+            merged.episode_id,
+            disk_pressure_sql_integer(merged.started_unix, "episode start")?,
+            disk_pressure_sql_integer(merged.deadline_unix, "cleanup deadline")?,
+            disk_pressure_sql_integer(merged.drain_deadline_unix, "drain deadline")?,
+            disk_pressure_sql_integer(merged.last_observed_unix, "last observation")?,
+            if merged.reclaim_attempted {
+                1_i64
+            } else {
+                0_i64
+            },
+            disk_pressure_sql_integer(merged.revision, "episode revision")?,
+            if merged.draining { 1_i64 } else { 0_i64 },
+            if merged.terminal { 1_i64 } else { 0_i64 },
+        ],
+    )?;
+    for alias in roots.iter().filter(|root| **root != sample.filesystem_id) {
+        transaction.execute(
+            "DELETE FROM disk_pressure_episodes
+             WHERE service_instance = ?1 AND filesystem_id = ?2",
+            params![service_instance, alias],
+        )?;
+    }
+    Ok(())
+}
+
+fn delete_pressure_episode_alias_group(
+    transaction: &rusqlite::Transaction<'_>,
+    service_instance: &str,
+    sample: &DiskPressureFilesystemSample,
+    episode: &DiskPressureEpisode,
+) -> StoreResult<bool> {
+    let revision = disk_pressure_sql_integer(episode.revision, "episode revision")?;
+    let mut deleted_primary = false;
+    for filesystem_id in std::iter::once(&sample.filesystem_id).chain(&sample.alias_ids) {
+        let deleted = transaction.execute(
+            "DELETE FROM disk_pressure_episodes
+             WHERE service_instance = ?1 AND filesystem_id = ?2
+               AND episode_id = ?3 AND revision = ?4",
+            params![
+                service_instance,
+                filesystem_id,
+                episode.episode_id,
+                revision
+            ],
+        )?;
+        if filesystem_id == &sample.filesystem_id {
+            deleted_primary = deleted == 1;
+        }
+    }
+    Ok(deleted_primary)
+}
+
+fn observe_disk_pressure_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    service_instance: &str,
+    sample: &DiskPressureFilesystemSample,
+    degraded_seconds: i64,
+    drain_seconds: i64,
+    now_unix: u64,
+) -> StoreResult<DiskPressureObservation> {
+    let filesystem_id = &sample.filesystem_id;
+    let clock = persist_pressure_clock_samples(transaction, service_instance, sample, now_unix)?;
+    merge_pressure_alias_episodes(transaction, service_instance, sample, &clock)?;
+    let measurable = sample.available_bytes.is_some() && sample.volume_fingerprint.is_some();
+    let low = !measurable
+        || sample
+            .available_bytes
+            .is_some_and(|available| available < sample.min_free_bytes);
+    let mut episode = load_disk_pressure_episode(transaction, service_instance, filesystem_id)?;
+    if let Some(current) = episode.as_mut() {
+        let rollback = clock.rollback
+            || now_unix < current.last_observed_unix
+            || now_unix < current.started_unix;
+        let previously_unbound = current.volume_fingerprint.is_none();
+        let fingerprint_changed = match (
+            current.volume_fingerprint.as_deref(),
+            sample.volume_fingerprint.as_deref(),
+        ) {
+            (Some(previous), Some(observed)) => previous != observed,
+            (Some(_), None) => false,
+            (None, Some(observed)) => {
+                current.volume_fingerprint = Some(observed.to_owned());
+                false
+            }
+            (None, None) => false,
+        } || clock.fingerprint_changed;
+        if rollback || fingerprint_changed {
+            current.draining = true;
+            current.terminal = true;
+        } else if !low
+            && !current.terminal
+            && clock.identity_confirmed
+            && !clock.late_binding
+            && current.volume_fingerprint.as_deref() == sample.volume_fingerprint.as_deref()
+        {
+            if !delete_pressure_episode_alias_group(transaction, service_instance, sample, current)?
+            {
+                return Err(disk_pressure_state_invalid(
+                    "healthy episode compare-and-swap missed".to_owned(),
+                ));
+            }
+            return Ok(DiskPressureObservation {
+                episode: None,
+                cleared: true,
+                reclaim_needed: false,
+            });
+        }
+        let old_revision = current.revision;
+        let mut reclaim_needed = false;
+        let episode_fingerprint_matches = current.volume_fingerprint.as_deref()
+            == sample.volume_fingerprint.as_deref()
+            && clock.identity_confirmed
+            && !clock.late_binding;
+        if low
+            && measurable
+            && episode_fingerprint_matches
+            && !previously_unbound
+            && !current.reclaim_attempted
+            && !current.terminal
+        {
+            current.reclaim_attempted = true;
+            reclaim_needed = true;
+        }
+        current.draining |=
+            rollback || fingerprint_changed || (low && now_unix >= current.deadline_unix);
+        current.terminal |=
+            rollback || fingerprint_changed || (low && now_unix >= current.drain_deadline_unix);
+        current.last_observed_unix = current
+            .last_observed_unix
+            .max(now_unix)
+            .max(clock.high_water_before.unwrap_or(0));
+        current.revision = current
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| disk_pressure_state_invalid("episode revision overflow".to_owned()))?;
+        let updated = transaction.execute(
+            "UPDATE disk_pressure_episodes
+             SET volume_fingerprint = ?1, last_observed_unix = ?2, reclaim_attempted = ?3,
+                 revision = ?4, draining = ?5, terminal = ?6
+             WHERE service_instance = ?7 AND filesystem_id = ?8
+               AND episode_id = ?9 AND revision = ?10",
+            params![
+                current.volume_fingerprint,
+                disk_pressure_sql_integer(current.last_observed_unix, "last observation")?,
+                if current.reclaim_attempted {
+                    1_i64
+                } else {
+                    0_i64
+                },
+                disk_pressure_sql_integer(current.revision, "episode revision")?,
+                if current.draining { 1_i64 } else { 0_i64 },
+                if current.terminal { 1_i64 } else { 0_i64 },
+                service_instance,
+                filesystem_id,
+                current.episode_id,
+                disk_pressure_sql_integer(old_revision, "episode revision")?,
+            ],
+        )?;
+        if updated != 1 {
+            return Err(disk_pressure_state_invalid(
+                "low-space episode compare-and-swap missed".to_owned(),
+            ));
+        }
+        return Ok(DiskPressureObservation {
+            episode: Some(current.clone()),
+            cleared: false,
+            reclaim_needed,
+        });
+    } else if low || clock.rollback || clock.fingerprint_changed {
+        let degraded_seconds = u64::try_from(degraded_seconds)
+            .map_err(|_| disk_pressure_state_invalid("degraded deadline is negative".to_owned()))?;
+        let drain_seconds = u64::try_from(drain_seconds)
+            .map_err(|_| disk_pressure_state_invalid("drain deadline is negative".to_owned()))?;
+        let started_unix = if clock.rollback {
+            clock.high_water_before.unwrap_or(now_unix)
+        } else {
+            now_unix
+        };
+        let deadline_unix = started_unix
+            .checked_add(degraded_seconds)
+            .ok_or_else(|| disk_pressure_state_invalid("cleanup deadline overflow".to_owned()))?;
+        let drain_deadline_unix = deadline_unix
+            .checked_add(drain_seconds)
+            .ok_or_else(|| disk_pressure_state_invalid("drain deadline overflow".to_owned()))?;
+        let claim_reclaim = low
+            && measurable
+            && clock.identity_confirmed
+            && !clock.late_binding
+            && !clock.rollback
+            && !clock.fingerprint_changed;
+        let created = DiskPressureEpisode {
+            episode_id: uuid::Uuid::new_v4().to_string(),
+            started_unix,
+            deadline_unix,
+            drain_deadline_unix,
+            draining: clock.rollback
+                || clock.fingerprint_changed
+                || (low && now_unix >= deadline_unix),
+            last_observed_unix: now_unix.max(clock.high_water_before.unwrap_or(0)),
+            reclaim_attempted: claim_reclaim,
+            revision: 1,
+            terminal: clock.rollback
+                || clock.fingerprint_changed
+                || (low && now_unix >= drain_deadline_unix),
+            volume_fingerprint: clock.trusted_fingerprint.clone(),
+        };
+        transaction.execute(
+            "INSERT INTO disk_pressure_episodes (
+                 service_instance, filesystem_id, volume_fingerprint, episode_id, started_unix,
+                 deadline_unix, drain_deadline_unix, last_observed_unix, reclaim_attempted,
+                 revision, draining, terminal
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?11)",
+            params![
+                service_instance,
+                filesystem_id,
+                created.volume_fingerprint,
+                created.episode_id,
+                disk_pressure_sql_integer(created.started_unix, "episode start")?,
+                disk_pressure_sql_integer(created.deadline_unix, "cleanup deadline")?,
+                disk_pressure_sql_integer(created.drain_deadline_unix, "drain deadline")?,
+                disk_pressure_sql_integer(created.last_observed_unix, "last observation")?,
+                if created.reclaim_attempted {
+                    1_i64
+                } else {
+                    0_i64
+                },
+                if created.draining { 1_i64 } else { 0_i64 },
+                if created.terminal { 1_i64 } else { 0_i64 },
+            ],
+        )?;
+        return Ok(DiskPressureObservation {
+            episode: Some(created),
+            cleared: false,
+            reclaim_needed: claim_reclaim,
+        });
+    }
+    Ok(DiskPressureObservation {
+        episode,
+        cleared: false,
+        reclaim_needed: false,
+    })
+}
+
+fn advance_controller_pressure_sample(
+    transaction: &rusqlite::Transaction<'_>,
+    service_instance: &str,
+    sample: &DiskPressureFilesystemSample,
+    degraded_seconds: i64,
+    drain_seconds: i64,
+    now_unix: u64,
+) -> StoreResult<()> {
+    let clock = persist_pressure_clock_samples(transaction, service_instance, sample, now_unix)?;
+    merge_pressure_alias_episodes(transaction, service_instance, sample, &clock)?;
+    let current = load_disk_pressure_episode(transaction, service_instance, &sample.filesystem_id)?;
+    let low = sample.volume_fingerprint.is_none()
+        || sample
+            .available_bytes
+            .is_none_or(|available| available < sample.min_free_bytes);
+    let Some(mut current) = current else {
+        if !low && !clock.rollback && !clock.fingerprint_changed {
+            return Ok(());
+        }
+        let degraded = disk_pressure_u64(degraded_seconds, "degraded deadline")?;
+        let drain = disk_pressure_u64(drain_seconds, "drain deadline")?;
+        let started = if clock.rollback {
+            clock.high_water_before.unwrap_or(now_unix)
+        } else {
+            now_unix
+        };
+        let deadline = started
+            .checked_add(degraded)
+            .ok_or_else(|| disk_pressure_state_invalid("cleanup deadline overflow".to_owned()))?;
+        let end = deadline
+            .checked_add(drain)
+            .ok_or_else(|| disk_pressure_state_invalid("drain deadline overflow".to_owned()))?;
+        let episode_id = uuid::Uuid::new_v4().to_string();
+        transaction.execute(
+            "INSERT INTO disk_pressure_episodes (
+                 service_instance, filesystem_id, volume_fingerprint, episode_id, started_unix,
+                 deadline_unix, drain_deadline_unix, last_observed_unix, reclaim_attempted,
+                 revision, draining, terminal
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, 1, ?9, ?10)",
+            params![
+                service_instance,
+                sample.filesystem_id,
+                clock.trusted_fingerprint,
+                episode_id,
+                disk_pressure_sql_integer(started, "episode start")?,
+                disk_pressure_sql_integer(deadline, "cleanup deadline")?,
+                disk_pressure_sql_integer(end, "drain deadline")?,
+                disk_pressure_sql_integer(
+                    now_unix.max(clock.high_water_before.unwrap_or(0)),
+                    "last observation",
+                )?,
+                if clock.rollback || clock.fingerprint_changed || now_unix >= deadline {
+                    1_i64
+                } else {
+                    0_i64
+                },
+                if clock.rollback || clock.fingerprint_changed || now_unix >= end {
+                    1_i64
+                } else {
+                    0_i64
+                },
+            ],
+        )?;
+        return Ok(());
+    };
+    let rollback =
+        clock.rollback || now_unix < current.last_observed_unix || now_unix < current.started_unix;
+    let fingerprint_changed = match (
+        current.volume_fingerprint.as_deref(),
+        sample.volume_fingerprint.as_deref(),
+    ) {
+        (Some(previous), Some(observed)) => previous != observed,
+        (Some(_), None) => false,
+        (None, Some(observed)) => {
+            current.volume_fingerprint = Some(observed.to_owned());
+            false
+        }
+        (None, None) => false,
+    } || clock.fingerprint_changed;
+    let old_revision = current.revision;
+    current.draining |=
+        rollback || fingerprint_changed || (low && now_unix >= current.deadline_unix);
+    current.terminal |=
+        rollback || fingerprint_changed || (low && now_unix >= current.drain_deadline_unix);
+    current.last_observed_unix = current
+        .last_observed_unix
+        .max(now_unix)
+        .max(clock.high_water_before.unwrap_or(0));
+    current.revision = current
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| disk_pressure_state_invalid("episode revision overflow".to_owned()))?;
+    let updated = transaction.execute(
+        "UPDATE disk_pressure_episodes
+         SET volume_fingerprint = ?1, revision = ?2, draining = ?3, terminal = ?4,
+             last_observed_unix = ?5
+         WHERE service_instance = ?6 AND filesystem_id = ?7
+           AND episode_id = ?8 AND revision = ?9",
+        params![
+            current.volume_fingerprint,
+            disk_pressure_sql_integer(current.revision, "episode revision")?,
+            if current.draining { 1_i64 } else { 0_i64 },
+            if current.terminal { 1_i64 } else { 0_i64 },
+            disk_pressure_sql_integer(current.last_observed_unix, "last observation")?,
+            service_instance,
+            sample.filesystem_id,
+            current.episode_id,
+            disk_pressure_sql_integer(old_revision, "episode revision")?,
+        ],
+    )?;
+    if updated != 1 {
+        return Err(disk_pressure_state_invalid(
+            "controller pressure episode compare-and-swap missed".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Atomically turn a terminal pressure latch into a generation fence and
+/// revoke every launch lease for that slot. Job/outbox ownership remains in
+/// materialized state for ordinary recovery after the controller stops the
+/// actor. This removes the gap where a concurrent permit or nonce issue could
+/// revive the generation between pressure expiry and `SlotStale`.
+fn persist_pressure_terminal_slot_fences(
+    transaction: &rusqlite::Transaction<'_>,
+    service_instance: &str,
+) -> StoreResult<()> {
+    let terminal: i64 = transaction.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM disk_pressure_episodes
+             WHERE service_instance = ?1 AND terminal = 1
+         )",
+        [service_instance],
+        |row| row.get(0),
+    )?;
+    if !disk_pressure_bool(terminal, "terminal pressure episode")? {
+        return Ok(());
+    }
+
+    let mut state = load_materialized_state(transaction)?;
+    if state.capacity_invalid {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.capacity.invalid",
+        )
+        .with_remediation(
+            "preserve the legacy journal and refuse terminal pressure recovery until capacity state is repaired",
+        ));
+    }
+    let slots = state.slots.clone();
+    for slot in slots {
+        transaction.execute(
+            "UPDATE disk_pressure_launches SET active = 0
+             WHERE service_instance = ?1 AND slot_id = ?2",
+            params![service_instance, slot.slot_id.0],
+        )?;
+        if slot.phase == SlotPhase2::Fenced {
+            continue;
+        }
+        let mut event = Event::DiskPressureTerminalFence {
+            slot_id: slot.slot_id,
+            generation: slot.generation,
+        };
+        stamp_event(&mut event);
+        let outcome = reduce(state.clone(), event.clone());
+        if outcome.rejected {
+            return Err(disk_pressure_state_invalid(format!(
+                "terminal pressure fence rejected slot generation {}",
+                slot.generation.0
+            )));
+        }
+        let payload = serde_json::to_string(&event).map_err(|error| {
+            StoreError::new(velnor_model::ExitClass::Operation, "journal.encode.failed")
+                .with_remediation(error.to_string())
         })?;
-        let outcome = reduce(state, event);
+        transaction.execute(
+            "INSERT INTO events (generation, kind, payload, checksum)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                disk_pressure_sql_integer(slot.generation.0, "terminal fence generation")?,
+                event_kind(&event),
+                payload,
+                sha256_hex(payload.as_bytes()),
+            ],
+        )?;
         state = outcome.state;
     }
-    state.capacity_invalid = state_capacity_invalid(&state) || legacy_slots_schema(conn)?;
+    persist_state(transaction, &state)?;
+    Ok(())
+}
+
+type DiskPressureEpisodeSqlRow = (
+    String,
+    Option<String>,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+);
+
+fn load_disk_pressure_episode(
+    conn: &Connection,
+    service_instance: &str,
+    filesystem_id: &str,
+) -> StoreResult<Option<DiskPressureEpisode>> {
+    let row: Option<DiskPressureEpisodeSqlRow> = conn
+        .query_row(
+            "SELECT episode_id, volume_fingerprint, started_unix, deadline_unix, drain_deadline_unix,
+                    last_observed_unix, reclaim_attempted, revision, draining, terminal
+             FROM disk_pressure_episodes
+             WHERE service_instance = ?1 AND filesystem_id = ?2",
+            params![service_instance, filesystem_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(
+        |(
+            episode_id,
+            volume_fingerprint,
+            started_unix,
+            deadline_unix,
+            drain_deadline_unix,
+            last_observed_unix,
+            reclaim_attempted,
+            revision,
+            draining,
+            terminal,
+        )| {
+            Ok(DiskPressureEpisode {
+                episode_id,
+                volume_fingerprint,
+                started_unix: disk_pressure_u64(started_unix, "episode start")?,
+                deadline_unix: disk_pressure_u64(deadline_unix, "cleanup deadline")?,
+                drain_deadline_unix: disk_pressure_u64(drain_deadline_unix, "drain deadline")?,
+                draining: disk_pressure_bool(draining, "draining")?,
+                last_observed_unix: disk_pressure_u64(last_observed_unix, "last observation")?,
+                reclaim_attempted: disk_pressure_bool(reclaim_attempted, "reclaim_attempted")?,
+                revision: disk_pressure_u64(revision, "episode revision")?,
+                terminal: disk_pressure_bool(terminal, "terminal")?,
+            })
+        },
+    )
+    .transpose()
+}
+
+fn pressure_episode_stages(conn: &Connection, service_instance: &str) -> StoreResult<(bool, bool)> {
+    let mut statement = conn.prepare(
+        "SELECT draining, terminal FROM disk_pressure_episodes
+         WHERE service_instance = ?1",
+    )?;
+    let rows = statement.query_map([service_instance], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut draining = false;
+    let mut terminal = false;
+    for row in rows {
+        let (row_draining, row_terminal) = row?;
+        draining |= disk_pressure_bool(row_draining, "draining")?;
+        terminal |= disk_pressure_bool(row_terminal, "terminal")?;
+    }
+    Ok((draining, terminal))
+}
+
+/// Every public state/overlay write must validate the current replay anchor before it can
+/// delete or replace materialized rows. This closes the already-open-handle
+/// case where the file is tampered with after `Journal::open` completed.
+fn validate_replay_baseline_before_write(conn: &Connection) -> StoreResult<()> {
+    let stored: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).ok() != Some(JOURNAL_SCHEMA_VERSION) {
+        return Err(replay_baseline_write_fenced(
+            u32::try_from(stored).unwrap_or(0),
+        ));
+    }
+    require_replay_baseline_keys(conn)?;
+    if load_replay_baseline(conn)?.is_none() {
+        return Err(replay_baseline_missing());
+    }
+    Ok(())
+}
+
+fn validate_replay_integrity_before_read(conn: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    let stored: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).ok() != Some(JOURNAL_SCHEMA_VERSION) {
+        return Err(replay_baseline_read_fenced(
+            u32::try_from(stored).unwrap_or(0),
+        ));
+    }
+    require_replay_baseline_keys(conn)?;
+    if load_replay_baseline(conn)?.is_none() {
+        return Err(replay_baseline_missing());
+    }
+    if !journal_write_fence_is_exact(conn)? {
+        return Err(journal_write_fence_invalid(
+            "gate schema, trigger set, or empty gate row is not exact".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn load_state_from_conn_seed(conn: &Connection, mut state: FleetState) -> StoreResult<FleetState> {
+    state.journal_writable = true;
+    let mut stmt =
+        conn.prepare("SELECT generation, kind, payload, checksum FROM events ORDER BY id ASC")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (generation, kind, payload, checksum) = row?;
+        // The version gate in `open` already refused a journal newer than this
+        // binary; a decoded event must still agree with its stored metadata.
+        let event = decode_checked_event(generation, &kind, &payload, &checksum)?;
+        let outcome = reduce(state, event);
+        if outcome.rejected {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.event.rejected",
+            )
+            .with_remediation(
+                "preserve the journal unchanged; replay rejected an event that was previously materialized",
+            ));
+        }
+        state = outcome.state;
+    }
+    state.capacity_invalid =
+        state.capacity_invalid || state_capacity_invalid(&state) || legacy_slots_schema(conn)?;
     Ok(state)
+}
+
+fn load_replay_baseline(conn: &Connection) -> StoreResult<Option<FleetState>> {
+    let serialized: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            [REPLAY_BASELINE_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let checksum: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            [REPLAY_BASELINE_CHECKSUM_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match (serialized, checksum) {
+        (None, None) => Ok(None),
+        (Some(serialized), Some(checksum)) => {
+            if sha256_hex(serialized.as_bytes()) != checksum {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.replay.baseline.checksum",
+                )
+                .with_remediation(
+                    "preserve the journal unchanged; the legacy replay baseline failed integrity verification",
+                ));
+            }
+            let baseline: ReplayBaseline = serde_json::from_str(&serialized).map_err(|error| {
+                StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.replay.baseline.invalid",
+                )
+                .with_remediation(format!(
+                    "preserve the journal unchanged; the legacy replay baseline could not be decoded: {error}"
+                ))
+            })?;
+            if baseline.format_version != 1 {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.replay.baseline.version",
+                )
+                .with_remediation(
+                    "preserve the journal unchanged; the replay baseline format is unsupported",
+                ));
+            }
+            let ReplayBaseline {
+                format_version: _,
+                source,
+                state: baseline_state,
+            } = baseline;
+            let state = baseline_state.into_fleet();
+            if matches!(source, ReplayBaselineSource::Empty)
+                && state
+                    != (FleetState {
+                        journal_writable: true,
+                        ..FleetState::default()
+                    })
+            {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.replay.baseline.invalid",
+                )
+                .with_remediation(
+                    "preserve the journal unchanged; an empty replay baseline contains semantic state",
+                ));
+            }
+            Ok(Some(state))
+        }
+        _ => Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.replay.baseline.invalid",
+        )
+        .with_remediation(
+            "preserve the journal unchanged; the legacy replay baseline is incomplete",
+        )),
+    }
+}
+
+fn load_state_from_conn_legacy_aware(conn: &Connection) -> StoreResult<FleetState> {
+    // A pre-event migration supplies the materialized snapshot as the replay
+    // origin. A v9 journal always carries an explicit baseline; the checked
+    // read caller validates its presence before reaching this helper.
+    let baseline = load_replay_baseline(conn)?;
+    load_state_from_conn_seed(
+        conn,
+        baseline.unwrap_or(FleetState {
+            journal_writable: true,
+            ..FleetState::default()
+        }),
+    )
+}
+
+fn load_current_state_checked(conn: &Connection) -> StoreResult<FleetState> {
+    // Replay and materialized reads must observe one SQLite snapshot. Reading
+    // them through separate connections would turn a legitimate concurrent
+    // commit into a false corruption report.
+    let transaction = conn.unchecked_transaction()?;
+    validate_replay_integrity_before_read(&transaction)?;
+    let replayed = load_state_from_conn_legacy_aware(&transaction)?;
+    let materialized = load_materialized_state(&transaction)?;
+    // Compare even when the event table is empty. A legacy baseline is part
+    // of the replay input; it is not a bypass around this check.
+    let mismatch =
+        canonical_projection(replayed.clone()) != canonical_projection(materialized.clone());
+    if mismatch && !materialized.capacity_invalid {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.materialized.replay.mismatch",
+        )
+        .with_remediation(
+            "preserve the journal unchanged; replayed event history differs from materialized state",
+        ));
+    }
+    transaction.commit()?;
+
+    // Drain and admission are meta overlays, not event projections. Return
+    // replayed state for a normal journal, with those durable latches overlaid
+    // from the same snapshot used for validation. A capacity-invalid
+    // materialization is forensic evidence; preserve that exact state instead
+    // of hiding an unlogged row behind a clean replay result.
+    let materialized_capacity_invalid = materialized.capacity_invalid;
+    let materialized_drain_active = materialized.drain_active;
+    let materialized_drain_version = materialized.drain_version;
+    let materialized_admission_blocked = materialized.admission_blocked;
+    let materialized_admission_version = materialized.admission_version;
+    let mut state = if materialized_capacity_invalid {
+        materialized
+    } else {
+        replayed
+    };
+    state.drain_active = materialized_drain_active;
+    state.drain_version = materialized_drain_version;
+    state.admission_blocked = materialized_admission_blocked;
+    state.admission_version = materialized_admission_version;
+    Ok(state)
+}
+
+/// Stable projection used for replay validation.
+///
+/// The v8 reducer stamps heartbeat and outbox timing from wall clock during
+/// replay, so those fields are intentionally excluded until durable event
+/// timestamps can be introduced in a separate migration. Terminal outbox
+/// rows are immutable evidence and are absent from materialized state; only
+/// pending rows participate in the comparison. Drain/admission are meta-only
+/// overlays and are copied after validation.
+fn canonical_projection(mut state: FleetState) -> FleetState {
+    state.drain_active = false;
+    state.drain_version = 0;
+    state.admission_blocked = false;
+    state.admission_version = 0;
+    for slot in &mut state.slots {
+        slot.heartbeat_unix = 0;
+    }
+    for job in &mut state.jobs {
+        job.accepted_unix = 0;
+        job.probe_deadline_unix = 0;
+    }
+    for row in &mut state.outbox {
+        row.created_unix = 0;
+        row.deadline_unix = 0;
+    }
+    state.outbox.retain(OutboxRecord::is_pending);
+    state.slots.sort_by(|left, right| {
+        left.slot_id
+            .0
+            .cmp(&right.slot_id.0)
+            .then_with(|| left.generation.0.cmp(&right.generation.0))
+    });
+    state.jobs.sort_by(|left, right| {
+        left.job_id
+            .0
+            .cmp(&right.job_id.0)
+            .then_with(|| left.generation.0.cmp(&right.generation.0))
+    });
+    state.outbox.sort_by(|left, right| {
+        left.job_id
+            .0
+            .cmp(&right.job_id.0)
+            .then_with(|| left.generation.0.cmp(&right.generation.0))
+    });
+    state
 }
 
 fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
@@ -2450,10 +7210,22 @@ fn outbox_owner_unknown(job_id: &str, generation: i64) -> StoreError {
 }
 
 fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreResult<()> {
+    // Validate the anchor before deleting any materialized row. The caller
+    // performs the same check before reducing, and this defense keeps the
+    // persistence primitive safe if another writer invokes it later.
+    if load_replay_baseline(tx)?.is_none() {
+        return Err(replay_baseline_missing());
+    }
     tx.execute("DELETE FROM slots", [])?;
     tx.execute("DELETE FROM jobs", [])?;
     tx.execute("DELETE FROM outbox", [])?;
-    tx.execute("DELETE FROM meta", [])?;
+    // Keep the anchor rows in place. Besides avoiding a replace-trigger on the
+    // v9 fence, this makes an old v8 `DELETE FROM meta` observably fail while
+    // allowing current writers to refresh the ordinary materialized keys.
+    tx.execute(
+        "DELETE FROM meta WHERE key NOT IN (?1, ?2)",
+        params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+    )?;
     for slot in &state.slots {
         tx.execute(
             "INSERT INTO slots (
@@ -2552,16 +7324,14 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
     ];
     // Every `apply` loads the materialized state (drain and admission
     // included) under the same immediate transaction it persists under, so
-    // re-emitting both markers from state keeps them sticky across unrelated
-    // event writes with no new event and no schema bump. Absent when inactive,
-    // so old journals keep their exact meta shape.
+    // Re-emitting both lifecycle markers from state keeps them sticky across
+    // unrelated event writes with no new event and no schema bump. Absent when
+    // inactive, so old journals keep their exact meta shape.
     //
     // Mixed-version warning: this rewrite drops every `meta` key it does
-    // not know, and an older binary's `persist_state` does not know the
-    // drain/admission keys — any write by an older binary clears a latched
-    // marker. Forward tolerance is read-only: old binaries open fenced
-    // journals fine but must not share one journal with a newer lifecycle
-    // writer across an upgrade.
+    // not know. The v9 baseline-delete trigger prevents a pre-v9 writer from
+    // completing this rewrite; binaries that understand v9 but do not know
+    // newer lifecycle overlays remain read-only with respect to those keys.
     let drain = state
         .drain_active
         .then(|| ("drain", format!("requested:{}", state.drain_version)));
@@ -2724,6 +7494,56 @@ fn journal_schema_newer() -> StoreError {
         .with_remediation(
             "preserve the journal unchanged and reopen it with a binary that supports its PRAGMA user_version",
         )
+}
+
+fn replay_baseline_missing() -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.replay.baseline.missing",
+    )
+    .with_remediation(
+        "preserve the journal unchanged and reopen it with the migration that writes both replay baseline keys",
+    )
+}
+
+fn replay_baseline_provenance(version: u32, shape: OutboxSchema) -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.replay.baseline.provenance",
+    )
+    .with_remediation(format!(
+        "preserve the eventless journal unchanged: PRAGMA user_version={version} with physical outbox shape {shape:?} has no trusted replay origin"
+    ))
+}
+
+fn replay_baseline_write_fenced(version: u32) -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.replay.baseline.fenced",
+    )
+    .with_remediation(format!(
+        "preserve the journal unchanged: state writes require schema v{JOURNAL_SCHEMA_VERSION} with a valid replay baseline, found PRAGMA user_version={version}"
+    ))
+}
+
+fn replay_baseline_read_fenced(version: u32) -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.replay.baseline.fenced",
+    )
+    .with_remediation(format!(
+        "preserve the journal unchanged: checked reads require schema v{JOURNAL_SCHEMA_VERSION} with a valid replay baseline and write fence, found PRAGMA user_version={version}"
+    ))
+}
+
+fn journal_write_fence_invalid(detail: String) -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.write.fence.invalid",
+    )
+    .with_remediation(format!(
+        "preserve the journal unchanged; the v11 write-fence schema is invalid: {detail}"
+    ))
 }
 
 fn outbox_schema_mismatch(version: u32, shape: OutboxSchema) -> StoreError {
@@ -2928,6 +7748,239 @@ fn migrate_v7_to_v8(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
     Ok(())
 }
 
+/// v9 installs a replay anchor and fences every older writer. A journal that
+/// already has event history starts from the reducer's empty state; an
+/// eventless legacy materialization starts from its explicit snapshot. Older
+/// v8 writers did not persist generation metadata for acquisition events, so
+/// that narrow, derivable backfill happens in this same transaction before
+/// the v9 stamp becomes visible.
+fn migrate_v8_to_v9(tx: &rusqlite::Transaction<'_>, legacy_eventless: bool) -> StoreResult<()> {
+    let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).unwrap_or(0) >= 9 {
+        return Ok(());
+    }
+    backfill_v8_acquisition_generations(tx)?;
+    install_replay_baseline(tx, legacy_eventless)?;
+    validate_replay_against_materialized(tx)?;
+    tx.pragma_update(None, "user_version", 9u32)?;
+    Ok(())
+}
+
+/// v10 adds durable pressure episodes, launch fences, and both pressure
+/// deadlines. Their DDL is installed by `SCHEMA` before this stamp.
+fn migrate_v9_to_v10(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).unwrap_or(0) >= 10 {
+        return Ok(());
+    }
+    if stored != 9 {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.schema.mismatch",
+        )
+        .with_remediation(format!(
+            "preserve the journal unchanged; expected schema 9 before pressure migration, found {stored}"
+        )));
+    }
+    tx.pragma_update(None, "user_version", 10u32)?;
+    Ok(())
+}
+
+/// v11 binds the fleet journal to one stable service identity. The table is
+/// installed by `SCHEMA`; this stamp makes every v10 writer refuse the file
+/// before it can ignore the identity or alter globally keyed fleet state.
+fn migrate_v10_to_v11(
+    tx: &rusqlite::Transaction<'_>,
+    requested_service_instance: Option<&str>,
+) -> StoreResult<()> {
+    let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).unwrap_or(0) >= 11 {
+        return Ok(());
+    }
+    if stored != 10 {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.schema.mismatch",
+        )
+        .with_remediation(format!(
+            "preserve the journal unchanged; expected schema 10 before service identity migration, found {stored}"
+        )));
+    }
+    if !journal_identity_table_is_exact(tx)? {
+        return Err(journal_schema_shape_mismatch(
+            "schema-10 migration did not create the canonical service identity table",
+        ));
+    }
+    let identity_rows: i64 = tx.query_row("SELECT COUNT(*) FROM journal_identity", [], |row| {
+        row.get(0)
+    })?;
+    if identity_rows != 0 {
+        return Err(journal_schema_shape_mismatch(
+            "schema-10 migration found a pre-existing service identity row",
+        ));
+    }
+    // SCHEMA and every earlier migration in this setup transaction roll back
+    // with this error, leaving nonempty legacy history available to the
+    // explicit service-bound migration path.
+    if requested_service_instance.is_none() && !journal_is_provably_new_and_empty(tx)? {
+        return Err(journal_service_instance_mismatch(
+            "a nonempty legacy journal needs an explicit service instance during schema-11 migration; reopen it with open_for_service_instance",
+        ));
+    }
+    if let Some(service_instance) = requested_service_instance {
+        validate_disk_pressure_key(service_instance, "service instance")?;
+        validate_journal_service_instance(tx, service_instance)?;
+        tx.execute(
+            "INSERT INTO journal_identity (id, service_instance) VALUES (1, ?1)",
+            [service_instance],
+        )?;
+    }
+    tx.pragma_update(None, "user_version", 11u32)?;
+    Ok(())
+}
+
+/// v12 adds the selected run-service URL to acquisition-resolution events.
+/// No materialized table changes; older writers must refuse journals that may
+/// contain the new resolution vocabulary.
+fn migrate_v11_to_v12(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).unwrap_or(0) >= 12 {
+        return Ok(());
+    }
+    if stored != 11 {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.schema.mismatch",
+        )
+        .with_remediation(format!(
+            "preserve the journal unchanged; expected schema 11 before selected-endpoint migration, found {stored}"
+        )));
+    }
+    tx.pragma_update(None, "user_version", 12u32)?;
+    Ok(())
+}
+
+/// Validate the complete v8 event log against its materialized projection
+/// before the migration stamps v9. Keeping this inside the setup transaction
+/// means checksum, decode, reducer, and projection failures roll back the
+/// baseline, generation backfill, and version stamp together.
+fn validate_replay_against_materialized(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    let replayed = load_state_from_conn_legacy_aware(tx)?;
+    let materialized = load_materialized_state(tx)?;
+    if canonical_projection(replayed) != canonical_projection(materialized.clone())
+        && !materialized.capacity_invalid
+    {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.materialized.replay.mismatch",
+        )
+        .with_remediation(
+            "preserve the journal unchanged; v8 replay differs from materialized state during v9 migration",
+        ));
+    }
+    Ok(())
+}
+
+/// Backfill only the metadata v8 omitted for acquisition events. The payload
+/// remains the source of truth: a zero generation is repaired, a nonzero
+/// disagreement is corruption, and every failure rolls back with the schema
+/// migration. No other event kind is rewritten here.
+fn backfill_v8_acquisition_generations(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    let mut statement = tx.prepare(
+        "SELECT id, generation, kind, payload, checksum
+         FROM events
+         WHERE kind IN (
+             'job_acquisition_intended',
+             'job_acquisition_resolved',
+             'acquisition_probe_failed',
+             'job_acquisition_lost'
+         )
+         ORDER BY id ASC",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    for (id, generation, kind, payload, checksum) in rows {
+        if sha256_hex(payload.as_bytes()) != checksum {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.checksum.mismatch",
+            )
+            .with_remediation(
+                "preserve the journal unchanged; an acquisition event failed checksum verification during v9 migration",
+            ));
+        }
+        let event: Event = serde_json::from_str(&payload).map_err(|error| {
+            StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.unknown")
+                .with_remediation(format!(
+                    "preserve the journal unchanged; an acquisition event could not be decoded during v9 migration: {error}"
+                ))
+        })?;
+        if kind != event_kind(&event) {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.event.metadata.mismatch",
+            )
+            .with_remediation(
+                "preserve the journal unchanged; acquisition event kind does not match its payload during v9 migration",
+            ));
+        }
+        let expected = event_generation(&event).0;
+        if expected == 0 {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.event.metadata.mismatch",
+            )
+            .with_remediation(
+                "preserve the journal unchanged; acquisition event payload has no derivable generation during v9 migration",
+            ));
+        }
+        let stored_generation = u64::try_from(generation).map_err(|_| {
+            StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.event.metadata.mismatch",
+            )
+            .with_remediation(
+                "preserve the journal unchanged; acquisition event generation is negative during v9 migration",
+            )
+        })?;
+        if stored_generation == 0 {
+            let expected_sql = i64::try_from(expected).map_err(|_| {
+                StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.event.metadata.mismatch",
+                )
+                .with_remediation(
+                    "preserve the journal unchanged; acquisition event generation exceeds SQLite's integer range",
+                )
+            })?;
+            tx.execute(
+                "UPDATE events SET generation = ?1 WHERE id = ?2 AND generation = 0",
+                params![expected_sql, id],
+            )?;
+        } else if stored_generation != expected {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.event.metadata.mismatch",
+            )
+            .with_remediation(
+                "preserve the journal unchanged; acquisition event generation disagrees with its payload during v9 migration",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Repair the one historical migration poison that can pass the version gate.
 ///
 /// The v5 bump once stamped a v4 `jobs` table as version 5. A later opener
@@ -3061,6 +8114,11 @@ fn event_generation(event: &Event) -> Generation {
         | Event::Registered { generation, .. }
         | Event::RegistrationLost { generation, .. }
         | Event::ReadyAttempt { generation, .. }
+        | Event::JobAcquisitionIntended { generation, .. }
+        | Event::JobAcquisitionResolved { generation, .. }
+        | Event::JobAcquisitionResolvedAtEndpoint { generation, .. }
+        | Event::AcquisitionProbeFailed { generation, .. }
+        | Event::JobAcquisitionLost { generation, .. }
         | Event::JobOwned { generation, .. }
         | Event::JobStarted { generation, .. }
         | Event::JobTerminalResult { generation, .. }
@@ -3074,7 +8132,8 @@ fn event_generation(event: &Event) -> Generation {
         | Event::RemoteObservedTerminal { generation, .. }
         | Event::CleanupIntended { generation, .. }
         | Event::SlotHeartbeat { generation, .. }
-        | Event::SlotStale { generation, .. } => *generation,
+        | Event::SlotStale { generation, .. }
+        | Event::DiskPressureTerminalFence { generation, .. } => *generation,
         Event::PackageActivated { generation, .. }
         | Event::PackageRetireIntended { generation } => Generation(*generation),
         _ => Generation(0),
@@ -3087,6 +8146,7 @@ fn event_kind(event: &Event) -> &'static str {
         Event::JournalWritable => "journal_writable",
         Event::JobAcquisitionIntended { .. } => "job_acquisition_intended",
         Event::JobAcquisitionResolved { .. } => "job_acquisition_resolved",
+        Event::JobAcquisitionResolvedAtEndpoint { .. } => "job_acquisition_resolved_at_endpoint",
         Event::AcquisitionProbeFailed { .. } => "acquisition_probe_failed",
         Event::JobAcquisitionLost { .. } => "job_acquisition_lost",
         Event::Dependency { .. } => "dependency",
@@ -3113,6 +8173,7 @@ fn event_kind(event: &Event) -> &'static str {
         Event::CleanupIntended { .. } => "cleanup_intended",
         Event::SlotHeartbeat { .. } => "slot_heartbeat",
         Event::SlotStale { .. } => "slot_stale",
+        Event::DiskPressureTerminalFence { .. } => "disk_pressure_terminal_fence",
         Event::CanaryObserved { .. } => "canary_observed",
         Event::PackageActivated { .. } => "package_activated",
         Event::PackageRetireIntended { .. } => "package_retire_intended",
@@ -3164,6 +8225,45 @@ pub fn payload_checksum(bytes: &[u8]) -> String {
     sha256_hex(bytes)
 }
 
+fn decode_checked_event(
+    generation: i64,
+    kind: &str,
+    payload: &str,
+    checksum: &str,
+) -> StoreResult<Event> {
+    if sha256_hex(payload.as_bytes()) != checksum {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.checksum.mismatch",
+        )
+        .with_remediation("the event log failed integrity verification"));
+    }
+    let event: Event = serde_json::from_str(payload).map_err(|error| {
+        StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.unknown")
+            .with_remediation(format!(
+                "event could not be decoded by schema version {JOURNAL_SCHEMA_VERSION}; preserve the journal and reopen it with the binary that wrote it: {error}"
+            ))
+    })?;
+    let stored_generation = u64::try_from(generation).map_err(|_| {
+        StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.event.metadata.mismatch",
+        )
+        .with_remediation("event generation is negative")
+    })?;
+    let expected_generation = event_generation(&event).0;
+    if kind != event_kind(&event) || stored_generation != expected_generation {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.event.metadata.mismatch",
+        )
+        .with_remediation(
+            "preserve the journal unchanged; event kind or generation does not match its payload",
+        ));
+    }
+    Ok(event)
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -3189,6 +8289,18 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("journal.db");
         let journal = Journal::open(&path).unwrap();
+        (dir, journal)
+    }
+
+    fn open_pressure_tmp(label: &str) -> (PathBuf, Journal) {
+        let nanos = unix_now();
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-journal-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.db");
+        let journal = Journal::open_for_service_instance(&path, "service-one").unwrap();
         (dir, journal)
     }
 
@@ -3244,6 +8356,45 @@ mod tests {
 
     fn r#gen() -> Generation {
         Generation::INITIAL
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_pressure_one(
+        journal: &Journal,
+        service_instance: &str,
+        filesystem_id: &str,
+        volume_fingerprint: &str,
+        slot_id: &SlotId,
+        generation: Generation,
+        launch_nonce: &str,
+        available_bytes: u64,
+        min_free_bytes: u64,
+        degraded_seconds: u64,
+        drain_seconds: u64,
+        now_unix: u64,
+    ) -> StoreResult<DiskPressureObservation> {
+        let samples = [DiskPressureFilesystemSample {
+            filesystem_id: filesystem_id.to_owned(),
+            alias_ids: Vec::new(),
+            available_bytes: Some(available_bytes),
+            min_free_bytes,
+            volume_fingerprint: Some(volume_fingerprint.to_owned()),
+        }];
+        journal
+            .observe_disk_pressure_roots(
+                service_instance,
+                slot_id,
+                generation,
+                launch_nonce,
+                &samples,
+                degraded_seconds,
+                drain_seconds,
+                now_unix,
+            )?
+            .into_iter()
+            .next()
+            .map(|(_, observation)| observation)
+            .ok_or_else(|| disk_pressure_state_invalid("empty filesystem observation".to_owned()))
     }
 
     fn event_count(journal: &Journal) -> i64 {
@@ -3456,24 +8607,34 @@ mod tests {
     #[test]
     fn materialized_state_tolerates_unknown_meta_keys_and_rejects_malformed_drain() {
         let (dir, journal) = open_tmp("drain-meta-tolerance");
-        journal
-            .conn
-            .execute(
-                "INSERT INTO meta (key, value) VALUES ('future_key', 'anything')",
-                [],
-            )
-            .unwrap();
+        {
+            let transaction = journal.conn.unchecked_transaction().unwrap();
+            begin_journal_write_gate(&transaction).unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO meta (key, value) VALUES ('future_key', 'anything')",
+                    [],
+                )
+                .unwrap();
+            end_journal_write_gate(&transaction).unwrap();
+            transaction.commit().unwrap();
+        }
         let state = journal.materialized_state().unwrap();
         assert!(!state.drain_active);
 
-        journal
-            .conn
-            .execute(
-                "INSERT INTO meta (key, value) VALUES ('drain', 'bogus')
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                [],
-            )
-            .unwrap();
+        {
+            let transaction = journal.conn.unchecked_transaction().unwrap();
+            begin_journal_write_gate(&transaction).unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO meta (key, value) VALUES ('drain', 'bogus')
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    [],
+                )
+                .unwrap();
+            end_journal_write_gate(&transaction).unwrap();
+            transaction.commit().unwrap();
+        }
         let error = journal.materialized_state().unwrap_err();
         assert_eq!(error.envelope.reason, "journal.materialized.invalid");
         std::fs::remove_dir_all(dir).unwrap();
@@ -3482,6 +8643,7 @@ mod tests {
     #[test]
     fn persist_state_drops_unknown_meta_keys_on_apply() {
         let (dir, mut journal) = open_tmp("drain-meta-apply-drops");
+        drop_replay_baseline_fence(&journal.conn);
         journal
             .conn
             .execute(
@@ -3489,6 +8651,7 @@ mod tests {
                 [],
             )
             .unwrap();
+        restore_journal_write_fence(&journal.conn);
         journal.apply(Event::ControlLive).unwrap();
         let raw: Option<String> = journal
             .conn
@@ -3514,39 +8677,25 @@ mod tests {
     }
 
     #[test]
-    fn pre_drain_binary_write_clears_the_drain_marker() {
+    fn pre_drain_binary_write_is_fenced_without_clearing_marker() {
         let (dir, mut journal) = open_tmp("drain-old-writer");
         assert!(journal.set_drain(7).unwrap());
-        // A pre-drain binary's `persist_state` (see base 97281ce7) rewrites
-        // every `meta` row it knows and drops the drain key it cannot know.
-        // Replay that exact shape: keep all known rows, omit the marker.
-        let kept: Vec<(String, String)> = {
-            let mut statement = journal
-                .conn
-                .prepare("SELECT key, value FROM meta WHERE key != 'drain'")
-                .unwrap();
-            statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                .unwrap()
-                .map(|row| row.unwrap())
-                .collect()
-        };
-        journal.conn.execute("DELETE FROM meta", []).unwrap();
-        for (key, value) in &kept {
-            journal
-                .conn
-                .execute(
-                    "INSERT INTO meta (key, value) VALUES (?1, ?2)",
-                    params![key.as_str(), value.as_str()],
-                )
-                .unwrap();
-        }
-        // The marker is gone although no drain-clear path ran: mixed-version
-        // fleets sharing one journal can unlatch a drain mid-flight.
+        // A pre-v9 binary's persist_state would rewrite every meta row it
+        // knows and drop the drain key. The durable v9 fence rejects that
+        // stale write before it can unlatch the fleet.
+        let old_writer = Connection::open(dir.join("journal.db")).unwrap();
+        let error = old_writer.execute("DELETE FROM meta", []).unwrap_err();
+        assert!(error.to_string().contains(JOURNAL_WRITE_FENCE_REASON));
         let state = journal.materialized_state().unwrap();
-        assert!(!state.drain_active);
-        assert_eq!(state.drain_version, 0);
-        assert_eq!(read_drain_state(&dir.join("journal.db")), Ok(None));
+        assert!(state.drain_active);
+        assert_eq!(state.drain_version, 7);
+        assert_eq!(
+            read_drain_state(&dir.join("journal.db")),
+            Ok(Some(DrainState {
+                active: true,
+                version: 7
+            }))
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -3611,6 +8760,7 @@ mod tests {
         ));
         let malformed = dir.join("malformed.db");
         let malformed_journal = Journal::open(&malformed).unwrap();
+        drop_replay_baseline_fence(&malformed_journal.conn);
         malformed_journal
             .conn
             .execute(
@@ -3635,6 +8785,7 @@ mod tests {
             read_admission_state(&path).unwrap(),
             Some(AdmissionState { version: 5 })
         );
+        drop_replay_baseline_fence(&journal.conn);
         journal
             .conn
             .execute(
@@ -3763,6 +8914,134 @@ mod tests {
                 })
                 .unwrap()
                 .rejected
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unmanaged_resolution_requires_the_latest_exact_broker_intent() {
+        let (dir, mut journal) = open_tmp("unmanaged-endpoint-resolution-fence");
+        let slot_id = slot("scope-unmanaged-resolution");
+        let generation = r#gen();
+        let provisional = job("request-unmanaged-resolution");
+        let broker_url = "https://broker.example/jobs/123";
+        let selected_url = "https://selected.example/jobs/456";
+        prime_ready(&mut journal, &slot_id.0);
+
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntended {
+                    slot_id: slot_id.clone(),
+                    job_id: provisional.clone(),
+                    generation,
+                    message_id: "message-old".to_owned(),
+                    run_service_url: broker_url.to_owned(),
+                    intended_unix: 100,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionLost {
+                    job_id: provisional.clone(),
+                    generation,
+                    reason: "old message was gone".to_owned(),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntended {
+                    slot_id: slot_id.clone(),
+                    job_id: provisional.clone(),
+                    generation,
+                    message_id: "message-new".to_owned(),
+                    run_service_url: broker_url.to_owned(),
+                    intended_unix: 101,
+                })
+                .unwrap()
+                .rejected
+        );
+
+        let stale = journal
+            .resolve_acquisition_response_at_endpoint(
+                slot_id.clone(),
+                generation,
+                provisional.clone(),
+                "message-old",
+                job("acquired-stale"),
+                broker_url,
+                selected_url,
+                "plan-stale",
+            )
+            .unwrap_err();
+        assert_eq!(stale.envelope.reason, "journal.acquisition.response.fenced");
+        let wrong_broker = journal
+            .resolve_acquisition_response_at_endpoint(
+                slot_id.clone(),
+                generation,
+                provisional.clone(),
+                "message-new",
+                job("acquired-wrong-broker"),
+                "https://other-broker.example/jobs/123",
+                selected_url,
+                "plan-wrong-broker",
+            )
+            .unwrap_err();
+        assert_eq!(
+            wrong_broker.envelope.reason,
+            "journal.acquisition.response.fenced"
+        );
+        let stale_loss = journal
+            .abandon_acquisition_response_at_endpoint(
+                slot_id.clone(),
+                generation,
+                provisional.clone(),
+                "message-old",
+                broker_url,
+                "stale typed 404".to_owned(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            stale_loss.envelope.reason,
+            "journal.acquisition.abandon.fenced"
+        );
+        assert_eq!(
+            journal.materialized_state().unwrap().jobs[0].job_id,
+            provisional,
+            "rejected responses leave the latest provisional intent intact"
+        );
+
+        let resolved = journal
+            .resolve_acquisition_response_at_endpoint(
+                slot_id,
+                generation,
+                job("request-unmanaged-resolution"),
+                "message-new",
+                job("acquired-current"),
+                broker_url,
+                selected_url,
+                "plan-current",
+            )
+            .unwrap();
+        assert!(!resolved.rejected);
+        drop(journal);
+
+        let reopened = Journal::open(dir.join("journal.db")).unwrap();
+        let state = reopened.materialized_state().unwrap();
+        let acquired = state
+            .jobs
+            .iter()
+            .find(|row| row.job_id == job("acquired-current"))
+            .unwrap();
+        assert_eq!(acquired.run_service_url, selected_url);
+        assert_eq!(acquired.plan_id, "plan-current");
+        assert!(acquired.provisional);
+        assert_eq!(
+            canonical_projection(reopened.load_state().unwrap()),
+            canonical_projection(state)
         );
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -4148,6 +9427,7 @@ mod tests {
         let path = dir.join("journal.db");
         drop(journal);
         let conn = Connection::open(&path).unwrap();
+        drop_schema10_pressure_and_schema11_identity(&conn);
         conn.pragma_update(None, "user_version", 6u32).unwrap();
         conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
             .unwrap();
@@ -4358,6 +9638,72 @@ mod tests {
     }
 
     #[test]
+    fn schema_twelve_migrates_and_replays_schema_eleven_acquisition_resolution() {
+        let (dir, mut journal) = open_tmp("schema-12-replay-v11-acquisition");
+        let slot_id = slot("schema-12-replay");
+        let generation = r#gen();
+        let broker_url = "https://broker.example/jobs/123";
+        prime_ready(&mut journal, &slot_id.0);
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntended {
+                    slot_id: slot_id.clone(),
+                    job_id: job("request-schema-11"),
+                    generation,
+                    message_id: "message-schema-11".to_owned(),
+                    run_service_url: broker_url.to_owned(),
+                    intended_unix: 100,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionResolved {
+                    provisional_job_id: job("request-schema-11"),
+                    acquired_job_id: job("acquired-schema-11"),
+                    plan_id: "plan-schema-11".to_owned(),
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+        drop(journal);
+
+        let path = dir.join("journal.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", 11u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let reopened = Journal::open(&path).unwrap();
+        let version: u32 = reopened
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .map(|value| u32::try_from(value).unwrap())
+            .unwrap();
+        assert_eq!(version, 12);
+        let state = reopened.materialized_state().unwrap();
+        let acquired = state
+            .jobs
+            .iter()
+            .find(|row| row.job_id == job("acquired-schema-11"))
+            .unwrap();
+        assert_eq!(acquired.plan_id, "plan-schema-11");
+        assert_eq!(acquired.run_service_url, broker_url);
+        assert!(acquired.provisional);
+        assert_eq!(
+            canonical_projection(reopened.load_state().unwrap()),
+            canonical_projection(state)
+        );
+
+        let old_writer = ensure_supported_schema(version, 11).unwrap_err();
+        assert_eq!(old_writer.envelope.reason, "journal.schema.newer");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn a_v3_shape_claiming_the_current_version_is_repaired_not_misread() {
         let (dir, journal) = open_tmp("v3-shape-upgrade");
         let path = dir.join("journal.db");
@@ -4382,10 +9728,11 @@ mod tests {
              ALTER TABLE jobs DROP COLUMN terminal_conclusion;",
         )
         .unwrap();
+        drop_schema10_pressure_and_schema11_identity(&conn);
         conn.pragma_update(None, "user_version", 3u32).unwrap();
         drop(conn);
 
-        let migrated = Journal::open(&path).unwrap();
+        let migrated = Journal::open_for_service_instance(&path, "legacy-migration").unwrap();
         let row = outbox_row(&migrated, "job-1").expect("pending row survives");
         assert!(row.is_pending());
         assert_eq!(row.attempts, 0);
@@ -4639,6 +9986,7 @@ mod tests {
         // Journal::apply must reject this state. Seed the intentionally stale
         // N+1 materialization directly so the test exercises forensic safety.
         let seed = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&seed);
         seed.execute_batch(
             "DROP TABLE outbox;
              CREATE TABLE outbox (
@@ -4681,10 +10029,11 @@ mod tests {
         let fixture_payload = r#"{"type":"control_live"}"#;
         seed.execute(
             "INSERT INTO events (generation, kind, payload, checksum)
-             VALUES (1, 'control_live', ?1, ?2)",
+             VALUES (0, 'control_live', ?1, ?2)",
             params![fixture_payload, sha256_hex(fixture_payload.as_bytes())],
         )
         .unwrap();
+        drop_schema10_pressure_and_schema11_identity(&seed);
         seed.execute("PRAGMA user_version = 2", []).unwrap();
         drop(seed);
 
@@ -4765,7 +10114,7 @@ mod tests {
         };
         // Migrate the explicit v2 fixture before taking the forensic baseline;
         // the failed-reconcile assertion covers v3 state, not migration.
-        drop(Journal::open(&path).unwrap());
+        drop(Journal::open_for_service_instance(&path, "legacy-migration").unwrap());
         let migrated = Connection::open(&path).unwrap();
         let slot_id_not_null: Option<i64> = migrated
             .query_row(
@@ -4779,15 +10128,15 @@ mod tests {
         let before = snapshot();
 
         for _ in 0..2 {
-            let mut reopened = Journal::open(&path).unwrap();
+            let mut reopened =
+                Journal::open_for_service_instance(&path, "legacy-migration").unwrap();
             // This fixture intentionally corrupts only the materialized
-            // tables. Event replay is an integrity/recovery view and must
-            // not infer materialized-only rows; the controller's hot path
-            // uses materialized_state(), which is the authoritative view for
-            // capacity safety and must detect the stale N+1 slot.
+            // tables. Both read APIs preserve the forensic capacity-invalid
+            // materialized state instead of hiding the stale N+1 slot behind
+            // a clean replay result.
             let replayed = reopened.load_state().unwrap();
-            assert!(!replayed.capacity_invalid);
-            assert!(replayed.slots.is_empty());
+            assert!(replayed.capacity_invalid);
+            assert_eq!(replayed.slots.len(), 3);
 
             let state = reopened.materialized_state().unwrap();
             assert!(state.capacity_invalid);
@@ -4819,6 +10168,8 @@ mod tests {
 
     fn seed_v2_outbox(path: &Path, version: i64) {
         let conn = Connection::open(path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        drop_schema10_pressure_and_schema11_identity(&conn);
         conn.execute_batch(
             "DROP TABLE outbox;
              CREATE TABLE outbox (
@@ -4844,6 +10195,105 @@ mod tests {
         )
         .unwrap();
         conn.pragma_update(None, "user_version", version).unwrap();
+    }
+
+    fn demote_eventful_journal_to_v8(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        drop_schema10_pressure_and_schema11_identity(&conn);
+        conn.execute(
+            "DELETE FROM meta WHERE key IN (?1, ?2)",
+            params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 8u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+    }
+
+    fn assert_schema8_migration_rejected(path: &Path, reason: &str) {
+        let error = Journal::open(path).unwrap_err();
+        assert_eq!(error.envelope.reason, reason);
+        let conn = Connection::open(path).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        assert!(load_replay_baseline(&conn).unwrap().is_none());
+        let trigger_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM sqlite_master
+                 WHERE type = 'trigger'
+                   AND lower(tbl_name) IN (
+                       'events', 'slots', 'jobs', 'outbox', 'meta',
+                       'disk_pressure_episodes', 'disk_pressure_launches',
+                       'journal_write_gate'
+                   )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(trigger_count, 0);
+    }
+
+    fn rewrite_replay_baseline(path: &Path, mutate: impl FnOnce(&mut serde_json::Value)) {
+        let conn = Connection::open(path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        let serialized: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [REPLAY_BASELINE_KEY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        mutate(&mut value);
+        let serialized = serde_json::to_string(&value).unwrap();
+        let checksum = sha256_hex(serialized.as_bytes());
+        conn.execute(
+            "UPDATE meta SET value = ?1 WHERE key = ?2",
+            params![serialized, REPLAY_BASELINE_KEY],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE meta SET value = ?1 WHERE key = ?2",
+            params![checksum, REPLAY_BASELINE_CHECKSUM_KEY],
+        )
+        .unwrap();
+        restore_journal_write_fence(&conn);
+    }
+
+    /// Model a pre-v9 database or an explicit forensic tamper fixture. Live
+    /// v9 writers must never remove the durable fence.
+    fn drop_replay_baseline_fence(conn: &Connection) {
+        for (name, _, _) in JOURNAL_WRITE_FENCE_TRIGGERS {
+            conn.execute_batch(&format!("DROP TRIGGER IF EXISTS {name};"))
+                .unwrap();
+        }
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS replay_baseline_delete_fence;
+             DROP TRIGGER IF EXISTS replay_baseline_rename_fence;",
+        )
+        .unwrap();
+    }
+
+    fn drop_schema10_pressure_and_schema11_identity(conn: &Connection) {
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS disk_pressure_episodes;
+             DROP TABLE IF EXISTS disk_pressure_launches;
+             DROP TABLE IF EXISTS disk_pressure_observations;
+             DROP TABLE IF EXISTS journal_identity;",
+        )
+        .unwrap();
+    }
+
+    fn restore_journal_write_fence(conn: &Connection) {
+        let transaction = conn.unchecked_transaction().unwrap();
+        ensure_journal_write_fence(&transaction).unwrap();
+        transaction.commit().unwrap();
     }
 
     #[test]
@@ -4876,6 +10326,7 @@ mod tests {
         let path = dir.join("journal.db");
         drop(journal);
         let conn = Connection::open(&path).unwrap();
+        drop_schema10_pressure_and_schema11_identity(&conn);
         conn.pragma_update(None, "user_version", 2u32).unwrap();
         conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
             .unwrap();
@@ -4895,16 +10346,61 @@ mod tests {
     }
 
     #[test]
+    fn negative_version_supported_v2_outbox_is_rejected_without_mutation() {
+        let (dir, journal) = open_tmp("negative-version-v2-outbox");
+        let path = dir.join("journal.db");
+        drop(journal);
+        seed_v2_outbox(&path, -1);
+        let conn = Connection::open(&path).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let check = Connection::open(&path).unwrap();
+        assert_eq!(
+            check
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            -1
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn version_zero_v2_outbox_migrates_from_physical_shape() {
         let (dir, journal) = open_tmp("version-zero-v2-outbox");
         let path = dir.join("journal.db");
         drop(journal);
         seed_v2_outbox(&path, 0);
 
-        let migrated = Journal::open(&path).unwrap();
+        let migrated = Journal::open_for_service_instance(&path, "legacy-migration").unwrap();
+        let replayed = migrated.load_state().unwrap();
         let state = migrated.materialized_state().unwrap();
+        assert_eq!(
+            canonical_projection(replayed),
+            canonical_projection(state.clone())
+        );
         assert_eq!(state.outbox[0].slot_id, slot("scope-1"));
         let conn = Connection::open(&path).unwrap();
+        let baseline: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [REPLAY_BASELINE_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        let baseline_checksum: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [REPLAY_BASELINE_CHECKSUM_KEY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sha256_hex(baseline.as_bytes()), baseline_checksum);
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
@@ -4917,6 +10413,3495 @@ mod tests {
             )
             .unwrap();
         assert_eq!(slot_id_not_null, 1);
+    }
+
+    #[test]
+    fn schema8_upgrade_seeds_anchor_and_fences_schema8_writer() {
+        let (dir, journal) = open_tmp("schema8-to-schema11-anchor");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        drop_schema10_pressure_and_schema11_identity(&conn);
+        conn.execute(
+            "DELETE FROM meta WHERE key IN (?1, ?2)",
+            params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 8u32).unwrap();
+        drop(conn);
+
+        let upgraded = Journal::open(&path).unwrap();
+        let version: u32 = upgraded
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .map(|value| u32::try_from(value).unwrap())
+            .unwrap();
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION);
+        assert!(load_replay_baseline(&upgraded.conn).unwrap().is_some());
+        let before = upgraded
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [REPLAY_BASELINE_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        let error = ensure_supported_schema(version, 8).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.newer");
+        let after = upgraded
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [REPLAY_BASELINE_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(before, after, "a schema-8 writer must not touch v11 state");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema11_reopen_rejects_missing_owner_table_without_recreating_it() {
+        let (dir, journal) = open_tmp("schema11-missing-owner");
+        let path = dir.join("journal.db");
+        drop(journal);
+        drop(Journal::open_for_service_instance(&path, "service-one").unwrap());
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("DROP TABLE journal_identity;").unwrap();
+        drop(conn);
+
+        let error = Journal::open_for_service_instance(&path, "service-two").unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        let conn = Connection::open(&path).unwrap();
+        let owner_table_exists: i64 = conn
+            .query_row(
+                "SELECT EXISTS (
+                     SELECT 1 FROM sqlite_master
+                     WHERE type = 'table' AND name = 'journal_identity'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(owner_table_exists, 0, "failed open must preserve evidence");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema11_reopen_rejects_missing_owner_row_on_nonempty_journal() {
+        let (dir, mut journal) = open_tmp("schema11-missing-owner-row");
+        let path = dir.join("journal.db");
+        assert!(!journal.apply(Event::ControlLive).unwrap().rejected);
+        drop(journal);
+
+        let error = Journal::open_for_service_instance(&path, "service-two").unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.service_instance.mismatch");
+        let conn = Connection::open(&path).unwrap();
+        let owner_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM journal_identity", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            owner_rows, 0,
+            "failed binding must preserve the missing owner"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM events", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema11_lowered_to_v10_stamp_is_rejected_without_mutation() {
+        let (dir, journal) = open_tmp("schema11-lowered-to-v10");
+        let path = dir.join("journal.db");
+        drop(journal);
+        drop(Journal::open_for_service_instance(&path, "service-one").unwrap());
+
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", 10u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+        let before = std::fs::read(&path).unwrap();
+
+        let error = Journal::open_for_service_instance(&path, "service-one").unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema10_reopen_rejects_missing_or_malformed_pressure_tables_before_ddl() {
+        for (label, mutate_sql, missing_table) in [
+            (
+                "missing-pressure",
+                "DROP TABLE disk_pressure_episodes;",
+                Some("disk_pressure_episodes"),
+            ),
+            (
+                "malformed-pressure",
+                "ALTER TABLE disk_pressure_observations ADD COLUMN unexpected TEXT;",
+                None,
+            ),
+        ] {
+            let (dir, journal) = open_tmp(label);
+            let path = dir.join("journal.db");
+            drop(journal);
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("DROP TABLE journal_identity;").unwrap();
+            conn.execute_batch(mutate_sql).unwrap();
+            conn.pragma_update(None, "user_version", 10u32).unwrap();
+            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+                .unwrap();
+            drop(conn);
+
+            let before = std::fs::read(&path).unwrap();
+            let error = Journal::open_for_service_instance(&path, "service-one").unwrap_err();
+            assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+
+            if let Some(table) = missing_table {
+                let conn = Connection::open(&path).unwrap();
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT EXISTS (
+                             SELECT 1 FROM sqlite_master
+                             WHERE type = 'table' AND lower(name) = lower(?1)
+                         )",
+                        [table],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                    0,
+                    "failed v10 open must not recreate {table}"
+                );
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn lowered_schema_stamp_rejects_case_insensitive_newer_pressure_and_identity_objects() {
+        let (dir, journal) = open_tmp("lowered-stamp-uppercase-pressure");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE disk_pressure_episodes
+                 RENAME TO disk_pressure_episodes_renamed;
+             ALTER TABLE disk_pressure_episodes_renamed
+                 RENAME TO DISK_PRESSURE_EPISODES;
+             DROP TABLE journal_identity;",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 9u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let before = std::fs::read(&path).unwrap();
+        let probe = Connection::open(&path).unwrap();
+        let preflight_error = preflight_schema(&probe).unwrap_err();
+        assert_eq!(preflight_error.envelope.reason, "journal.schema.mismatch");
+        drop(probe);
+        let error = Journal::open_for_service_instance(&path, "service-one").unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+
+        let (dir, journal) = open_tmp("lowered-stamp-uppercase-identity");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE journal_identity RENAME TO journal_identity_renamed;
+             ALTER TABLE journal_identity_renamed RENAME TO JOURNAL_IDENTITY;",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 10u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let before = std::fs::read(&path).unwrap();
+        let probe = Connection::open(&path).unwrap();
+        let preflight_error = preflight_schema(&probe).unwrap_err();
+        assert_eq!(preflight_error.envelope.reason, "journal.schema.mismatch");
+        drop(probe);
+        let error = Journal::open_for_service_instance(&path, "service-one").unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema11_reopen_rejects_malformed_identity_shape_without_mutation() {
+        let (dir, journal) = open_tmp("schema11-malformed-identity");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("ALTER TABLE journal_identity ADD COLUMN unexpected TEXT;")
+            .unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema11_reopen_rejects_missing_pressure_tables_without_recreating_them() {
+        for table in [
+            "disk_pressure_episodes",
+            "disk_pressure_launches",
+            "disk_pressure_observations",
+        ] {
+            let (dir, journal) = open_tmp(&format!("schema11-missing-{table}"));
+            let path = dir.join("journal.db");
+            drop(journal);
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&format!("DROP TABLE {table};")).unwrap();
+            drop(conn);
+
+            let error = Journal::open(&path).unwrap_err();
+            assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+            let conn = Connection::open(&path).unwrap();
+            let table_exists: i64 = conn
+                .query_row(
+                    "SELECT EXISTS (
+                         SELECT 1 FROM sqlite_master
+                         WHERE type = 'table' AND name = ?1
+                     )",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(table_exists, 0, "failed open recreated {table}");
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn schema10_upgrade_creates_owner_table_before_binding() {
+        let (dir, journal) = open_tmp("schema10-to-schema11-owner");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("DROP TABLE journal_identity;").unwrap();
+        conn.pragma_update(None, "user_version", 10u32).unwrap();
+        drop(conn);
+
+        let upgraded = Journal::open_for_service_instance(&path, "service-one").unwrap();
+        let version: i64 = upgraded
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
+        let owner: String = upgraded
+            .conn
+            .query_row(
+                "SELECT service_instance FROM journal_identity WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(owner, "service-one");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn nonempty_pre_v11_journals_require_explicit_binding_for_migration() {
+        for version in [0, 2, 3, 4, 5, 6, 7, 8, 9, 10] {
+            let (dir, journal) = open_tmp(&format!("unbound-legacy-v{version}"));
+            let path = dir.join("journal.db");
+            drop(journal);
+
+            if version <= 2 {
+                seed_v2_outbox(&path, i64::from(version));
+            } else {
+                let mut journal = Journal::open(&path).unwrap();
+                assert!(!journal.apply(Event::ControlLive).unwrap().rejected);
+                drop(journal);
+
+                let conn = Connection::open(&path).unwrap();
+                drop_replay_baseline_fence(&conn);
+                if version < 10 {
+                    drop_schema10_pressure_and_schema11_identity(&conn);
+                } else {
+                    conn.execute_batch("DROP TABLE journal_identity;").unwrap();
+                }
+                if version < 9 {
+                    conn.execute(
+                        "DELETE FROM meta WHERE key IN (?1, ?2)",
+                        params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+                    )
+                    .unwrap();
+                }
+                match version {
+                    3 => {
+                        for column in ["attempts", "deadline_unix", "permanent", "abandoned"] {
+                            conn.execute_batch(&format!(
+                                "ALTER TABLE outbox DROP COLUMN {column};"
+                            ))
+                            .unwrap();
+                        }
+                        for column in [
+                            "terminal_conclusion",
+                            "provisional",
+                            "plan_id",
+                            "run_service_url",
+                            "probe_attempts",
+                            "probe_deadline_unix",
+                        ] {
+                            conn.execute_batch(&format!("ALTER TABLE jobs DROP COLUMN {column};"))
+                                .unwrap();
+                        }
+                    }
+                    4 => {
+                        for column in [
+                            "provisional",
+                            "plan_id",
+                            "run_service_url",
+                            "probe_attempts",
+                            "probe_deadline_unix",
+                        ] {
+                            conn.execute_batch(&format!("ALTER TABLE jobs DROP COLUMN {column};"))
+                                .unwrap();
+                        }
+                    }
+                    5 => {
+                        for column in [
+                            "plan_id",
+                            "run_service_url",
+                            "probe_attempts",
+                            "probe_deadline_unix",
+                        ] {
+                            conn.execute_batch(&format!("ALTER TABLE jobs DROP COLUMN {column};"))
+                                .unwrap();
+                        }
+                    }
+                    6..=10 => {}
+                    _ => unreachable!(),
+                }
+                conn.pragma_update(None, "user_version", version).unwrap();
+                conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+                    .unwrap();
+            }
+
+            let expected_events = if version <= 2 { 0 } else { 1 };
+            let error = Journal::open(&path).unwrap_err();
+            assert_eq!(
+                error.envelope.reason, "journal.service_instance.mismatch",
+                "v{version} unbound migration must request an explicit owner"
+            );
+            let conn = Connection::open(&path).unwrap();
+            assert_eq!(
+                conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                i64::from(version),
+                "v{version} unbound migration must roll back its schema stamp"
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table' AND name = 'journal_identity'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                0,
+                "v{version} unbound migration must not leave an empty owner table"
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM events", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                expected_events,
+                "v{version} legacy history must survive the rejected open"
+            );
+            drop(conn);
+
+            let bound = Journal::open_for_service_instance(&path, "service-one").unwrap();
+            let state = bound.materialized_state().unwrap();
+            if version <= 2 {
+                assert!(!state.control_live);
+                assert_eq!(state.jobs.len(), 1);
+                assert_eq!(state.outbox.len(), 1);
+            } else {
+                assert!(state.control_live);
+            }
+            assert_eq!(
+                bound
+                    .conn
+                    .query_row(
+                        "SELECT service_instance FROM journal_identity WHERE id = 1",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap(),
+                "service-one"
+            );
+            assert_eq!(
+                bound
+                    .conn
+                    .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                i64::from(JOURNAL_SCHEMA_VERSION)
+            );
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn worker_connections_enable_and_verify_connection_local_pragmas() {
+        let (dir, journal) = open_tmp("worker-connection-pragmas");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let mut controller = Journal::open_for_service_instance(&path, "service-one").unwrap();
+        prime_ready(&mut controller, "scope-1");
+        let slot_id = slot("scope-1");
+        let generation = Generation::INITIAL;
+        let nonce = controller
+            .issue_disk_pressure_launch("service-one", &slot_id, generation, 100)
+            .unwrap();
+
+        let worker =
+            Journal::open_for_launch(&path, "service-one", &slot_id, generation, &nonce).unwrap();
+        let journal_mode: String = worker
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        let synchronous: i64 = worker
+            .conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        let foreign_keys: i64 = worker
+            .conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        assert_eq!(synchronous, 2);
+        assert_eq!(foreign_keys, 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stale_unbound_handle_cannot_mutate_after_service_binding() {
+        let (dir, mut stale_unbound) = open_tmp("stale-unbound-after-binding");
+        let path = dir.join("journal.db");
+        let stale_context = stale_unbound.writer_context();
+        let mut controller = Journal::open_for_service_instance(&path, "service-one").unwrap();
+        let generation = prime_running_job(&mut controller, "scope-1", "job-1");
+        let before_events = event_count(&controller);
+        let before_state = controller.materialized_state().unwrap();
+        assert_eq!(stale_unbound.materialized_state().unwrap(), before_state);
+        assert_eq!(
+            canonical_projection(stale_unbound.load_state().unwrap()),
+            canonical_projection(before_state.clone()),
+            "unbound current-schema handles may inspect but not mutate the journal"
+        );
+
+        // Model the open-then-bind race directly: this handle captured no
+        // owner context before another connection bound the still-empty DB.
+        let transaction = stale_unbound
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let gate_error = stale_context.begin_write(&transaction).unwrap_err();
+        assert_eq!(
+            gate_error.envelope.reason,
+            "journal.service_instance.mismatch"
+        );
+        drop(transaction);
+
+        for result in [
+            stale_unbound.apply(Event::JobTerminalResult {
+                job_id: job("job-1"),
+                generation,
+                conclusion: "success".to_owned(),
+            }),
+            stale_unbound.apply(Event::ControlLive),
+        ] {
+            let error = result.unwrap_err();
+            assert_eq!(error.envelope.reason, "journal.service_instance.mismatch");
+        }
+        assert_eq!(
+            stale_unbound.set_drain(1).unwrap_err().envelope.reason,
+            "journal.service_instance.mismatch"
+        );
+        assert_eq!(
+            stale_unbound
+                .set_admission_blocked(1)
+                .unwrap_err()
+                .envelope
+                .reason,
+            "journal.service_instance.mismatch"
+        );
+        assert_eq!(
+            stale_unbound
+                .advance_unmeasurable_disk_pressure("service-one", 60, 30, 100)
+                .unwrap_err()
+                .envelope
+                .reason,
+            "journal.service_instance.mismatch"
+        );
+        assert_eq!(event_count(&controller), before_events);
+        assert_eq!(controller.materialized_state().unwrap(), before_state);
+        assert_eq!(read_drain_state(&path), Ok(None));
+        assert_eq!(read_admission_state(&path), Ok(None));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pressure_deadlines_survive_reopen_and_block_worker_relaunch() {
+        let (dir, mut setup) = open_pressure_tmp("pressure-episode-relaunch");
+        prime_ready(&mut setup, "scope-1");
+        let path = dir.join("journal.db");
+        drop(setup);
+        let service_instance = "service-one";
+        let filesystem_id = "dev:42";
+        let slot_id = slot("scope-1");
+        let journal = Journal::open_for_service_instance(&path, service_instance).unwrap();
+        let first_nonce = journal
+            .issue_disk_pressure_launch(service_instance, &slot_id, r#gen(), 100)
+            .unwrap();
+        let first_observation = observe_pressure_one(
+            &journal,
+            service_instance,
+            filesystem_id,
+            "volume-dev-42",
+            &slot_id,
+            r#gen(),
+            &first_nonce,
+            0,
+            10,
+            60,
+            30,
+            100,
+        )
+        .unwrap();
+        assert!(first_observation.reclaim_needed);
+        let first = first_observation.episode.unwrap();
+        assert_eq!(first.started_unix, 100);
+        assert_eq!(first.deadline_unix, 160);
+        assert_eq!(first.drain_deadline_unix, 190);
+        assert!(!first.draining);
+        assert!(!first.terminal);
+        assert!(first.reclaim_attempted);
+
+        drop(journal);
+        let reopened = Journal::open_for_service_instance(&path, service_instance).unwrap();
+        let relaunch_error = reopened
+            .issue_disk_pressure_launch(service_instance, &slot_id, r#gen(), 120)
+            .unwrap_err();
+        assert_eq!(
+            relaunch_error.envelope.reason,
+            "journal.disk_pressure.launch.pressure"
+        );
+        let sample = [DiskPressureFilesystemSample {
+            filesystem_id: filesystem_id.to_owned(),
+            alias_ids: Vec::new(),
+            available_bytes: Some(0),
+            min_free_bytes: 10,
+            volume_fingerprint: Some("volume-dev-42".to_owned()),
+        }];
+        reopened
+            .advance_disk_pressure_roots(service_instance, &sample, 60, 30, 120)
+            .unwrap();
+        let after_restart = reopened
+            .disk_pressure_episode(service_instance, filesystem_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_restart.episode_id, first.episode_id);
+        assert_eq!(after_restart.started_unix, 100);
+        assert_eq!(after_restart.deadline_unix, 160);
+        assert_eq!(after_restart.drain_deadline_unix, 190);
+        assert!(after_restart.reclaim_attempted);
+        reopened
+            .advance_disk_pressure_roots(service_instance, &sample, 60, 30, 160)
+            .unwrap();
+        let draining = reopened
+            .disk_pressure_episode(service_instance, filesystem_id)
+            .unwrap()
+            .unwrap();
+        assert!(draining.draining);
+        assert!(!draining.terminal);
+        assert_eq!(draining.deadline_unix, 160);
+        assert_eq!(draining.drain_deadline_unix, 190);
+
+        drop(reopened);
+        let reopened =
+            Journal::open_for_service_instance(dir.join("journal.db"), service_instance).unwrap();
+        reopened
+            .advance_disk_pressure_roots(service_instance, &sample, 60, 30, 189)
+            .unwrap();
+        let still_draining = reopened
+            .disk_pressure_episode(service_instance, filesystem_id)
+            .unwrap()
+            .unwrap();
+        assert!(still_draining.draining);
+        assert!(!still_draining.terminal);
+        drop(reopened);
+
+        let reopened =
+            Journal::open_for_service_instance(dir.join("journal.db"), service_instance).unwrap();
+        reopened
+            .advance_disk_pressure_roots(service_instance, &sample, 60, 30, 190)
+            .unwrap();
+        let terminal = reopened
+            .disk_pressure_episode(service_instance, filesystem_id)
+            .unwrap()
+            .unwrap();
+        assert!(terminal.draining);
+        assert!(terminal.terminal);
+        assert_eq!(terminal.deadline_unix, 160);
+        assert_eq!(terminal.drain_deadline_unix, 190);
+        let terminal_state = reopened.materialized_state().unwrap();
+        assert_eq!(
+            terminal_state
+                .slots
+                .iter()
+                .find(|slot| slot.slot_id == slot_id)
+                .unwrap()
+                .phase,
+            SlotPhase2::Fenced
+        );
+        assert!(!reopened
+            .clear_disk_pressure_episode_if_healthy(
+                service_instance,
+                filesystem_id,
+                &[],
+                &terminal,
+                10,
+                10,
+                "volume-dev-42",
+                189,
+            )
+            .unwrap());
+        let terminal_after_rollback = reopened
+            .disk_pressure_episode(service_instance, filesystem_id)
+            .unwrap()
+            .unwrap();
+        assert!(terminal_after_rollback.draining);
+        assert!(terminal_after_rollback.terminal);
+        assert!(reopened
+            .clear_disk_pressure_episode_if_healthy(
+                service_instance,
+                filesystem_id,
+                &[],
+                &terminal_after_rollback,
+                10,
+                10,
+                "volume-dev-42",
+                191,
+            )
+            .unwrap());
+        assert!(reopened
+            .disk_pressure_episode(service_instance, filesystem_id)
+            .unwrap()
+            .is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn controller_creates_root_episodes_and_persists_high_water_without_workers() {
+        let (_dir, journal) = open_pressure_tmp("pressure-controller-first-observation");
+        let service_instance = "service-one";
+        let config_root = "root:config";
+        let work_root = "root:work";
+        let unknown_root = "root:unknown";
+        let samples = [
+            DiskPressureFilesystemSample {
+                filesystem_id: config_root.to_owned(),
+                alias_ids: Vec::new(),
+                available_bytes: Some(0),
+                min_free_bytes: 10,
+                volume_fingerprint: Some("volume-config".to_owned()),
+            },
+            DiskPressureFilesystemSample {
+                filesystem_id: work_root.to_owned(),
+                alias_ids: Vec::new(),
+                available_bytes: Some(100),
+                min_free_bytes: 10,
+                volume_fingerprint: Some("volume-work".to_owned()),
+            },
+            DiskPressureFilesystemSample {
+                filesystem_id: unknown_root.to_owned(),
+                alias_ids: Vec::new(),
+                available_bytes: None,
+                min_free_bytes: 10,
+                volume_fingerprint: None,
+            },
+        ];
+
+        journal
+            .advance_disk_pressure_roots(service_instance, &samples, 60, 30, 100)
+            .unwrap();
+        let config_episode = journal
+            .disk_pressure_episode(service_instance, config_root)
+            .unwrap()
+            .unwrap();
+        let unknown_episode = journal
+            .disk_pressure_episode(service_instance, unknown_root)
+            .unwrap()
+            .unwrap();
+        assert!(!config_episode.reclaim_attempted);
+        assert_eq!(config_episode.started_unix, 100);
+        assert_eq!(config_episode.deadline_unix, 160);
+        assert_eq!(config_episode.drain_deadline_unix, 190);
+        assert!(config_episode.volume_fingerprint.is_some());
+        assert!(!unknown_episode.reclaim_attempted);
+        assert_eq!(unknown_episode.volume_fingerprint, None);
+        assert!(journal
+            .disk_pressure_episode(service_instance, work_root)
+            .unwrap()
+            .is_none());
+
+        journal
+            .advance_disk_pressure_roots(service_instance, &samples, 600, 300, 120)
+            .unwrap();
+        let high_water = journal
+            .disk_pressure_episode(service_instance, config_root)
+            .unwrap()
+            .unwrap();
+        assert_eq!(high_water.started_unix, 100);
+        assert_eq!(high_water.deadline_unix, 160);
+        assert_eq!(high_water.drain_deadline_unix, 190);
+        assert_eq!(high_water.last_observed_unix, 120);
+        assert!(high_water.revision > config_episode.revision);
+
+        journal
+            .advance_disk_pressure_roots(service_instance, &samples, 60, 30, 110)
+            .unwrap();
+        let rolled_back = journal
+            .disk_pressure_episode(service_instance, config_root)
+            .unwrap()
+            .unwrap();
+        assert!(rolled_back.draining);
+        assert!(rolled_back.terminal);
+        assert_eq!(rolled_back.started_unix, 100);
+        assert_eq!(rolled_back.deadline_unix, 160);
+        assert_eq!(rolled_back.drain_deadline_unix, 190);
+        assert_eq!(rolled_back.last_observed_unix, 120);
+        assert!(!rolled_back.reclaim_attempted);
+
+        let unknown_rolled_back = journal
+            .disk_pressure_episode(service_instance, unknown_root)
+            .unwrap()
+            .unwrap();
+        assert!(unknown_rolled_back.terminal);
+        assert_eq!(unknown_rolled_back.deadline_unix, 160);
+        assert_eq!(unknown_rolled_back.drain_deadline_unix, 190);
+        assert!(!unknown_rolled_back.reclaim_attempted);
+    }
+
+    #[test]
+    fn healthy_observation_at_deadline_clears_in_either_cross_connection_order() {
+        for boundary in [160, 190] {
+            for controller_first in [false, true] {
+                let label = format!("pressure-healthy-{boundary}-{controller_first}");
+                let (dir, mut controller) = open_pressure_tmp(&label);
+                prime_ready(&mut controller, "scope-1");
+                let service = "service-one";
+                let filesystem_id = "unix-device:2a";
+                let slot_id = slot("scope-1");
+                let nonce = controller
+                    .issue_disk_pressure_launch(service, &slot_id, r#gen(), 100)
+                    .unwrap();
+                let low = [DiskPressureFilesystemSample {
+                    filesystem_id: filesystem_id.to_owned(),
+                    alias_ids: Vec::new(),
+                    available_bytes: Some(0),
+                    min_free_bytes: 10,
+                    volume_fingerprint: Some("volume-a".to_owned()),
+                }];
+                controller
+                    .advance_disk_pressure_roots(service, &low, 60, 30, 100)
+                    .unwrap();
+                let worker = Journal::open_for_launch(
+                    dir.join("journal.db"),
+                    service,
+                    &slot_id,
+                    r#gen(),
+                    &nonce,
+                )
+                .unwrap();
+                let healthy = [DiskPressureFilesystemSample {
+                    filesystem_id: filesystem_id.to_owned(),
+                    alias_ids: Vec::new(),
+                    available_bytes: Some(10),
+                    min_free_bytes: 10,
+                    volume_fingerprint: Some("volume-a".to_owned()),
+                }];
+
+                if controller_first {
+                    controller
+                        .advance_disk_pressure_roots(service, &healthy, 60, 30, boundary)
+                        .unwrap();
+                    let episode = controller
+                        .disk_pressure_episode(service, filesystem_id)
+                        .unwrap()
+                        .unwrap();
+                    assert!(!episode.draining);
+                    assert!(!episode.terminal);
+                    assert!(controller
+                        .clear_disk_pressure_episode_if_healthy(
+                            service,
+                            filesystem_id,
+                            &[],
+                            &episode,
+                            10,
+                            10,
+                            "volume-a",
+                            boundary,
+                        )
+                        .unwrap());
+                    worker
+                        .observe_disk_pressure_roots(
+                            service,
+                            &slot_id,
+                            r#gen(),
+                            &nonce,
+                            &healthy,
+                            60,
+                            30,
+                            boundary,
+                        )
+                        .unwrap();
+                } else {
+                    let observation = worker
+                        .observe_disk_pressure_roots(
+                            service,
+                            &slot_id,
+                            r#gen(),
+                            &nonce,
+                            &healthy,
+                            60,
+                            30,
+                            boundary,
+                        )
+                        .unwrap();
+                    assert!(observation[0].1.episode.is_none());
+                    controller
+                        .advance_disk_pressure_roots(service, &healthy, 60, 30, boundary)
+                        .unwrap();
+                }
+                assert!(controller
+                    .disk_pressure_episode(service, filesystem_id)
+                    .unwrap()
+                    .is_none());
+                std::fs::remove_dir_all(dir).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn pinned_identity_merges_unknown_root_deadline_and_delays_first_reclaim() {
+        let (dir, controller) = open_pressure_tmp("pressure-unpinnable-to-device");
+        let service = "service-one";
+        let unknown_root = "root:config";
+        let filesystem_id = "unix-device:2a";
+        let pinned = [DiskPressureFilesystemSample {
+            filesystem_id: filesystem_id.to_owned(),
+            alias_ids: vec![unknown_root.to_owned(), "root:work".to_owned()],
+            available_bytes: Some(0),
+            min_free_bytes: 10,
+            volume_fingerprint: Some("volume-a".to_owned()),
+        }];
+        controller
+            .advance_disk_pressure_roots(
+                service,
+                &[DiskPressureFilesystemSample {
+                    filesystem_id: unknown_root.to_owned(),
+                    alias_ids: Vec::new(),
+                    available_bytes: None,
+                    min_free_bytes: 10,
+                    volume_fingerprint: None,
+                }],
+                60,
+                30,
+                100,
+            )
+            .unwrap();
+        let before = controller
+            .disk_pressure_episode(service, unknown_root)
+            .unwrap()
+            .unwrap();
+        let second_connection =
+            Journal::open_for_service_instance(dir.join("journal.db"), service).unwrap();
+        second_connection
+            .advance_disk_pressure_roots(service, &pinned, 60, 30, 120)
+            .unwrap();
+        let bound = controller
+            .disk_pressure_episode(service, filesystem_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bound.started_unix, before.started_unix);
+        assert_eq!(bound.deadline_unix, before.deadline_unix);
+        assert_eq!(bound.drain_deadline_unix, before.drain_deadline_unix);
+        assert!(!bound.reclaim_attempted);
+        assert_eq!(bound.volume_fingerprint.as_deref(), Some("volume-a"));
+        assert!(controller
+            .disk_pressure_episode(service, unknown_root)
+            .unwrap()
+            .is_none());
+
+        assert!(
+            !controller
+                .claim_disk_pressure_reclaim(
+                    service,
+                    filesystem_id,
+                    &pinned[0].alias_ids,
+                    &bound,
+                    0,
+                    10,
+                    "volume-a",
+                    120,
+                )
+                .unwrap(),
+            "a late-bound alias must block controller reclaim"
+        );
+        assert!(
+            !controller
+                .clear_disk_pressure_episode_if_healthy(
+                    service,
+                    filesystem_id,
+                    &pinned[0].alias_ids,
+                    &bound,
+                    10,
+                    10,
+                    "volume-a",
+                    120,
+                )
+                .unwrap(),
+            "a late-bound alias must block controller clearing"
+        );
+        assert!(controller
+            .disk_pressure_episode(service, filesystem_id)
+            .unwrap()
+            .is_some());
+
+        controller
+            .advance_disk_pressure_roots(service, &pinned, 60, 30, 121)
+            .unwrap();
+        let confirmed = controller
+            .disk_pressure_episode(service, filesystem_id)
+            .unwrap()
+            .unwrap();
+        assert!(controller
+            .claim_disk_pressure_reclaim(
+                service,
+                filesystem_id,
+                &pinned[0].alias_ids,
+                &confirmed,
+                0,
+                10,
+                "volume-a",
+                121,
+            )
+            .unwrap());
+
+        let mut healthy = pinned[0].clone();
+        healthy.available_bytes = Some(10);
+        controller
+            .advance_disk_pressure_roots(service, &[healthy.clone()], 60, 30, 122)
+            .unwrap();
+        let clearable = controller
+            .disk_pressure_episode(service, filesystem_id)
+            .unwrap()
+            .unwrap();
+        assert!(controller
+            .clear_disk_pressure_episode_if_healthy(
+                service,
+                filesystem_id,
+                &healthy.alias_ids,
+                &clearable,
+                10,
+                10,
+                "volume-a",
+                122,
+            )
+            .unwrap());
+        assert!(controller
+            .disk_pressure_episode(service, filesystem_id)
+            .unwrap()
+            .is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn changed_volume_rebinds_only_after_terminal_generation_is_safe() {
+        let (dir, mut controller) = open_pressure_tmp("pressure-volume-rebind");
+        prime_ready(&mut controller, "scope-1");
+        let service = "service-one";
+        let filesystem_id = "unix-device:2a";
+        let slot_id = slot("scope-1");
+        controller
+            .issue_disk_pressure_launch(service, &slot_id, r#gen(), 100)
+            .unwrap();
+        let old_sample = [DiskPressureFilesystemSample {
+            filesystem_id: filesystem_id.to_owned(),
+            alias_ids: vec!["root:config".to_owned()],
+            available_bytes: Some(0),
+            min_free_bytes: 10,
+            volume_fingerprint: Some("volume-old".to_owned()),
+        }];
+        controller
+            .advance_disk_pressure_roots(service, &old_sample, 60, 30, 100)
+            .unwrap();
+        let new_sample = [DiskPressureFilesystemSample {
+            filesystem_id: filesystem_id.to_owned(),
+            alias_ids: vec!["root:config".to_owned()],
+            available_bytes: Some(0),
+            min_free_bytes: 10,
+            volume_fingerprint: Some("volume-new".to_owned()),
+        }];
+        let second_connection =
+            Journal::open_for_service_instance(dir.join("journal.db"), service).unwrap();
+        second_connection
+            .advance_disk_pressure_roots(service, &new_sample, 60, 30, 110)
+            .unwrap();
+        let terminal = controller
+            .disk_pressure_episode(service, filesystem_id)
+            .unwrap()
+            .unwrap();
+        assert!(terminal.terminal);
+        assert_eq!(terminal.volume_fingerprint.as_deref(), Some("volume-old"));
+        assert_eq!(
+            controller
+                .materialized_state()
+                .unwrap()
+                .slots
+                .iter()
+                .find(|slot| slot.slot_id == slot_id)
+                .unwrap()
+                .phase,
+            SlotPhase2::Fenced
+        );
+        assert!(controller
+            .rebind_disk_pressure_episode_if_safe(
+                service,
+                filesystem_id,
+                &["root:config".to_owned()],
+                &terminal,
+                Some(0),
+                10,
+                "volume-new",
+                60,
+                30,
+                111,
+            )
+            .unwrap());
+        let rebound = controller
+            .disk_pressure_episode(service, filesystem_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rebound.started_unix, 111);
+        assert_eq!(rebound.deadline_unix, 171);
+        assert_eq!(rebound.drain_deadline_unix, 201);
+        assert_eq!(rebound.volume_fingerprint.as_deref(), Some("volume-new"));
+        assert!(!rebound.terminal);
+        assert!(!rebound.reclaim_attempted);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn absent_device_episode_retires_after_complete_root_switch() {
+        let (dir, mut controller) = open_pressure_tmp("pressure-root-switch");
+        prime_ready(&mut controller, "scope-1");
+        let service = "service-one";
+        let old_id = "unix-device:old";
+        let new_id = "unix-device:new";
+        controller
+            .advance_disk_pressure_roots(
+                service,
+                &[DiskPressureFilesystemSample {
+                    filesystem_id: old_id.to_owned(),
+                    alias_ids: vec!["root:old-config".to_owned()],
+                    available_bytes: Some(0),
+                    min_free_bytes: 10,
+                    volume_fingerprint: Some("volume-old".to_owned()),
+                }],
+                60,
+                30,
+                100,
+            )
+            .unwrap();
+        let second_connection =
+            Journal::open_for_service_instance(dir.join("journal.db"), service).unwrap();
+        second_connection
+            .advance_disk_pressure_roots(
+                service,
+                &[DiskPressureFilesystemSample {
+                    filesystem_id: new_id.to_owned(),
+                    alias_ids: vec!["root:new-config".to_owned()],
+                    available_bytes: Some(100),
+                    min_free_bytes: 10,
+                    volume_fingerprint: Some("volume-new".to_owned()),
+                }],
+                60,
+                30,
+                120,
+            )
+            .unwrap();
+        second_connection
+            .retire_unobserved_disk_pressure_episodes(
+                service,
+                &[new_id.to_owned(), "root:new-config".to_owned()],
+                true,
+            )
+            .unwrap();
+        assert!(controller
+            .disk_pressure_episode(service, old_id)
+            .unwrap()
+            .is_none());
+        assert!(controller
+            .disk_pressure_episode(service, new_id)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            second_connection.disk_pressure_state(service).unwrap(),
+            (false, false, false)
+        );
+        second_connection
+            .advance_disk_pressure_roots(
+                service,
+                &[DiskPressureFilesystemSample {
+                    filesystem_id: new_id.to_owned(),
+                    alias_ids: vec!["root:new-config".to_owned()],
+                    available_bytes: Some(0),
+                    min_free_bytes: 10,
+                    volume_fingerprint: Some("volume-new".to_owned()),
+                }],
+                60,
+                30,
+                110,
+            )
+            .unwrap();
+        let rolled_back = second_connection
+            .disk_pressure_episode(service, new_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rolled_back.started_unix, 120);
+        assert!(rolled_back.terminal);
+        assert_eq!(
+            controller
+                .materialized_state()
+                .unwrap()
+                .slots
+                .iter()
+                .find(|record| record.slot_id == slot("scope-1"))
+                .unwrap()
+                .phase,
+            SlotPhase2::Fenced
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn occupied_slot_cannot_be_staled_without_pressure_terminal_fence() {
+        let (dir, mut journal) = open_pressure_tmp("pressure-launch-assigned-slot");
+        let generation = prime_running_job(&mut journal, "scope-1", "job-1");
+        let slot_id = slot("scope-1");
+        let slot = journal
+            .materialized_state()
+            .unwrap()
+            .slots
+            .into_iter()
+            .find(|slot| slot.slot_id == slot_id)
+            .unwrap();
+        assert_eq!(slot.phase, SlotPhase2::Assigned);
+
+        let nonce = journal
+            .issue_disk_pressure_launch("service-one", &slot_id, generation, 100)
+            .unwrap();
+        assert_eq!(
+            journal
+                .disk_pressure_launch_nonce("service-one", &slot_id, generation)
+                .unwrap()
+                .as_deref(),
+            Some(nonce.as_str())
+        );
+        let stale = journal
+            .apply(Event::SlotStale {
+                slot_id: slot_id.clone(),
+                generation,
+            })
+            .unwrap();
+        assert!(stale.rejected);
+        assert_eq!(
+            journal
+                .disk_pressure_launch_nonce("service-one", &slot_id, generation)
+                .unwrap()
+                .as_deref(),
+            Some(nonce.as_str())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pressure_episode_blocks_permit_and_launch_issue_across_connections() {
+        let (dir, mut controller) = open_pressure_tmp("pressure-admission-cross-connection");
+        prime_ready(&mut controller, "scope-1");
+        let service = "service-one";
+        let slot_id = slot("scope-1");
+        let generation = Generation::INITIAL;
+        let nonce = controller
+            .issue_disk_pressure_launch(service, &slot_id, generation, 100)
+            .unwrap();
+        let worker = Journal::open_for_launch(
+            dir.join("journal.db"),
+            service,
+            &slot_id,
+            generation,
+            &nonce,
+        )
+        .unwrap();
+        observe_pressure_one(
+            &worker,
+            service,
+            "pressure-volume",
+            "volume-pressure-volume",
+            &slot_id,
+            generation,
+            &nonce,
+            0,
+            10,
+            60,
+            30,
+            100,
+        )
+        .unwrap();
+
+        let mut second_connection = Journal::open(dir.join("journal.db")).unwrap();
+        let next_generation = generation.next();
+        let unbound_error = second_connection
+            .apply(Event::PermitReserved {
+                slot_id: slot_id.clone(),
+                generation: next_generation,
+            })
+            .unwrap_err();
+        assert_eq!(
+            unbound_error.envelope.reason,
+            "journal.service_instance.mismatch"
+        );
+        assert_eq!(
+            second_connection
+                .materialized_state()
+                .unwrap()
+                .slots
+                .iter()
+                .find(|slot| slot.slot_id == slot_id)
+                .unwrap()
+                .generation,
+            generation
+        );
+        assert!(second_connection
+            .issue_disk_pressure_launch(service, &slot_id, generation, 101)
+            .is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pressure_orders_before_or_after_durable_acquisition_intent() {
+        for intent_first in [true, false] {
+            let label = format!("pressure-acquisition-order-{intent_first}");
+            let (dir, mut setup) = open_pressure_tmp(&label);
+            prime_ready(&mut setup, "scope-1");
+            let path = dir.join("journal.db");
+            drop(setup);
+
+            let service = "service-one";
+            let slot_id = slot("scope-1");
+            let generation = r#gen();
+            let mut controller = Journal::open_for_service_instance(&path, service).unwrap();
+            let nonce = controller
+                .issue_disk_pressure_launch(service, &slot_id, generation, 100)
+                .unwrap();
+            let worker =
+                Journal::open_for_launch(&path, service, &slot_id, generation, &nonce).unwrap();
+
+            if intent_first {
+                let intent = controller
+                    .intend_acquisition_with_disk_pressure_launch(
+                        service,
+                        slot_id.clone(),
+                        generation,
+                        &nonce,
+                        job("request-before-pressure"),
+                        "message-before-pressure".to_owned(),
+                        "https://run.example/run".to_owned(),
+                        100,
+                    )
+                    .unwrap();
+                assert!(!intent.rejected);
+            }
+
+            observe_pressure_one(
+                &worker,
+                service,
+                "device:pressure-order",
+                "volume-pressure-order",
+                &slot_id,
+                generation,
+                &nonce,
+                0,
+                10,
+                60,
+                30,
+                100,
+            )
+            .unwrap();
+
+            if !intent_first {
+                let intent = controller
+                    .intend_acquisition_with_disk_pressure_launch(
+                        service,
+                        slot_id.clone(),
+                        generation,
+                        &nonce,
+                        job("request-after-pressure"),
+                        "message-after-pressure".to_owned(),
+                        "https://run.example/run".to_owned(),
+                        101,
+                    )
+                    .unwrap();
+                assert!(intent.rejected);
+                let generic_intent = controller
+                    .apply(Event::JobAcquisitionIntended {
+                        slot_id: slot_id.clone(),
+                        job_id: job("generic-after-pressure"),
+                        generation,
+                        message_id: "generic-after-pressure".to_owned(),
+                        run_service_url: "https://run.example/run".to_owned(),
+                        intended_unix: 101,
+                    })
+                    .unwrap();
+                assert!(generic_intent.rejected);
+            }
+
+            let state = controller.materialized_state().unwrap();
+            if intent_first {
+                assert_eq!(state.jobs.len(), 1);
+                assert_eq!(state.jobs[0].job_id, job("request-before-pressure"));
+                assert!(state.jobs[0].provisional);
+                assert_eq!(state.slots[0].phase, SlotPhase2::Assigned);
+            } else {
+                assert!(state.jobs.is_empty());
+                assert_eq!(state.slots[0].phase, SlotPhase2::Ready);
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn exact_pressure_acquisition_retry_is_idempotent_and_keeps_launch_nonce() {
+        let (dir, mut controller) = open_pressure_tmp("pressure-acquisition-exact-retry");
+        prime_ready(&mut controller, "scope-1");
+        let service = "service-one";
+        let slot_id = slot("scope-1");
+        let generation = r#gen();
+        let nonce = controller
+            .issue_disk_pressure_launch(service, &slot_id, generation, 100)
+            .unwrap();
+        let mut worker = Journal::open_for_launch(
+            dir.join("journal.db"),
+            service,
+            &slot_id,
+            generation,
+            &nonce,
+        )
+        .unwrap();
+        let provisional = job("request-exact-retry");
+        let first = worker
+            .intend_acquisition_with_disk_pressure_launch(
+                service,
+                slot_id.clone(),
+                generation,
+                &nonce,
+                provisional.clone(),
+                "message-exact-retry".to_owned(),
+                "https://run.example/run".to_owned(),
+                100,
+            )
+            .unwrap();
+        assert!(!first.rejected);
+        let after_first = event_count(&worker);
+
+        let exact_retry = worker
+            .intend_acquisition_with_disk_pressure_launch(
+                service,
+                slot_id.clone(),
+                generation,
+                &nonce,
+                provisional.clone(),
+                "message-exact-retry".to_owned(),
+                "https://run.example/run".to_owned(),
+                101,
+            )
+            .unwrap();
+        assert!(!exact_retry.rejected);
+        assert_eq!(exact_retry.state.jobs.len(), 1);
+        assert_eq!(event_count(&worker), after_first);
+        assert_eq!(
+            controller
+                .issue_disk_pressure_launch(service, &slot_id, generation, 102)
+                .unwrap(),
+            nonce,
+            "reopening the same generation must reuse its active nonce"
+        );
+
+        let wrong_message = worker
+            .intend_acquisition_with_disk_pressure_launch(
+                service,
+                slot_id.clone(),
+                generation,
+                &nonce,
+                provisional.clone(),
+                "different-message".to_owned(),
+                "https://run.example/run".to_owned(),
+                103,
+            )
+            .unwrap();
+        assert!(wrong_message.rejected);
+        let wrong_url = worker
+            .intend_acquisition_with_disk_pressure_launch(
+                service,
+                slot_id.clone(),
+                generation,
+                &nonce,
+                provisional,
+                "message-exact-retry".to_owned(),
+                "https://other.example/run".to_owned(),
+                104,
+            )
+            .unwrap();
+        assert!(wrong_url.rejected);
+        assert_eq!(event_count(&worker), after_first);
+
+        assert!(controller
+            .revoke_disk_pressure_launch(service, &slot_id, generation)
+            .unwrap());
+        assert!(
+            controller
+                .issue_disk_pressure_launch(service, &slot_id, generation, 105)
+                .is_err(),
+            "a provisional row pins its nonce until resolved or abandoned"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn typed_gone_abandon_is_exact_and_orders_with_terminal_revocation() {
+        for terminal_first in [false, true] {
+            let label = format!("pressure-acquisition-gone-{terminal_first}");
+            let (dir, mut controller) = open_pressure_tmp(&label);
+            prime_ready(&mut controller, "scope-1");
+            let service = "service-one";
+            let slot_id = slot("scope-1");
+            let generation = r#gen();
+            let nonce = controller
+                .issue_disk_pressure_launch(service, &slot_id, generation, 100)
+                .unwrap();
+            let mut worker = Journal::open_for_launch(
+                dir.join("journal.db"),
+                service,
+                &slot_id,
+                generation,
+                &nonce,
+            )
+            .unwrap();
+            let provisional = job("request-typed-gone");
+            let run_service_url = "https://run.example/run";
+            let message_id = "message-typed-gone";
+            assert!(
+                !worker
+                    .intend_acquisition_with_disk_pressure_launch(
+                        service,
+                        slot_id.clone(),
+                        generation,
+                        &nonce,
+                        provisional.clone(),
+                        message_id.to_owned(),
+                        run_service_url.to_owned(),
+                        100,
+                    )
+                    .unwrap()
+                    .rejected
+            );
+
+            if terminal_first {
+                observe_pressure_one(
+                    &worker,
+                    service,
+                    "device:typed-gone",
+                    "volume-typed-gone",
+                    &slot_id,
+                    generation,
+                    &nonce,
+                    0,
+                    10,
+                    60,
+                    30,
+                    100,
+                )
+                .unwrap();
+                controller
+                    .advance_disk_pressure_roots(
+                        service,
+                        &[DiskPressureFilesystemSample {
+                            filesystem_id: "device:typed-gone".to_owned(),
+                            alias_ids: Vec::new(),
+                            available_bytes: Some(0),
+                            min_free_bytes: 10,
+                            volume_fingerprint: Some("volume-typed-gone".to_owned()),
+                        }],
+                        60,
+                        30,
+                        190,
+                    )
+                    .unwrap();
+            }
+
+            if terminal_first {
+                assert!(
+                    worker
+                        .apply(Event::JobAcquisitionLost {
+                            job_id: provisional.clone(),
+                            generation,
+                            reason: "typed gone".to_owned(),
+                        })
+                        .is_err(),
+                    "the generic stale-worker mutation path stays fenced after terminal revoke"
+                );
+            }
+            let wrong_message = worker
+                .abandon_acquisition_after_disk_pressure_terminal(
+                    service,
+                    slot_id.clone(),
+                    generation,
+                    &nonce,
+                    provisional.clone(),
+                    "wrong-message",
+                    run_service_url,
+                    "typed gone".to_owned(),
+                )
+                .unwrap_err();
+            assert_eq!(
+                wrong_message.envelope.reason,
+                "journal.acquisition.abandon.fenced"
+            );
+            let wrong_url = worker
+                .abandon_acquisition_after_disk_pressure_terminal(
+                    service,
+                    slot_id.clone(),
+                    generation,
+                    &nonce,
+                    provisional.clone(),
+                    message_id,
+                    "https://wrong.example/run",
+                    "typed gone".to_owned(),
+                )
+                .unwrap_err();
+            assert_eq!(
+                wrong_url.envelope.reason,
+                "journal.acquisition.abandon.fenced"
+            );
+            let abandoned = worker
+                .abandon_acquisition_after_disk_pressure_terminal(
+                    service,
+                    slot_id.clone(),
+                    generation,
+                    &nonce,
+                    provisional,
+                    message_id,
+                    run_service_url,
+                    "typed gone".to_owned(),
+                )
+                .unwrap();
+            assert!(!abandoned.rejected);
+            let state = controller.materialized_state().unwrap();
+            assert!(state.jobs.is_empty());
+            if terminal_first {
+                assert_eq!(state.slots[0].phase, SlotPhase2::Fenced);
+                assert_eq!(state.advertised_capacity(), 0);
+            } else {
+                assert_eq!(state.slots[0].phase, SlotPhase2::Ready);
+                assert_eq!(state.advertised_capacity(), 1);
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn terminal_pressure_revocation_allows_only_exact_acquire_response_handoff() {
+        let (dir, mut setup) = open_pressure_tmp("pressure-acquisition-response-handoff");
+        prime_ready(&mut setup, "scope-1");
+        let path = dir.join("journal.db");
+        drop(setup);
+
+        let service = "service-one";
+        let slot_id = slot("scope-1");
+        let generation = r#gen();
+        let filesystem_id = "device:response-handoff";
+        let acquire_run_service_url = "https://broker.example/jobs/123";
+        let job_run_service_url = "https://selected.example/jobs/456";
+        let mut controller = Journal::open_for_service_instance(&path, service).unwrap();
+        let nonce = controller
+            .issue_disk_pressure_launch(service, &slot_id, generation, 100)
+            .unwrap();
+        let mut worker =
+            Journal::open_for_launch(&path, service, &slot_id, generation, &nonce).unwrap();
+        let intent = worker
+            .intend_acquisition_with_disk_pressure_launch(
+                service,
+                slot_id.clone(),
+                generation,
+                &nonce,
+                job("request-handoff"),
+                "message-handoff".to_owned(),
+                acquire_run_service_url.to_owned(),
+                100,
+            )
+            .unwrap();
+        assert!(!intent.rejected);
+        observe_pressure_one(
+            &worker,
+            service,
+            filesystem_id,
+            "volume-response-handoff",
+            &slot_id,
+            generation,
+            &nonce,
+            0,
+            10,
+            60,
+            30,
+            100,
+        )
+        .unwrap();
+
+        let terminal = [DiskPressureFilesystemSample {
+            filesystem_id: filesystem_id.to_owned(),
+            alias_ids: Vec::new(),
+            available_bytes: Some(0),
+            min_free_bytes: 10,
+            volume_fingerprint: Some("volume-response-handoff".to_owned()),
+        }];
+        controller
+            .advance_disk_pressure_roots(service, &terminal, 60, 30, 190)
+            .unwrap();
+        assert_eq!(
+            controller
+                .disk_pressure_launch_nonce(service, &slot_id, generation)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            controller
+                .materialized_state()
+                .unwrap()
+                .slots
+                .iter()
+                .find(|slot| slot.slot_id == slot_id)
+                .unwrap()
+                .phase,
+            SlotPhase2::Fenced
+        );
+
+        let wrong_url = worker
+            .resolve_acquisition_response(
+                service,
+                slot_id.clone(),
+                generation,
+                &nonce,
+                job("request-handoff"),
+                "message-handoff",
+                job("acquired-handoff"),
+                "https://other.example/run",
+                job_run_service_url,
+                "plan-handoff",
+            )
+            .unwrap_err();
+        assert_eq!(
+            wrong_url.envelope.reason,
+            "journal.acquisition.response.fenced"
+        );
+        let resolved = worker
+            .resolve_acquisition_response(
+                service,
+                slot_id.clone(),
+                generation,
+                &nonce,
+                job("request-handoff"),
+                "message-handoff",
+                job("acquired-handoff"),
+                acquire_run_service_url,
+                job_run_service_url,
+                "plan-handoff",
+            )
+            .unwrap();
+        assert!(!resolved.rejected);
+        assert!(resolved.commands.is_empty());
+
+        let unauthorized_confirmation = controller
+            .apply(Event::JobOwned {
+                job_id: job("acquired-handoff"),
+                slot_id: slot_id.clone(),
+                attempt: 1,
+                generation,
+                worker: "velnor-job@acquired-handoff".to_owned(),
+                accepted_unix: 0,
+            })
+            .unwrap();
+        assert!(unauthorized_confirmation.rejected);
+        let confirmed = controller
+            .confirm_acquisition_after_disk_pressure_terminal(
+                service,
+                slot_id.clone(),
+                generation,
+                job("acquired-handoff"),
+                "plan-handoff",
+                job_run_service_url,
+            )
+            .unwrap();
+        assert!(!confirmed.rejected);
+
+        let state = controller.materialized_state().unwrap();
+        assert_eq!(state.slots[0].phase, SlotPhase2::Fenced);
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.jobs[0].job_id, job("acquired-handoff"));
+        assert_eq!(state.jobs[0].plan_id, "plan-handoff");
+        assert_eq!(state.jobs[0].run_service_url, job_run_service_url);
+        assert!(!state.jobs[0].provisional);
+        assert_eq!(state.advertised_capacity(), 0);
+        assert_eq!(
+            canonical_projection(controller.load_state().unwrap()),
+            canonical_projection(state),
+            "terminal handoff confirmation must replay with the slot still fenced"
+        );
+        drop(worker);
+        drop(controller);
+        let reopened = Journal::open_for_service_instance(&path, service).unwrap();
+        let reopened_state = reopened.materialized_state().unwrap();
+        assert_eq!(reopened_state.jobs[0].run_service_url, job_run_service_url);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn journal_identity_rejects_a_second_service_on_the_same_fleet_database() {
+        let (dir, mut setup) = open_pressure_tmp("pressure-single-service-database");
+        prime_ready(&mut setup, "scope-1");
+        let path = dir.join("journal.db");
+        drop(setup);
+
+        let service_a = "service-one";
+        let service_b = "service-two";
+        let slot_id = slot("scope-1");
+        let mut journal = Journal::open_for_service_instance(&path, service_a).unwrap();
+        let nonce = journal
+            .issue_disk_pressure_launch(service_a, &slot_id, r#gen(), 100)
+            .unwrap();
+        observe_pressure_one(
+            &journal,
+            service_a,
+            "device:one",
+            "volume-one-uuid",
+            &slot_id,
+            r#gen(),
+            &nonce,
+            0,
+            10,
+            60,
+            30,
+            100,
+        )
+        .unwrap();
+
+        assert!(
+            !journal
+                .apply(Event::Dependency {
+                    github_reachable: false,
+                })
+                .unwrap()
+                .rejected
+        );
+        let owner: String = journal
+            .conn
+            .query_row(
+                "SELECT service_instance FROM journal_identity WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(owner, service_a, "materialization keeps the durable owner");
+
+        let second_open = Journal::open_for_service_instance(&path, service_b).unwrap_err();
+        assert_eq!(
+            second_open.envelope.reason,
+            "journal.service_instance.mismatch"
+        );
+        let second_launch = journal
+            .issue_disk_pressure_launch(service_b, &slot_id, r#gen(), 101)
+            .unwrap_err();
+        assert_eq!(
+            second_launch.envelope.reason,
+            "journal.service_instance.mismatch"
+        );
+
+        let mut unbound_admin = Journal::open(&path).unwrap();
+        let unbound_write = unbound_admin
+            .apply(Event::PermitReserved {
+                slot_id: slot_id.clone(),
+                generation: r#gen().next(),
+            })
+            .unwrap_err();
+        assert_eq!(
+            unbound_write.envelope.reason,
+            "journal.service_instance.mismatch"
+        );
+        let foreign_read = unbound_admin
+            .disk_pressure_episode(service_b, "device:one")
+            .unwrap_err();
+        assert_eq!(
+            foreign_read.envelope.reason,
+            "journal.service_instance.mismatch"
+        );
+        let foreign_launches: i64 = journal
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM disk_pressure_launches WHERE service_instance = ?1",
+                [service_b],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(foreign_launches, 0);
+        assert!(journal
+            .disk_pressure_episode(service_a, "device:one")
+            .unwrap()
+            .is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn terminal_pressure_fences_occupied_generation_atomically() {
+        let (dir, mut controller) = open_pressure_tmp("pressure-terminal-occupied");
+        let generation = prime_running_job(&mut controller, "scope-1", "job-1");
+        let service = "service-one";
+        let slot_id = slot("scope-1");
+        let nonce = controller
+            .issue_disk_pressure_launch(service, &slot_id, generation, 100)
+            .unwrap();
+        let mut stale_worker = Journal::open_for_launch(
+            dir.join("journal.db"),
+            service,
+            &slot_id,
+            generation,
+            &nonce,
+        )
+        .unwrap();
+
+        let sample = [DiskPressureFilesystemSample {
+            filesystem_id: "pressure-volume".to_owned(),
+            alias_ids: Vec::new(),
+            available_bytes: Some(0),
+            min_free_bytes: 10,
+            volume_fingerprint: Some("volume-uuid".to_owned()),
+        }];
+        controller
+            .advance_disk_pressure_roots(service, &sample, 0, 5, 100)
+            .unwrap();
+        controller
+            .advance_disk_pressure_roots(service, &sample, 0, 5, 105)
+            .unwrap();
+
+        let state = controller.materialized_state().unwrap();
+        let slot = state
+            .slots
+            .iter()
+            .find(|slot| slot.slot_id == slot_id)
+            .unwrap();
+        assert_eq!(slot.generation, generation);
+        assert_eq!(slot.phase, SlotPhase2::Fenced);
+        assert!(state
+            .jobs
+            .iter()
+            .any(|job| job.slot_id == slot_id && job.phase.occupies_slot()));
+        assert!(controller
+            .disk_pressure_launch_nonce(service, &slot_id, generation)
+            .unwrap()
+            .is_none());
+        let stale_write = stale_worker.apply(Event::JobStarted {
+            job_id: JobId("job-1".to_owned()),
+            generation,
+        });
+        assert!(stale_write.is_err());
+        let next_permit = controller
+            .apply(Event::PermitReserved {
+                slot_id,
+                generation: generation.next(),
+            })
+            .unwrap();
+        assert!(next_permit.rejected);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn terminal_pressure_revocation_and_slot_stale_fence_bound_writers() {
+        let (dir, mut setup) = open_pressure_tmp("pressure-launch-terminal-revoke");
+        prime_ready(&mut setup, "scope-1");
+        let path = dir.join("journal.db");
+        drop(setup);
+        let service = "service-one";
+        let mut journal = Journal::open_for_service_instance(&path, service).unwrap();
+        let generation = Generation::INITIAL;
+        let slot_id = slot("scope-1");
+        let nonce = journal
+            .issue_disk_pressure_launch(service, &slot_id, generation, 100)
+            .unwrap();
+        let mut stale_worker =
+            Journal::open_for_launch(&path, service, &slot_id, generation, &nonce).unwrap();
+
+        assert!(journal
+            .revoke_disk_pressure_launch(service, &slot_id, generation)
+            .unwrap());
+        assert!(journal
+            .disk_pressure_launch_nonce(service, &slot_id, generation)
+            .unwrap()
+            .is_none());
+        assert!(stale_worker
+            .apply(Event::SlotHeartbeat {
+                slot_id: slot_id.clone(),
+                generation,
+                pid: 17,
+            })
+            .is_err());
+
+        let replacement = journal
+            .issue_disk_pressure_launch(service, &slot_id, generation, 101)
+            .unwrap();
+        let mut fenced_worker =
+            Journal::open_for_launch(&path, service, &slot_id, generation, &replacement).unwrap();
+        assert!(
+            !journal
+                .apply(Event::SlotStale {
+                    slot_id: slot_id.clone(),
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(journal
+            .disk_pressure_launch_nonce(service, &slot_id, generation)
+            .unwrap()
+            .is_none());
+        assert!(fenced_worker
+            .apply(Event::SlotHeartbeat {
+                slot_id,
+                generation,
+                pid: 18,
+            })
+            .is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stale_bound_journal_cannot_mutate_after_same_generation_nonce_replacement() {
+        let (dir, mut controller) = open_pressure_tmp("pressure-bound-journal-stale-nonce");
+        prime_ready(&mut controller, "scope-1");
+        let service_instance = "service-one";
+        let slot_id = slot("scope-1");
+        let generation = r#gen();
+        let first_nonce = controller
+            .issue_disk_pressure_launch(service_instance, &slot_id, generation, 100)
+            .unwrap();
+        let mut stale_worker = Journal::open_for_launch(
+            dir.join("journal.db"),
+            service_instance,
+            &slot_id,
+            generation,
+            &first_nonce,
+        )
+        .unwrap();
+        let replacement_nonce = controller
+            .issue_disk_pressure_launch(service_instance, &slot_id, generation, 101)
+            .unwrap();
+        assert_ne!(first_nonce, replacement_nonce);
+
+        let error = stale_worker
+            .apply(Event::Dependency {
+                github_reachable: false,
+            })
+            .unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.disk_pressure.launch.fenced");
+        assert!(controller.materialized_state().unwrap().github_reachable);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unmeasurable_controller_advances_existing_deadline_stages() {
+        let (_dir, mut journal) = open_pressure_tmp("pressure-unmeasurable-controller-advance");
+        prime_ready(&mut journal, "scope-1");
+        let service_instance = "service-one";
+        let slot_id = slot("scope-1");
+        let nonce = journal
+            .issue_disk_pressure_launch(service_instance, &slot_id, r#gen(), 100)
+            .unwrap();
+        observe_pressure_one(
+            &journal,
+            service_instance,
+            "config-device",
+            "config-volume",
+            &slot_id,
+            r#gen(),
+            &nonce,
+            0,
+            10,
+            60,
+            30,
+            100,
+        )
+        .unwrap();
+
+        assert_eq!(
+            journal
+                .advance_unmeasurable_disk_pressure(service_instance, 60, 30, 160)
+                .unwrap(),
+            (true, false),
+            "unknown capacity advances to drain but does not clear or skip it"
+        );
+        let draining = journal
+            .disk_pressure_episode(service_instance, "config-device")
+            .unwrap()
+            .unwrap();
+        assert!(draining.draining);
+        assert!(!draining.terminal);
+
+        assert_eq!(
+            journal
+                .advance_unmeasurable_disk_pressure(service_instance, 60, 30, 190)
+                .unwrap(),
+            (true, true),
+            "unknown capacity reaches terminal at the persisted drain cutoff"
+        );
+        let terminal = journal
+            .disk_pressure_episode(service_instance, "config-device")
+            .unwrap()
+            .unwrap();
+        assert!(terminal.draining);
+        assert!(terminal.terminal);
+    }
+
+    #[test]
+    fn unmeasurable_advance_ignores_retired_observation_history() {
+        let (_dir, mut journal) = open_pressure_tmp("pressure-unmeasurable-retired-history");
+        prime_ready(&mut journal, "scope-1");
+        let service_instance = "service-one";
+        let filesystem_id = "unix-device:retired";
+        let new_filesystem_id = "unix-device:current";
+        let volume_fingerprint = "volume-retired-uuid";
+        let slot_id = slot("scope-1");
+        let old_generation = r#gen();
+        let nonce = journal
+            .issue_disk_pressure_launch(service_instance, &slot_id, old_generation, 100)
+            .unwrap();
+        let low = observe_pressure_one(
+            &journal,
+            service_instance,
+            filesystem_id,
+            volume_fingerprint,
+            &slot_id,
+            old_generation,
+            &nonce,
+            0,
+            10,
+            60,
+            30,
+            100,
+        )
+        .unwrap()
+        .episode
+        .unwrap();
+
+        let current_root = [DiskPressureFilesystemSample {
+            filesystem_id: new_filesystem_id.to_owned(),
+            alias_ids: Vec::new(),
+            available_bytes: Some(20),
+            min_free_bytes: 10,
+            volume_fingerprint: Some("volume-current-uuid".to_owned()),
+        }];
+        journal
+            .advance_disk_pressure_roots(service_instance, &current_root, 60, 30, 110)
+            .unwrap();
+        assert_eq!(
+            journal
+                .disk_pressure_episode(service_instance, filesystem_id)
+                .unwrap()
+                .as_ref()
+                .map(|episode| episode.episode_id.as_str()),
+            Some(low.episode_id.as_str())
+        );
+        journal
+            .retire_unobserved_disk_pressure_episodes(
+                service_instance,
+                &[new_filesystem_id.to_owned()],
+                true,
+            )
+            .unwrap();
+        assert!(journal
+            .disk_pressure_episode(service_instance, filesystem_id)
+            .unwrap()
+            .is_none());
+
+        let old_observation_before: (String, i64, i64) = journal
+            .conn
+            .query_row(
+                "SELECT volume_fingerprint, identity_confirmed, last_observed_unix
+                 FROM disk_pressure_observations
+                 WHERE service_instance = ?1 AND filesystem_id = ?2",
+                params![service_instance, filesystem_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            old_observation_before,
+            (volume_fingerprint.to_owned(), 1, 100)
+        );
+        let current_observation_before: (String, i64, i64) = journal
+            .conn
+            .query_row(
+                "SELECT volume_fingerprint, identity_confirmed, last_observed_unix
+                 FROM disk_pressure_observations
+                 WHERE service_instance = ?1 AND filesystem_id = ?2",
+                params![service_instance, new_filesystem_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            current_observation_before,
+            ("volume-current-uuid".to_owned(), 1, 110)
+        );
+
+        let new_generation = old_generation.next();
+        for event in [
+            Event::PermitReserved {
+                slot_id: slot_id.clone(),
+                generation: new_generation,
+            },
+            Event::ExecutorProven {
+                slot_id: slot_id.clone(),
+                generation: new_generation,
+            },
+            Event::SessionLive {
+                slot_id: slot_id.clone(),
+                generation: new_generation,
+            },
+            Event::RegistrationIntended {
+                slot_id: slot_id.clone(),
+                generation: new_generation,
+            },
+            Event::Registered {
+                slot_id: slot_id.clone(),
+                generation: new_generation,
+            },
+            Event::ReadyAttempt {
+                slot_id: slot_id.clone(),
+                generation: new_generation,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        let current_nonce = journal
+            .issue_disk_pressure_launch(service_instance, &slot_id, new_generation, 120)
+            .unwrap();
+
+        assert_eq!(
+            journal
+                .advance_unmeasurable_disk_pressure(service_instance, 60, 30, 700)
+                .unwrap(),
+            (false, false)
+        );
+        assert_eq!(
+            journal
+                .disk_pressure_launch_nonce(service_instance, &slot_id, new_generation)
+                .unwrap()
+                .as_deref(),
+            Some(current_nonce.as_str()),
+            "history-only identities cannot revoke the current launch"
+        );
+        assert!(journal
+            .disk_pressure_episode(service_instance, filesystem_id)
+            .unwrap()
+            .is_none());
+        let old_observation_after: (String, i64, i64) = journal
+            .conn
+            .query_row(
+                "SELECT volume_fingerprint, identity_confirmed, last_observed_unix
+                 FROM disk_pressure_observations
+                 WHERE service_instance = ?1 AND filesystem_id = ?2",
+                params![service_instance, filesystem_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(old_observation_after, old_observation_before);
+        let current_observation_after: (String, i64, i64) = journal
+            .conn
+            .query_row(
+                "SELECT volume_fingerprint, identity_confirmed, last_observed_unix
+                 FROM disk_pressure_observations
+                 WHERE service_instance = ?1 AND filesystem_id = ?2",
+                params![service_instance, new_filesystem_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(current_observation_after, current_observation_before);
+        assert_eq!(
+            journal
+                .materialized_state()
+                .unwrap()
+                .slots
+                .iter()
+                .find(|slot| slot.slot_id == slot_id)
+                .unwrap()
+                .phase,
+            SlotPhase2::Ready,
+            "history-only identities cannot recreate pressure and fence a slot"
+        );
+    }
+
+    #[test]
+    fn pressure_clock_rollback_latches_terminal_until_healthy_cas() {
+        let (dir, mut journal) = open_pressure_tmp("pressure-clock-rollback");
+        prime_ready(&mut journal, "scope-1");
+        let service_instance = "service-one";
+        let filesystem_id = "dev:42";
+        let slot_id = slot("scope-1");
+        let nonce = journal
+            .issue_disk_pressure_launch(service_instance, &slot_id, r#gen(), 100)
+            .unwrap();
+        observe_pressure_one(
+            &journal,
+            service_instance,
+            filesystem_id,
+            "volume-dev-42",
+            &slot_id,
+            r#gen(),
+            &nonce,
+            0,
+            10,
+            60,
+            30,
+            100,
+        )
+        .unwrap();
+        let rolled_back = observe_pressure_one(
+            &journal,
+            service_instance,
+            filesystem_id,
+            "volume-dev-42",
+            &slot_id,
+            r#gen(),
+            &nonce,
+            0,
+            10,
+            600,
+            30,
+            90,
+        )
+        .unwrap()
+        .episode
+        .unwrap();
+        assert!(rolled_back.terminal);
+        assert_eq!(rolled_back.deadline_unix, 160);
+        assert_eq!(rolled_back.drain_deadline_unix, 190);
+        assert!(rolled_back.draining);
+        assert!(!journal
+            .clear_disk_pressure_episode_if_healthy(
+                service_instance,
+                filesystem_id,
+                &[],
+                &rolled_back,
+                10,
+                10,
+                "volume-dev-42",
+                90,
+            )
+            .unwrap());
+        let terminal = journal
+            .disk_pressure_episode(service_instance, filesystem_id)
+            .unwrap()
+            .unwrap();
+        assert!(terminal.terminal);
+        assert!(journal
+            .clear_disk_pressure_episode_if_healthy(
+                service_instance,
+                filesystem_id,
+                &[],
+                &terminal,
+                10,
+                10,
+                "volume-dev-42",
+                101,
+            )
+            .unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pressure_root_batch_rolls_back_all_reclaim_claims_on_corrupt_root() {
+        let (_dir, mut journal) = open_pressure_tmp("pressure-root-batch-atomic");
+        prime_ready(&mut journal, "scope-1");
+        let service_instance = "service-one";
+        let slot_id = slot("scope-1");
+        let generation = r#gen();
+        let nonce = journal
+            .issue_disk_pressure_launch(service_instance, &slot_id, generation, 100)
+            .unwrap();
+
+        let transaction = journal.conn.unchecked_transaction().unwrap();
+        begin_journal_write_gate(&transaction).unwrap();
+        transaction
+            .execute(
+                "INSERT INTO disk_pressure_episodes (
+                     service_instance, filesystem_id, episode_id, started_unix, deadline_unix,
+                     drain_deadline_unix, last_observed_unix, reclaim_attempted, revision,
+                     draining, terminal
+                 ) VALUES (?1, ?2, ?3, -1, 160, 190, 100, 1, 1, 0, 0)",
+                params![service_instance, "work-device", "corrupt-episode"],
+            )
+            .unwrap();
+        end_journal_write_gate(&transaction).unwrap();
+        transaction.commit().unwrap();
+
+        let error = journal
+            .observe_disk_pressure_roots(
+                service_instance,
+                &slot_id,
+                generation,
+                &nonce,
+                &[
+                    DiskPressureFilesystemSample {
+                        filesystem_id: "config-device".to_owned(),
+                        alias_ids: Vec::new(),
+                        available_bytes: Some(0),
+                        min_free_bytes: 10,
+                        volume_fingerprint: Some("config-volume".to_owned()),
+                    },
+                    DiskPressureFilesystemSample {
+                        filesystem_id: "work-device".to_owned(),
+                        alias_ids: Vec::new(),
+                        available_bytes: Some(0),
+                        min_free_bytes: 10,
+                        volume_fingerprint: Some("work-volume".to_owned()),
+                    },
+                ],
+                60,
+                30,
+                100,
+            )
+            .unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.disk_pressure.state.invalid");
+        assert!(journal
+            .disk_pressure_episode(service_instance, "config-device")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn pressure_episodes_are_independent_per_filesystem() {
+        let (_dir, mut journal) = open_pressure_tmp("pressure-multiple-filesystems");
+        prime_ready(&mut journal, "scope-1");
+        let service_instance = "service-one";
+        let slot_id = slot("scope-1");
+        let generation = r#gen();
+        let nonce = journal
+            .issue_disk_pressure_launch(service_instance, &slot_id, generation, 100)
+            .unwrap();
+        let config_episode = observe_pressure_one(
+            &journal,
+            service_instance,
+            "config-device",
+            "config-volume",
+            &slot_id,
+            generation,
+            &nonce,
+            0,
+            10,
+            60,
+            30,
+            100,
+        )
+        .unwrap()
+        .episode
+        .unwrap();
+        let work_episode = observe_pressure_one(
+            &journal,
+            service_instance,
+            "work-device",
+            "work-volume",
+            &slot_id,
+            generation,
+            &nonce,
+            0,
+            10,
+            60,
+            30,
+            110,
+        )
+        .unwrap()
+        .episode
+        .unwrap();
+        assert_ne!(config_episode.episode_id, work_episode.episode_id);
+        assert_eq!(config_episode.deadline_unix, 160);
+        assert_eq!(work_episode.deadline_unix, 170);
+
+        let cleared_config = observe_pressure_one(
+            &journal,
+            service_instance,
+            "config-device",
+            "config-volume",
+            &slot_id,
+            generation,
+            &nonce,
+            10,
+            10,
+            60,
+            30,
+            120,
+        )
+        .unwrap();
+        assert!(cleared_config.cleared);
+        assert!(journal
+            .disk_pressure_episode(service_instance, "config-device")
+            .unwrap()
+            .is_none());
+        let still_low_work = journal
+            .disk_pressure_episode(service_instance, "work-device")
+            .unwrap()
+            .unwrap();
+        assert_eq!(still_low_work.episode_id, work_episode.episode_id);
+        assert_eq!(still_low_work.deadline_unix, work_episode.deadline_unix);
+    }
+
+    #[test]
+    fn config_root_episode_survives_relaunch_while_work_root_is_healthy() {
+        let (dir, mut setup) = open_pressure_tmp("pressure-config-root-relaunch");
+        prime_ready(&mut setup, "scope-1");
+        let path = dir.join("journal.db");
+        drop(setup);
+        let service_instance = "service-one";
+        let slot_id = slot("scope-1");
+        let generation = r#gen();
+        let journal = Journal::open_for_service_instance(&path, service_instance).unwrap();
+        let first_nonce = journal
+            .issue_disk_pressure_launch(service_instance, &slot_id, generation, 100)
+            .unwrap();
+        let first_observations = journal
+            .observe_disk_pressure_roots(
+                service_instance,
+                &slot_id,
+                generation,
+                &first_nonce,
+                &[
+                    DiskPressureFilesystemSample {
+                        filesystem_id: "config-device".to_owned(),
+                        alias_ids: Vec::new(),
+                        available_bytes: Some(0),
+                        min_free_bytes: 10,
+                        volume_fingerprint: Some("config-volume".to_owned()),
+                    },
+                    DiskPressureFilesystemSample {
+                        filesystem_id: "work-device".to_owned(),
+                        alias_ids: Vec::new(),
+                        available_bytes: Some(10),
+                        min_free_bytes: 10,
+                        volume_fingerprint: Some("work-volume".to_owned()),
+                    },
+                ],
+                60,
+                30,
+                100,
+            )
+            .unwrap();
+        assert!(first_observations[0].1.reclaim_needed);
+        let first_config = first_observations[0].1.episode.as_ref().unwrap();
+        assert!(first_observations[1].1.episode.is_none());
+
+        drop(journal);
+        let reopened = Journal::open_for_service_instance(&path, service_instance).unwrap();
+        let relaunch_error = reopened
+            .issue_disk_pressure_launch(service_instance, &slot_id, generation, 120)
+            .unwrap_err();
+        assert_eq!(
+            relaunch_error.envelope.reason,
+            "journal.disk_pressure.launch.pressure"
+        );
+        reopened
+            .advance_disk_pressure_roots(
+                service_instance,
+                &[
+                    DiskPressureFilesystemSample {
+                        filesystem_id: "config-device".to_owned(),
+                        alias_ids: Vec::new(),
+                        available_bytes: Some(0),
+                        min_free_bytes: 10,
+                        volume_fingerprint: Some("config-volume".to_owned()),
+                    },
+                    DiskPressureFilesystemSample {
+                        filesystem_id: "work-device".to_owned(),
+                        alias_ids: Vec::new(),
+                        available_bytes: Some(10),
+                        min_free_bytes: 10,
+                        volume_fingerprint: Some("work-volume".to_owned()),
+                    },
+                ],
+                600,
+                30,
+                120,
+            )
+            .unwrap();
+        let config_episode = reopened
+            .disk_pressure_episode(service_instance, "config-device")
+            .unwrap()
+            .unwrap();
+        assert_eq!(config_episode.episode_id, first_config.episode_id);
+        assert_eq!(config_episode.started_unix, 100);
+        assert_eq!(config_episode.deadline_unix, 160);
+        assert!(reopened
+            .disk_pressure_episode(service_instance, "work-device")
+            .unwrap()
+            .is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pressure_launch_fence_survives_slot_generation_reuse() {
+        let (dir, mut setup) = open_pressure_tmp("pressure-generation-reuse");
+        prime_ready(&mut setup, "scope-1");
+        let service_instance = "service-one";
+        let path = dir.join("journal.db");
+        drop(setup);
+        let mut journal = Journal::open_for_service_instance(&path, service_instance).unwrap();
+        let filesystem_id = "dev:42";
+        let slot_id = slot("scope-1");
+        let old_generation = r#gen();
+        let old_nonce = journal
+            .issue_disk_pressure_launch(service_instance, &slot_id, old_generation, 100)
+            .unwrap();
+
+        assert!(
+            !journal
+                .apply(Event::SlotStale {
+                    slot_id: slot_id.clone(),
+                    generation: old_generation,
+                })
+                .unwrap()
+                .rejected
+        );
+        let generation = old_generation.next();
+        for event in [
+            Event::PermitReserved {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::ExecutorProven {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::SessionLive {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::RegistrationIntended {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::Registered {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::ReadyAttempt {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        let new_nonce = journal
+            .issue_disk_pressure_launch(service_instance, &slot_id, generation, 120)
+            .unwrap();
+        assert_ne!(old_nonce, new_nonce);
+
+        let stale = observe_pressure_one(
+            &journal,
+            service_instance,
+            filesystem_id,
+            "volume-dev-42",
+            &slot_id,
+            old_generation,
+            &old_nonce,
+            0,
+            10,
+            60,
+            30,
+            130,
+        )
+        .unwrap_err();
+        assert_eq!(stale.envelope.reason, "journal.disk_pressure.launch.fenced");
+        assert!(
+            observe_pressure_one(
+                &journal,
+                service_instance,
+                filesystem_id,
+                "volume-dev-42",
+                &slot_id,
+                generation,
+                &new_nonce,
+                0,
+                10,
+                60,
+                30,
+                130,
+            )
+            .unwrap()
+            .reclaim_needed
+        );
+    }
+
+    #[test]
+    fn schema8_eventful_upgrade_backfills_acquisition_generation_atomically() {
+        let (dir, mut journal) = open_tmp("schema8-eventful-acquisition-backfill");
+        prime_provisional(&mut journal, "scope-1", "request-1");
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute(
+            "DELETE FROM meta WHERE key IN (?1, ?2)",
+            params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE events SET generation = 0 WHERE kind = 'job_acquisition_intended'",
+            [],
+        )
+        .unwrap();
+        drop_schema10_pressure_and_schema11_identity(&conn);
+        conn.pragma_update(None, "user_version", 8u32).unwrap();
+        drop(conn);
+
+        let upgraded = Journal::open_for_service_instance(&path, "legacy-migration").unwrap();
+        let generation: i64 = upgraded
+            .conn
+            .query_row(
+                "SELECT generation FROM events WHERE kind = 'job_acquisition_intended'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(generation, 1);
+        assert_eq!(
+            upgraded.load_state().unwrap().jobs[0].job_id,
+            job("request-1")
+        );
+        assert_eq!(
+            upgraded
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            i64::from(JOURNAL_SCHEMA_VERSION)
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema8_acquisition_generation_mismatch_rolls_back_without_stamping() {
+        let (dir, mut journal) = open_tmp("schema8-acquisition-backfill-rollback");
+        prime_provisional(&mut journal, "scope-1", "request-1");
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute(
+            "DELETE FROM meta WHERE key IN (?1, ?2)",
+            params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE events SET generation = 2 WHERE kind = 'job_acquisition_intended'",
+            [],
+        )
+        .unwrap();
+        drop_schema10_pressure_and_schema11_identity(&conn);
+        conn.pragma_update(None, "user_version", 8u32).unwrap();
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.event.metadata.mismatch");
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT generation FROM events WHERE kind = 'job_acquisition_intended'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            2
+        );
+        assert!(load_replay_baseline(&conn).unwrap().is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema8_eventless_nonempty_state_fails_closed_without_stamping() {
+        let (dir, mut journal) = open_tmp("schema8-eventless-nonempty");
+        assert!(!journal.apply(Event::ControlLive).unwrap().rejected);
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        drop_schema10_pressure_and_schema11_identity(&conn);
+        conn.execute("DELETE FROM events", []).unwrap();
+        conn.pragma_update(None, "user_version", 8u32).unwrap();
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.provenance");
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema8_migration_rejects_nonacquisition_checksum_before_stamping() {
+        let (dir, mut journal) = open_tmp("schema8-migration-checksum");
+        journal.apply(Event::ControlLive).unwrap();
+        let path = dir.join("journal.db");
+        drop(journal);
+        demote_eventful_journal_to_v8(&path);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE events SET checksum = 'tampered' WHERE kind = 'control_live'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_schema8_migration_rejected(&path, "journal.checksum.mismatch");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema8_migration_rejects_unknown_event_before_stamping() {
+        let (dir, mut journal) = open_tmp("schema8-migration-unknown-event");
+        journal.apply(Event::ControlLive).unwrap();
+        let path = dir.join("journal.db");
+        drop(journal);
+        demote_eventful_journal_to_v8(&path);
+        let payload = r#"{"type":"future_envelope","x":1}"#;
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE events SET kind = 'future_envelope', payload = ?1, checksum = ?2 WHERE id = 1",
+            params![payload, payload_checksum(payload.as_bytes())],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_schema8_migration_rejected(&path, "journal.event.unknown");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema8_migration_rejects_reducer_event_before_stamping() {
+        let (dir, mut journal) = open_tmp("schema8-migration-reducer-rejection");
+        journal.apply(Event::ControlLive).unwrap();
+        let path = dir.join("journal.db");
+        drop(journal);
+        demote_eventful_journal_to_v8(&path);
+        let event = Event::SlotStale {
+            slot_id: slot("scope-1"),
+            generation: r#gen().next(),
+        };
+        let payload = serde_json::to_string(&event).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE events
+             SET generation = ?1, kind = ?2, payload = ?3, checksum = ?4
+             WHERE id = 1",
+            params![
+                event_generation(&event).0 as i64,
+                event_kind(&event),
+                payload,
+                payload_checksum(payload.as_bytes()),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_schema8_migration_rejected(&path, "journal.event.rejected");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema8_migration_rejects_replay_materialized_drift_before_stamping() {
+        let (dir, mut journal) = open_tmp("schema8-migration-projection-drift");
+        journal.apply(Event::ControlLive).unwrap();
+        let path = dir.join("journal.db");
+        drop(journal);
+        demote_eventful_journal_to_v8(&path);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("UPDATE meta SET value = '0' WHERE key = 'control_live'", [])
+            .unwrap();
+        drop(conn);
+
+        assert_schema8_migration_rejected(&path, "journal.materialized.replay.mismatch");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema11_sql_fence_blocks_an_already_open_v10_writer() {
+        let (dir, mut journal) = open_tmp("schema11-already-open-v10-writer");
+        // Seed one row in every guarded table through the current writer. The stale connection must then be unable to exercise any
+        // INSERT, UPDATE, or DELETE path, including rows an empty fixture
+        // would not visit for UPDATE/DELETE triggers.
+        let generation = prime_running_job(&mut journal, "scope-1", "job-1");
+        assert!(
+            !journal
+                .apply(Event::CompletionIntended {
+                    job_id: job("job-1"),
+                    generation,
+                    payload_sha256: "payload".into(),
+                })
+                .unwrap()
+                .rejected
+        );
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let setup = Connection::open(&path).unwrap();
+        for (name, _, _) in JOURNAL_WRITE_FENCE_TRIGGERS {
+            setup
+                .execute_batch(&format!("DROP TRIGGER IF EXISTS {name};"))
+                .unwrap();
+        }
+        setup.execute_batch("DROP TABLE journal_identity;").unwrap();
+        setup
+            .execute(
+                "INSERT INTO disk_pressure_episodes (
+                     service_instance, filesystem_id, episode_id, started_unix,
+                     deadline_unix, drain_deadline_unix, last_observed_unix,
+                     reclaim_attempted, revision, draining, terminal
+                 ) VALUES ('fence-test', 'dev:42', 'episode-1', 100, 160, 460, 100, 1, 1, 0, 0)",
+                [],
+            )
+            .unwrap();
+        setup
+            .execute(
+                "INSERT INTO disk_pressure_launches (
+                     service_instance, slot_id, generation, launch_nonce, issued_unix, active
+                 ) VALUES ('fence-test', 'scope-2', 1, 'launch-1', 100, 1)",
+                [],
+            )
+            .unwrap();
+        setup
+            .execute(
+                "INSERT INTO disk_pressure_observations (
+                     service_instance, filesystem_id, volume_fingerprint,
+                     identity_confirmed, last_observed_unix
+                 ) VALUES ('fence-test', 'dev:42', 'volume-42', 1, 100)",
+                [],
+            )
+            .unwrap();
+        // Model the v10 writer's 24 triggers: all pressure/event/materialized
+        // rows are fenced, but it predates the identity table.
+        for (name, table, operation) in JOURNAL_WRITE_FENCE_TRIGGERS[..24].iter().copied() {
+            setup
+                .execute_batch(&journal_write_fence_trigger_sql(name, table, operation))
+                .unwrap();
+        }
+        setup.pragma_update(None, "user_version", 10u32).unwrap();
+        drop(setup);
+
+        // This connection represents a v10 process that opened before the
+        // migration and therefore cannot be protected by a fresh-read
+        // `PRAGMA user_version` check.
+        let old_writer = Connection::open(&path).unwrap();
+        let mut prepared_delete = old_writer.prepare("DELETE FROM meta").unwrap();
+        let mut upgraded = Journal::open_for_service_instance(&path, "fence-test").unwrap();
+        let before_events = event_count(&upgraded);
+        let before_state = upgraded.materialized_state().unwrap();
+        let before_baseline = load_replay_baseline(&upgraded.conn).unwrap();
+
+        // SQLite may invalidate and transparently recompile a statement when
+        // migration installs triggers. Either outcome must fail closed; the
+        // prepared pre-migration statement must never delete post-migration
+        // metadata.
+        let prepared_error = prepared_delete.execute([]).unwrap_err();
+        assert!(
+            prepared_error
+                .to_string()
+                .contains(JOURNAL_WRITE_FENCE_REASON)
+                || prepared_error
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains("schema has changed"),
+            "prepared stale write was rejected for the wrong reason: {prepared_error}"
+        );
+        drop(prepared_delete);
+
+        let blocked_writes = [
+            (
+                "events insert",
+                "INSERT INTO events (generation, kind, payload, checksum) VALUES (0, 'tampered', '{}', 'bad')",
+            ),
+            (
+                "events update",
+                "UPDATE events SET payload = 'tampered' WHERE id = (SELECT MIN(id) FROM events)",
+            ),
+            (
+                "events delete",
+                "DELETE FROM events WHERE id = (SELECT MIN(id) FROM events)",
+            ),
+            (
+                "slots insert",
+                "INSERT INTO slots (slot_id, generation, phase, permit_held, routing_valid, session_live, executor_proven, registered, pid, heartbeat_unix) VALUES ('stale-slot', 1, 'ready', 0, 0, 0, 0, 0, NULL, 0)",
+            ),
+            (
+                "slots update",
+                "UPDATE slots SET phase = 'tampered' WHERE slot_id = 'scope-1'",
+            ),
+            (
+                "slots delete",
+                "DELETE FROM slots WHERE slot_id = 'scope-1'",
+            ),
+            (
+                "jobs insert",
+                "INSERT INTO jobs (job_id, slot_id, generation, attempt, worker, phase, accepted_unix) VALUES ('stale-job', 'scope-1', 1, 1, 'stale', 'assigned', 0)",
+            ),
+            (
+                "jobs update",
+                "UPDATE jobs SET phase = 'tampered' WHERE job_id = 'job-1'",
+            ),
+            (
+                "jobs delete",
+                "DELETE FROM jobs WHERE job_id = 'job-1'",
+            ),
+            (
+                "outbox insert",
+                "INSERT INTO outbox (job_id, slot_id, generation, payload_sha256, created_unix) VALUES ('stale-job', 'scope-1', 1, 'stale', 0)",
+            ),
+            (
+                "outbox update",
+                "UPDATE outbox SET payload_sha256 = 'tampered' WHERE job_id = 'job-1'",
+            ),
+            (
+                "outbox delete",
+                "DELETE FROM outbox WHERE job_id = 'job-1'",
+            ),
+            (
+                "meta insert",
+                "INSERT INTO meta (key, value) VALUES ('stale', 'tampered')",
+            ),
+            (
+                "meta update",
+                "UPDATE meta SET value = 'tampered' WHERE key = 'replay_baseline_sha256_v1'",
+            ),
+            (
+                "meta delete",
+                "DELETE FROM meta WHERE key = 'replay_baseline_v1'",
+            ),
+            (
+                "pressure episode insert",
+                "INSERT INTO disk_pressure_episodes (service_instance, filesystem_id, episode_id, started_unix, deadline_unix, drain_deadline_unix, last_observed_unix, reclaim_attempted, revision, draining, terminal) VALUES ('fence-test', 'other-device', 'stale-episode', 100, 160, 460, 100, 0, 1, 0, 0)",
+            ),
+            (
+                "pressure episode update",
+                "UPDATE disk_pressure_episodes SET terminal = 1 WHERE service_instance = 'fence-test' AND filesystem_id = 'dev:42'",
+            ),
+            (
+                "pressure episode delete",
+                "DELETE FROM disk_pressure_episodes WHERE service_instance = 'fence-test' AND filesystem_id = 'dev:42'",
+            ),
+            (
+                "pressure launch insert",
+                "INSERT INTO disk_pressure_launches (service_instance, slot_id, generation, launch_nonce, issued_unix, active) VALUES ('fence-test', 'other-slot', 1, 'nonce', 100, 1)",
+            ),
+            (
+                "pressure launch update",
+                "UPDATE disk_pressure_launches SET active = 0 WHERE service_instance = 'fence-test' AND slot_id = 'scope-2'",
+            ),
+            (
+                "pressure launch delete",
+                "DELETE FROM disk_pressure_launches WHERE service_instance = 'fence-test' AND slot_id = 'scope-2'",
+            ),
+            (
+                "pressure observation insert",
+                "INSERT INTO disk_pressure_observations (service_instance, filesystem_id, volume_fingerprint, identity_confirmed, last_observed_unix) VALUES ('fence-test', 'other-device', 'other-volume', 1, 100)",
+            ),
+            (
+                "pressure observation update",
+                "UPDATE disk_pressure_observations SET last_observed_unix = 101 WHERE service_instance = 'fence-test' AND filesystem_id = 'dev:42'",
+            ),
+            (
+                "pressure observation delete",
+                "DELETE FROM disk_pressure_observations WHERE service_instance = 'fence-test' AND filesystem_id = 'dev:42'",
+            ),
+            (
+                "journal identity insert",
+                "INSERT INTO journal_identity (id, service_instance) VALUES (1, 'stale-service')",
+            ),
+            (
+                "journal identity update",
+                "UPDATE journal_identity SET service_instance = 'stale-service' WHERE id = 1",
+            ),
+            (
+                "journal identity delete",
+                "DELETE FROM journal_identity WHERE id = 1",
+            ),
+        ];
+        assert_eq!(blocked_writes.len(), JOURNAL_WRITE_FENCE_TRIGGERS.len());
+        for (label, sql) in blocked_writes {
+            let error = match old_writer.execute(sql, []) {
+                Ok(changed) => panic!("{label} unexpectedly changed {changed} rows"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains(JOURNAL_WRITE_FENCE_REASON),
+                "{label} was rejected for the wrong reason: {error}"
+            );
+        }
+
+        assert_eq!(event_count(&upgraded), before_events);
+        assert_eq!(upgraded.materialized_state().unwrap(), before_state);
+        assert_eq!(
+            load_replay_baseline(&upgraded.conn).unwrap(),
+            before_baseline
+        );
+
+        // The same database remains writable through the current API. These
+        // calls exercise both ordinary event materialization and direct meta
+        // overlays while the stale connection remains open.
+        assert!(
+            !upgraded
+                .apply(Event::SlotHeartbeat {
+                    slot_id: slot("scope-1"),
+                    generation,
+                    pid: 42,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(upgraded.set_drain(17).unwrap());
+        assert!(upgraded.clear_drain().unwrap());
+        assert!(upgraded.set_admission_blocked(18).unwrap());
+        assert!(upgraded.clear_admission_blocked_if(Some(18)).unwrap());
+        assert!(event_count(&upgraded) > before_events);
+        assert!(load_replay_baseline(&upgraded.conn).unwrap().is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema9_trigger_census_rejects_case_variant_persistent_and_temp_triggers() {
+        let (dir, mut journal) = open_tmp("schema9-case-variant-trigger-census");
+        let guarded_tables = [
+            ("events", "EVENTS", "INSERT"),
+            ("slots", "SLOTS", "INSERT"),
+            ("jobs", "JOBS", "INSERT"),
+            ("outbox", "OUTBOX", "INSERT"),
+            ("meta", "META", "INSERT"),
+            ("journal_write_gate", "JOURNAL_WRITE_GATE", "DELETE"),
+        ];
+        for (index, (_table, case_variant, operation)) in guarded_tables.iter().enumerate() {
+            let persistent_name = format!("rogue_case_persistent_{index}");
+            journal
+                .conn
+                .execute_batch(&format!(
+                    "CREATE TRIGGER {persistent_name}
+                     AFTER {operation} ON \"{case_variant}\"
+                     FOR EACH ROW BEGIN SELECT 1; END;"
+                ))
+                .unwrap();
+            let error = journal.set_drain(index as u64 + 1).unwrap_err();
+            assert_eq!(error.envelope.reason, "journal.write.fence.invalid");
+            journal
+                .conn
+                .execute_batch(&format!("DROP TRIGGER {persistent_name};"))
+                .unwrap();
+
+            let temp_name = format!("rogue_case_temp_{index}");
+            journal
+                .conn
+                .execute_batch(&format!(
+                    "CREATE TEMP TRIGGER {temp_name}
+                     AFTER {operation} ON \"{case_variant}\"
+                     FOR EACH ROW BEGIN SELECT 1; END;"
+                ))
+                .unwrap();
+            let error = journal.set_drain(index as u64 + 100).unwrap_err();
+            assert_eq!(error.envelope.reason, "journal.write.fence.invalid");
+            journal
+                .conn
+                .execute_batch(&format!("DROP TRIGGER {temp_name};"))
+                .unwrap();
+        }
+        assert_eq!(read_drain_state(&dir.join("journal.db")), Ok(None));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_v9_writer_rejects_gate_after_delete_reentrancy() {
+        let (dir, mut journal) = open_tmp("schema9-rogue-gate-after-delete");
+        let path = dir.join("journal.db");
+        let external = Connection::open(&path).unwrap();
+        external
+            .execute_batch(
+                "CREATE TRIGGER rogue_gate_after_delete
+                 AFTER DELETE ON journal_write_gate
+                 FOR EACH ROW
+                 BEGIN
+                     INSERT INTO journal_write_gate (id) VALUES (1);
+                 END;",
+            )
+            .unwrap();
+
+        let error = journal.set_drain(17).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.write.fence.invalid");
+        assert_eq!(read_drain_state(&path), Ok(None));
+        assert_eq!(event_count(&journal), 0);
+        drop(external);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_v9_writer_rejects_before_dml_gate_injection() {
+        let (dir, mut journal) = open_tmp("schema9-rogue-before-dml");
+        let path = dir.join("journal.db");
+        let external = Connection::open(&path).unwrap();
+        external
+            .execute_batch(
+                "CREATE TRIGGER rogue_events_before_insert
+                 BEFORE INSERT ON events
+                 FOR EACH ROW
+                 BEGIN
+                     INSERT OR IGNORE INTO journal_write_gate (id) VALUES (1);
+                 END;",
+            )
+            .unwrap();
+
+        let error = journal.apply(Event::ControlLive).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.write.fence.invalid");
+        assert_eq!(event_count(&journal), 0);
+        assert!(load_replay_baseline(&journal.conn).unwrap().is_some());
+        drop(external);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_v9_handle_rejects_fence_removal_before_writing() {
+        let (dir, mut journal) = open_tmp("schema9-fence-removed-live-handle");
+        let path = dir.join("journal.db");
+        let external = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&external);
+
+        let error = journal.set_drain(17).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.write.fence.invalid");
+        assert_eq!(read_drain_state(&path), Ok(None));
+
+        restore_journal_write_fence(&external);
+        assert!(journal.set_drain(17).unwrap());
+        drop(external);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn checked_reads_reject_baseline_or_fence_tamper_on_open_handle() {
+        let (dir, journal) = open_tmp("schema9-checked-read-tamper");
+        let path = dir.join("journal.db");
+        let external = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&external);
+        let error = journal.materialized_state().unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.write.fence.invalid");
+        let error = journal.load_state().unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.write.fence.invalid");
+
+        restore_journal_write_fence(&external);
+        drop_replay_baseline_fence(&external);
+        external
+            .execute(
+                "DELETE FROM meta WHERE key IN (?1, ?2)",
+                params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+            )
+            .unwrap();
+        restore_journal_write_fence(&external);
+        let error = journal.materialized_state().unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.missing");
+        let error = journal.load_state().unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.missing");
+        drop(external);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema9_rejects_malformed_write_gate_schema_without_installing_fence() {
+        let (dir, journal) = open_tmp("schema9-malformed-write-gate");
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute_batch(
+            "DROP TABLE journal_write_gate;
+             CREATE TABLE journal_write_gate (id INTEGER PRIMARY KEY);",
+        )
+        .unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+
+        let check = Connection::open(&path).unwrap();
+        let gate_schema: String = check
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'journal_write_gate'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            normalize_sql(&gate_schema),
+            normalize_sql("CREATE TABLE journal_write_gate (id INTEGER PRIMARY KEY);")
+        );
+        let trigger_count: i64 = check
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'journal_write_fence_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(trigger_count, 0);
+        assert_eq!(
+            check
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            JOURNAL_SCHEMA_VERSION as i64
+        );
+        assert!(load_replay_baseline(&check).unwrap().is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn open_handle_rejects_baseline_deletion_before_state_or_overlay_writes() {
+        let (dir, mut journal) = open_tmp("schema9-write-baseline-missing");
+        let path = dir.join("journal.db");
+        let external = Connection::open(&path).unwrap();
+        let direct_error = external
+            .execute("DELETE FROM meta WHERE key = ?1", [REPLAY_BASELINE_KEY])
+            .unwrap_err();
+        assert!(direct_error
+            .to_string()
+            .contains(JOURNAL_WRITE_FENCE_REASON));
+        drop_replay_baseline_fence(&external);
+        external
+            .execute(
+                "DELETE FROM meta WHERE key IN (?1, ?2)",
+                params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+            )
+            .unwrap();
+        drop(external);
+
+        let before_events = event_count(&journal);
+        let error = journal.apply(Event::ControlLive).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.missing");
+        assert_eq!(event_count(&journal), before_events);
+        let error = journal.set_drain(7).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.missing");
+        assert_eq!(read_drain_state(&path), Ok(None));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn open_handle_rejects_baseline_checksum_tamper_before_overlay_write() {
+        let (dir, mut journal) = open_tmp("schema9-write-baseline-checksum");
+        let path = dir.join("journal.db");
+        let external = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&external);
+        external
+            .execute(
+                "UPDATE meta SET value = 'tampered' WHERE key = ?1",
+                [REPLAY_BASELINE_CHECKSUM_KEY],
+            )
+            .unwrap();
+        drop(external);
+        let error = journal.set_admission_blocked(11).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.checksum");
+        assert_eq!(read_admission_state(&path), Ok(None));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema9_missing_both_replay_baseline_keys_fails_closed() {
+        let (dir, journal) = open_tmp("schema9-missing-baseline");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute(
+            "DELETE FROM meta WHERE key IN (?1, ?2)",
+            params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+        )
+        .unwrap();
+        restore_journal_write_fence(&conn);
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.replay.baseline.missing");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_upgrade_baseline_excludes_drain_and_admission_overlays() {
+        let (dir, journal) = open_tmp("legacy-baseline-overlays");
+        let path = dir.join("journal.db");
+        drop(journal);
+        seed_v2_outbox(&path, 0);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES
+                ('drain', 'requested:7'),
+                ('admission', 'blocked:11')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let reopened = Journal::open_for_service_instance(&path, "legacy-migration").unwrap();
+        let baseline: serde_json::Value = serde_json::from_str(
+            &reopened
+                .conn
+                .query_row(
+                    "SELECT value FROM meta WHERE key = ?1",
+                    [REPLAY_BASELINE_KEY],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let baseline_state = baseline.get("state").unwrap();
+        assert!(baseline_state.get("drain_active").is_none());
+        assert!(baseline_state.get("admission_blocked").is_none());
+        let state = reopened.load_state().unwrap();
+        assert!(state.drain_active);
+        assert_eq!(state.drain_version, 7);
+        assert!(state.admission_blocked);
+        assert_eq!(state.admission_version, 11);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn schema9_rejects_missing_and_unknown_baseline_fields() {
+        fn assert_malformed_baseline(label: &str, mutate: fn(&mut serde_json::Value)) {
+            let (dir, journal) = open_tmp(label);
+            let path = dir.join("journal.db");
+            drop(journal);
+            rewrite_replay_baseline(&path, mutate);
+            let error = Journal::open(&path).unwrap_err();
+            assert_eq!(error.envelope.reason, "journal.replay.baseline.invalid");
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+        assert_malformed_baseline("missing-state", |value| {
+            value.as_object_mut().unwrap().remove("state");
+        });
+        assert_malformed_baseline("unknown-field", |value| {
+            value
+                .as_object_mut()
+                .unwrap()
+                .insert("future_semantic_field".into(), true.into());
+        });
+        assert_malformed_baseline("missing-state-field", |value| {
+            value
+                .get_mut("state")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove("control_live");
+        });
+        assert_malformed_baseline("unknown-state-field", |value| {
+            value
+                .get_mut("state")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("future_state_field".into(), true.into());
+        });
+    }
+
+    #[test]
+    fn legacy_v2_migration_writes_and_reloads_from_replay_baseline() {
+        let (dir, journal) = open_tmp("legacy-v2-baseline-write");
+        let path = dir.join("journal.db");
+        drop(journal);
+        seed_v2_outbox(&path, 0);
+
+        let mut migrated = Journal::open_for_service_instance(&path, "legacy-migration").unwrap();
+        assert!(!migrated.apply(Event::ControlLive).unwrap().rejected);
+        drop(migrated);
+
+        let reopened = Journal::open_for_service_instance(&path, "legacy-migration").unwrap();
+        let state = reopened.load_state().unwrap();
+        assert!(state.control_live);
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.outbox.len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_v2_delete_all_post_migration_events_is_rejected() {
+        let (dir, journal) = open_tmp("legacy-v2-delete-all-events");
+        let path = dir.join("journal.db");
+        drop(journal);
+        seed_v2_outbox(&path, 0);
+
+        let mut migrated = Journal::open_for_service_instance(&path, "legacy-migration").unwrap();
+        migrated.apply(Event::ControlLive).unwrap();
+        drop(migrated);
+
+        let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute("DELETE FROM events", []).unwrap();
+        restore_journal_write_fence(&conn);
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(
+            error.envelope.reason,
+            "journal.materialized.replay.mismatch"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5051,21 +14036,31 @@ mod tests {
         let path = dir.join("journal.db");
         drop(journal);
 
-        let seed = Connection::open(&path).unwrap();
-        seed.execute(
-            "INSERT INTO slots (
-                 slot_id, generation, phase, permit_held, routing_valid,
-                 session_live, executor_proven, registered, pid, heartbeat_unix
-             ) VALUES ('scope-extra', 1, 'provisioning', 0, 0, 0, 0, 0, NULL, 0)",
-            [],
-        )
-        .unwrap();
+        let mut seed = Connection::open(&path).unwrap();
+        let transaction = seed
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        begin_journal_write_gate(&transaction).unwrap();
+        transaction
+            .execute(
+                "INSERT INTO slots (
+                     slot_id, generation, phase, permit_held, routing_valid,
+                     session_live, executor_proven, registered, pid, heartbeat_unix
+                 ) VALUES ('scope-extra', 1, 'provisioning', 0, 0, 0, 0, 0, NULL, 0)",
+                [],
+            )
+            .unwrap();
+        end_journal_write_gate(&transaction).unwrap();
+        transaction.commit().unwrap();
         seed.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
             .unwrap();
         drop(seed);
 
         let before = std::fs::read(&path).unwrap();
         let mut reopened = Journal::open(&path).unwrap();
+        let replayed = reopened.load_state().unwrap();
+        assert!(replayed.capacity_invalid);
+        assert_eq!(replayed.slots.len(), 3);
         let state = reopened.materialized_state().unwrap();
         assert!(state.capacity_invalid);
         assert_eq!(state.slots.len(), 3);
@@ -5121,6 +14116,7 @@ mod tests {
 
         let path = dir.join("journal.db");
         let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
         conn.execute(
             "ALTER TABLE slots ADD COLUMN surge INTEGER NOT NULL DEFAULT 0",
             [],
@@ -5204,6 +14200,7 @@ mod tests {
 
         let path = dir.join("journal.db");
         let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
         conn.execute_batch(
             "ALTER TABLE jobs RENAME TO jobs_v2;
              CREATE TABLE jobs (
@@ -5433,6 +14430,220 @@ mod tests {
         }
     }
 
+    fn migrated_generation_mismatch_state(phase: JobPhase2) -> FleetState {
+        let slot_id = slot("scope-1");
+        FleetState {
+            slots: vec![SlotRecord {
+                slot_id: slot_id.clone(),
+                generation: Generation(2),
+                phase: SlotPhase2::Assigned,
+                permit_held: true,
+                ..SlotRecord::new(slot_id.clone())
+            }],
+            jobs: vec![JobRecord {
+                job_id: job("job-1"),
+                slot_id,
+                generation: r#gen(),
+                attempt: 1,
+                worker: "worker-1".to_owned(),
+                phase,
+                accepted_unix: 1,
+                terminal_conclusion: None,
+                provisional: false,
+                plan_id: String::new(),
+                run_service_url: String::new(),
+                probe_attempts: 0,
+                probe_deadline_unix: 0,
+            }],
+            ..FleetState::default()
+        }
+    }
+
+    fn migrated_completion_generation_mismatch_state() -> FleetState {
+        let mut state = migrated_generation_mismatch_state(JobPhase2::Completing);
+        state.outbox.push(OutboxRecord {
+            job_id: job("job-1"),
+            slot_id: slot("scope-1"),
+            generation: r#gen(),
+            payload_sha256: "payload".to_owned(),
+            intended: true,
+            send_started: true,
+            remote_acked: false,
+            created_unix: 1,
+            attempts: 0,
+            deadline_unix: 2,
+            permanent: false,
+            abandoned: false,
+        });
+        state
+    }
+
+    #[test]
+    fn job_started_rejects_migrated_slot_generation_mismatch_without_mutation() {
+        let state = migrated_generation_mismatch_state(JobPhase2::Assigned);
+        let outcome = reduce(
+            state.clone(),
+            Event::JobStarted {
+                job_id: job("job-1"),
+                generation: r#gen(),
+            },
+        );
+
+        assert!(outcome.rejected);
+        assert!(outcome.commands.is_empty());
+        assert_eq!(outcome.state, state);
+    }
+
+    #[test]
+    fn job_worker_lost_rejects_migrated_slot_generation_mismatch_without_mutation() {
+        let state = migrated_generation_mismatch_state(JobPhase2::Running);
+        let outcome = reduce(
+            state.clone(),
+            Event::JobWorkerLost {
+                job_id: job("job-1"),
+                generation: r#gen(),
+            },
+        );
+
+        assert!(outcome.rejected);
+        assert!(outcome.commands.is_empty());
+        assert_eq!(outcome.state, state);
+    }
+
+    #[test]
+    fn schema7_eventless_migration_preserves_generation_mismatch_evidence() {
+        let (dir, journal) = open_tmp("schema7-generation-mismatch");
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute(
+            "DELETE FROM meta WHERE key IN (?1, ?2)",
+            params![REPLAY_BASELINE_KEY, REPLAY_BASELINE_CHECKSUM_KEY],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO slots (
+                 slot_id, generation, phase, permit_held, routing_valid,
+                 session_live, executor_proven, registered, pid, heartbeat_unix
+             ) VALUES ('scope-1', 2, 'assigned', 1, 1, 1, 1, 1, NULL, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO jobs (
+                 job_id, slot_id, generation, attempt, worker, phase, accepted_unix,
+                 terminal_conclusion, provisional, plan_id, run_service_url,
+                 probe_attempts, probe_deadline_unix
+             ) VALUES ('job-1', 'scope-1', 1, 1, 'worker-1', 'assigned', 1,
+                       NULL, 0, '', '', 0, 0)",
+            [],
+        )
+        .unwrap();
+        drop_schema10_pressure_and_schema11_identity(&conn);
+        conn.pragma_update(None, "user_version", 7u32).unwrap();
+        drop(conn);
+
+        let mut migrated = Journal::open_for_service_instance(&path, "legacy-migration").unwrap();
+        let before = migrated.load_state().unwrap();
+        assert_eq!(before.slots[0].generation, Generation(2));
+        assert_eq!(before.jobs[0].generation, r#gen());
+        let events_before = event_count(&migrated);
+
+        for event in [
+            Event::JobStarted {
+                job_id: job("job-1"),
+                generation: r#gen(),
+            },
+            Event::JobWorkerLost {
+                job_id: job("job-1"),
+                generation: r#gen(),
+            },
+        ] {
+            let outcome = migrated.apply(event).unwrap();
+            assert!(outcome.rejected);
+            assert!(outcome.commands.is_empty());
+            assert_eq!(outcome.state, before);
+        }
+
+        assert_eq!(migrated.load_state().unwrap(), before);
+        assert_eq!(event_count(&migrated), events_before);
+    }
+
+    #[test]
+    fn terminal_observation_rejects_migrated_slot_generation_mismatch_without_mutation() {
+        let state = migrated_completion_generation_mismatch_state();
+
+        for event in [
+            Event::RemoteAcked {
+                job_id: job("job-1"),
+                generation: r#gen(),
+            },
+            Event::RemoteObservedTerminal {
+                job_id: job("job-1"),
+                generation: r#gen(),
+            },
+        ] {
+            let outcome = reduce(state.clone(), event);
+            assert!(outcome.rejected);
+            assert!(outcome.commands.is_empty());
+            assert_eq!(outcome.state, state);
+        }
+    }
+
+    #[test]
+    fn terminal_observation_accepts_matching_job_and_slot_generation() {
+        for (suffix, event) in [
+            (
+                "acked",
+                Event::RemoteAcked {
+                    job_id: job("job-1"),
+                    generation: r#gen(),
+                },
+            ),
+            (
+                "observed",
+                Event::RemoteObservedTerminal {
+                    job_id: job("job-1"),
+                    generation: r#gen(),
+                },
+            ),
+        ] {
+            let (_dir, mut journal) = open_tmp(&format!("terminal-observation-{suffix}"));
+            let generation = prime_running_job(&mut journal, "scope-1", "job-1");
+            journal
+                .apply(Event::CompletionIntended {
+                    job_id: job("job-1"),
+                    generation,
+                    payload_sha256: "payload".to_owned(),
+                })
+                .unwrap();
+            journal
+                .apply(Event::CompletionSendStarted {
+                    job_id: job("job-1"),
+                    generation,
+                })
+                .unwrap();
+
+            let outcome = journal.apply(event).unwrap();
+            assert!(!outcome.rejected, "{suffix}");
+            assert!(outcome.commands.iter().any(|command| matches!(
+                command,
+                SideEffect::DeleteOutbox {
+                    job_id,
+                    generation: command_generation
+                } if *job_id == job("job-1") && *command_generation == generation
+            )));
+            assert!(outcome.state.jobs.is_empty());
+            assert!(outcome
+                .state
+                .outbox
+                .iter()
+                .any(|row| row.job_id == job("job-1") && row.remote_acked));
+        }
+    }
+
     #[test]
     fn journal_slot_stale_rejection_preserves_running_job() {
         let (_dir, mut journal) = open_tmp("occupied-slot-stale");
@@ -5568,6 +14779,262 @@ mod tests {
             journal.materialized_state().unwrap().jobs[0].accepted_unix,
             123
         );
+    }
+
+    #[test]
+    fn schema9_reopen_replay_validates_current_event_projection() {
+        let (dir, mut journal) = open_tmp("schema9-replay-valid");
+        journal.apply(Event::ControlLive).unwrap();
+        journal
+            .apply(Event::Dependency {
+                github_reachable: true,
+            })
+            .unwrap();
+        drop(journal);
+
+        let reopened = Journal::open(dir.join("journal.db")).unwrap();
+        let state = reopened.load_state().unwrap();
+        assert!(state.control_live);
+        assert!(state.github_reachable);
+        let conn = Connection::open(dir.join("journal.db")).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replay_rejects_materialized_projection_drift() {
+        let (dir, mut journal) = open_tmp("replay-projection-drift");
+        journal.apply(Event::ControlLive).unwrap();
+        drop(journal);
+
+        let conn = Connection::open(dir.join("journal.db")).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute("UPDATE meta SET value = '0' WHERE key = 'control_live'", [])
+            .unwrap();
+        restore_journal_write_fence(&conn);
+        drop(conn);
+
+        let error = Journal::open(dir.join("journal.db")).unwrap_err();
+        assert_eq!(
+            error.envelope.reason,
+            "journal.materialized.replay.mismatch"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replay_rejects_event_deletion_that_breaks_projection() {
+        let (dir, mut journal) = open_tmp("replay-event-deletion");
+        journal.apply(Event::ControlLive).unwrap();
+        journal
+            .apply(Event::Dependency {
+                github_reachable: true,
+            })
+            .unwrap();
+        drop(journal);
+
+        let conn = Connection::open(dir.join("journal.db")).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute("DELETE FROM events WHERE kind = 'control_live'", [])
+            .unwrap();
+        restore_journal_write_fence(&conn);
+        drop(conn);
+
+        let error = Journal::open(dir.join("journal.db")).unwrap_err();
+        assert_eq!(
+            error.envelope.reason,
+            "journal.materialized.replay.mismatch"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replay_rejects_deleting_all_events_with_materialized_state() {
+        let (dir, mut journal) = open_tmp("replay-delete-all-events");
+        journal.apply(Event::ControlLive).unwrap();
+        journal
+            .apply(Event::Dependency {
+                github_reachable: true,
+            })
+            .unwrap();
+        drop(journal);
+
+        let conn = Connection::open(dir.join("journal.db")).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute("DELETE FROM events", []).unwrap();
+        restore_journal_write_fence(&conn);
+        drop(conn);
+
+        let error = Journal::open(dir.join("journal.db")).unwrap_err();
+        assert_eq!(
+            error.envelope.reason,
+            "journal.materialized.replay.mismatch"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replay_rejects_event_payload_checksum_tamper() {
+        let (dir, mut journal) = open_tmp("replay-event-checksum");
+        journal.apply(Event::ControlLive).unwrap();
+        drop(journal);
+
+        let conn = Connection::open(dir.join("journal.db")).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute(
+            "UPDATE events SET payload = '{\"type\":\"dependency\",\"github_reachable\":false}' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        restore_journal_write_fence(&conn);
+        drop(conn);
+
+        let error = Journal::open(dir.join("journal.db")).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.checksum.mismatch");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replay_rejects_decoded_event_metadata_mismatch() {
+        let (dir, mut journal) = open_tmp("replay-event-metadata");
+        journal.apply(Event::ControlLive).unwrap();
+        drop(journal);
+
+        let conn = Connection::open(dir.join("journal.db")).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute("UPDATE events SET kind = 'dependency' WHERE id = 1", [])
+            .unwrap();
+        restore_journal_write_fence(&conn);
+        drop(conn);
+
+        let error = Journal::open(dir.join("journal.db")).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.event.metadata.mismatch");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replay_rejects_zero_generation_metadata_tamper() {
+        let (dir, mut journal) = open_tmp("replay-zero-generation-metadata");
+        journal.apply(Event::ControlLive).unwrap();
+        drop(journal);
+
+        let conn = Connection::open(dir.join("journal.db")).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute("UPDATE events SET generation = 1 WHERE id = 1", [])
+            .unwrap();
+        // The payload and its checksum are unchanged. Only the denormalized
+        // database generation was tampered with.
+        let (payload, checksum): (String, String) = conn
+            .query_row(
+                "SELECT payload, checksum FROM events WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(sha256_hex(payload.as_bytes()), checksum);
+        restore_journal_write_fence(&conn);
+        drop(conn);
+
+        let error = Journal::open(dir.join("journal.db")).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.event.metadata.mismatch");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replay_rejects_acquisition_generation_metadata_tamper() {
+        let (dir, mut journal) = open_tmp("replay-acquisition-generation");
+        prime_provisional(&mut journal, "scope-1", "request-1");
+        drop(journal);
+
+        let conn = Connection::open(dir.join("journal.db")).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute(
+            "UPDATE events SET generation = 2 WHERE kind = 'job_acquisition_intended'",
+            [],
+        )
+        .unwrap();
+        restore_journal_write_fence(&conn);
+        drop(conn);
+
+        let error = Journal::open(dir.join("journal.db")).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.event.metadata.mismatch");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn acquisition_events_bind_generation_metadata() {
+        let generation = Generation(7);
+        let events = [
+            Event::JobAcquisitionIntended {
+                slot_id: slot("scope-1"),
+                job_id: job("request-1"),
+                generation,
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
+            },
+            Event::JobAcquisitionResolved {
+                provisional_job_id: job("request-1"),
+                acquired_job_id: job("job-1"),
+                plan_id: "plan-1".into(),
+                generation,
+            },
+            Event::JobAcquisitionResolvedAtEndpoint {
+                provisional_job_id: job("request-1"),
+                acquired_job_id: job("job-1"),
+                plan_id: "plan-1".into(),
+                generation,
+                run_service_url: "https://run.example/jobs/1".into(),
+            },
+            Event::AcquisitionProbeFailed {
+                job_id: job("request-1"),
+                generation,
+            },
+            Event::JobAcquisitionLost {
+                job_id: job("request-1"),
+                generation,
+                reason: "lost".into(),
+            },
+        ];
+        for event in events {
+            assert_eq!(event_generation(&event), generation);
+        }
+    }
+
+    #[test]
+    fn replay_rejects_event_that_reducer_now_rejects() {
+        let (dir, mut journal) = open_tmp("replay-event-rejection");
+        journal.apply(Event::ControlLive).unwrap();
+        drop(journal);
+
+        let event = Event::SlotStale {
+            slot_id: slot("scope-1"),
+            generation: r#gen().next(),
+        };
+        let payload = serde_json::to_string(&event).unwrap();
+        let conn = Connection::open(dir.join("journal.db")).unwrap();
+        drop_replay_baseline_fence(&conn);
+        conn.execute(
+            "UPDATE events
+             SET generation = ?1, kind = ?2, payload = ?3, checksum = ?4
+             WHERE id = 1",
+            params![
+                event_generation(&event).0 as i64,
+                event_kind(&event),
+                payload,
+                payload_checksum(payload.as_bytes()),
+            ],
+        )
+        .unwrap();
+        restore_journal_write_fence(&conn);
+        drop(conn);
+
+        let error = Journal::open(dir.join("journal.db")).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.event.rejected");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -6245,6 +15712,7 @@ mod tests {
         drop(journal);
         let path = dir.join("journal.db");
         let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
         let payload = r#"{"type":"future_envelope","x":1}"#;
         let checksum = payload_checksum(payload.as_bytes());
         conn.execute(
@@ -6252,6 +15720,7 @@ mod tests {
             params![payload, checksum],
         )
         .unwrap();
+        restore_journal_write_fence(&conn);
         drop(conn);
         // Skipping it would drop terminal state and re-drive a completion the
         // writer had already resolved. The version gate is what keeps an
@@ -6495,6 +15964,7 @@ mod tests {
             conn.execute_batch(&format!("ALTER TABLE jobs DROP COLUMN {column};"))
                 .unwrap();
         }
+        drop_schema10_pressure_and_schema11_identity(&conn);
         conn.pragma_update(None, "user_version", 5u32).unwrap();
         conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
             .unwrap();
@@ -6514,7 +15984,7 @@ mod tests {
             .unwrap();
         assert_eq!(u32::try_from(version).unwrap(), JOURNAL_SCHEMA_VERSION);
         assert_eq!(
-            JOURNAL_SCHEMA_VERSION, 8,
+            JOURNAL_SCHEMA_VERSION, 12,
             "this test pins the current upgrade"
         );
         for column in [
@@ -6538,6 +16008,7 @@ mod tests {
             conn.execute_batch(&format!("ALTER TABLE jobs DROP COLUMN {column};"))
                 .unwrap();
         }
+        drop_schema10_pressure_and_schema11_identity(&conn);
         conn.pragma_update(None, "user_version", version).unwrap();
         conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
             .unwrap();
@@ -7177,12 +16648,13 @@ mod tests {
         let g = prime_running_job(&mut journal, "scope-1", "job-1");
         drop(journal);
         let conn = Connection::open(&path).unwrap();
+        drop_schema10_pressure_and_schema11_identity(&conn);
         conn.pragma_update(None, "user_version", 7u32).unwrap();
         conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
             .unwrap();
         drop(conn);
 
-        let reopened = Journal::open(&path).unwrap();
+        let reopened = Journal::open_for_service_instance(&path, "legacy-migration").unwrap();
         let version: i64 = reopened
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -7201,6 +16673,8 @@ mod tests {
         prime_running_job(&mut journal, "scope-1", "job-1");
         drop(journal);
         let conn = Connection::open(&path).unwrap();
+        drop_replay_baseline_fence(&conn);
+        drop_schema10_pressure_and_schema11_identity(&conn);
         conn.execute("UPDATE slots SET phase = 'running'", [])
             .unwrap();
         conn.pragma_update(None, "user_version", 7u32).unwrap();

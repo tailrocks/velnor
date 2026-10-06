@@ -18,22 +18,24 @@
 //! * The ledger is a host-wide SQLite database. Every daemon on the host
 //!   must resolve to the same file; multi-process contention is bounded by
 //!   a busy timeout, and every mutation runs in an immediate transaction.
-//! * Grants are generation-fenced: [`PermitLedger::begin_epoch`] bumps the
-//!   generation at daemon startup, and acquire/transition calls carrying a
-//!   stale generation are rejected. Release is intentionally unfenced —
-//!   freeing capacity is always safe, and fencing it would leak permits
-//!   held by a previous epoch's workers.
+//! * Grants and transitions are generation-fenced: [`PermitLedger::begin_epoch`]
+//!   bumps the generation at daemon startup, and stale callers are rejected.
+//!   Guard-owned transitions and releases use a per-attempt token, so delayed
+//!   work from an old holder cannot mutate a redelivery's adopted row.
+//!   Recorded-job recovery persists and uses that same token.
 //! * Capacity is advertised only after reconciliation:
 //!   [`PermitLedger::advertised_free`] returns `None` until
-//!   [`PermitLedger::reconcile`] has run in the current epoch.
-//!   Reconciliation never deletes: observed-but-unrecorded work is adopted
-//!   as counted occupancy, and recorded-but-unobserved work is marked
-//!   [`PermitState::Uncertain`] (still counted). A cleanup failure retains
-//!   its visible reservation; occupied work is never erased by resetting a
-//!   semaphore.
-//! * Acquisition is idempotent per holder: a duplicate delivery for the
-//!   same holder returns [`AcquireOutcome::AlreadyHeld`] without spending
-//!   a second permit. A fresh grant atomically changes the oldest eligible
+//!   [`PermitLedger::reconcile_attempts`] has run in the current epoch.
+//!   Reconciliation never deletes permit rows. Live observations require an
+//!   existing permit row with the exact owner
+//!   token; observed-but-unrecorded work fails stale and is not adopted.
+//!   Recorded-but-unobserved work stays counted and is marked
+//!   [`PermitState::Uncertain`] unless an active cleanup claim protects it.
+//!   Reconciliation creates a missing demand as granted and promotes an
+//!   eligible demand to granted; cleanup failures retain visible reservations.
+//! * Acquisition returns an owner token only for a fresh grant. A duplicate
+//!   delivery returns [`AcquireAttemptOutcome::AlreadyHeld`] without granting
+//!   mutation authority. A fresh grant atomically changes the oldest eligible
 //!   demand to granted while inserting its permit.
 
 use std::path::{Path, PathBuf};
@@ -62,14 +64,14 @@ pub const DEMAND_STALE_AFTER_SECS: u64 = 300;
 /// this long.
 pub const DEFERRED_WAIT_BUDGET: Duration = Duration::from_secs(5);
 
-/// First pause between [`AcquireOutcome::Deferred`] retries; doubles per
+/// First pause between [`AcquireAttemptOutcome::Deferred`] retries; doubles per
 /// consecutive wait.
 pub const DEFERRED_WAIT_MIN: Duration = Duration::from_millis(1);
 
-/// Backoff cap between [`AcquireOutcome::Deferred`] retries.
+/// Backoff cap between [`AcquireAttemptOutcome::Deferred`] retries.
 pub const DEFERRED_WAIT_MAX: Duration = Duration::from_millis(50);
 
-/// Pause before retrying after `attempt` consecutive [`AcquireOutcome::Deferred`]
+/// Pause before retrying after `attempt` consecutive [`AcquireAttemptOutcome::Deferred`]
 /// outcomes: exponential from [`DEFERRED_WAIT_MIN`], capped at
 /// [`DEFERRED_WAIT_MAX`]. The sleeps yield the SQLite lock — a tight spin
 /// re-locks unfairly and starves the head it waits for.
@@ -203,18 +205,59 @@ pub struct PermitHolder {
     pub acquired_unix: u64,
     pub updated_unix: u64,
     pub generation: u64,
-    /// Host pid of the acquiring process, when the lane records one.
-    /// Same-holder redelivery may adopt a dead attempt; startup never uses
-    /// local pid or root evidence alone to erase another daemon's row.
+    /// Host pid of the current owner process, when the lane records one.
+    /// Same-holder redelivery may adopt a dead attempt or a terminal uncertain
+    /// attempt retained by this process; startup never uses local pid or root
+    /// evidence alone to erase another daemon's row.
     pub pid: Option<u32>,
 }
 
-/// Outcome of [`PermitLedger::adopt_if_pid_dead`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Shared Scale Set recovery ownership for one ledger. A dead owner may be
+/// taken over without changing the claim token, so a staged ledger rotation
+/// can prove that its prior commit belongs to this same recovery claim.
+#[derive(Debug)]
+pub struct ScaleSetRecoveryClaim {
+    path: PathBuf,
+    token: String,
+    owner_pid: u32,
+}
+
+impl ScaleSetRecoveryClaim {
+    #[must_use]
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Release only this claim after recovery and supervision have completed.
+    /// Dropping a claim without this explicit call leaves a dead-pid-reclaimable
+    /// row, preserving the fencing token across a crash cut.
+    pub fn release(&mut self) -> Result<(), LedgerError> {
+        let mut ledger = PermitLedger::open(&self.path)?;
+        let tx = ledger
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "DELETE FROM scaleset_recovery_claims
+             WHERE id = 1 AND claim_token = ?1 AND owner_pid = ?2",
+            params![self.token, i64::from(self.owner_pid)],
+        )?;
+        if changed != 1 {
+            return Err(LedgerError::StaleAttempt(
+                "Scale Set recovery claim".to_owned(),
+            ));
+        }
+        tx.commit()?;
+        self.token.clear();
+        Ok(())
+    }
+}
+
+/// Outcome of [`PermitLedger::adopt_for_redelivery`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdoptOutcome {
-    /// The dead attempt's row was adopted: same holder, new pid, new state.
-    Adopted,
-    /// The holding attempt may still be alive (or belongs to another
+    /// The previous attempt's row was adopted with a fresh owner token.
+    Adopted { attempt_token: String },
+    /// The holding attempt may still be active (or belongs to another
     /// lane): not adopted.
     LiveHolder,
     /// The row vanished between calls; retry the acquire.
@@ -223,18 +266,67 @@ pub enum AdoptOutcome {
     StaleGeneration,
 }
 
-/// Outcome of [`PermitLedger::acquire`].
+/// Result of fencing a recorded terminal cleanup against a concurrently
+/// arriving acquisition for the same holder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AcquireOutcome {
-    /// A fresh permit was granted.
-    Acquired,
-    /// The holder already holds a permit (duplicate delivery); no second
-    /// permit was spent.
+pub enum CleanupClaimOutcome {
+    /// The recorded attempt still owned the permit, which is now claimed by
+    /// this process for cleanup.
+    Claimed,
+    /// No permit row existed and its demand was already closed. Cleanup may
+    /// release local reservations and remove the exact marker.
+    ClosedAbsent,
+    /// No permit row existed, so an open demand was atomically closed to stop
+    /// a concurrent fresh acquire. Keep local reservations and the marker on
+    /// this pass; a later recovery can continue from the closed state.
+    DemandClosed,
+    /// A different attempt token already owns the holder. Cleanup has made
+    /// no changes and must retain its local reservation and marker.
+    StaleAttempt,
+}
+
+/// Result of a staged Scale Set token rotation during proven worker recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttemptRotationOutcome {
+    /// The current token matched the staged old token and was rotated.
+    Rotated,
+    /// The ledger contains the staged target plus exact prior-owner and
+    /// claim proof; the owning recovery process can finish its state-database
+    /// transaction idempotently.
+    AlreadyRotated,
+    /// The permit row no longer exists. Recovery must retain its durable
+    /// stage and resources instead of recreating the permit.
+    Missing,
+    /// A different attempt token currently owns this holder.
+    StaleAttempt,
+    /// The caller supplied a stale generation and must reread.
+    StaleGeneration,
+}
+
+/// Atomic result of releasing one token-owned permit attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnedReleaseOutcome {
+    /// The exact token owned a permit row, which is now released.
+    Released,
+    /// No row remained and the demand already matches the requested closed
+    /// target, or staged Scale Set recovery proved the release committed.
+    AlreadyAbsent,
+    /// A different attempt token owns the row. No demand or permit changed.
+    StaleAttempt,
+}
+
+/// Result of a fresh owner-bearing acquisition. `AlreadyHeld` deliberately
+/// does not expose the current token: an existing row is not proof that this
+/// caller owns its attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcquireAttemptOutcome {
+    /// A fresh permit was granted to this attempt.
+    Acquired { attempt_token: String },
+    /// The holder already has a permit; this caller did not acquire ownership.
     AlreadyHeld,
     /// `occupied >= max_jobs`; no permit was granted.
     Full,
-    /// Capacity is available, but an older eligible demand must acquire
-    /// first. The demand remains durable and keeps its original age.
+    /// Capacity is available, but an older eligible demand must acquire first.
     Deferred,
     /// This demand was already terminal or cancelled and cannot be revived.
     Closed,
@@ -244,12 +336,10 @@ pub enum AcquireOutcome {
     NotConfigured,
 }
 
-/// What [`PermitLedger::reconcile`] did. Reconciliation adopts and marks;
-/// it never deletes.
+/// What [`PermitLedger::reconcile_attempts`] confirmed or marked uncertain.
+/// It never recreates a missing permit or deletes a recorded permit.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReconcileReport {
-    /// Observed holders that had no row; adopted as counted occupancy.
-    pub adopted: Vec<String>,
     /// Recorded holders that were not observed; marked uncertain (counted).
     pub marked_uncertain: Vec<String>,
     /// Recorded holders confirmed by observation.
@@ -264,6 +354,8 @@ pub enum LedgerError {
     UnknownState(String),
     UnknownDemandState(String),
     UnknownHolder(String),
+    StaleAttempt(String),
+    RecoveryClaimed(u32),
     DemandLaneMismatch {
         holder: String,
         expected: PermitLane,
@@ -286,6 +378,13 @@ impl std::fmt::Display for LedgerError {
             }
             Self::UnknownHolder(holder) => {
                 write!(f, "permit ledger holds no permit for {holder:?}")
+            }
+            Self::StaleAttempt(holder) => write!(
+                f,
+                "permit attempt token for {holder:?} is missing or no longer current"
+            ),
+            Self::RecoveryClaimed(pid) => {
+                write!(f, "Scale Set recovery is owned by live process {pid}")
             }
             Self::DemandLaneMismatch {
                 holder,
@@ -406,6 +505,102 @@ fn migrate_legacy_native_demand(conn: &mut Connection) -> Result<(), LedgerError
     Ok(())
 }
 
+/// Add and backfill the per-attempt owner token on pre-token ledgers.
+/// Serialize inspection, alteration, backfill, and uniqueness enforcement so
+/// simultaneous daemon opens cannot observe a partially migrated schema.
+fn ensure_permit_attempt_token_column(conn: &mut Connection) -> Result<(), LedgerError> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS permit_token_migrations (
+            holder TEXT PRIMARY KEY,
+            attempt_token TEXT NOT NULL UNIQUE,
+            acquired_unix INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS scaleset_recovery_claims (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            claim_token TEXT NOT NULL,
+            owner_pid INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS recorded_terminal_cleanup_releases (
+            holder TEXT NOT NULL,
+            attempt_token TEXT NOT NULL,
+            PRIMARY KEY (holder, attempt_token)
+        );",
+    )?;
+    let (
+        has_attempt_token,
+        has_recovery_claim_token,
+        has_recovery_previous_pid,
+        has_recovery_previous_token,
+    ) = {
+        let mut statement = tx.prepare("PRAGMA table_info(permits)")?;
+        let mut rows = statement.query([])?;
+        let mut has_attempt_token = false;
+        let mut has_recovery_claim_token = false;
+        let mut has_recovery_previous_pid = false;
+        let mut has_recovery_previous_token = false;
+        while let Some(row) = rows.next()? {
+            match row.get::<_, String>(1)?.as_str() {
+                "attempt_token" => has_attempt_token = true,
+                "recovery_claim_token" => has_recovery_claim_token = true,
+                "recovery_previous_pid" => has_recovery_previous_pid = true,
+                "recovery_previous_token" => has_recovery_previous_token = true,
+                _ => {}
+            }
+        }
+        (
+            has_attempt_token,
+            has_recovery_claim_token,
+            has_recovery_previous_pid,
+            has_recovery_previous_token,
+        )
+    };
+    if !has_attempt_token {
+        tx.execute_batch("ALTER TABLE permits ADD COLUMN attempt_token TEXT;")?;
+    }
+    if !has_recovery_claim_token {
+        tx.execute_batch("ALTER TABLE permits ADD COLUMN recovery_claim_token TEXT;")?;
+    }
+    if !has_recovery_previous_pid {
+        tx.execute_batch("ALTER TABLE permits ADD COLUMN recovery_previous_pid INTEGER;")?;
+    }
+    if !has_recovery_previous_token {
+        tx.execute_batch("ALTER TABLE permits ADD COLUMN recovery_previous_token TEXT;")?;
+    }
+    let missing_tokens: Vec<(String, i64)> = {
+        let mut statement = tx.prepare(
+            "SELECT holder, acquired_unix FROM permits
+             WHERE attempt_token IS NULL OR attempt_token = ''",
+        )?;
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?
+    };
+    for (holder, acquired_unix) in missing_tokens {
+        let attempt_token = uuid::Uuid::new_v4().to_string();
+        tx.execute(
+            "UPDATE permits SET attempt_token = ?1 WHERE holder = ?2",
+            params![attempt_token, holder],
+        )?;
+        // Only rows whose token column did not exist are eligible for a
+        // one-time marker migration. A NULL/empty token in an already
+        // tokenized schema has no trustworthy attempt provenance.
+        if !has_attempt_token {
+            tx.execute(
+                "INSERT OR IGNORE INTO permit_token_migrations
+                 (holder, attempt_token, acquired_unix) VALUES (?1, ?2, ?3)",
+                params![holder, attempt_token, acquired_unix],
+            )?;
+        }
+    }
+    tx.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_permits_attempt_token
+         ON permits (attempt_token);",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 fn read_demand(conn: &Connection, holder: &str) -> Result<Option<PermitDemand>, LedgerError> {
     let row: Option<(String, String, String, i64, i64, String, i64)> = conn
         .query_row(
@@ -443,6 +638,38 @@ fn read_demand(conn: &Connection, holder: &str) -> Result<Option<PermitDemand>, 
         },
     )
     .transpose()
+}
+
+fn read_owned_attempt_state(
+    conn: &Connection,
+    holder: &str,
+    attempt_token: &str,
+) -> Result<String, LedgerError> {
+    let current: Option<(String, String)> = conn
+        .query_row(
+            "SELECT attempt_token, state FROM permits WHERE holder = ?1",
+            params![holder],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((current_token, current_state)) = current {
+        return if current_token == attempt_token {
+            Ok(current_state)
+        } else {
+            Err(LedgerError::StaleAttempt(holder.to_owned()))
+        };
+    }
+
+    let known_holder: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM permit_demands WHERE holder = ?1)",
+        params![holder],
+        |row| row.get(0),
+    )?;
+    Err(if known_holder {
+        LedgerError::StaleAttempt(holder.to_owned())
+    } else {
+        LedgerError::UnknownHolder(holder.to_owned())
+    })
 }
 
 fn check_demand_lane(
@@ -520,22 +747,29 @@ impl PermitLedger {
         conn.busy_timeout(BUSY_TIMEOUT)?;
         let schema_objects: i64 = conn.query_row(
             "SELECT COUNT(*) FROM sqlite_master
-             WHERE (type = 'table' AND name IN ('permit_meta', 'permits', 'permit_demands'))
-                OR (type = 'index' AND name = 'idx_permit_demands_oldest')",
+             WHERE (type = 'table' AND name IN (
+                    'permit_meta', 'permits', 'permit_demands', 'permit_token_migrations',
+                    'scaleset_recovery_claims',
+                    'recorded_terminal_cleanup_releases'
+                ))
+                OR (type = 'index' AND name IN (
+                    'idx_permit_demands_oldest', 'idx_permits_attempt_token'
+                ))",
             [],
             |row| row.get(0),
         )?;
-        // Keep the hot-open path read-only when the schema and its singleton
-        // metadata row are already complete. Counting only sqlite_master
-        // entries is insufficient: a process can observe all four objects
-        // after another process has removed the permit_meta seed row.
-        let meta_seeded = schema_objects == 4
+        // Avoid recreating tables and indexes when their schema and singleton
+        // metadata row are complete. Counting only sqlite_master entries is
+        // insufficient: another process may have removed the permit_meta
+        // seed row while all eight schema objects remain.
+        let meta_seeded = schema_objects == 8
             && conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM permit_meta WHERE id = 1)",
                 [],
                 |row| row.get(0),
             )?;
-        if schema_objects != 4 || !meta_seeded {
+        let schema_repair_needed = schema_objects != 8 || !meta_seeded;
+        if schema_repair_needed {
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS permit_meta (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -552,7 +786,11 @@ impl PermitLedger {
                     acquired_unix INTEGER NOT NULL,
                     updated_unix INTEGER NOT NULL,
                     generation INTEGER NOT NULL,
-                    pid INTEGER
+                    pid INTEGER,
+                    attempt_token TEXT NOT NULL,
+                    recovery_claim_token TEXT,
+                    recovery_previous_pid INTEGER,
+                    recovery_previous_token TEXT
                 );
                 CREATE TABLE IF NOT EXISTS permit_demands (
                     holder TEXT PRIMARY KEY,
@@ -563,10 +801,31 @@ impl PermitLedger {
                     state TEXT NOT NULL,
                     updated_unix INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS permit_token_migrations (
+                    holder TEXT PRIMARY KEY,
+                    attempt_token TEXT NOT NULL UNIQUE,
+                    acquired_unix INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS scaleset_recovery_claims (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    claim_token TEXT NOT NULL,
+                    owner_pid INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS recorded_terminal_cleanup_releases (
+                    holder TEXT NOT NULL,
+                    attempt_token TEXT NOT NULL,
+                    PRIMARY KEY (holder, attempt_token)
+                );
                 CREATE INDEX IF NOT EXISTS idx_permit_demands_oldest
                     ON permit_demands (state, first_seen_unix, sequence);",
             )?;
         }
+        // Run the idempotent transactional backfill on every open. A ledger
+        // can have all expected schema objects while still containing NULL
+        // or empty tokens from an interrupted/older migration; `sqlite_master`
+        // shape alone does not prove every extant permit has an owner token.
+        conn.execute_batch("DROP TABLE IF EXISTS unresolved_native_permit_protections;")?;
+        ensure_permit_attempt_token_column(&mut conn)?;
         migrate_legacy_native_demand(&mut conn)?;
         Ok(Self {
             path: path.to_path_buf(),
@@ -577,6 +836,73 @@ impl PermitLedger {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Claim the shared Scale Set recovery role for this ledger. Claims are
+    /// serialized in SQLite, survive process crashes, and keep their token
+    /// when a proven-dead pid is replaced. A live or same-process owner blocks
+    /// another daemon from recovering or supervising the same ledger.
+    pub fn claim_scaleset_recovery(
+        &mut self,
+        is_alive: &dyn Fn(u32) -> bool,
+    ) -> Result<ScaleSetRecoveryClaim, LedgerError> {
+        let current_pid = std::process::id();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let existing: Option<(String, i64)> = tx
+            .query_row(
+                "SELECT claim_token, owner_pid FROM scaleset_recovery_claims WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let token = match existing {
+            Some((token, raw_pid)) => {
+                if token.is_empty() {
+                    return Err(LedgerError::StaleAttempt(
+                        "Scale Set recovery claim token".to_owned(),
+                    ));
+                }
+                let old_pid = u32::try_from(raw_pid).map_err(|_| {
+                    LedgerError::StaleAttempt("Scale Set recovery claim owner pid".to_owned())
+                })?;
+                if old_pid == 0 {
+                    return Err(LedgerError::StaleAttempt(
+                        "Scale Set recovery claim owner pid".to_owned(),
+                    ));
+                }
+                if is_alive(old_pid) {
+                    return Err(LedgerError::RecoveryClaimed(old_pid));
+                }
+                let changed = tx.execute(
+                    "UPDATE scaleset_recovery_claims SET owner_pid = ?1
+                     WHERE id = 1 AND claim_token = ?2 AND owner_pid = ?3",
+                    params![i64::from(current_pid), token, raw_pid],
+                )?;
+                if changed != 1 {
+                    return Err(LedgerError::StaleAttempt(
+                        "Scale Set recovery claim".to_owned(),
+                    ));
+                }
+                token
+            }
+            None => {
+                let token = uuid::Uuid::new_v4().to_string();
+                tx.execute(
+                    "INSERT INTO scaleset_recovery_claims (id, claim_token, owner_pid)
+                     VALUES (1, ?1, ?2)",
+                    params![token, i64::from(current_pid)],
+                )?;
+                token
+            }
+        };
+        tx.commit()?;
+        Ok(ScaleSetRecoveryClaim {
+            path: self.path.clone(),
+            token,
+            owner_pid: current_pid,
+        })
     }
 
     /// Configured host-wide `N`, when one was set.
@@ -631,7 +957,7 @@ impl PermitLedger {
     }
 
     /// Start a new epoch (daemon startup): bump the generation and require
-    /// a fresh [`Self::reconcile`] before capacity is advertised.
+    /// a fresh [`Self::reconcile_attempts`] before capacity is advertised.
     pub fn begin_epoch(&mut self) -> Result<u64, LedgerError> {
         let tx = self
             .conn
@@ -650,7 +976,7 @@ impl PermitLedger {
         Ok(next.max(0) as u64)
     }
 
-    /// Whether [`Self::reconcile`] ran in the current generation.
+    /// Whether [`Self::reconcile_attempts`] ran in the current generation.
     pub fn reconciled(&self) -> Result<bool, LedgerError> {
         let (generation, reconciled): (i64, i64) = self.conn.query_row(
             "SELECT generation, reconciled_generation FROM permit_meta WHERE id = 1",
@@ -724,6 +1050,49 @@ impl PermitLedger {
             });
         }
         Ok(holders)
+    }
+
+    /// Whether a holder currently has any permit row. This observation does
+    /// not grant ownership and cannot be used to mutate the row.
+    pub fn has_permit(&self, holder: &str) -> Result<bool, LedgerError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM permits WHERE holder = ?1)",
+            params![holder],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Check an attempt token without returning the current token to a caller
+    /// that may not own it. Mutations must still use the token-fenced method;
+    /// this read is observational only.
+    pub fn is_current_attempt(
+        &self,
+        holder: &str,
+        attempt_token: &str,
+    ) -> Result<bool, LedgerError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(
+                    SELECT 1 FROM permits WHERE holder = ?1 AND attempt_token = ?2
+                )",
+            params![holder, attempt_token],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Internal verification/test access. Owner tokens are returned only by
+    /// successful acquire/adoption; external callers cannot recover one from
+    /// a holder string after an `AlreadyHeld` result.
+    #[cfg(test)]
+    fn attempt_token(&self, holder: &str) -> Result<Option<String>, LedgerError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT attempt_token FROM permits WHERE holder = ?1",
+                params![holder],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
     }
 
     /// Read one durable demand row.
@@ -848,25 +1217,55 @@ impl PermitLedger {
             .transpose()
     }
 
-    /// Acquire one permit for `holder`, fenced on `generation`.
-    ///
-    /// Idempotent: a holder that already holds keeps its permit (its state
-    /// is left untouched) and reports [`AcquireOutcome::AlreadyHeld`]. A
-    /// fresh holder acquires only when capacity is available and it is the
-    /// oldest eligible demand. Permit insertion and the eligible-to-granted
-    /// transition commit together. A parked ([`DemandState::Waiting`])
-    /// holder revives at its original age before the admission decision.
-    ///
-    /// `pid` records the acquiring host process as diagnostic recovery
-    /// evidence; lanes whose holders are not host processes pass `None`.
-    pub fn acquire(
+    /// Acquire one permit and return its token atomically with the ownership
+    /// decision. Existing holders never receive a token from this method;
+    /// they must use a separate, proof-bearing recovery/adoption path.
+    pub fn acquire_attempt(
         &mut self,
         holder: &str,
         lane: PermitLane,
         state: PermitState,
         generation: u64,
         pid: Option<u32>,
-    ) -> Result<AcquireOutcome, LedgerError> {
+    ) -> Result<AcquireAttemptOutcome, LedgerError> {
+        self.acquire_attempt_with_token(holder, lane, state, generation, pid, None)
+    }
+
+    /// Acquire a Scale Set permit under a token already persisted in its
+    /// cross-database acquisition stage. This lets startup distinguish a
+    /// committed ledger insert from the state projection that may have been
+    /// interrupted. Replaying the same stage token is idempotent; another
+    /// holder token remains unowned and returns `AlreadyHeld`.
+    pub fn acquire_scaleset_attempt_with_token(
+        &mut self,
+        holder: &str,
+        state: PermitState,
+        generation: u64,
+        pid: Option<u32>,
+        attempt_token: &str,
+    ) -> Result<AcquireAttemptOutcome, LedgerError> {
+        if attempt_token.is_empty() {
+            return Err(LedgerError::StaleAttempt(holder.to_owned()));
+        }
+        self.acquire_attempt_with_token(
+            holder,
+            PermitLane::ScaleSet,
+            state,
+            generation,
+            pid,
+            Some(attempt_token),
+        )
+    }
+
+    fn acquire_attempt_with_token(
+        &mut self,
+        holder: &str,
+        lane: PermitLane,
+        state: PermitState,
+        generation: u64,
+        pid: Option<u32>,
+        staged_attempt_token: Option<&str>,
+    ) -> Result<AcquireAttemptOutcome, LedgerError> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -876,17 +1275,17 @@ impl PermitLedger {
             |row| row.get(0),
         )?;
         if current.max(0) as u64 != generation {
-            return Ok(AcquireOutcome::StaleGeneration);
+            return Ok(AcquireAttemptOutcome::StaleGeneration);
         }
         let now = unix_now();
-        let held_lane: Option<String> = tx
+        let held: Option<(String, String, String)> = tx
             .query_row(
-                "SELECT lane FROM permits WHERE holder = ?1",
+                "SELECT lane, attempt_token, state FROM permits WHERE holder = ?1",
                 params![holder],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
-        if let Some(held_lane) = held_lane {
+        if let Some((held_lane, held_token, held_state)) = held {
             if held_lane != lane.as_str() {
                 return Err(LedgerError::DemandLaneMismatch {
                     holder: holder.to_owned(),
@@ -894,28 +1293,34 @@ impl PermitLedger {
                     seen: held_lane,
                 });
             }
-            let demand = ensure_demand_tx(&tx, holder, lane, "", now, now, DemandState::Granted)?;
-            if demand.state == DemandState::Eligible {
-                tx.execute(
-                    "UPDATE permit_demands SET state = 'granted', updated_unix = ?1
-                     WHERE holder = ?2",
-                    params![i64::try_from(now).unwrap_or(i64::MAX), holder],
-                )?;
+            if staged_attempt_token == Some(held_token.as_str()) && held_state == state.as_str() {
+                let demand = read_demand(&tx, holder)?
+                    .ok_or_else(|| LedgerError::UnknownHolder(holder.to_owned()))?;
+                check_demand_lane(holder, &demand, lane)?;
+                if demand.state != DemandState::Granted {
+                    return Ok(AcquireAttemptOutcome::AlreadyHeld);
+                }
+                tx.commit()?;
+                return Ok(AcquireAttemptOutcome::Acquired {
+                    attempt_token: held_token,
+                });
             }
+            // A duplicate has no attempt token, so it cannot repair demand
+            // state or otherwise mutate the existing owner's row.
             tx.commit()?;
-            return Ok(AcquireOutcome::AlreadyHeld);
+            return Ok(AcquireAttemptOutcome::AlreadyHeld);
         }
         let max: Option<i64> =
             tx.query_row("SELECT max_jobs FROM permit_meta WHERE id = 1", [], |row| {
                 row.get(0)
             })?;
         let Some(max) = max.and_then(|max| u32::try_from(max).ok()) else {
-            return Ok(AcquireOutcome::NotConfigured);
+            return Ok(AcquireAttemptOutcome::NotConfigured);
         };
 
         let demand = ensure_demand_tx(&tx, holder, lane, "", now, now, DemandState::Eligible)?;
         if demand.state == DemandState::Terminal || demand.state == DemandState::Cancelled {
-            return Ok(AcquireOutcome::Closed);
+            return Ok(AcquireAttemptOutcome::Closed);
         }
         if demand.state == DemandState::Granted {
             // A granted demand without its permit can only come from an
@@ -942,7 +1347,7 @@ impl PermitLedger {
         let occupied: i64 = tx.query_row("SELECT COUNT(*) FROM permits", [], |row| row.get(0))?;
         if occupied.max(0) as u64 >= u64::from(max) {
             tx.commit()?;
-            return Ok(AcquireOutcome::Full);
+            return Ok(AcquireAttemptOutcome::Full);
         }
         let fresh_after = now.saturating_sub(DEMAND_STALE_AFTER_SECS);
         let oldest: String = tx.query_row(
@@ -954,12 +1359,16 @@ impl PermitLedger {
         )?;
         if oldest != holder {
             tx.commit()?;
-            return Ok(AcquireOutcome::Deferred);
+            return Ok(AcquireAttemptOutcome::Deferred);
         }
         let now_i64 = i64::try_from(now).unwrap_or(i64::MAX);
+        let attempt_token = staged_attempt_token
+            .map(str::to_owned)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         tx.execute(
-            "INSERT INTO permits (holder, lane, state, acquired_unix, updated_unix, generation, pid)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO permits
+             (holder, lane, state, acquired_unix, updated_unix, generation, pid, attempt_token)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 holder,
                 lane.as_str(),
@@ -968,6 +1377,7 @@ impl PermitLedger {
                 now_i64,
                 i64::try_from(generation).unwrap_or(i64::MAX),
                 pid.map(i64::from),
+                attempt_token,
             ],
         )?;
         tx.execute(
@@ -976,19 +1386,24 @@ impl PermitLedger {
             params![now_i64, holder],
         )?;
         tx.commit()?;
-        Ok(AcquireOutcome::Acquired)
+        Ok(AcquireAttemptOutcome::Acquired { attempt_token })
     }
 
-    /// Adopt one holder's row when its acquiring process is dead and the
-    /// row belongs to `lane`, fenced on `generation`.
+    /// Adopt one holder's row for redelivery when its acquiring process is
+    /// dead, or when this process previously retained the row as uncertain
+    /// with a terminal demand. A `Cleaning` row is an active cleanup claim:
+    /// same-process uncertainty retention cannot demote it, so timed-out
+    /// teardown remains protected until its owner releases it. The row must
+    /// belong to `lane` and match `generation`.
     ///
-    /// Crash-redelivery convergence: the attempt that acquired the permit
-    /// died, and the redelivered attempt takes over the same row (same
-    /// holder, new pid and state) instead of spending a second permit or
-    /// executing rowless. Occupancy is unchanged. A live pid, a missing
-    /// pid, a row in another lane, or a reused pid (which reads as alive)
-    /// all refuse the adoption: the error direction is retention.
-    pub fn adopt_if_pid_dead(
+    /// Crash-redelivery convergence: the redelivered attempt takes over the
+    /// same row (same holder, updated pid and state) instead of spending a
+    /// second permit or executing rowless. A same-process retry can also
+    /// take over its own uncertain terminal row: its old guard has dropped,
+    /// so PID liveness no longer identifies an active attempt. Active
+    /// states, uncertain rows from another live process, missing pids, and
+    /// foreign lanes refuse adoption. Occupancy is unchanged.
+    pub fn adopt_for_redelivery(
         &mut self,
         holder: &str,
         lane: PermitLane,
@@ -1008,14 +1423,16 @@ impl PermitLedger {
         if current.max(0) as u64 != generation {
             return Ok(AdoptOutcome::StaleGeneration);
         }
-        let row: Option<(String, Option<i64>)> = tx
+        let row: Option<(String, Option<i64>, String, Option<String>)> = tx
             .query_row(
-                "SELECT lane, pid FROM permits WHERE holder = ?1",
+                "SELECT permits.lane, permits.pid, permits.state, permit_demands.state
+                 FROM permits LEFT JOIN permit_demands USING (holder)
+                 WHERE permits.holder = ?1",
                 params![holder],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
-        let Some((row_lane, row_pid)) = row else {
+        let Some((row_lane, row_pid, row_state, demand_state)) = row else {
             return Ok(AdoptOutcome::Missing);
         };
         if row_lane != lane.as_str() {
@@ -1024,18 +1441,32 @@ impl PermitLedger {
         let Some(row_pid) = row_pid.and_then(|pid| u32::try_from(pid).ok()) else {
             return Ok(AdoptOutcome::LiveHolder);
         };
-        if is_alive(row_pid) {
+        // `retain_uncertain` marks the demand terminal when its old guard
+        // exits without a terminal service result. That state pair marks a
+        // dropped attempt only when no cleanup worker has claimed it:
+        // `Cleaning` is preserved across the old guard's drop. The pid check
+        // still protects uncertain rows owned by another live daemon.
+        let same_process_retained_native_attempt = lane == PermitLane::Native
+            && row_pid == pid
+            && row_state == PermitState::Uncertain.as_str()
+            && demand_state.as_deref() == Some(DemandState::Terminal.as_str());
+        if is_alive(row_pid) && !same_process_retained_native_attempt {
             return Ok(AdoptOutcome::LiveHolder);
         }
         let now = unix_now();
+        let attempt_token = uuid::Uuid::new_v4().to_string();
         tx.execute(
-            "UPDATE permits SET state = ?1, updated_unix = ?2, generation = ?3, pid = ?4
-             WHERE holder = ?5",
+            "UPDATE permits
+             SET state = ?1, updated_unix = ?2, generation = ?3, pid = ?4, attempt_token = ?5,
+                 recovery_claim_token = NULL, recovery_previous_pid = NULL,
+                 recovery_previous_token = NULL
+             WHERE holder = ?6",
             params![
                 state.as_str(),
                 i64::try_from(now).unwrap_or(i64::MAX),
                 i64::try_from(generation).unwrap_or(i64::MAX),
                 i64::from(pid),
+                attempt_token,
                 holder,
             ],
         )?;
@@ -1048,16 +1479,318 @@ impl PermitLedger {
             )?;
         }
         tx.commit()?;
-        Ok(AdoptOutcome::Adopted)
+        Ok(AdoptOutcome::Adopted { attempt_token })
     }
 
-    /// Move one held permit to a new state, fenced on `generation`.
-    /// Occupancy is unchanged: every state counts.
-    pub fn transition(
+    /// Apply or finish a durable Scale Set recovery token rotation.
+    ///
+    /// The caller must hold the ledger-wide recovery claim and prove the
+    /// worker/resource is no longer live. The state-database stage supplies
+    /// the exact prior pid and token. `None` matches only a token recorded by
+    /// this ledger's one-time legacy migration. The existing permit row is
+    /// mandatory: this method never inserts or reacquires one. A retry after
+    /// a crash between ledger and state-database commits is accepted only when
+    /// the current claim owns the exact rotation recorded on that row. For
+    /// this idempotent path, `generation` is the rotation row's exact committed
+    /// generation; the ledger's current epoch may have advanced since then.
+    pub fn rotate_scaleset_attempt_for_recovery(
         &mut self,
         holder: &str,
         state: PermitState,
         generation: u64,
+        previous_pid: u32,
+        previous_token: Option<&str>,
+        target_token: &str,
+        claim_token: &str,
+    ) -> Result<AttemptRotationOutcome, LedgerError> {
+        if target_token.is_empty()
+            || claim_token.is_empty()
+            || previous_pid == 0
+            || previous_token.is_some_and(str::is_empty)
+            || previous_token == Some(target_token)
+        {
+            return Ok(AttemptRotationOutcome::StaleAttempt);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current_pid = std::process::id();
+        let claim_owner: Option<(String, i64)> = tx
+            .query_row(
+                "SELECT claim_token, owner_pid FROM scaleset_recovery_claims WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if claim_owner.as_ref().is_none_or(|(token, owner_pid)| {
+            token != claim_token || *owner_pid != i64::from(current_pid)
+        }) {
+            return Ok(AttemptRotationOutcome::StaleAttempt);
+        }
+        let current_generation: i64 = tx.query_row(
+            "SELECT generation FROM permit_meta WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let row: Option<(
+            String,
+            String,
+            Option<i64>,
+            i64,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+        )> = tx
+            .query_row(
+                "SELECT lane, attempt_token, pid, generation, recovery_claim_token,
+                        recovery_previous_pid, recovery_previous_token
+                 FROM permits WHERE holder = ?1",
+                params![holder],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            lane,
+            current_token,
+            raw_pid,
+            row_generation,
+            row_claim,
+            row_previous_pid,
+            row_previous_token,
+        )) = row
+        else {
+            return Ok(AttemptRotationOutcome::Missing);
+        };
+        if lane != PermitLane::ScaleSet.as_str() {
+            return Err(LedgerError::DemandLaneMismatch {
+                holder: holder.to_owned(),
+                expected: PermitLane::ScaleSet,
+                seen: lane,
+            });
+        }
+        if current_token == target_token {
+            if (current_generation.max(0) as u64) < generation {
+                return Ok(AttemptRotationOutcome::StaleGeneration);
+            }
+            let same_previous_token = match previous_token {
+                Some(previous) => row_previous_token.as_deref() == Some(previous),
+                None => row_previous_token.is_none(),
+            };
+            if row_claim.as_deref() == Some(claim_token)
+                && row_previous_pid == Some(i64::from(previous_pid))
+                && same_previous_token
+                && u64::try_from(row_generation).is_ok_and(|seen| seen == generation)
+            {
+                tx.commit()?;
+                return Ok(AttemptRotationOutcome::AlreadyRotated);
+            }
+            return Ok(AttemptRotationOutcome::StaleAttempt);
+        }
+        if current_generation.max(0) as u64 != generation {
+            return Ok(AttemptRotationOutcome::StaleGeneration);
+        }
+        let current_row_pid = raw_pid.and_then(|pid| u32::try_from(pid).ok());
+        let previous_token_matches = match previous_token {
+            Some(previous) => previous == current_token,
+            None => tx.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM permit_token_migrations
+                    WHERE holder = ?1 AND attempt_token = ?2
+                )",
+                params![holder, current_token],
+                |row| row.get(0),
+            )?,
+        };
+        if current_token.is_empty()
+            || current_row_pid != Some(previous_pid)
+            || !previous_token_matches
+        {
+            return Ok(AttemptRotationOutcome::StaleAttempt);
+        }
+        let now = i64::try_from(unix_now()).unwrap_or(i64::MAX);
+        let changed = tx.execute(
+            "UPDATE permits SET state = ?1, updated_unix = ?2, generation = ?3,
+                 pid = ?4, attempt_token = ?5, recovery_claim_token = ?6,
+                 recovery_previous_pid = ?7, recovery_previous_token = ?8
+             WHERE holder = ?9 AND lane = ?10 AND attempt_token = ?11 AND pid = ?12",
+            params![
+                state.as_str(),
+                now,
+                i64::try_from(generation).unwrap_or(i64::MAX),
+                i64::from(current_pid),
+                target_token,
+                claim_token,
+                i64::from(previous_pid),
+                previous_token,
+                holder,
+                PermitLane::ScaleSet.as_str(),
+                current_token,
+                i64::from(previous_pid),
+            ],
+        )?;
+        if changed != 1 {
+            return Ok(AttemptRotationOutcome::StaleAttempt);
+        }
+        let demand = ensure_demand_tx(
+            &tx,
+            holder,
+            PermitLane::ScaleSet,
+            "",
+            now.max(0) as u64,
+            now.max(0) as u64,
+            DemandState::Granted,
+        )?;
+        if demand.state == DemandState::Eligible {
+            tx.execute(
+                "UPDATE permit_demands SET state = 'granted', updated_unix = ?1
+                 WHERE holder = ?2",
+                params![now, holder],
+            )?;
+        }
+        tx.commit()?;
+        Ok(AttemptRotationOutcome::Rotated)
+    }
+
+    /// Transition only if the permit still belongs to this exact attempt.
+    /// Adoption rotates the token, so delayed work from the previous attempt
+    /// cannot mutate the redelivery's row. The successful owner is recorded
+    /// as the current process, allowing later recovery to distinguish a live
+    /// cleanup claim from a dead attempt.
+    pub fn transition_owned(
+        &mut self,
+        holder: &str,
+        state: PermitState,
+        generation: u64,
+        attempt_token: &str,
+    ) -> Result<(), LedgerError> {
+        self.transition_for_attempt(holder, state, generation, attempt_token)
+    }
+
+    /// Claim local cleanup for a marker whose exact job is proven terminal.
+    ///
+    /// This is a recovery authority, not a substitute for an attempt owner's
+    /// normal transition. When the token still owns a row, move that row to
+    /// `Cleaning` and record this process in the same transaction. When the
+    /// row is absent, close its demand atomically: a concurrent fresh acquire
+    /// either inserts first and makes this token stale, or observes the closed
+    /// demand and cannot create a permit while local storage is released.
+    ///
+    /// An open demand is closed on this call but returns [`CleanupClaimOutcome::DemandClosed`]
+    /// so the caller retains storage and the marker until a later recovery
+    /// pass confirms the closed state. A different current token returns
+    /// [`CleanupClaimOutcome::StaleAttempt`] without changing either row.
+    pub fn claim_recorded_terminal_cleanup(
+        &mut self,
+        holder: &str,
+        lane: PermitLane,
+        attempt_token: &str,
+    ) -> Result<CleanupClaimOutcome, LedgerError> {
+        if attempt_token.is_empty() {
+            return Ok(CleanupClaimOutcome::StaleAttempt);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let now = unix_now();
+        let now_i64 = i64::try_from(now).unwrap_or(i64::MAX);
+        let generation: i64 = tx.query_row(
+            "SELECT generation FROM permit_meta WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let permit: Option<(String, String)> = tx
+            .query_row(
+                "SELECT lane, attempt_token FROM permits WHERE holder = ?1",
+                params![holder],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((permit_lane, current_token)) = permit {
+            if permit_lane != lane.as_str() {
+                return Err(LedgerError::DemandLaneMismatch {
+                    holder: holder.to_owned(),
+                    expected: lane,
+                    seen: permit_lane,
+                });
+            }
+            if let Some(demand) = read_demand(&tx, holder)? {
+                check_demand_lane(holder, &demand, lane)?;
+            }
+            if current_token != attempt_token {
+                tx.commit()?;
+                return Ok(CleanupClaimOutcome::StaleAttempt);
+            }
+            tx.execute(
+                "UPDATE permits
+                 SET state = 'cleaning', updated_unix = ?1, generation = ?2, pid = ?3
+                 WHERE holder = ?4 AND attempt_token = ?5",
+                params![
+                    now_i64,
+                    generation,
+                    i64::from(std::process::id()),
+                    holder,
+                    attempt_token,
+                ],
+            )?;
+            tx.commit()?;
+            return Ok(CleanupClaimOutcome::Claimed);
+        }
+
+        let existing_demand = read_demand(&tx, holder)?;
+        let demand_was_closed = if let Some(demand) = &existing_demand {
+            check_demand_lane(holder, demand, lane)?;
+            matches!(demand.state, DemandState::Terminal | DemandState::Cancelled)
+        } else {
+            false
+        };
+        if lane == PermitLane::Native
+            && demand_was_closed
+            && existing_demand
+                .as_ref()
+                .is_some_and(|demand| demand.state == DemandState::Cancelled)
+        {
+            // The following release call is separated from this recorded
+            // cleanup proof by local-storage teardown. Persist the exact
+            // marker token so that it can acknowledge this already-closed
+            // cancellation after reopening the ledger.
+            tx.execute(
+                "INSERT OR IGNORE INTO recorded_terminal_cleanup_releases
+                 (holder, attempt_token) VALUES (?1, ?2)",
+                params![holder, attempt_token],
+            )?;
+        }
+        if !demand_was_closed {
+            ensure_demand_tx(&tx, holder, lane, "", now, now, DemandState::Terminal)?;
+            tx.execute(
+                "UPDATE permit_demands SET state = 'terminal', updated_unix = ?1
+                 WHERE holder = ?2",
+                params![now_i64, holder],
+            )?;
+        }
+        tx.commit()?;
+        Ok(if demand_was_closed {
+            CleanupClaimOutcome::ClosedAbsent
+        } else {
+            CleanupClaimOutcome::DemandClosed
+        })
+    }
+
+    fn transition_for_attempt(
+        &mut self,
+        holder: &str,
+        state: PermitState,
+        generation: u64,
+        attempt_token: &str,
     ) -> Result<(), LedgerError> {
         let tx = self
             .conn
@@ -1073,52 +1806,302 @@ impl PermitLedger {
                 seen: generation,
             });
         }
+        let current_state = read_owned_attempt_state(&tx, holder, attempt_token)?;
+        if current_state == PermitState::Cleaning.as_str() {
+            // A cleanup worker's claim is final for this attempt. Even an
+            // idempotent transition to Cleaning must not refresh its row.
+            tx.commit()?;
+            return Ok(());
+        }
         let now = unix_now() as i64;
-        let updated = tx.execute(
-            "UPDATE permits SET state = ?1, updated_unix = ?2, generation = ?3 WHERE holder = ?4",
+        tx.execute(
+            "UPDATE permits SET state = ?1, updated_unix = ?2, generation = ?3, pid = ?4
+             WHERE holder = ?5 AND attempt_token = ?6
+               AND (state <> 'cleaning' OR ?1 = 'cleaning')",
             params![
                 state.as_str(),
                 now,
                 i64::try_from(generation).unwrap_or(i64::MAX),
+                i64::from(std::process::id()),
                 holder,
+                attempt_token,
             ],
         )?;
-        if updated == 0 {
-            return Err(LedgerError::UnknownHolder(holder.to_string()));
-        }
         tx.commit()?;
         Ok(())
     }
 
-    /// Confirm terminal owned cleanup, then atomically release the permit
-    /// and close its demand. Unfenced by design: a worker from an earlier
-    /// daemon epoch must be able to release its own completed hold.
-    pub fn release(&mut self, holder: &str) -> Result<bool, LedgerError> {
-        self.release_with_demand_state(holder, DemandState::Terminal)
+    /// Release and terminalize a permit only if this attempt still owns it.
+    pub fn release_owned(
+        &mut self,
+        holder: &str,
+        attempt_token: &str,
+    ) -> Result<bool, LedgerError> {
+        self.release_with_demand_state(holder, DemandState::Terminal, attempt_token)
     }
 
-    /// Release a permit after confirmed handoff/retry cleanup and return
-    /// its demand to the queue without changing its original age.
-    pub fn release_to_eligible(&mut self, holder: &str) -> Result<bool, LedgerError> {
-        self.release_with_demand_state(holder, DemandState::Eligible)
+    /// Terminally release a Native attempt. If its row is already gone, an
+    /// already-closed demand makes a completed release idempotent;
+    /// absence alone never creates or closes a demand.
+    pub fn release_native_terminal_owned(
+        &mut self,
+        holder: &str,
+        attempt_token: &str,
+    ) -> Result<OwnedReleaseOutcome, LedgerError> {
+        self.release_native_owned_with_terminal_demand(holder, attempt_token, DemandState::Terminal)
     }
 
-    /// Release a permit after confirmed upstream cancellation and ensure
-    /// the demand cannot block later work.
-    pub fn release_cancelled(&mut self, holder: &str) -> Result<bool, LedgerError> {
-        self.release_with_demand_state(holder, DemandState::Cancelled)
+    /// Replay a durable Scale Set release stage with exact-token outcomes.
+    ///
+    /// A present permit is deleted only when its lane and token match. Its
+    /// demand transition commits in the same transaction. If the permit is
+    /// already absent, return `AlreadyAbsent` only when the existing demand
+    /// proves that the same release target committed; absence never inserts
+    /// or mutates a demand. This distinguishes a completed release from a
+    /// newer token without a racy holder-only lookup.
+    pub fn release_scaleset_staged_owned(
+        &mut self,
+        holder: &str,
+        attempt_token: &str,
+        next_demand_state: DemandState,
+    ) -> Result<OwnedReleaseOutcome, LedgerError> {
+        if attempt_token.is_empty()
+            || !matches!(
+                next_demand_state,
+                DemandState::Eligible | DemandState::Cancelled | DemandState::Terminal
+            )
+        {
+            return Ok(OwnedReleaseOutcome::StaleAttempt);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let now_i64 = i64::try_from(unix_now()).unwrap_or(i64::MAX);
+        let current: Option<(String, String)> = tx
+            .query_row(
+                "SELECT lane, attempt_token FROM permits WHERE holder = ?1",
+                params![holder],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((lane, current_token)) = current else {
+            let demand = read_demand(&tx, holder)?;
+            let Some(demand) = demand else {
+                tx.commit()?;
+                return Ok(OwnedReleaseOutcome::StaleAttempt);
+            };
+            check_demand_lane(holder, &demand, PermitLane::ScaleSet)?;
+            if demand.state == next_demand_state {
+                tx.commit()?;
+                return Ok(OwnedReleaseOutcome::AlreadyAbsent);
+            }
+            tx.commit()?;
+            return Ok(OwnedReleaseOutcome::StaleAttempt);
+        };
+        if lane != PermitLane::ScaleSet.as_str() {
+            return Err(LedgerError::DemandLaneMismatch {
+                holder: holder.to_owned(),
+                expected: PermitLane::ScaleSet,
+                seen: lane,
+            });
+        }
+        if current_token != attempt_token {
+            tx.commit()?;
+            return Ok(OwnedReleaseOutcome::StaleAttempt);
+        }
+        let demand = read_demand(&tx, holder)?
+            .ok_or_else(|| LedgerError::UnknownHolder(holder.to_owned()))?;
+        check_demand_lane(holder, &demand, PermitLane::ScaleSet)?;
+        if next_demand_state == DemandState::Eligible
+            && !matches!(demand.state, DemandState::Eligible | DemandState::Granted)
+        {
+            tx.commit()?;
+            return Ok(OwnedReleaseOutcome::StaleAttempt);
+        }
+        tx.execute(
+            "DELETE FROM permits WHERE holder = ?1 AND attempt_token = ?2",
+            params![holder, attempt_token],
+        )?;
+        match next_demand_state {
+            DemandState::Terminal | DemandState::Cancelled => {
+                tx.execute(
+                    "UPDATE permit_demands SET state = ?1, updated_unix = ?2
+                     WHERE holder = ?3",
+                    params![next_demand_state.as_str(), now_i64, holder],
+                )?;
+            }
+            DemandState::Eligible => {
+                tx.execute(
+                    "UPDATE permit_demands SET state = 'eligible', updated_unix = ?1
+                     WHERE holder = ?2",
+                    params![now_i64, holder],
+                )?;
+            }
+            DemandState::Granted | DemandState::Waiting => {
+                // Roll the delete back if a future call path slips past the
+                // target-state check above.
+                return Ok(OwnedReleaseOutcome::StaleAttempt);
+            }
+        }
+        tx.commit()?;
+        Ok(OwnedReleaseOutcome::Released)
+    }
+
+    /// Release to the queue only if this attempt still owns the permit.
+    pub fn release_to_eligible_owned(
+        &mut self,
+        holder: &str,
+        attempt_token: &str,
+    ) -> Result<bool, LedgerError> {
+        self.release_with_demand_state(holder, DemandState::Eligible, attempt_token)
+    }
+
+    /// Release and cancel only if this attempt still owns the permit.
+    pub fn release_cancelled_owned(
+        &mut self,
+        holder: &str,
+        attempt_token: &str,
+    ) -> Result<bool, LedgerError> {
+        self.release_with_demand_state(holder, DemandState::Cancelled, attempt_token)
+    }
+
+    /// Cancel a Native attempt with the same absent-row behavior as
+    /// [`Self::release_native_terminal_owned`].
+    pub fn release_native_cancelled_owned(
+        &mut self,
+        holder: &str,
+        attempt_token: &str,
+    ) -> Result<OwnedReleaseOutcome, LedgerError> {
+        self.release_native_owned_with_terminal_demand(
+            holder,
+            attempt_token,
+            DemandState::Cancelled,
+        )
+    }
+
+    fn release_native_owned_with_terminal_demand(
+        &mut self,
+        holder: &str,
+        attempt_token: &str,
+        next_demand_state: DemandState,
+    ) -> Result<OwnedReleaseOutcome, LedgerError> {
+        debug_assert!(matches!(
+            next_demand_state,
+            DemandState::Terminal | DemandState::Cancelled
+        ));
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current: Option<(String, String)> = tx
+            .query_row(
+                "SELECT lane, attempt_token FROM permits WHERE holder = ?1",
+                params![holder],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((lane, current_token)) = current else {
+            let Some(demand) = read_demand(&tx, holder)? else {
+                tx.execute(
+                    "DELETE FROM recorded_terminal_cleanup_releases
+                     WHERE holder = ?1 AND attempt_token = ?2",
+                    params![holder, attempt_token],
+                )?;
+                tx.commit()?;
+                return Ok(OwnedReleaseOutcome::StaleAttempt);
+            };
+            check_demand_lane(holder, &demand, PermitLane::Native)?;
+            // Cancellation is accepted as terminal only after the exact
+            // recorded marker token claimed cleanup; ordinary owner releases
+            // still need the demand to match their requested target.
+            let recorded_cancelled_cleanup = next_demand_state == DemandState::Terminal
+                && demand.state == DemandState::Cancelled
+                && tx.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM recorded_terminal_cleanup_releases
+                        WHERE holder = ?1 AND attempt_token = ?2
+                    )",
+                    params![holder, attempt_token],
+                    |row| row.get::<_, bool>(0),
+                )?;
+            let outcome = if demand.state == next_demand_state || recorded_cancelled_cleanup {
+                OwnedReleaseOutcome::AlreadyAbsent
+            } else {
+                OwnedReleaseOutcome::StaleAttempt
+            };
+            tx.execute(
+                "DELETE FROM recorded_terminal_cleanup_releases
+                 WHERE holder = ?1 AND attempt_token = ?2",
+                params![holder, attempt_token],
+            )?;
+            tx.commit()?;
+            return Ok(outcome);
+        };
+        if lane != PermitLane::Native.as_str() {
+            return Err(LedgerError::DemandLaneMismatch {
+                holder: holder.to_owned(),
+                expected: PermitLane::Native,
+                seen: lane,
+            });
+        }
+        if current_token != attempt_token {
+            tx.execute(
+                "DELETE FROM recorded_terminal_cleanup_releases
+                 WHERE holder = ?1 AND attempt_token = ?2",
+                params![holder, attempt_token],
+            )?;
+            tx.commit()?;
+            return Ok(OwnedReleaseOutcome::StaleAttempt);
+        }
+        let now = unix_now();
+        ensure_demand_tx(
+            &tx,
+            holder,
+            PermitLane::Native,
+            "",
+            now,
+            now,
+            next_demand_state,
+        )?;
+        tx.execute(
+            "DELETE FROM permits WHERE holder = ?1 AND attempt_token = ?2",
+            params![holder, attempt_token],
+        )?;
+        tx.execute(
+            "UPDATE permit_demands SET state = ?1, updated_unix = ?2
+             WHERE holder = ?3",
+            params![
+                next_demand_state.as_str(),
+                i64::try_from(now).unwrap_or(i64::MAX),
+                holder
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM recorded_terminal_cleanup_releases
+             WHERE holder = ?1 AND attempt_token = ?2",
+            params![holder, attempt_token],
+        )?;
+        tx.commit()?;
+        Ok(OwnedReleaseOutcome::Released)
     }
 
     fn release_with_demand_state(
         &mut self,
         holder: &str,
         next_demand_state: DemandState,
+        attempt_token: &str,
     ) -> Result<bool, LedgerError> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let now = i64::try_from(unix_now()).unwrap_or(i64::MAX);
-        let removed = tx.execute("DELETE FROM permits WHERE holder = ?1", params![holder])?;
+        let removed = tx.execute(
+            "DELETE FROM permits WHERE holder = ?1 AND attempt_token = ?2",
+            params![holder, attempt_token],
+        )?;
+        if removed == 0 {
+            tx.commit()?;
+            return Ok(false);
+        }
         match next_demand_state {
             DemandState::Terminal | DemandState::Cancelled => {
                 tx.execute(
@@ -1143,10 +2126,94 @@ impl PermitLedger {
         Ok(removed > 0)
     }
 
-    /// Retain an uncertain permit after cleanup could not be confirmed.
-    /// The permit and demand transition commit together so failure cannot
-    /// expose false capacity or leave a served demand blocking the queue.
-    pub fn retain_uncertain(&mut self, holder: &str, generation: u64) -> Result<(), LedgerError> {
+    /// Retain an uncertain permit only if it still belongs to this exact
+    /// attempt. A redelivery rotates the token and fences a delayed old drop.
+    pub fn retain_uncertain_owned(
+        &mut self,
+        holder: &str,
+        generation: u64,
+        attempt_token: &str,
+    ) -> Result<(), LedgerError> {
+        self.retain_uncertain_for_attempt(holder, generation, attempt_token)
+    }
+
+    /// Finish confirmed local cleanup while preserving a Native permit for
+    /// service-response recovery. Exact token, Uncertain state, and terminal
+    /// demand commit together; a later same-process redelivery can adopt only
+    /// after this worker relinquishes its active cleanup claim.
+    pub fn retain_uncertain_after_cleanup_owned(
+        &mut self,
+        holder: &str,
+        attempt_token: &str,
+    ) -> Result<(), LedgerError> {
+        if attempt_token.is_empty() {
+            return Err(LedgerError::StaleAttempt(holder.to_owned()));
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let row: Option<(String, String)> = tx
+            .query_row(
+                "SELECT lane, attempt_token FROM permits WHERE holder = ?1",
+                params![holder],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((lane, current_token)) = row else {
+            return Err(LedgerError::StaleAttempt(holder.to_owned()));
+        };
+        if lane != PermitLane::Native.as_str() {
+            return Err(LedgerError::DemandLaneMismatch {
+                holder: holder.to_owned(),
+                expected: PermitLane::Native,
+                seen: lane,
+            });
+        }
+        if current_token != attempt_token {
+            return Err(LedgerError::StaleAttempt(holder.to_owned()));
+        }
+        let now = unix_now();
+        let generation: i64 = tx.query_row(
+            "SELECT generation FROM permit_meta WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "UPDATE permits SET state = 'uncertain', updated_unix = ?1,
+                 generation = ?2, pid = ?3
+             WHERE holder = ?4 AND attempt_token = ?5",
+            params![
+                i64::try_from(now).unwrap_or(i64::MAX),
+                generation,
+                i64::from(std::process::id()),
+                holder,
+                attempt_token
+            ],
+        )?;
+        ensure_demand_tx(
+            &tx,
+            holder,
+            PermitLane::Native,
+            "",
+            now,
+            now,
+            DemandState::Granted,
+        )?;
+        tx.execute(
+            "UPDATE permit_demands SET state = 'terminal', updated_unix = ?1
+             WHERE holder = ?2 AND state <> 'cancelled'",
+            params![i64::try_from(now).unwrap_or(i64::MAX), holder],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn retain_uncertain_for_attempt(
+        &mut self,
+        holder: &str,
+        generation: u64,
+        attempt_token: &str,
+    ) -> Result<(), LedgerError> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1161,15 +2228,23 @@ impl PermitLedger {
                 seen: generation,
             });
         }
-        let now = i64::try_from(unix_now()).unwrap_or(i64::MAX);
-        let updated = tx.execute(
-            "UPDATE permits SET state = 'uncertain', updated_unix = ?1, generation = ?2
-             WHERE holder = ?3",
-            params![now, i64::try_from(generation).unwrap_or(i64::MAX), holder],
-        )?;
-        if updated == 0 {
-            return Err(LedgerError::UnknownHolder(holder.to_owned()));
+        let current_state = read_owned_attempt_state(&tx, holder, attempt_token)?;
+        if current_state == PermitState::Cleaning.as_str() {
+            // Do not demote an active cleanup claim or terminalize its demand.
+            tx.commit()?;
+            return Ok(());
         }
+        let now = i64::try_from(unix_now()).unwrap_or(i64::MAX);
+        tx.execute(
+            "UPDATE permits SET state = 'uncertain', updated_unix = ?1, generation = ?2
+             WHERE holder = ?3 AND attempt_token = ?4 AND state <> 'cleaning'",
+            params![
+                now,
+                i64::try_from(generation).unwrap_or(i64::MAX),
+                holder,
+                attempt_token,
+            ],
+        )?;
         tx.execute(
             "UPDATE permit_demands SET state = 'terminal', updated_unix = ?1
              WHERE holder = ?2 AND state IN ('eligible', 'granted')",
@@ -1179,16 +2254,88 @@ impl PermitLedger {
         Ok(())
     }
 
-    /// Reconcile durable occupancy against observed live work, and mark this
-    /// epoch reconciled so capacity may be advertised.
+    /// Reconcile durable occupancy against exact-token observations, and mark
+    /// this epoch reconciled so capacity may be advertised.
     ///
-    /// `alive` is the caller's attested live set: `(holder, lane, state)`.
-    /// Observed holders without a row are adopted as counted occupancy;
-    /// recorded holders outside the set are marked uncertain (still
-    /// counted). Nothing is ever deleted here.
-    pub fn reconcile(
+    /// `alive` is the caller's attested live set: `(holder, lane,
+    /// attempt_token)`. All observations are checked and applied in one
+    /// immediate transaction. A missing row or token mismatch fails closed;
+    /// observations never recreate a released permit or mint an unrecorded
+    /// owner token. Recorded holders outside the set are marked uncertain
+    /// (still counted), while active `Cleaning` claims remain protected.
+    pub fn reconcile_attempts(
         &mut self,
-        alive: &[(&str, PermitLane, PermitState)],
+        alive: &[(&str, PermitLane, &str)],
+    ) -> Result<ReconcileReport, LedgerError> {
+        self.reconcile_attempts_with_staged(alive, &[])
+    }
+
+    /// Reconcile exact live observations and proof-bearing staged Scale Set
+    /// token rotations in one ledger transaction.
+    ///
+    /// A staged tuple is `(holder, lane, previous_token, target_token)`. The
+    /// caller must prove the stage came from the durable Scale Set recovery
+    /// journal. Before rotation, a stage accepts only the exact previous
+    /// token; `None` matches only the exact token recorded by the ledger's
+    /// migration journal. After rotation, the target must carry the prior
+    /// token-or-legacy-null, prior PID, and recovery-claim proof from the
+    /// atomic ledger CAS. This operation never inserts, rotates, or releases
+    /// a permit. Recovery must still prove the old worker and resources are
+    /// no longer live before finishing the staged rotation.
+    pub fn reconcile_attempts_with_staged(
+        &mut self,
+        alive: &[(&str, PermitLane, &str)],
+        staged: &[(&str, PermitLane, Option<&str>, &str)],
+    ) -> Result<ReconcileReport, LedgerError> {
+        self.reconcile_attempts_with_staged_releases(alive, staged, &[])
+    }
+
+    /// Reconcile exact live observations plus durable Scale Set token
+    /// rotation and release stages in one ledger transaction.
+    ///
+    /// `staged_releases` contains `(holder, lane, attempt_token,
+    /// target_demand_state)` tuples from a durable Scale Set release journal.
+    /// The lane must be `ScaleSet`, and an extant row must still have that
+    /// lane and exact token. An absent row is accepted only when its durable
+    /// demand already has the staged target state, proving the ledger release
+    /// transaction committed before its state-database projection did. Staged
+    /// releases never recreate or mutate permits or demand; recovery must
+    /// finish the projection while still holding its serialized recovery
+    /// claim. A mismatched token, lane, or absent-row demand state fails
+    /// closed.
+    pub fn reconcile_attempts_with_staged_releases(
+        &mut self,
+        alive: &[(&str, PermitLane, &str)],
+        staged_rotations: &[(&str, PermitLane, Option<&str>, &str)],
+        staged_releases: &[(&str, PermitLane, &str, DemandState)],
+    ) -> Result<ReconcileReport, LedgerError> {
+        self.reconcile_attempts_with_staged_acquisitions(
+            alive,
+            staged_rotations,
+            staged_releases,
+            &[],
+        )
+    }
+
+    /// Reconcile exact live observations and durable Scale Set rotation,
+    /// release, and acquisition stages in one ledger transaction.
+    ///
+    /// `staged_acquisitions` contains `(holder, lane, attempt_token)` tuples
+    /// from the state database, persisted before the ledger insert. An exact
+    /// extant row is attested; an absent row is allowed because the stage may
+    /// have been written before the ledger transaction began. Reconciliation
+    /// never creates, releases, or rotates a permit row; it may mark
+    /// unobserved rows uncertain and create their missing demand as granted
+    /// or promote an eligible demand to granted. Exact live and staged-rotation
+    /// rows do the same demand reconciliation. Recovery may discard an absent
+    /// acquisition stage, or finish the state projection when its exact token
+    /// row exists.
+    pub fn reconcile_attempts_with_staged_acquisitions(
+        &mut self,
+        alive: &[(&str, PermitLane, &str)],
+        staged_rotations: &[(&str, PermitLane, Option<&str>, &str)],
+        staged_releases: &[(&str, PermitLane, &str, DemandState)],
+        staged_acquisitions: &[(&str, PermitLane, &str)],
     ) -> Result<ReconcileReport, LedgerError> {
         let tx = self
             .conn
@@ -1200,23 +2347,40 @@ impl PermitLedger {
         )?;
         let mut report = ReconcileReport::default();
         let now = unix_now() as i64;
-        for (holder, lane, state) in alive {
-            let held: Option<String> = tx
+        let mut observed_holders = std::collections::BTreeSet::<String>::new();
+        for (holder, lane, attempt_token) in alive {
+            if attempt_token.is_empty() || !observed_holders.insert((*holder).to_owned()) {
+                return Err(LedgerError::StaleAttempt((*holder).to_owned()));
+            }
+            let held: Option<(String, String, Option<String>, Option<i64>, Option<String>)> = tx
                 .query_row(
-                    "SELECT holder FROM permits WHERE holder = ?1",
+                    "SELECT lane, attempt_token, recovery_claim_token,
+                            recovery_previous_pid, recovery_previous_token
+                     FROM permits WHERE holder = ?1",
                     params![*holder],
-                    |row| row.get(0),
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
                 )
                 .optional()?;
-            if held.is_none() {
-                tx.execute(
-                    "INSERT INTO permits (holder, lane, state, acquired_unix, updated_unix, generation)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![*holder, lane.as_str(), state.as_str(), now, now, generation],
-                )?;
-                report.adopted.push((*holder).to_string());
-            } else {
-                report.confirmed.push((*holder).to_string());
+            let Some((recorded_lane, recorded_token, _, _, _)) = held else {
+                return Err(LedgerError::StaleAttempt((*holder).to_owned()));
+            };
+            if recorded_lane != lane.as_str() {
+                return Err(LedgerError::DemandLaneMismatch {
+                    holder: (*holder).to_owned(),
+                    expected: *lane,
+                    seen: recorded_lane,
+                });
+            }
+            if recorded_token != *attempt_token {
+                return Err(LedgerError::StaleAttempt((*holder).to_owned()));
             }
             let demand = ensure_demand_tx(
                 &tx,
@@ -1234,6 +2398,187 @@ impl PermitLedger {
                     params![now, holder],
                 )?;
             }
+            report.confirmed.push((*holder).to_string());
+        }
+        for (holder, lane, previous_token, target_token) in staged_rotations {
+            if *lane != PermitLane::ScaleSet
+                || target_token.is_empty()
+                || previous_token.is_some_and(str::is_empty)
+                || *previous_token == Some(*target_token)
+                || !observed_holders.insert((*holder).to_owned())
+            {
+                return Err(LedgerError::StaleAttempt((*holder).to_owned()));
+            }
+            let held: Option<(String, String, Option<String>, Option<i64>, Option<String>)> = tx
+                .query_row(
+                    "SELECT lane, attempt_token, recovery_claim_token,
+                            recovery_previous_pid, recovery_previous_token
+                     FROM permits WHERE holder = ?1",
+                    params![*holder],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((
+                recorded_lane,
+                recorded_token,
+                recovery_claim,
+                recovery_previous_pid,
+                recovery_previous_token,
+            )) = held
+            else {
+                return Err(LedgerError::StaleAttempt((*holder).to_owned()));
+            };
+            if recorded_lane != PermitLane::ScaleSet.as_str() {
+                return Err(LedgerError::DemandLaneMismatch {
+                    holder: (*holder).to_owned(),
+                    expected: PermitLane::ScaleSet,
+                    seen: recorded_lane,
+                });
+            }
+            let completed_rotation_matches = recovery_claim
+                .as_deref()
+                .is_some_and(|token| !token.is_empty())
+                && recovery_previous_pid.is_some_and(|pid| pid > 0)
+                && match previous_token {
+                    Some(previous) => recovery_previous_token.as_deref() == Some(previous),
+                    None => recovery_previous_token.is_none(),
+                };
+            let previous_matches = match previous_token {
+                Some(previous) if *previous == recorded_token => true,
+                Some(_) | None if recorded_token == *target_token => completed_rotation_matches,
+                None => tx.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM permit_token_migrations
+                        WHERE holder = ?1 AND attempt_token = ?2
+                    )",
+                    params![*holder, recorded_token],
+                    |row| row.get(0),
+                )?,
+                Some(_) => false,
+            };
+            if recorded_token.is_empty() || !previous_matches {
+                return Err(LedgerError::StaleAttempt((*holder).to_owned()));
+            }
+            let demand = ensure_demand_tx(
+                &tx,
+                holder,
+                PermitLane::ScaleSet,
+                "",
+                now.max(0) as u64,
+                now.max(0) as u64,
+                DemandState::Granted,
+            )?;
+            if demand.state == DemandState::Eligible {
+                tx.execute(
+                    "UPDATE permit_demands SET state = 'granted', updated_unix = ?1
+                     WHERE holder = ?2",
+                    params![now, holder],
+                )?;
+            }
+            report.confirmed.push((*holder).to_string());
+        }
+        for (holder, lane, attempt_token, target_demand_state) in staged_releases {
+            if *lane != PermitLane::ScaleSet {
+                return Err(LedgerError::DemandLaneMismatch {
+                    holder: (*holder).to_owned(),
+                    expected: PermitLane::ScaleSet,
+                    seen: lane.as_str().to_owned(),
+                });
+            }
+            if !matches!(
+                *target_demand_state,
+                DemandState::Eligible | DemandState::Cancelled | DemandState::Terminal
+            ) || attempt_token.is_empty()
+                || !observed_holders.insert((*holder).to_owned())
+            {
+                return Err(LedgerError::StaleAttempt((*holder).to_owned()));
+            }
+            let held: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT lane, attempt_token FROM permits WHERE holder = ?1",
+                    params![*holder],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((recorded_lane, recorded_token)) = held else {
+                // An exact desired demand state proves the token-fenced
+                // release transaction committed; the owner token itself is
+                // no longer present to compare. Never mint a replacement.
+                let demand: Option<(String, String)> = tx
+                    .query_row(
+                        "SELECT lane, state FROM permit_demands WHERE holder = ?1",
+                        params![*holder],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                let Some((demand_lane, demand_state)) = demand else {
+                    return Err(LedgerError::StaleAttempt((*holder).to_owned()));
+                };
+                if demand_lane != lane.as_str() {
+                    return Err(LedgerError::DemandLaneMismatch {
+                        holder: (*holder).to_owned(),
+                        expected: *lane,
+                        seen: demand_lane,
+                    });
+                }
+                if DemandState::parse(&demand_state) != Some(*target_demand_state) {
+                    return Err(LedgerError::StaleAttempt((*holder).to_owned()));
+                }
+                continue;
+            };
+            if recorded_lane != lane.as_str() {
+                return Err(LedgerError::DemandLaneMismatch {
+                    holder: (*holder).to_owned(),
+                    expected: PermitLane::ScaleSet,
+                    seen: recorded_lane,
+                });
+            }
+            if recorded_token != *attempt_token {
+                return Err(LedgerError::StaleAttempt((*holder).to_owned()));
+            }
+            // Keep an extant staged release untouched. Its owner will retry
+            // the token-fenced release after the cross-database recovery
+            // stage has been inspected.
+            report.confirmed.push((*holder).to_string());
+        }
+        for (holder, lane, attempt_token) in staged_acquisitions {
+            if *lane != PermitLane::ScaleSet
+                || attempt_token.is_empty()
+                || !observed_holders.insert((*holder).to_owned())
+            {
+                return Err(LedgerError::StaleAttempt((*holder).to_owned()));
+            }
+            let held: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT lane, attempt_token FROM permits WHERE holder = ?1",
+                    params![*holder],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((recorded_lane, recorded_token)) = held else {
+                // The state journal precedes the ledger insert. Absence means
+                // its ledger half did not commit; recovery can discard it.
+                continue;
+            };
+            if recorded_lane != lane.as_str() {
+                return Err(LedgerError::DemandLaneMismatch {
+                    holder: (*holder).to_owned(),
+                    expected: *lane,
+                    seen: recorded_lane,
+                });
+            }
+            if recorded_token != *attempt_token {
+                return Err(LedgerError::StaleAttempt((*holder).to_owned()));
+            }
+            report.confirmed.push((*holder).to_string());
         }
         let mut select = tx.prepare("SELECT holder, lane FROM permits")?;
         let recorded: Vec<(String, String)> = select
@@ -1241,16 +2586,21 @@ impl PermitLedger {
             .collect::<Result<_, _>>()?;
         drop(select);
         for (holder, raw_lane) in &recorded {
-            if alive.iter().any(|(live, _, _)| live == holder) {
+            if observed_holders.contains(holder) {
                 continue;
             }
             let lane = PermitLane::parse(raw_lane)
                 .ok_or_else(|| LedgerError::UnknownLane(raw_lane.clone()))?;
-            tx.execute(
+            let changed = tx.execute(
                 "UPDATE permits SET state = 'uncertain', updated_unix = ?1, generation = ?2
-                 WHERE holder = ?3",
+                 WHERE holder = ?3 AND state <> 'cleaning'",
                 params![now, generation, holder],
             )?;
+            if changed == 0 {
+                // A worker may have claimed cleanup after this process took
+                // its observation snapshot. Keep its active claim intact.
+                continue;
+            }
             let demand = ensure_demand_tx(
                 &tx,
                 holder,
@@ -1274,59 +2624,9 @@ impl PermitLedger {
             [],
         )?;
         tx.commit()?;
-        report.adopted.sort();
         report.marked_uncertain.sort();
         report.confirmed.sort();
         Ok(report)
-    }
-
-    /// Release uncertain native permits whose acquiring process is dead.
-    ///
-    /// This is the only path that deletes without an explicit release, and
-    /// it is narrow on purpose: only `uncertain` rows in the native lane
-    /// with a recorded pid for which `is_alive` returns false, and never a
-    /// holder in `protected` (the caller's in-flight set — a cleanup
-    /// failure retains its visible reservation until lifecycle
-    /// reconciliation converges it, even across restarts).
-    ///
-    /// A reused pid reads as alive and skips the sweep: the error direction
-    /// is retention, never a double-spend. Returns the swept holders.
-    pub fn sweep_dead_uncertain(
-        &mut self,
-        is_alive: &dyn Fn(u32) -> bool,
-        protected: &std::collections::BTreeSet<String>,
-    ) -> Result<Vec<String>, LedgerError> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let candidates: Vec<(String, i64)> = {
-            let mut select = tx.prepare(
-                "SELECT holder, pid FROM permits
-                 WHERE state = 'uncertain' AND lane = 'native' AND pid IS NOT NULL",
-            )?;
-            select
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                })?
-                .collect::<Result<_, _>>()?
-        };
-        let mut swept = Vec::new();
-        for (holder, pid) in candidates {
-            if protected.contains(&holder) {
-                continue;
-            }
-            let Ok(pid) = u32::try_from(pid) else {
-                continue;
-            };
-            if is_alive(pid) {
-                continue;
-            }
-            tx.execute("DELETE FROM permits WHERE holder = ?1", params![holder])?;
-            swept.push(holder);
-        }
-        tx.commit()?;
-        swept.sort();
-        Ok(swept)
     }
 
     /// Number of permits in `state` (observability; every state counts).
@@ -1353,6 +2653,45 @@ impl PermitLedger {
 mod tests {
     use super::*;
 
+    /// Acquisition assertions intentionally ignore the fresh token when a
+    /// test only checks admission. Tests that mutate a permit retain and pass
+    /// the token from `AcquireAttemptOutcome::Acquired`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum AcquireExpected {
+        Acquired,
+        AlreadyHeld,
+        Full,
+        Deferred,
+        Closed,
+        StaleGeneration,
+        NotConfigured,
+    }
+
+    impl PartialEq<AcquireExpected> for AcquireAttemptOutcome {
+        fn eq(&self, expected: &AcquireExpected) -> bool {
+            matches!(
+                (self, expected),
+                (
+                    AcquireAttemptOutcome::Acquired { .. },
+                    AcquireExpected::Acquired
+                ) | (
+                    AcquireAttemptOutcome::AlreadyHeld,
+                    AcquireExpected::AlreadyHeld
+                ) | (AcquireAttemptOutcome::Full, AcquireExpected::Full)
+                    | (AcquireAttemptOutcome::Deferred, AcquireExpected::Deferred)
+                    | (AcquireAttemptOutcome::Closed, AcquireExpected::Closed)
+                    | (
+                        AcquireAttemptOutcome::StaleGeneration,
+                        AcquireExpected::StaleGeneration
+                    )
+                    | (
+                        AcquireAttemptOutcome::NotConfigured,
+                        AcquireExpected::NotConfigured
+                    )
+            )
+        }
+    }
+
     fn temp_ledger(name: &str) -> (PermitLedger, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "velnor-permit-ledger-{name}-{}-{}",
@@ -1370,35 +2709,39 @@ mod tests {
         ledger.set_max_jobs(2).unwrap();
         let generation = ledger.generation().unwrap();
 
-        assert_eq!(
-            ledger
-                .acquire(
-                    "a",
-                    PermitLane::Native,
-                    PermitState::Acquiring,
-                    generation,
-                    None
-                )
-                .unwrap(),
-            AcquireOutcome::Acquired
-        );
-        assert_eq!(
-            ledger
-                .acquire(
-                    "b",
-                    PermitLane::Native,
-                    PermitState::Running,
-                    generation,
-                    None
-                )
-                .unwrap(),
-            AcquireOutcome::Acquired
-        );
+        let AcquireAttemptOutcome::Acquired {
+            attempt_token: a_token,
+        } = ledger
+            .acquire_attempt(
+                "a",
+                PermitLane::Native,
+                PermitState::Acquiring,
+                generation,
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("first permit was not acquired");
+        };
+        let AcquireAttemptOutcome::Acquired {
+            attempt_token: b_token,
+        } = ledger
+            .acquire_attempt(
+                "b",
+                PermitLane::Native,
+                PermitState::Running,
+                generation,
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("second permit was not acquired");
+        };
         assert_eq!(ledger.occupied().unwrap(), 2);
         // A third holder is refused; nothing was spent.
         assert_eq!(
             ledger
-                .acquire(
+                .acquire_attempt(
                     "c",
                     PermitLane::Native,
                     PermitState::Reserved,
@@ -1406,14 +2749,14 @@ mod tests {
                     None
                 )
                 .unwrap(),
-            AcquireOutcome::Full
+            AcquireExpected::Full
         );
         assert_eq!(ledger.occupied().unwrap(), 2);
 
         // Lanes share the one N: a Scale Set holder is refused too.
         assert_eq!(
             ledger
-                .acquire(
+                .acquire_attempt(
                     "d",
                     PermitLane::ScaleSet,
                     PermitState::Reserved,
@@ -1421,15 +2764,15 @@ mod tests {
                     None
                 )
                 .unwrap(),
-            AcquireOutcome::Full
+            AcquireExpected::Full
         );
         assert_eq!(ledger.occupied_by_lane(PermitLane::ScaleSet).unwrap(), 0);
 
-        assert!(ledger.release("a").unwrap());
+        assert!(ledger.release_owned("a", &a_token).unwrap());
         // The older queued native demand gets the newly freed permit first.
         assert_eq!(
             ledger
-                .acquire(
+                .acquire_attempt(
                     "d",
                     PermitLane::ScaleSet,
                     PermitState::Provisioning,
@@ -1437,11 +2780,11 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-            AcquireOutcome::Deferred
+            AcquireExpected::Deferred
         );
         assert_eq!(
             ledger
-                .acquire(
+                .acquire_attempt(
                     "c",
                     PermitLane::Native,
                     PermitState::Reserved,
@@ -1449,12 +2792,12 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-            AcquireOutcome::Acquired
+            AcquireExpected::Acquired
         );
-        assert!(ledger.release("b").unwrap());
+        assert!(ledger.release_owned("b", &b_token).unwrap());
         assert_eq!(
             ledger
-                .acquire(
+                .acquire_attempt(
                     "d",
                     PermitLane::ScaleSet,
                     PermitState::Provisioning,
@@ -1462,10 +2805,344 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-            AcquireOutcome::Acquired
+            AcquireExpected::Acquired
         );
         assert_eq!(ledger.occupied_by_lane(PermitLane::ScaleSet).unwrap(), 1);
 
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn acquire_attempt_returns_token_only_to_fresh_owner() {
+        let (mut ledger, dir) = temp_ledger("acquire-attempt-token");
+        ledger.set_max_jobs(1).unwrap();
+        let generation = ledger.generation().unwrap();
+
+        let AcquireAttemptOutcome::Acquired { attempt_token } = ledger
+            .acquire_attempt(
+                "owned",
+                PermitLane::Native,
+                PermitState::Acquiring,
+                generation,
+                Some(std::process::id()),
+            )
+            .unwrap()
+        else {
+            panic!("fresh attempt was not acquired");
+        };
+        assert!(!attempt_token.is_empty());
+        assert_eq!(
+            ledger.attempt_token("owned").unwrap(),
+            Some(attempt_token.clone())
+        );
+        ledger
+            .conn
+            .execute(
+                "UPDATE permit_demands SET state = 'eligible' WHERE holder = 'owned'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            ledger
+                .acquire_attempt(
+                    "owned",
+                    PermitLane::Native,
+                    PermitState::Acquiring,
+                    generation,
+                    Some(std::process::id()),
+                )
+                .unwrap(),
+            AcquireAttemptOutcome::AlreadyHeld
+        );
+        assert_eq!(
+            ledger.demand("owned").unwrap().unwrap().state,
+            DemandState::Eligible,
+            "an unowned duplicate cannot mutate the held attempt's demand"
+        );
+        ledger
+            .transition_owned("owned", PermitState::Cleaning, generation, &attempt_token)
+            .unwrap();
+        assert_eq!(
+            ledger
+                .holders()
+                .unwrap()
+                .into_iter()
+                .find(|holder| holder.holder == "owned")
+                .unwrap()
+                .pid,
+            Some(std::process::id())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn staged_scale_set_acquisition_replays_exact_token_after_crash_cut() {
+        let (mut ledger, dir) = temp_ledger("staged-scaleset-acquisition");
+        ledger.set_max_jobs(2).unwrap();
+        let holder = "scaleset/7/acquire-stage";
+        let token = uuid::Uuid::new_v4().to_string();
+
+        // A crash after the state journal write but before the ledger insert
+        // leaves no row. Startup may attest the stage without creating one.
+        ledger.begin_epoch().unwrap();
+        let report = ledger
+            .reconcile_attempts_with_staged_acquisitions(
+                &[],
+                &[],
+                &[],
+                &[(holder, PermitLane::ScaleSet, &token)],
+            )
+            .unwrap();
+        assert!(report.confirmed.is_empty());
+        assert!(!ledger.has_permit(holder).unwrap());
+        assert!(ledger.demand(holder).unwrap().is_none());
+
+        // The same stage token is used by the ledger write, so a crash after
+        // that commit but before state projection can be resumed safely.
+        let generation = ledger.generation().unwrap();
+        assert_eq!(
+            ledger
+                .acquire_scaleset_attempt_with_token(
+                    holder,
+                    PermitState::Acquiring,
+                    generation,
+                    None,
+                    &token,
+                )
+                .unwrap(),
+            AcquireAttemptOutcome::Acquired {
+                attempt_token: token.clone(),
+            }
+        );
+        assert_eq!(
+            ledger
+                .acquire_scaleset_attempt_with_token(
+                    holder,
+                    PermitState::Acquiring,
+                    generation,
+                    None,
+                    &token,
+                )
+                .unwrap(),
+            AcquireAttemptOutcome::Acquired {
+                attempt_token: token.clone(),
+            }
+        );
+        ledger.begin_epoch().unwrap();
+        let report = ledger
+            .reconcile_attempts_with_staged_acquisitions(
+                &[],
+                &[],
+                &[],
+                &[(holder, PermitLane::ScaleSet, &token)],
+            )
+            .unwrap();
+        assert_eq!(report.confirmed, vec![holder.to_owned()]);
+        assert_eq!(ledger.attempt_token(holder).unwrap(), Some(token.clone()));
+
+        // Stage replay never adopts a different live owner token.
+        let generation = ledger.generation().unwrap();
+        assert_eq!(
+            ledger
+                .acquire_scaleset_attempt_with_token(
+                    holder,
+                    PermitState::Acquiring,
+                    generation,
+                    None,
+                    "newer-stage-token",
+                )
+                .unwrap(),
+            AcquireAttemptOutcome::AlreadyHeld
+        );
+        assert_eq!(
+            ledger
+                .acquire_scaleset_attempt_with_token(
+                    holder,
+                    PermitState::Running,
+                    generation,
+                    None,
+                    &token,
+                )
+                .unwrap(),
+            AcquireAttemptOutcome::AlreadyHeld
+        );
+        assert!(matches!(
+            ledger.reconcile_attempts_with_staged_acquisitions(
+                &[],
+                &[],
+                &[],
+                &[(holder, PermitLane::ScaleSet, "newer-stage-token")],
+            ),
+            Err(LedgerError::StaleAttempt(seen)) if seen == holder
+        ));
+        assert!(matches!(
+            ledger.reconcile_attempts_with_staged_acquisitions(
+                &[],
+                &[],
+                &[],
+                &[(holder, PermitLane::Native, &token)],
+            ),
+            Err(LedgerError::StaleAttempt(seen)) if seen == holder
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn staged_scaleset_attempt_rotation_is_token_fenced_and_restart_finishable() {
+        let (mut ledger, dir) = temp_ledger("staged-scaleset-rotation");
+        ledger.set_max_jobs(2).unwrap();
+        let generation = ledger.generation().unwrap();
+        let holder = "scaleset/7/worker-rotation";
+        let previous_pid = std::process::id();
+        let AcquireAttemptOutcome::Acquired {
+            attempt_token: old_token,
+        } = ledger
+            .acquire_attempt(
+                holder,
+                PermitLane::ScaleSet,
+                PermitState::Running,
+                generation,
+                Some(previous_pid),
+            )
+            .unwrap()
+        else {
+            panic!("Scale Set permit was not acquired");
+        };
+        let target_token = uuid::Uuid::new_v4().to_string();
+        let recovery_claim = ledger.claim_scaleset_recovery(&|_| false).unwrap();
+
+        assert_eq!(
+            ledger
+                .rotate_scaleset_attempt_for_recovery(
+                    holder,
+                    PermitState::Provisioning,
+                    generation,
+                    previous_pid,
+                    Some(&old_token),
+                    &target_token,
+                    recovery_claim.token(),
+                )
+                .unwrap(),
+            AttemptRotationOutcome::Rotated
+        );
+        assert_eq!(
+            ledger.attempt_token(holder).unwrap(),
+            Some(target_token.clone())
+        );
+        assert!(!ledger.release_owned(holder, &old_token).unwrap());
+
+        // A crash after ledger commit but before the state-database token
+        // transaction resumes from the stage without rotating a second time.
+        assert_eq!(
+            ledger
+                .rotate_scaleset_attempt_for_recovery(
+                    holder,
+                    PermitState::Provisioning,
+                    generation,
+                    previous_pid,
+                    Some(&old_token),
+                    &target_token,
+                    recovery_claim.token(),
+                )
+                .unwrap(),
+            AttemptRotationOutcome::AlreadyRotated
+        );
+        assert_eq!(
+            ledger.attempt_token(holder).unwrap(),
+            Some(target_token.clone())
+        );
+        assert!(ledger.release_owned(holder, &target_token).unwrap());
+        assert_eq!(
+            ledger
+                .rotate_scaleset_attempt_for_recovery(
+                    holder,
+                    PermitState::Provisioning,
+                    generation,
+                    previous_pid,
+                    None,
+                    &uuid::Uuid::new_v4().to_string(),
+                    recovery_claim.token(),
+                )
+                .unwrap(),
+            AttemptRotationOutcome::Missing
+        );
+        assert!(!ledger.has_permit(holder).unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn recovery_claim_excludes_competitors_and_dead_owner_takeover_finishes_rotation() {
+        let (mut first, dir) = temp_ledger("scaleset-recovery-claim-takeover");
+        first.set_max_jobs(1).unwrap();
+        let generation = first.generation().unwrap();
+        let holder = "scaleset/7/claim-takeover";
+        let previous_pid = u32::MAX;
+        let AcquireAttemptOutcome::Acquired { attempt_token } = first
+            .acquire_attempt(
+                holder,
+                PermitLane::ScaleSet,
+                PermitState::Running,
+                generation,
+                Some(previous_pid),
+            )
+            .unwrap()
+        else {
+            panic!("Scale Set permit was not acquired");
+        };
+        let original_claim = first.claim_scaleset_recovery(&|_| false).unwrap();
+
+        let mut competing = PermitLedger::open(first.path()).unwrap();
+        assert!(matches!(
+            competing.claim_scaleset_recovery(&|pid| pid == std::process::id()),
+            Err(LedgerError::RecoveryClaimed(pid)) if pid == std::process::id()
+        ));
+
+        let target_token = uuid::Uuid::new_v4().to_string();
+        assert_eq!(
+            first
+                .rotate_scaleset_attempt_for_recovery(
+                    holder,
+                    PermitState::Provisioning,
+                    generation,
+                    previous_pid,
+                    Some(&attempt_token),
+                    &target_token,
+                    original_claim.token(),
+                )
+                .unwrap(),
+            AttemptRotationOutcome::Rotated
+        );
+
+        // Model process death after the ledger rotation but before the state
+        // database projection: another claimant takes over the same durable
+        // token and proves ownership of the already-committed rotation.
+        let simulated_dead_owner = u32::MAX - 1;
+        competing
+            .conn
+            .execute(
+                "UPDATE scaleset_recovery_claims SET owner_pid = ?1 WHERE id = 1",
+                params![i64::from(simulated_dead_owner)],
+            )
+            .unwrap();
+        let mut replacement_claim = competing.claim_scaleset_recovery(&|_| false).unwrap();
+        assert_eq!(replacement_claim.token(), original_claim.token());
+        assert_eq!(
+            competing
+                .rotate_scaleset_attempt_for_recovery(
+                    holder,
+                    PermitState::Provisioning,
+                    generation,
+                    previous_pid,
+                    Some(&attempt_token),
+                    &target_token,
+                    replacement_claim.token(),
+                )
+                .unwrap(),
+            AttemptRotationOutcome::AlreadyRotated
+        );
+        replacement_claim.release().unwrap();
+        drop(competing);
+        drop(first);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1489,25 +3166,27 @@ mod tests {
         assert_eq!(parked.sequence, ticket.sequence);
 
         // A younger holder grants past the parked head with free capacity.
-        assert_eq!(
-            ledger
-                .acquire(
-                    "younger",
-                    PermitLane::Native,
-                    PermitState::Acquiring,
-                    generation,
-                    None
-                )
-                .unwrap(),
-            AcquireOutcome::Acquired
-        );
+        let AcquireAttemptOutcome::Acquired {
+            attempt_token: younger_token,
+        } = ledger
+            .acquire_attempt(
+                "younger",
+                PermitLane::Native,
+                PermitState::Acquiring,
+                generation,
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("younger permit was not acquired");
+        };
 
         // Redelivery revives the parked demand at its original age: it
         // heads the queue again once capacity frees.
-        assert!(ledger.release("younger").unwrap());
+        assert!(ledger.release_owned("younger", &younger_token).unwrap());
         assert_eq!(
             ledger
-                .acquire(
+                .acquire_attempt(
                     "older",
                     PermitLane::Native,
                     PermitState::Acquiring,
@@ -1515,7 +3194,7 @@ mod tests {
                     None
                 )
                 .unwrap(),
-            AcquireOutcome::Acquired
+            AcquireExpected::Acquired
         );
         let revived = ledger.demand("older").unwrap().unwrap();
         assert_eq!(revived.state, DemandState::Granted);
@@ -1536,7 +3215,7 @@ mod tests {
         );
         assert_eq!(
             ledger
-                .acquire(
+                .acquire_attempt(
                     "gone",
                     PermitLane::Native,
                     PermitState::Acquiring,
@@ -1544,7 +3223,7 @@ mod tests {
                     None
                 )
                 .unwrap(),
-            AcquireOutcome::Closed
+            AcquireExpected::Closed
         );
 
         std::fs::remove_dir_all(dir).unwrap();
@@ -1558,7 +3237,7 @@ mod tests {
 
         assert_eq!(
             ledger
-                .acquire(
+                .acquire_attempt(
                     "a",
                     PermitLane::Native,
                     PermitState::Acquiring,
@@ -1566,12 +3245,12 @@ mod tests {
                     None
                 )
                 .unwrap(),
-            AcquireOutcome::Acquired
+            AcquireExpected::Acquired
         );
         // Same holder, redelivered: no second permit.
         assert_eq!(
             ledger
-                .acquire(
+                .acquire_attempt(
                     "a",
                     PermitLane::Native,
                     PermitState::Acquiring,
@@ -1579,13 +3258,13 @@ mod tests {
                     None
                 )
                 .unwrap(),
-            AcquireOutcome::AlreadyHeld
+            AcquireExpected::AlreadyHeld
         );
         assert_eq!(ledger.occupied().unwrap(), 1);
         // ... and the duplicate does not evict the other waiter either.
         assert_eq!(
             ledger
-                .acquire(
+                .acquire_attempt(
                     "b",
                     PermitLane::Native,
                     PermitState::Acquiring,
@@ -1593,7 +3272,7 @@ mod tests {
                     None
                 )
                 .unwrap(),
-            AcquireOutcome::Full
+            AcquireExpected::Full
         );
 
         std::fs::remove_dir_all(dir).unwrap();
@@ -1613,18 +3292,27 @@ mod tests {
             PermitState::Cleaning,
             PermitState::Uncertain,
         ];
+        let mut job_zero_token = None;
         for (index, state) in states.iter().enumerate() {
             let holder = format!("job-{index}");
-            assert_eq!(
-                ledger
-                    .acquire(&holder, PermitLane::Native, *state, generation, None)
-                    .unwrap(),
-                AcquireOutcome::Acquired
-            );
+            let AcquireAttemptOutcome::Acquired { attempt_token } = ledger
+                .acquire_attempt(&holder, PermitLane::Native, *state, generation, None)
+                .unwrap()
+            else {
+                panic!("permit for {holder} was not acquired");
+            };
+            if index == 0 {
+                job_zero_token = Some(attempt_token);
+            }
         }
         assert_eq!(ledger.occupied().unwrap(), 7);
         ledger
-            .transition("job-0", PermitState::Running, generation)
+            .transition_owned(
+                "job-0",
+                PermitState::Running,
+                generation,
+                job_zero_token.as_deref().unwrap(),
+            )
             .unwrap();
         assert_eq!(ledger.occupied().unwrap(), 7);
         assert_eq!(
@@ -1636,7 +3324,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_generations_are_rejected_but_release_is_not_fenced() {
+    fn stale_generations_are_rejected_and_release_uses_the_owner_token() {
         let (mut ledger, dir) = temp_ledger("generation");
         ledger.set_max_jobs(2).unwrap();
         let stale = ledger.generation().unwrap();
@@ -1645,29 +3333,122 @@ mod tests {
 
         assert_eq!(
             ledger
-                .acquire("a", PermitLane::Native, PermitState::Acquiring, stale, None)
+                .acquire_attempt("a", PermitLane::Native, PermitState::Acquiring, stale, None)
                 .unwrap(),
-            AcquireOutcome::StaleGeneration
+            AcquireExpected::StaleGeneration
         );
-        assert_eq!(
-            ledger
-                .acquire(
-                    "a",
-                    PermitLane::Native,
-                    PermitState::Acquiring,
-                    current,
-                    None
-                )
-                .unwrap(),
-            AcquireOutcome::Acquired
-        );
+        let AcquireAttemptOutcome::Acquired { attempt_token } = ledger
+            .acquire_attempt(
+                "a",
+                PermitLane::Native,
+                PermitState::Acquiring,
+                current,
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("current-generation permit was not acquired");
+        };
         assert!(matches!(
-            ledger.transition("a", PermitState::Running, stale),
+            ledger.transition_owned("a", PermitState::Running, stale, &attempt_token),
             Err(LedgerError::StaleGeneration { .. })
         ));
-        // Release always frees, whatever epoch the hold came from.
-        assert!(ledger.release("a").unwrap());
-        assert!(!ledger.release("a").unwrap());
+        // The owner token fences release; generation changes do not rotate it.
+        assert!(ledger.release_owned("a", &attempt_token).unwrap());
+        assert!(!ledger.release_owned("a", &attempt_token).unwrap());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn attempt_mutations_distinguish_stale_missing_and_cleaning_without_mutation() {
+        let (mut ledger, dir) = temp_ledger("attempt-mutation-errors");
+        ledger.set_max_jobs(1).unwrap();
+        let generation = ledger.generation().unwrap();
+        let holder = "native/attempt-mutation-errors";
+        let AcquireAttemptOutcome::Acquired { attempt_token } = ledger
+            .acquire_attempt(
+                holder,
+                PermitLane::Native,
+                PermitState::Running,
+                generation,
+                Some(std::process::id()),
+            )
+            .unwrap()
+        else {
+            panic!("attempt was not acquired");
+        };
+        ledger
+            .transition_owned(holder, PermitState::Cleaning, generation, &attempt_token)
+            .unwrap();
+        let cleaning_holders = ledger.holders().unwrap();
+        let cleaning_demand = ledger.demand(holder).unwrap();
+
+        // The exact owner may finish late, but cannot mutate or demote a
+        // cleanup claim through either transition path.
+        ledger
+            .transition_owned(holder, PermitState::Running, generation, &attempt_token)
+            .unwrap();
+        ledger
+            .retain_uncertain_owned(holder, generation, &attempt_token)
+            .unwrap();
+        assert_eq!(ledger.holders().unwrap(), cleaning_holders);
+        assert_eq!(ledger.demand(holder).unwrap(), cleaning_demand);
+
+        // A different token is stale even while the current attempt is
+        // Cleaning. Neither operation may touch the permit or its demand.
+        let stale_token = "old-attempt-token";
+        assert!(matches!(
+            ledger.transition_owned(holder, PermitState::Running, generation, stale_token),
+            Err(LedgerError::StaleAttempt(seen)) if seen == holder
+        ));
+        assert_eq!(ledger.holders().unwrap(), cleaning_holders);
+        assert_eq!(ledger.demand(holder).unwrap(), cleaning_demand);
+        assert!(matches!(
+            ledger.retain_uncertain_owned(holder, generation, stale_token),
+            Err(LedgerError::StaleAttempt(seen)) if seen == holder
+        ));
+        assert_eq!(ledger.holders().unwrap(), cleaning_holders);
+        assert_eq!(ledger.demand(holder).unwrap(), cleaning_demand);
+
+        // A missing holder remains a distinct condition and must not create
+        // either a permit or a demand.
+        let missing_holder = "native/absent-attempt";
+        assert!(matches!(
+            ledger.transition_owned(
+                missing_holder,
+                PermitState::Running,
+                generation,
+                &attempt_token,
+            ),
+            Err(LedgerError::UnknownHolder(seen)) if seen == missing_holder
+        ));
+        assert!(matches!(
+            ledger.retain_uncertain_owned(missing_holder, generation, &attempt_token),
+            Err(LedgerError::UnknownHolder(seen)) if seen == missing_holder
+        ));
+        assert!(!ledger.has_permit(missing_holder).unwrap());
+        assert!(ledger.demand(missing_holder).unwrap().is_none());
+        assert_eq!(ledger.holders().unwrap(), cleaning_holders);
+        assert_eq!(ledger.demand(holder).unwrap(), cleaning_demand);
+
+        // Once release removes the permit, its durable demand still proves
+        // this holder existed; delayed calls with the former token are stale,
+        // while a holder with no permit or demand remains unknown.
+        assert!(ledger.release_owned(holder, &attempt_token).unwrap());
+        let released_holders = ledger.holders().unwrap();
+        let released_demand = ledger.demand(holder).unwrap();
+        assert!(matches!(
+            ledger.transition_owned(holder, PermitState::Running, generation, &attempt_token),
+            Err(LedgerError::StaleAttempt(seen)) if seen == holder
+        ));
+        assert!(matches!(
+            ledger.retain_uncertain_owned(holder, generation, &attempt_token),
+            Err(LedgerError::StaleAttempt(seen)) if seen == holder
+        ));
+        assert!(!ledger.has_permit(holder).unwrap());
+        assert_eq!(ledger.holders().unwrap(), released_holders);
+        assert_eq!(ledger.demand(holder).unwrap(), released_demand);
 
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1696,7 +3477,7 @@ mod tests {
         // older native demand before the shared grant transaction commits.
         assert_eq!(
             ledger
-                .acquire(
+                .acquire_attempt(
                     "scaleset/7/younger",
                     PermitLane::ScaleSet,
                     PermitState::Reserved,
@@ -1704,7 +3485,7 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-            AcquireOutcome::Deferred
+            AcquireExpected::Deferred
         );
         let redelivered = ledger
             .observe_demand(
@@ -1722,7 +3503,7 @@ mod tests {
 
         assert_eq!(
             ledger
-                .acquire(
+                .acquire_attempt(
                     "native/older",
                     PermitLane::Native,
                     PermitState::Acquiring,
@@ -1730,7 +3511,7 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-            AcquireOutcome::Acquired
+            AcquireExpected::Acquired
         );
         assert_eq!(
             ledger.demand("native/older").unwrap().unwrap().state,
@@ -1740,7 +3521,7 @@ mod tests {
         // another free host slot is available to the next demand.
         assert_eq!(
             ledger
-                .acquire(
+                .acquire_attempt(
                     "scaleset/7/younger",
                     PermitLane::ScaleSet,
                     PermitState::Reserved,
@@ -1748,7 +3529,7 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-            AcquireOutcome::Acquired
+            AcquireExpected::Acquired
         );
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1782,7 +3563,7 @@ mod tests {
             let mut ledger = PermitLedger::open(&older_path).unwrap();
             older_barrier.wait();
             ledger
-                .acquire(
+                .acquire_attempt(
                     "native/older",
                     PermitLane::Native,
                     PermitState::Acquiring,
@@ -1797,7 +3578,7 @@ mod tests {
             let mut ledger = PermitLedger::open(&younger_path).unwrap();
             younger_barrier.wait();
             ledger
-                .acquire(
+                .acquire_attempt(
                     "scaleset/7/younger",
                     PermitLane::ScaleSet,
                     PermitState::Reserved,
@@ -1808,10 +3589,10 @@ mod tests {
         });
         barrier.wait();
 
-        assert_eq!(older.join().unwrap(), AcquireOutcome::Acquired);
+        assert_eq!(older.join().unwrap(), AcquireExpected::Acquired);
         assert!(matches!(
             younger.join().unwrap(),
-            AcquireOutcome::Full | AcquireOutcome::Deferred
+            AcquireAttemptOutcome::Full | AcquireAttemptOutcome::Deferred
         ));
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1834,19 +3615,23 @@ mod tests {
                 now + 1,
             )
             .unwrap();
-        assert_eq!(
-            ledger
-                .acquire(
-                    "native/first",
-                    PermitLane::Native,
-                    PermitState::Acquiring,
-                    generation,
-                    None,
-                )
-                .unwrap(),
-            AcquireOutcome::Acquired
-        );
-        assert!(ledger.release_to_eligible("native/first").unwrap());
+        let AcquireAttemptOutcome::Acquired {
+            attempt_token: first_token,
+        } = ledger
+            .acquire_attempt(
+                "native/first",
+                PermitLane::Native,
+                PermitState::Acquiring,
+                generation,
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("first permit was not acquired");
+        };
+        assert!(ledger
+            .release_to_eligible_owned("native/first", &first_token)
+            .unwrap());
         assert_eq!(
             ledger
                 .demand("native/first")
@@ -1857,7 +3642,7 @@ mod tests {
         );
         assert_eq!(
             ledger
-                .acquire(
+                .acquire_attempt(
                     "scaleset/7/second",
                     PermitLane::ScaleSet,
                     PermitState::Reserved,
@@ -1865,21 +3650,23 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-            AcquireOutcome::Deferred
+            AcquireExpected::Deferred
         );
-        assert_eq!(
-            ledger
-                .acquire(
-                    "native/first",
-                    PermitLane::Native,
-                    PermitState::Acquiring,
-                    generation,
-                    None,
-                )
-                .unwrap(),
-            AcquireOutcome::Acquired
-        );
-        assert!(ledger.retain_uncertain("native/first", generation).is_ok());
+        let AcquireAttemptOutcome::Acquired { attempt_token } = ledger
+            .acquire_attempt(
+                "native/first",
+                PermitLane::Native,
+                PermitState::Acquiring,
+                generation,
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("retried permit was not acquired");
+        };
+        assert!(ledger
+            .retain_uncertain_owned("native/first", generation, &attempt_token)
+            .is_ok());
         assert_eq!(ledger.occupied().unwrap(), 1);
         assert_eq!(
             ledger.demand("native/first").unwrap().unwrap().state,
@@ -1934,6 +3721,70 @@ mod tests {
     }
 
     #[test]
+    fn open_backfills_unique_attempt_tokens_transactionally_and_idempotently() {
+        let (ledger, dir) = temp_ledger("attempt-token-backfill");
+        let path = ledger.path().to_owned();
+        drop(ledger);
+
+        // Recreate the pre-token permit table with extant occupants.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DROP TABLE permits;
+             CREATE TABLE permits (
+                holder TEXT PRIMARY KEY,
+                lane TEXT NOT NULL,
+                state TEXT NOT NULL,
+                acquired_unix INTEGER NOT NULL,
+                updated_unix INTEGER NOT NULL,
+                generation INTEGER NOT NULL,
+                pid INTEGER
+             );
+             INSERT INTO permits VALUES
+                ('legacy-a', 'native', 'running', 1, 1, 0, 10),
+                ('legacy-b', 'native', 'uncertain', 2, 2, 0, 11);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let ledger = PermitLedger::open(&path).unwrap();
+        let first_a = ledger.attempt_token("legacy-a").unwrap().unwrap();
+        let first_b = ledger.attempt_token("legacy-b").unwrap().unwrap();
+        assert!(!first_a.is_empty());
+        assert!(!first_b.is_empty());
+        assert_ne!(first_a, first_b);
+        drop(ledger);
+
+        let ledger = PermitLedger::open(&path).unwrap();
+        assert_eq!(
+            ledger.attempt_token("legacy-a").unwrap(),
+            Some(first_a.clone())
+        );
+        assert_eq!(
+            ledger.attempt_token("legacy-b").unwrap(),
+            Some(first_b.clone())
+        );
+        drop(ledger);
+
+        // The complete schema can still contain a bad token value (for
+        // example after an interrupted migration). Backfill must run even
+        // when every schema object already exists.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE permits SET attempt_token = '' WHERE holder = 'legacy-a'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let ledger = PermitLedger::open(&path).unwrap();
+        let repaired_a = ledger.attempt_token("legacy-a").unwrap().unwrap();
+        assert!(!repaired_a.is_empty());
+        assert_ne!(repaired_a, first_a);
+        assert_eq!(ledger.attempt_token("legacy-b").unwrap(), Some(first_b));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn open_repairs_missing_permit_meta_seed_row() {
         let (ledger, dir) = temp_ledger("missing-meta-seed");
         let path = ledger.path().to_owned();
@@ -1970,7 +3821,7 @@ mod tests {
         assert_eq!(ledger.max_jobs().unwrap(), None);
         assert_eq!(
             ledger
-                .acquire(
+                .acquire_attempt(
                     "a",
                     PermitLane::Native,
                     PermitState::Acquiring,
@@ -1978,67 +3829,628 @@ mod tests {
                     None
                 )
                 .unwrap(),
-            AcquireOutcome::NotConfigured
+            AcquireExpected::NotConfigured
         );
         assert_eq!(ledger.occupied().unwrap(), 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn reconcile_adopts_marks_and_gates_advertisement() {
+    fn reconcile_requires_exact_attempts_marks_and_gates_advertisement() {
         let (mut ledger, dir) = temp_ledger("reconcile");
         ledger.set_max_jobs(4).unwrap();
         let generation = ledger.generation().unwrap();
-        ledger
-            .acquire(
+        let AcquireAttemptOutcome::Acquired {
+            attempt_token: old_token,
+        } = ledger
+            .acquire_attempt(
                 "old",
                 PermitLane::Native,
                 PermitState::Running,
                 generation,
                 None,
             )
-            .unwrap();
+            .unwrap()
+        else {
+            panic!("old permit was not acquired");
+        };
         // Nothing advertised before the first reconcile.
         assert_eq!(ledger.advertised_free().unwrap(), None);
 
-        let report = ledger
-            .reconcile(&[("new", PermitLane::Native, PermitState::Running)])
-            .unwrap();
-        assert_eq!(report.adopted, vec!["new".to_string()]);
+        // An observed holder without an existing exact-token row is not
+        // reacquired during reconciliation.
+        assert!(matches!(
+            ledger.reconcile_attempts(&[(
+                "new",
+                PermitLane::Native,
+                "unissued-token",
+            )]),
+            Err(LedgerError::StaleAttempt(holder)) if holder == "new"
+        ));
+        assert_eq!(ledger.occupied().unwrap(), 1);
+
+        let report = ledger.reconcile_attempts(&[]).unwrap();
         assert_eq!(report.marked_uncertain, vec!["old".to_string()]);
         assert!(report.confirmed.is_empty());
-        // Adopted and uncertain rows both count; nothing was erased.
-        assert_eq!(ledger.occupied().unwrap(), 2);
+        // Uncertain rows count; nothing was erased.
+        assert_eq!(ledger.occupied().unwrap(), 1);
         assert_eq!(
             ledger.holder_state("old").unwrap(),
             Some(PermitState::Uncertain)
         );
-        assert_eq!(ledger.advertised_free().unwrap(), Some(2));
+        assert_eq!(ledger.advertised_free().unwrap(), Some(3));
 
         // A new epoch requires a fresh reconcile before advertising.
         ledger.begin_epoch().unwrap();
         assert_eq!(ledger.advertised_free().unwrap(), None);
         let report = ledger
-            .reconcile(&[
-                ("new", PermitLane::Native, PermitState::Running),
-                ("old", PermitLane::Native, PermitState::Cleaning),
-            ])
+            .reconcile_attempts(&[("old", PermitLane::Native, &old_token)])
             .unwrap();
-        assert!(report.adopted.is_empty());
         assert!(report.marked_uncertain.is_empty());
-        assert_eq!(report.confirmed.len(), 2);
-        assert_eq!(ledger.advertised_free().unwrap(), Some(2));
+        assert_eq!(report.confirmed, vec!["old".to_string()]);
+        assert_eq!(ledger.advertised_free().unwrap(), Some(3));
 
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn adopt_takes_over_dead_attempts_and_refuses_the_rest() {
+    fn staged_reconcile_accepts_only_the_pre_or_post_rotation_row() {
+        let (mut ledger, dir) = temp_ledger("staged-reconcile");
+        ledger.set_max_jobs(2).unwrap();
+        let generation = ledger.generation().unwrap();
+        let holder = "scaleset/7/staged";
+        let previous_pid = std::process::id();
+        let AcquireAttemptOutcome::Acquired {
+            attempt_token: previous_token,
+        } = ledger
+            .acquire_attempt(
+                holder,
+                PermitLane::ScaleSet,
+                PermitState::Running,
+                generation,
+                Some(previous_pid),
+            )
+            .unwrap()
+        else {
+            panic!("staged fixture permit was not acquired");
+        };
+        let target_token = uuid::Uuid::new_v4().to_string();
+
+        // Crash cut before ledger rotation: accept exact previous token and
+        // leave the permit unchanged for proof-bearing recovery to finish.
+        let report = ledger
+            .reconcile_attempts_with_staged(
+                &[],
+                &[(
+                    holder,
+                    PermitLane::ScaleSet,
+                    Some(&previous_token),
+                    &target_token,
+                )],
+            )
+            .unwrap();
+        assert_eq!(report.confirmed, vec![holder.to_owned()]);
+        assert_eq!(
+            ledger.attempt_token(holder).unwrap(),
+            Some(previous_token.clone())
+        );
+        assert_eq!(
+            ledger.holder_state(holder).unwrap(),
+            Some(PermitState::Running)
+        );
+
+        // Crash cut after ledger rotation but before state DB projection:
+        // a fresh epoch still recognizes the exact target token.
+        let recovery_claim = ledger.claim_scaleset_recovery(&|_| false).unwrap();
+        assert_eq!(
+            ledger
+                .rotate_scaleset_attempt_for_recovery(
+                    holder,
+                    PermitState::Provisioning,
+                    generation,
+                    previous_pid,
+                    Some(&previous_token),
+                    &target_token,
+                    recovery_claim.token(),
+                )
+                .unwrap(),
+            AttemptRotationOutcome::Rotated
+        );
+        ledger.begin_epoch().unwrap();
+        let report = ledger
+            .reconcile_attempts_with_staged(
+                &[],
+                &[(
+                    holder,
+                    PermitLane::ScaleSet,
+                    Some(&previous_token),
+                    &target_token,
+                )],
+            )
+            .unwrap();
+        assert_eq!(report.confirmed, vec![holder.to_owned()]);
+        assert_eq!(
+            ledger.attempt_token(holder).unwrap(),
+            Some(target_token.clone())
+        );
+
+        // A v23 stage had no prior token. Only explicit migration provenance
+        // authorizes the exact backfilled token on this extant row.
+        let legacy_generation = ledger.generation().unwrap();
+        let legacy_pid = std::process::id();
+        let AcquireAttemptOutcome::Acquired {
+            attempt_token: backfilled_token,
+        } = ledger
+            .acquire_attempt(
+                "scaleset/7/v23-active",
+                PermitLane::ScaleSet,
+                PermitState::Uncertain,
+                legacy_generation,
+                Some(legacy_pid),
+            )
+            .unwrap()
+        else {
+            panic!("v23 fixture permit was not acquired");
+        };
+        ledger
+            .conn
+            .execute(
+                "INSERT INTO permit_token_migrations (holder, attempt_token, acquired_unix)
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    "scaleset/7/v23-active",
+                    backfilled_token,
+                    i64::try_from(unix_now()).unwrap_or(i64::MAX)
+                ],
+            )
+            .unwrap();
+        let legacy_target = uuid::Uuid::new_v4().to_string();
+        ledger.begin_epoch().unwrap();
+        let report = ledger
+            .reconcile_attempts_with_staged(
+                &[],
+                &[
+                    (
+                        holder,
+                        PermitLane::ScaleSet,
+                        Some(&previous_token),
+                        &target_token,
+                    ),
+                    (
+                        "scaleset/7/v23-active",
+                        PermitLane::ScaleSet,
+                        None,
+                        &legacy_target,
+                    ),
+                ],
+            )
+            .unwrap();
+        assert_eq!(report.confirmed.len(), 2);
+        assert_eq!(
+            ledger.attempt_token("scaleset/7/v23-active").unwrap(),
+            Some(backfilled_token)
+        );
+        assert!(matches!(
+            ledger.reconcile_attempts_with_staged(
+                &[],
+                &[(
+                    "scaleset/7/missing",
+                    PermitLane::ScaleSet,
+                    None,
+                    "target",
+                )],
+            ),
+            Err(LedgerError::StaleAttempt(seen)) if seen == "scaleset/7/missing"
+        ));
+        assert!(!ledger.has_permit("scaleset/7/missing").unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn staged_scale_set_release_reconcile_accepts_exact_or_absent_without_recreating() {
+        let (mut ledger, dir) = temp_ledger("staged-scaleset-release");
+        ledger.set_max_jobs(2).unwrap();
+        let generation = ledger.generation().unwrap();
+        let holder = "scaleset/7/release-stage";
+        let AcquireAttemptOutcome::Acquired { attempt_token } = ledger
+            .acquire_attempt(
+                holder,
+                PermitLane::ScaleSet,
+                PermitState::Cleaning,
+                generation,
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("staged release fixture permit was not acquired");
+        };
+
+        // Before the cross-database release commits, the exact row is
+        // attested and left untouched for Scale Set recovery.
+        let report = ledger
+            .reconcile_attempts_with_staged_releases(
+                &[],
+                &[],
+                &[(
+                    holder,
+                    PermitLane::ScaleSet,
+                    &attempt_token,
+                    DemandState::Terminal,
+                )],
+            )
+            .unwrap();
+        assert_eq!(report.confirmed, vec![holder.to_owned()]);
+        assert_eq!(
+            ledger.attempt_token(holder).unwrap(),
+            Some(attempt_token.clone())
+        );
+        assert_eq!(
+            ledger.holder_state(holder).unwrap(),
+            Some(PermitState::Cleaning)
+        );
+
+        // Crash after the ledger release but before the state database
+        // projection: a new startup accepts the absent exact staged row and
+        // does not reacquire it or alter the terminal demand.
+        assert_eq!(
+            ledger
+                .release_scaleset_staged_owned(holder, &attempt_token, DemandState::Terminal,)
+                .unwrap(),
+            OwnedReleaseOutcome::Released
+        );
+        ledger.begin_epoch().unwrap();
+        let report = ledger
+            .reconcile_attempts_with_staged_releases(
+                &[],
+                &[],
+                &[(
+                    holder,
+                    PermitLane::ScaleSet,
+                    &attempt_token,
+                    DemandState::Terminal,
+                )],
+            )
+            .unwrap();
+        assert!(report.confirmed.is_empty());
+        assert!(!ledger.has_permit(holder).unwrap());
+        assert_eq!(
+            ledger.demand(holder).unwrap().unwrap().state,
+            DemandState::Terminal
+        );
+        assert_eq!(
+            ledger
+                .release_scaleset_staged_owned(holder, &attempt_token, DemandState::Terminal,)
+                .unwrap(),
+            OwnedReleaseOutcome::AlreadyAbsent
+        );
+        assert_eq!(
+            ledger
+                .release_scaleset_staged_owned(holder, &attempt_token, DemandState::Eligible,)
+                .unwrap(),
+            OwnedReleaseOutcome::StaleAttempt
+        );
+        assert!(matches!(
+            ledger.reconcile_attempts_with_staged_releases(
+                &[],
+                &[],
+                &[(holder, PermitLane::ScaleSet, &attempt_token, DemandState::Eligible)],
+            ),
+            Err(LedgerError::StaleAttempt(seen)) if seen == holder
+        ));
+        assert!(matches!(
+            ledger.reconcile_attempts_with_staged_releases(
+                &[],
+                &[],
+                &[(
+                    holder,
+                    PermitLane::Native,
+                    &attempt_token,
+                    DemandState::Terminal,
+                )],
+            ),
+            Err(LedgerError::DemandLaneMismatch {
+                expected: PermitLane::ScaleSet,
+                ..
+            })
+        ));
+
+        // A newer token on the same holder may never be mistaken for the
+        // staged release owner.
+        let replacement_holder = "scaleset/7/replacement";
+        let generation = ledger.generation().unwrap();
+        let replacement_pid = std::process::id();
+        let AcquireAttemptOutcome::Acquired {
+            attempt_token: replacement_token,
+        } = ledger
+            .acquire_attempt(
+                replacement_holder,
+                PermitLane::ScaleSet,
+                PermitState::Running,
+                generation,
+                Some(replacement_pid),
+            )
+            .unwrap()
+        else {
+            panic!("replacement fixture permit was not acquired");
+        };
+        let replacement_target = uuid::Uuid::new_v4().to_string();
+        let recovery_claim = ledger.claim_scaleset_recovery(&|_| false).unwrap();
+        assert_eq!(
+            ledger
+                .rotate_scaleset_attempt_for_recovery(
+                    replacement_holder,
+                    PermitState::Provisioning,
+                    generation,
+                    replacement_pid,
+                    Some(&replacement_token),
+                    &replacement_target,
+                    recovery_claim.token(),
+                )
+                .unwrap(),
+            AttemptRotationOutcome::Rotated
+        );
+        ledger.begin_epoch().unwrap();
+        assert!(matches!(
+            ledger.reconcile_attempts_with_staged_releases(
+                &[],
+                &[],
+                &[(
+                    replacement_holder,
+                    PermitLane::ScaleSet,
+                    &replacement_token,
+                    DemandState::Terminal,
+                )],
+            ),
+            Err(LedgerError::StaleAttempt(seen)) if seen == replacement_holder
+        ));
+        assert_eq!(
+            ledger.attempt_token(replacement_holder).unwrap(),
+            Some(replacement_target)
+        );
+        assert_eq!(
+            ledger
+                .release_scaleset_staged_owned(
+                    replacement_holder,
+                    &replacement_token,
+                    DemandState::Terminal,
+                )
+                .unwrap(),
+            OwnedReleaseOutcome::StaleAttempt
+        );
+        assert_eq!(ledger.occupied().unwrap(), 1);
+        drop(ledger);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn native_terminal_release_requires_owner_when_absent_and_retry_is_idempotent() {
+        let (mut ledger, dir) = temp_ledger("native-terminal-release-absent");
+        ledger.set_max_jobs(1).unwrap();
+        let now = unix_now();
+        ledger
+            .observe_demand("native/absent", PermitLane::Native, "test", now, now)
+            .unwrap();
+        let generation = ledger.generation().unwrap();
+        let AcquireAttemptOutcome::Acquired {
+            attempt_token: stale_token,
+        } = ledger
+            .acquire_attempt(
+                "native/absent",
+                PermitLane::Native,
+                PermitState::Acquiring,
+                generation,
+                Some(std::process::id()),
+            )
+            .unwrap()
+        else {
+            panic!("initial demand must acquire its permit");
+        };
+        assert!(ledger
+            .release_to_eligible_owned("native/absent", &stale_token)
+            .unwrap());
+
+        assert_eq!(
+            ledger
+                .release_native_terminal_owned("native/absent", &stale_token)
+                .unwrap(),
+            OwnedReleaseOutcome::StaleAttempt
+        );
+        assert_eq!(
+            ledger.demand("native/absent").unwrap().unwrap().state,
+            DemandState::Eligible
+        );
+        assert_eq!(
+            ledger
+                .release_native_cancelled_owned("native/absent", &stale_token)
+                .unwrap(),
+            OwnedReleaseOutcome::StaleAttempt
+        );
+        assert_eq!(
+            ledger.demand("native/absent").unwrap().unwrap().state,
+            DemandState::Eligible
+        );
+        let AcquireAttemptOutcome::Acquired { attempt_token } = ledger
+            .acquire_attempt(
+                "native/absent",
+                PermitLane::Native,
+                PermitState::Acquiring,
+                generation,
+                Some(std::process::id()),
+            )
+            .unwrap()
+        else {
+            panic!("open demand must remain acquirable after an unowned release");
+        };
+        assert_eq!(
+            ledger
+                .release_native_terminal_owned("native/absent", &attempt_token)
+                .unwrap(),
+            OwnedReleaseOutcome::Released
+        );
+        assert_eq!(
+            ledger.demand("native/absent").unwrap().unwrap().state,
+            DemandState::Terminal
+        );
+        assert_eq!(
+            ledger
+                .release_native_terminal_owned("native/absent", &attempt_token)
+                .unwrap(),
+            OwnedReleaseOutcome::AlreadyAbsent
+        );
+        assert_eq!(
+            ledger
+                .acquire_attempt(
+                    "native/absent",
+                    PermitLane::Native,
+                    PermitState::Acquiring,
+                    generation,
+                    Some(std::process::id()),
+                )
+                .unwrap(),
+            AcquireAttemptOutcome::Closed
+        );
+        assert_eq!(ledger.occupied().unwrap(), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cleanup_preservation_releases_only_exact_attempt_to_redelivery() {
+        let (mut ledger, dir) = temp_ledger("cleanup-preservation-token");
+        ledger.set_max_jobs(1).unwrap();
+        let generation = ledger.generation().unwrap();
+        let holder = "native/cleanup-preservation";
+        let AcquireAttemptOutcome::Acquired { attempt_token } = ledger
+            .acquire_attempt(
+                holder,
+                PermitLane::Native,
+                PermitState::Cleaning,
+                generation,
+                Some(std::process::id()),
+            )
+            .unwrap()
+        else {
+            panic!("cleanup attempt was not acquired");
+        };
+
+        assert!(matches!(
+            ledger.retain_uncertain_after_cleanup_owned(holder, "stale-token"),
+            Err(LedgerError::StaleAttempt(seen)) if seen == holder
+        ));
+        assert_eq!(
+            ledger.holder_state(holder).unwrap(),
+            Some(PermitState::Cleaning)
+        );
+        assert_eq!(
+            ledger.demand(holder).unwrap().unwrap().state,
+            DemandState::Granted
+        );
+
+        ledger
+            .retain_uncertain_after_cleanup_owned(holder, &attempt_token)
+            .unwrap();
+        assert_eq!(
+            ledger.holder_state(holder).unwrap(),
+            Some(PermitState::Uncertain)
+        );
+        assert_eq!(
+            ledger.demand(holder).unwrap().unwrap().state,
+            DemandState::Terminal
+        );
+        assert_eq!(ledger.attempt_token(holder).unwrap(), Some(attempt_token));
+        assert!(matches!(
+            ledger
+                .adopt_for_redelivery(
+                    holder,
+                    PermitLane::Native,
+                    PermitState::Acquiring,
+                    generation,
+                    std::process::id(),
+                    &|_| true,
+                )
+                .unwrap(),
+            AdoptOutcome::Adopted { .. }
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn exact_token_reconcile_races_release_without_reacquiring_orphaned_row() {
+        use std::sync::{Arc, Barrier};
+
+        let (mut setup, dir) = temp_ledger("reconcile-release-race");
+        setup.set_max_jobs(32).unwrap();
+        let generation = setup.generation().unwrap();
+        drop(setup);
+
+        for iteration in 0..16 {
+            let holder = format!("native/reconcile-race-{iteration}");
+            let mut setup = PermitLedger::open(&dir.join("permit-ledger.db")).unwrap();
+            let AcquireAttemptOutcome::Acquired { attempt_token } = setup
+                .acquire_attempt(
+                    &holder,
+                    PermitLane::Native,
+                    PermitState::Running,
+                    generation,
+                    Some(std::process::id()),
+                )
+                .unwrap()
+            else {
+                panic!("race fixture permit was not acquired");
+            };
+            let path = setup.path().to_owned();
+            drop(setup);
+
+            let barrier = Arc::new(Barrier::new(3));
+            let release_barrier = Arc::clone(&barrier);
+            let release_path = path.clone();
+            let release_holder = holder.clone();
+            let release_token = attempt_token.clone();
+            let release = std::thread::spawn(move || {
+                let mut ledger = PermitLedger::open(&release_path).unwrap();
+                release_barrier.wait();
+                ledger
+                    .release_owned(&release_holder, &release_token)
+                    .unwrap()
+            });
+
+            let reconcile_barrier = Arc::clone(&barrier);
+            let reconcile_path = path.clone();
+            let reconcile_holder = holder.clone();
+            let reconcile_token = attempt_token.clone();
+            let reconcile = std::thread::spawn(move || {
+                let mut ledger = PermitLedger::open(&reconcile_path).unwrap();
+                reconcile_barrier.wait();
+                ledger.reconcile_attempts(&[(
+                    &reconcile_holder,
+                    PermitLane::Native,
+                    &reconcile_token,
+                )])
+            });
+
+            barrier.wait();
+            assert!(release.join().unwrap());
+            let reconcile = reconcile.join().unwrap();
+            assert!(
+                reconcile.is_ok()
+                    || matches!(reconcile, Err(LedgerError::StaleAttempt(ref seen)) if seen == &holder)
+            );
+            let ledger = PermitLedger::open(&path).unwrap();
+            assert!(!ledger.has_permit(&holder).unwrap());
+            assert_eq!(
+                ledger.demand(&holder).unwrap().unwrap().state,
+                DemandState::Terminal
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn adopt_dead_and_same_process_uncertain_attempts_but_refuse_live_attempts() {
         let (mut ledger, dir) = temp_ledger("adopt");
-        ledger.set_max_jobs(4).unwrap();
+        ledger.set_max_jobs(5).unwrap();
         let generation = ledger.generation().unwrap();
         ledger
-            .acquire(
+            .acquire_attempt(
                 "dead",
                 PermitLane::Native,
                 PermitState::Running,
@@ -2047,7 +4459,7 @@ mod tests {
             )
             .unwrap();
         ledger
-            .acquire(
+            .acquire_attempt(
                 "live",
                 PermitLane::Native,
                 PermitState::Running,
@@ -2056,7 +4468,7 @@ mod tests {
             )
             .unwrap();
         ledger
-            .acquire(
+            .acquire_attempt(
                 "noid",
                 PermitLane::Native,
                 PermitState::Running,
@@ -2065,7 +4477,7 @@ mod tests {
             )
             .unwrap();
         ledger
-            .acquire(
+            .acquire_attempt(
                 "official",
                 PermitLane::ScaleSet,
                 PermitState::Running,
@@ -2074,22 +4486,45 @@ mod tests {
             )
             .unwrap();
 
+        let AcquireAttemptOutcome::Acquired {
+            attempt_token: stale_attempt_token,
+        } = ledger
+            .acquire_attempt(
+                "uncertain",
+                PermitLane::Native,
+                PermitState::Acquiring,
+                generation,
+                Some(102),
+            )
+            .unwrap()
+        else {
+            panic!("uncertain fixture attempt was not acquired");
+        };
+        // This same-process attempt dropped after an ambiguous acquire.
+        // Its state and terminal demand distinguish it from active work.
+        ledger
+            .retain_uncertain_owned("uncertain", generation, &stale_attempt_token)
+            .unwrap();
+
         let is_alive = |pid: u32| pid == 102;
-        assert_eq!(
-            ledger
-                .adopt_if_pid_dead(
-                    "dead",
-                    PermitLane::Native,
-                    PermitState::Acquiring,
-                    generation,
-                    999,
-                    &is_alive,
-                )
-                .unwrap(),
-            AdoptOutcome::Adopted
-        );
+        let AdoptOutcome::Adopted {
+            attempt_token: dead_attempt_token,
+        } = ledger
+            .adopt_for_redelivery(
+                "dead",
+                PermitLane::Native,
+                PermitState::Acquiring,
+                generation,
+                999,
+                &is_alive,
+            )
+            .unwrap()
+        else {
+            panic!("dead attempt was not adopted");
+        };
+        assert!(!dead_attempt_token.is_empty());
         // Same row, new pid and state; occupancy unchanged.
-        assert_eq!(ledger.occupied().unwrap(), 4);
+        assert_eq!(ledger.occupied().unwrap(), 5);
         assert_eq!(
             ledger.holder_state("dead").unwrap(),
             Some(PermitState::Acquiring)
@@ -2103,15 +4538,74 @@ mod tests {
                 .pid,
             Some(999)
         );
-        // Live pid, missing pid, foreign lane, and missing row all refuse.
+        // Same-process redelivery takes over only the uncertain terminal
+        // attempt. Its active neighbor retains its running state and pid.
+        let AdoptOutcome::Adopted {
+            attempt_token: adopted_attempt_token,
+        } = ledger
+            .adopt_for_redelivery(
+                "uncertain",
+                PermitLane::Native,
+                PermitState::Acquiring,
+                generation,
+                102,
+                &is_alive,
+            )
+            .unwrap()
+        else {
+            panic!("same-process uncertain attempt was not adopted");
+        };
+        assert_eq!(
+            ledger.holder_state("uncertain").unwrap(),
+            Some(PermitState::Acquiring)
+        );
+        assert_ne!(stale_attempt_token, adopted_attempt_token);
+        let adopted_holders = ledger.holders().unwrap();
+        let adopted_demand = ledger.demand("uncertain").unwrap();
+        // Teardown from the previous owner is fenced after adoption. Its
+        // state and terminal-demand updates must not leak through stale
+        // transitions, retention, or release.
+        assert!(matches!(
+            ledger.transition_owned(
+                "uncertain",
+                PermitState::Cleaning,
+                generation,
+                &stale_attempt_token,
+            ),
+            Err(LedgerError::StaleAttempt(seen)) if seen == "uncertain"
+        ));
+        assert_eq!(ledger.holders().unwrap(), adopted_holders);
+        assert_eq!(ledger.demand("uncertain").unwrap(), adopted_demand);
+        assert!(matches!(
+            ledger.retain_uncertain_owned("uncertain", generation, &stale_attempt_token),
+            Err(LedgerError::StaleAttempt(seen)) if seen == "uncertain"
+        ));
+        assert_eq!(ledger.holders().unwrap(), adopted_holders);
+        assert_eq!(ledger.demand("uncertain").unwrap(), adopted_demand);
+        assert!(!ledger
+            .release_owned("uncertain", &stale_attempt_token)
+            .unwrap());
+        assert_eq!(ledger.holders().unwrap(), adopted_holders);
+        assert_eq!(ledger.demand("uncertain").unwrap(), adopted_demand);
+        assert_eq!(ledger.occupied().unwrap(), 5);
+        assert_eq!(
+            ledger.holder_state("uncertain").unwrap(),
+            Some(PermitState::Acquiring)
+        );
+        assert_eq!(
+            ledger.demand("uncertain").unwrap().unwrap().state,
+            DemandState::Terminal
+        );
+        // A concurrent redelivery sees the acquired active state and cannot
+        // take the same row again.
         assert_eq!(
             ledger
-                .adopt_if_pid_dead(
-                    "live",
+                .adopt_for_redelivery(
+                    "uncertain",
                     PermitLane::Native,
                     PermitState::Acquiring,
                     generation,
-                    999,
+                    102,
                     &is_alive,
                 )
                 .unwrap(),
@@ -2119,7 +4613,25 @@ mod tests {
         );
         assert_eq!(
             ledger
-                .adopt_if_pid_dead(
+                .adopt_for_redelivery(
+                    "live",
+                    PermitLane::Native,
+                    PermitState::Acquiring,
+                    generation,
+                    102,
+                    &is_alive,
+                )
+                .unwrap(),
+            AdoptOutcome::LiveHolder
+        );
+        assert_eq!(
+            ledger.holder_state("live").unwrap(),
+            Some(PermitState::Running)
+        );
+        // Missing pid, foreign lane, and missing row all refuse.
+        assert_eq!(
+            ledger
+                .adopt_for_redelivery(
                     "noid",
                     PermitLane::Native,
                     PermitState::Acquiring,
@@ -2132,7 +4644,7 @@ mod tests {
         );
         assert_eq!(
             ledger
-                .adopt_if_pid_dead(
+                .adopt_for_redelivery(
                     "official",
                     PermitLane::Native,
                     PermitState::Acquiring,
@@ -2145,7 +4657,7 @@ mod tests {
         );
         assert_eq!(
             ledger
-                .adopt_if_pid_dead(
+                .adopt_for_redelivery(
                     "gone",
                     PermitLane::Native,
                     PermitState::Acquiring,
@@ -2160,81 +4672,378 @@ mod tests {
     }
 
     #[test]
-    fn sweep_releases_only_dead_unprotected_uncertain_natives() {
-        use std::collections::BTreeSet;
-        let (mut ledger, dir) = temp_ledger("sweep");
-        ledger.set_max_jobs(8).unwrap();
+    fn same_process_scaleset_uncertain_attempt_is_not_adopted_while_live() {
+        let (mut ledger, dir) = temp_ledger("scaleset-live-uncertain");
+        ledger.set_max_jobs(1).unwrap();
         let generation = ledger.generation().unwrap();
-        // Dead pid does not prove owned teardown completed.
-        ledger
-            .acquire(
-                "dead",
-                PermitLane::Native,
-                PermitState::Uncertain,
+        let holder = "scaleset/7/worker-1";
+        let AcquireAttemptOutcome::Acquired { attempt_token } = ledger
+            .acquire_attempt(
+                holder,
+                PermitLane::ScaleSet,
+                PermitState::Provisioning,
                 generation,
-                Some(1),
+                Some(std::process::id()),
             )
-            .unwrap();
-        // Live pid: retained even though uncertain.
+            .unwrap()
+        else {
+            panic!("Scale Set attempt was not acquired");
+        };
         ledger
-            .acquire(
-                "live",
-                PermitLane::Native,
-                PermitState::Uncertain,
-                generation,
-                Some(2),
-            )
+            .retain_uncertain_owned(holder, generation, &attempt_token)
             .unwrap();
-        // Dead pid but protected (in-flight elsewhere): retained.
-        ledger
-            .acquire(
-                "kept",
-                PermitLane::Native,
-                PermitState::Uncertain,
-                generation,
-                Some(3),
-            )
-            .unwrap();
-        // Dead pid but still running (never marked uncertain): retained.
-        ledger
-            .acquire(
-                "running",
+
+        assert_eq!(
+            ledger
+                .adopt_for_redelivery(
+                    holder,
+                    PermitLane::ScaleSet,
+                    PermitState::Provisioning,
+                    generation,
+                    std::process::id(),
+                    &|_| true,
+                )
+                .unwrap(),
+            AdoptOutcome::LiveHolder
+        );
+        assert_eq!(ledger.occupied().unwrap(), 1);
+        assert!(ledger.has_permit(holder).unwrap());
+        assert!(ledger.release_owned(holder, &attempt_token).unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn timed_out_cleanup_claim_blocks_same_process_redelivery_until_worker_finishes() {
+        use std::sync::{Arc, Barrier};
+
+        let (mut setup, dir) = temp_ledger("timed-out-cleanup-live-redelivery");
+        setup.set_max_jobs(2).unwrap();
+        let generation = setup.generation().unwrap();
+        let holder = "native/timed-out-cleanup";
+        let AcquireAttemptOutcome::Acquired { attempt_token } = setup
+            .acquire_attempt(
+                holder,
                 PermitLane::Native,
                 PermitState::Running,
                 generation,
-                Some(4),
+                Some(std::process::id()),
             )
-            .unwrap();
-        // Dead pid but no pid recorded: retained.
-        ledger
-            .acquire(
-                "noid",
-                PermitLane::Native,
-                PermitState::Uncertain,
-                generation,
-                None,
-            )
-            .unwrap();
-        // Dead pid but Scale Set lane: never swept here.
-        ledger
-            .acquire(
-                "official",
-                PermitLane::ScaleSet,
-                PermitState::Uncertain,
-                generation,
-                Some(5),
-            )
-            .unwrap();
+            .unwrap()
+        else {
+            panic!("attempt was not acquired");
+        };
+        let path = setup.path().to_owned();
+        drop(setup);
 
-        let is_alive = |pid: u32| pid == 2;
-        let protected: BTreeSet<String> = ["kept".to_string()].into_iter().collect();
+        // The detached teardown worker owns the Cleaning state while it
+        // retries local cleanup after the handler's timeout.
+        let claimed = Arc::new(Barrier::new(2));
+        let timeout_drop = Arc::new(Barrier::new(2));
+        let retained = Arc::new(Barrier::new(2));
+        let finish_cleanup = Arc::new(Barrier::new(2));
+        let worker_path = path.clone();
+        let worker_holder = holder.to_owned();
+        let worker_token = attempt_token.clone();
+        let worker_claimed = Arc::clone(&claimed);
+        let worker_timeout_drop = Arc::clone(&timeout_drop);
+        let worker_retained = Arc::clone(&retained);
+        let worker_finish = Arc::clone(&finish_cleanup);
+        let worker = std::thread::spawn(move || {
+            let mut ledger = PermitLedger::open(&worker_path).unwrap();
+            let generation = ledger.generation().unwrap();
+            ledger
+                .transition_owned(
+                    &worker_holder,
+                    PermitState::Cleaning,
+                    generation,
+                    &worker_token,
+                )
+                .unwrap();
+            worker_claimed.wait();
+            // Simulate the timed-out request guard dropping while the
+            // detached cleanup worker is still live.
+            worker_timeout_drop.wait();
+            ledger
+                .retain_uncertain_owned(&worker_holder, generation, &worker_token)
+                .unwrap();
+            assert_eq!(
+                ledger.holder_state(&worker_holder).unwrap(),
+                Some(PermitState::Cleaning)
+            );
+            worker_retained.wait();
+            worker_finish.wait();
+            assert!(ledger.release_owned(&worker_holder, &worker_token).unwrap());
+        });
+
+        claimed.wait();
+        let is_alive = |pid| pid == std::process::id();
+        let mut redelivery = PermitLedger::open(&path).unwrap();
         assert_eq!(
-            ledger.sweep_dead_uncertain(&is_alive, &protected).unwrap(),
-            vec!["dead".to_string()]
+            redelivery
+                .adopt_for_redelivery(
+                    holder,
+                    PermitLane::Native,
+                    PermitState::Acquiring,
+                    generation,
+                    std::process::id(),
+                    &is_alive,
+                )
+                .unwrap(),
+            AdoptOutcome::LiveHolder
         );
-        assert_eq!(ledger.occupied().unwrap(), 5);
-        assert!(ledger.holder_state("dead").unwrap().is_none());
+        timeout_drop.wait();
+        retained.wait();
+        assert_eq!(
+            redelivery.holder_state(holder).unwrap(),
+            Some(PermitState::Cleaning)
+        );
+        assert_eq!(
+            redelivery
+                .adopt_for_redelivery(
+                    holder,
+                    PermitLane::Native,
+                    PermitState::Acquiring,
+                    generation,
+                    std::process::id(),
+                    &is_alive,
+                )
+                .unwrap(),
+            AdoptOutcome::LiveHolder
+        );
+        finish_cleanup.wait();
+        worker.join().unwrap();
+        assert!(!redelivery.has_permit(holder).unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
+    #[test]
+    fn absent_row_cleanup_claim_races_fresh_acquire_without_releasing_new_attempt() {
+        use std::sync::{Arc, Barrier};
+
+        let (mut setup, dir) = temp_ledger("cleanup-claim-acquire-race");
+        setup.set_max_jobs(32).unwrap();
+        let generation = setup.begin_epoch().unwrap();
+        setup.reconcile_attempts(&[]).unwrap();
+        drop(setup);
+
+        for attempt in 0..16 {
+            let holder = format!("native/cleanup-race-{attempt}");
+            let previous_token = format!("previous-attempt-{attempt}");
+            let mut setup = PermitLedger::open(&dir.join("permit-ledger.db")).unwrap();
+            let now = unix_now();
+            setup
+                .observe_demand(&holder, PermitLane::Native, "test", now, now)
+                .unwrap();
+            drop(setup);
+
+            let gate = Arc::new(Barrier::new(2));
+            let acquire_gate = Arc::clone(&gate);
+            let acquire_path = dir.join("permit-ledger.db");
+            let acquire_holder = holder.clone();
+            let acquire = std::thread::spawn(move || {
+                let mut ledger = PermitLedger::open(&acquire_path).unwrap();
+                acquire_gate.wait();
+                ledger
+                    .acquire_attempt(
+                        &acquire_holder,
+                        PermitLane::Native,
+                        PermitState::Acquiring,
+                        generation,
+                        Some(std::process::id()),
+                    )
+                    .unwrap()
+            });
+
+            let cleanup_gate = Arc::clone(&gate);
+            let cleanup_path = dir.join("permit-ledger.db");
+            let cleanup_holder = holder.clone();
+            let cleanup_token = previous_token.clone();
+            let cleanup = std::thread::spawn(move || {
+                let mut ledger = PermitLedger::open(&cleanup_path).unwrap();
+                cleanup_gate.wait();
+                ledger
+                    .claim_recorded_terminal_cleanup(
+                        &cleanup_holder,
+                        PermitLane::Native,
+                        &cleanup_token,
+                    )
+                    .unwrap()
+            });
+
+            let acquired = acquire.join().unwrap();
+            let claimed = cleanup.join().unwrap();
+            match acquired {
+                AcquireAttemptOutcome::Acquired { attempt_token } => {
+                    assert_eq!(claimed, CleanupClaimOutcome::StaleAttempt);
+                    let mut ledger = PermitLedger::open(&dir.join("permit-ledger.db")).unwrap();
+                    assert!(!ledger.release_owned(&holder, &previous_token).unwrap());
+                    assert!(ledger.is_current_attempt(&holder, &attempt_token).unwrap());
+                }
+                AcquireAttemptOutcome::Closed => {
+                    assert_eq!(claimed, CleanupClaimOutcome::DemandClosed);
+                    let mut ledger = PermitLedger::open(&dir.join("permit-ledger.db")).unwrap();
+                    assert_eq!(
+                        ledger
+                            .claim_recorded_terminal_cleanup(
+                                &holder,
+                                PermitLane::Native,
+                                &previous_token,
+                            )
+                            .unwrap(),
+                        CleanupClaimOutcome::ClosedAbsent
+                    );
+                    assert!(!ledger.has_permit(&holder).unwrap());
+                    assert_eq!(
+                        ledger.demand(&holder).unwrap().unwrap().state,
+                        DemandState::Terminal
+                    );
+                    assert!(!ledger.release_owned(&holder, &previous_token).unwrap());
+                }
+                outcome => panic!("unexpected fresh-acquire result: {outcome:?}"),
+            }
+        }
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn recorded_cleanup_retry_accepts_cancelled_redelivery_after_token_rotation() {
+        let (mut ledger, dir) = temp_ledger("recorded-cleanup-cancelled-redelivery");
+        ledger.set_max_jobs(1).unwrap();
+        let generation = ledger.generation().unwrap();
+        let holder = "native/recorded-cleanup-cancelled";
+        let AcquireAttemptOutcome::Acquired {
+            attempt_token: recorded_token,
+        } = ledger
+            .acquire_attempt(
+                holder,
+                PermitLane::Native,
+                PermitState::Acquiring,
+                generation,
+                Some(std::process::id()),
+            )
+            .unwrap()
+        else {
+            panic!("recorded attempt was not acquired");
+        };
+
+        ledger
+            .retain_uncertain_after_cleanup_owned(holder, &recorded_token)
+            .unwrap();
+        let AdoptOutcome::Adopted {
+            attempt_token: redelivered_token,
+        } = ledger
+            .adopt_for_redelivery(
+                holder,
+                PermitLane::Native,
+                PermitState::Acquiring,
+                generation,
+                std::process::id(),
+                &|_| true,
+            )
+            .unwrap()
+        else {
+            panic!("preserved attempt was not adopted");
+        };
+        assert_ne!(recorded_token, redelivered_token);
+        assert_eq!(
+            ledger
+                .release_native_cancelled_owned(holder, &redelivered_token)
+                .unwrap(),
+            OwnedReleaseOutcome::Released
+        );
+        assert_eq!(
+            ledger.demand(holder).unwrap().unwrap().state,
+            DemandState::Cancelled
+        );
+
+        // The ordinary token-owner API still rejects an absent cancellation
+        // until recorded cleanup proves the old marker's exact token.
+        assert_eq!(
+            ledger
+                .release_native_terminal_owned(holder, &recorded_token)
+                .unwrap(),
+            OwnedReleaseOutcome::StaleAttempt
+        );
+        assert_eq!(
+            ledger
+                .claim_recorded_terminal_cleanup(holder, PermitLane::Native, &recorded_token)
+                .unwrap(),
+            CleanupClaimOutcome::ClosedAbsent
+        );
+        let other_holder = "native/recorded-cleanup-other";
+        let now = unix_now();
+        ledger
+            .observe_demand(other_holder, PermitLane::Native, "test", now, now)
+            .unwrap();
+        assert!(ledger.cancel_demand(other_holder).unwrap());
+        assert_eq!(
+            ledger
+                .release_native_terminal_owned(other_holder, &recorded_token)
+                .unwrap(),
+            OwnedReleaseOutcome::StaleAttempt
+        );
+        assert_eq!(
+            ledger
+                .release_native_terminal_owned(holder, "wrong-recorded-token")
+                .unwrap(),
+            OwnedReleaseOutcome::StaleAttempt
+        );
+        assert_eq!(
+            ledger.demand(holder).unwrap().unwrap().state,
+            DemandState::Cancelled
+        );
+        assert_eq!(
+            ledger.demand(other_holder).unwrap().unwrap().state,
+            DemandState::Cancelled
+        );
+
+        // The caller releases local storage between the claim and release,
+        // reopening the ledger on the second operation.
+        drop(ledger);
+        let mut retry = PermitLedger::open(&dir.join("permit-ledger.db")).unwrap();
+        assert_eq!(
+            retry
+                .release_native_terminal_owned(holder, &recorded_token)
+                .unwrap(),
+            OwnedReleaseOutcome::AlreadyAbsent
+        );
+        assert_eq!(
+            retry
+                .release_native_terminal_owned(holder, &recorded_token)
+                .unwrap(),
+            OwnedReleaseOutcome::StaleAttempt
+        );
+
+        // Simulate a crash after release commits but before the caller clears
+        // its marker. The retry must reclaim and recreate the consumed proof.
+        drop(retry);
+        let mut crashed_retry = PermitLedger::open(&dir.join("permit-ledger.db")).unwrap();
+        assert_eq!(
+            crashed_retry
+                .claim_recorded_terminal_cleanup(holder, PermitLane::Native, &recorded_token)
+                .unwrap(),
+            CleanupClaimOutcome::ClosedAbsent
+        );
+        drop(crashed_retry);
+        let mut final_retry = PermitLedger::open(&dir.join("permit-ledger.db")).unwrap();
+        assert_eq!(
+            final_retry
+                .release_native_terminal_owned(holder, &recorded_token)
+                .unwrap(),
+            OwnedReleaseOutcome::AlreadyAbsent
+        );
+        assert!(!final_retry.has_permit(holder).unwrap());
+        assert_eq!(
+            final_retry.demand(holder).unwrap().unwrap().state,
+            DemandState::Cancelled
+        );
+        assert_eq!(
+            final_retry
+                .release_native_terminal_owned(holder, &recorded_token)
+                .unwrap(),
+            OwnedReleaseOutcome::StaleAttempt
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2251,7 +5060,7 @@ mod tests {
             ledger.set_max_jobs(3).unwrap();
             let generation = ledger.generation().unwrap();
             ledger
-                .acquire(
+                .acquire_attempt(
                     "a",
                     PermitLane::Native,
                     PermitState::Running,
@@ -2269,7 +5078,7 @@ mod tests {
         // still counts against fresh acquisitions.
         assert_eq!(
             ledger
-                .acquire(
+                .acquire_attempt(
                     "b",
                     PermitLane::Native,
                     PermitState::Acquiring,
@@ -2277,11 +5086,11 @@ mod tests {
                     None
                 )
                 .unwrap(),
-            AcquireOutcome::Acquired
+            AcquireExpected::Acquired
         );
         assert_eq!(
             ledger
-                .acquire(
+                .acquire_attempt(
                     "c",
                     PermitLane::Native,
                     PermitState::Acquiring,
@@ -2289,11 +5098,11 @@ mod tests {
                     None
                 )
                 .unwrap(),
-            AcquireOutcome::Acquired
+            AcquireExpected::Acquired
         );
         assert_eq!(
             ledger
-                .acquire(
+                .acquire_attempt(
                     "d",
                     PermitLane::Native,
                     PermitState::Acquiring,
@@ -2301,7 +5110,7 @@ mod tests {
                     None
                 )
                 .unwrap(),
-            AcquireOutcome::Full
+            AcquireExpected::Full
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

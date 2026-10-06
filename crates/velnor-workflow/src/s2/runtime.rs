@@ -17,7 +17,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use sha2::{Digest, Sha256};
 
@@ -38,6 +38,7 @@ use super::{GeneratorError, UnitKind, ValidationPhase};
 const DEFAULT_CONFIG: &str = ".github/ci/project.toml";
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 const REVISION_FALLBACK_REASON: &str = "identical or unresolvable revisions; fell back to full";
+const COMMAND_DIGEST_DOMAIN: &[u8] = b"velnor-command-digest-v3";
 
 #[expect(
     dead_code,
@@ -461,6 +462,122 @@ fn print_closure(arguments: &[OsString]) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+#[derive(Debug, Serialize)]
+struct ResultRecord {
+    repository: String,
+    base_sha: String,
+    head_sha: String,
+    run_id: String,
+    run_attempt: String,
+    plan_digest: String,
+    unit: String,
+    lane: String,
+    provider: String,
+    platform: String,
+    command_digest: String,
+    outcome: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ResultDocument {
+    schema: u8,
+    results: Vec<ResultRecord>,
+}
+
+fn required_result_value(name: &str, value: Option<String>) -> Result<String, GeneratorError> {
+    match value {
+        Some(value) if !value.is_empty() => Ok(value),
+        Some(_) => Err(GeneratorError::usage(format!(
+            "record-result requires non-empty {name}"
+        ))),
+        None => Err(GeneratorError::usage(format!(
+            "record-result requires {name}"
+        ))),
+    }
+}
+
+fn result_outcome(value: &str) -> String {
+    match value {
+        "success" => "success".to_owned(),
+        "cancelled" => "cancelled".to_owned(),
+        _ => "failure".to_owned(),
+    }
+}
+
+fn result_record_from_env() -> Result<ResultRecord, GeneratorError> {
+    Ok(ResultRecord {
+        repository: required_result_value(
+            "VELNOR_RESULT_REPOSITORY",
+            env::var("VELNOR_RESULT_REPOSITORY").ok(),
+        )?,
+        base_sha: required_result_value(
+            "VELNOR_RESULT_BASE_SHA",
+            env::var("VELNOR_RESULT_BASE_SHA").ok(),
+        )?,
+        head_sha: required_result_value(
+            "VELNOR_RESULT_HEAD_SHA",
+            env::var("VELNOR_RESULT_HEAD_SHA").ok(),
+        )?,
+        run_id: required_result_value(
+            "VELNOR_RESULT_RUN_ID",
+            env::var("VELNOR_RESULT_RUN_ID").ok(),
+        )?,
+        run_attempt: required_result_value(
+            "VELNOR_RESULT_RUN_ATTEMPT",
+            env::var("VELNOR_RESULT_RUN_ATTEMPT").ok(),
+        )?,
+        plan_digest: required_result_value(
+            "VELNOR_RESULT_PLAN_DIGEST",
+            env::var("VELNOR_RESULT_PLAN_DIGEST").ok(),
+        )?,
+        unit: required_result_value("VELNOR_RESULT_UNIT", env::var("VELNOR_RESULT_UNIT").ok())?,
+        lane: required_result_value("VELNOR_RESULT_LANE", env::var("VELNOR_RESULT_LANE").ok())?,
+        provider: required_result_value(
+            "VELNOR_RESULT_PROVIDER",
+            env::var("VELNOR_RESULT_PROVIDER").ok(),
+        )?,
+        platform: required_result_value(
+            "VELNOR_RESULT_PLATFORM",
+            env::var("VELNOR_RESULT_PLATFORM").ok(),
+        )?,
+        command_digest: required_result_value(
+            "VELNOR_RESULT_COMMAND_DIGEST",
+            env::var("VELNOR_RESULT_COMMAND_DIGEST").ok(),
+        )?,
+        outcome: result_outcome(
+            &env::var("VELNOR_RESULT_OUTCOME").map_err(|_| {
+                GeneratorError::usage("record-result requires VELNOR_RESULT_OUTCOME")
+            })?,
+        ),
+    })
+}
+
+fn write_result_record(output: &Path, record: ResultRecord) -> Result<(), GeneratorError> {
+    let document = ResultDocument {
+        schema: crate::s2::reuse::S2_WORK_RESULTS_SCHEMA,
+        results: vec![record],
+    };
+    let text = serde_json::to_string(&document)
+        .map_err(|error| GeneratorError::usage(format!("serialize result record: {error}")))?;
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| GeneratorError::io("create result directory", parent, &error))?;
+    }
+    fs::write(output, format!("{text}\n"))
+        .map_err(|error| GeneratorError::io("write result record", output, &error))
+}
+
+fn record_result(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["output"])?;
+    let output = options
+        .get("output")
+        .ok_or_else(|| GeneratorError::usage("record-result requires --output PATH".to_owned()))?;
+    write_result_record(Path::new(output), result_record_from_env()?)
+}
+
 /// Dispatch the binary-only subcommands. `false` means the arguments belong
 /// to the workflow generator CLI proper.
 pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
@@ -468,46 +585,10 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
         return Ok(false);
     };
     match command {
-        "plan" => {
-            let options = parse_options(&arguments[1..], &["config"])?;
-            plan(&resolve_config_path(options.get("config")))?;
-            Ok(true)
-        }
-        "run" => {
-            let options = parse_options(&arguments[1..], &["config", "scope", "unit", "phase"])?;
-            let root = env::current_dir()
-                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
-            let config = resolve_config_path(options.get("config"));
-            let scope = options
-                .get("scope")
-                .map_or(Ok(Scope::Full), |value| Scope::parse(value))?;
-            let phase = options
-                .get("phase")
-                .map(|value| {
-                    ValidationPhase::parse(value).ok_or_else(|| {
-                        GeneratorError::usage(format!(
-                            "unsupported --phase: {value}; use precondition, fmt, clippy, test, doctest, swift-format, swift-lint, xcodegen-generate, swift-build, swift-run, swift-test, or check"
-                        ))
-                    })
-                })
-                .transpose()?;
-            run_units(
-                &root,
-                &config,
-                scope,
-                options.get("unit").map(String::as_str),
-                phase,
-            )?;
-            Ok(true)
-        }
+        "plan" => try_run_plan(&arguments[1..]),
+        "run" => try_run_units(&arguments[1..]),
         "verify-action" => verify_action_command(&arguments[1..]),
-        "test-crates" => {
-            let options = parse_options(&arguments[1..], &["config"])?;
-            let root = env::current_dir()
-                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
-            test_crates(&root, &resolve_config_path(options.get("config")), None)?;
-            Ok(true)
-        }
+        "test-crates" => try_run_test_crates(&arguments[1..]),
         "policy" => {
             crate::s2::policy::run_cli(&arguments[1..])?;
             Ok(true)
@@ -522,6 +603,10 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
         }
         "closure" => {
             print_closure(arguments.get(1..).unwrap_or_default())?;
+            Ok(true)
+        }
+        "record-result" => {
+            record_result(arguments.get(1..).unwrap_or_default())?;
             Ok(true)
         }
         "prepared-tool-install" => {
@@ -540,30 +625,74 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             crate::s2::primitives::product_transport::verify_product_cli(&root, &arguments[1..])?;
             Ok(true)
         }
-        "cache-plan" => {
-            let options = parse_options(&arguments[1..], &["entries", "now", "mode"])?;
-            let mode = options.get("mode").map_or("plan", String::as_str);
-            if !matches!(mode, "plan" | "budget") {
-                return Err(GeneratorError::usage(format!(
-                    "unsupported cache-plan mode: {mode}; use --mode=plan or --mode=budget"
-                )));
-            }
-            if mode == "budget" {
-                if let Some(entries_path) = options.get("entries") {
-                    cache_budget_report(entries_path)?;
-                } else {
-                    println!("{}", retention_policy_for_plan()?.total_bytes);
-                }
-                return Ok(true);
-            }
-            cache_plan(
-                options.get("entries").map(String::as_str),
-                options.get("now").map(String::as_str),
-            )?;
-            Ok(true)
-        }
+        "cache-plan" => try_run_cache_plan(&arguments[1..]),
         _ => try_run_reuse(command, arguments),
     }
+}
+
+fn try_run_plan(arguments: &[OsString]) -> Result<bool, GeneratorError> {
+    let options = parse_options(arguments, &["config"])?;
+    plan(&resolve_config_path(options.get("config")))?;
+    Ok(true)
+}
+
+fn try_run_units(arguments: &[OsString]) -> Result<bool, GeneratorError> {
+    let options = parse_options(arguments, &["config", "scope", "unit", "phase"])?;
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    let config = resolve_config_path(options.get("config"));
+    let scope = options
+        .get("scope")
+        .map_or(Ok(Scope::Full), |value| Scope::parse(value))?;
+    let phase = options
+        .get("phase")
+        .map(|value| {
+            ValidationPhase::parse(value).ok_or_else(|| {
+                GeneratorError::usage(format!(
+                    "unsupported --phase: {value}; use precondition, fmt, clippy, test, doctest, swift-format, swift-lint, xcodegen-generate, swift-build, swift-run, swift-test, or check"
+                ))
+            })
+        })
+        .transpose()?;
+    run_units(
+        &root,
+        &config,
+        scope,
+        options.get("unit").map(String::as_str),
+        phase,
+    )?;
+    Ok(true)
+}
+
+fn try_run_test_crates(arguments: &[OsString]) -> Result<bool, GeneratorError> {
+    let options = parse_options(arguments, &["config"])?;
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    test_crates(&root, &resolve_config_path(options.get("config")), None)?;
+    Ok(true)
+}
+
+fn try_run_cache_plan(arguments: &[OsString]) -> Result<bool, GeneratorError> {
+    let options = parse_options(arguments, &["entries", "now", "mode"])?;
+    let mode = options.get("mode").map_or("plan", String::as_str);
+    if !matches!(mode, "plan" | "budget") {
+        return Err(GeneratorError::usage(format!(
+            "unsupported cache-plan mode: {mode}; use --mode=plan or --mode=budget"
+        )));
+    }
+    if mode == "budget" {
+        if let Some(entries_path) = options.get("entries") {
+            cache_budget_report(entries_path)?;
+        } else {
+            println!("{}", retention_policy_for_plan()?.total_bytes);
+        }
+        return Ok(true);
+    }
+    cache_plan(
+        options.get("entries").map(String::as_str),
+        options.get("now").map(String::as_str),
+    )?;
+    Ok(true)
 }
 
 fn verify_action_command(arguments: &[OsString]) -> Result<bool, GeneratorError> {
@@ -1842,19 +1971,45 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
             )
         })
         .collect();
-    let digest = plan_digest(&digest_input, &exclusion_input);
+    // Keep the historical selection digest for the per-unit selection
+    // artifact. The expected-work artifact has a stronger identity: it must
+    // bind every field the aggregate scores, including prerequisites and the
+    // typed command/platform maps.
+    let selection_digest = plan_digest(&digest_input, &exclusion_input);
+    let expected_plan_digest =
+        expected_work_plan_digest(&planned, &config, &inputs.base, &inputs.head)?;
     let units_json = serde_json::to_string(
         &planned
             .iter()
             .map(|unit| {
-                serde_json::json!({
+                let platform = config
+                    .unit
+                    .iter()
+                    .find(|candidate| candidate.id == unit.unit_id)
+                    .ok_or_else(|| {
+                        GeneratorError::usage(format!(
+                            "CI unit `{}` is missing from the configuration",
+                            unit.unit_id
+                        ))
+                    })?
+                    .platform()?;
+                Ok(serde_json::json!({
                     "unit_id": unit.unit_id,
                     "providers": unit.providers.iter().map(ProviderId::as_str).collect::<Vec<_>>(),
-                })
+                    "platform": platform.as_str(),
+                    "command_digest": unit.command_digest,
+                }))
             })
-            .collect::<Vec<_>>(),
+            .collect::<Result<Vec<_>, GeneratorError>>()?,
     )
     .map_err(|error| GeneratorError::usage(format!("serialize plan units: {error}")))?;
+    let command_digests_json = serde_json::to_string(
+        &planned
+            .iter()
+            .map(|unit| (unit.unit_id.clone(), unit.command_digest.clone()))
+            .collect::<BTreeMap<_, _>>(),
+    )
+    .map_err(|error| GeneratorError::usage(format!("serialize command digests: {error}")))?;
     let excluded_json = serde_json::to_string(
         &excluded
             .iter()
@@ -1911,11 +2066,18 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
             scope,
             &unit_ids,
             &full_units,
-            &digest,
+            &selection_digest,
         )?;
     }
     if let Some(path) = &inputs.expected_file {
-        write_expected_work_file(path, &planned, &config, &inputs.base, &inputs.head)?;
+        write_expected_work_file_with_identity(
+            path,
+            &planned,
+            &config,
+            &inputs.base,
+            &inputs.head,
+            &expected_plan_digest,
+        )?;
     }
     if let Some(output_path) = &inputs.github_output {
         let mut file = fs::OpenOptions::new()
@@ -1934,7 +2096,8 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
             ("units", units_json.clone()),
             ("unit_ids", unit_ids.clone()),
             ("full_units", full_units.clone()),
-            ("plan_digest", digest.clone()),
+            ("plan_digest", expected_plan_digest.clone()),
+            ("command_digests", command_digests_json.clone()),
             ("excluded", excluded_json.clone()),
         ] {
             writeln!(file, "{name}={value}")
@@ -1956,9 +2119,10 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
     println!("units={units_json}");
     println!("unit_ids={unit_ids}");
     println!("full_units={full_units}");
+    println!("command_digests={command_digests_json}");
     println!("prereq_inputs={prereq_inputs}");
     println!("closed_excluded={closed_excluded}");
-    println!("plan_digest={digest}");
+    println!("plan_digest={expected_plan_digest}");
     println!("excluded={excluded_json}");
     if let Some(reason) = &selection.fallback_reason {
         println!("fallback_reason={reason}");
@@ -1970,14 +2134,52 @@ fn plan_with(config_path: &Path, inputs: &PlanInputs) -> Result<(), GeneratorErr
     Ok(())
 }
 
-/// Stable digest over a unit's planned commands for one scope.
+/// Stable digest over a unit's complete executable plan for one scope.
+///
+/// Count and byte-length framing keeps every boundary unambiguous. The digest
+/// binds the immutable renderer revision, scope, ordered command list,
+/// positional phase tags, and prerequisite check commands. The phase and
+/// check inputs are part of the executable plan even though they do not need
+/// separate expected-work JSON fields: the strict plan digest binds this
+/// per-unit command digest. SHA-256 gives the live identity enough collision
+/// resistance for cache and result binding. The domain tag separates this
+/// digest from other hashes.
 fn command_digest_for(unit: &CiUnit, scope: Scope) -> String {
-    let mut input = String::new();
-    for command in unit.commands(scope) {
-        input.push_str(command);
-        input.push('\n');
+    command_digest_for_revision(unit, scope, crate::s2::SOURCE_REVISION)
+}
+
+/// Testable form of [`command_digest_for`]. The production path passes the
+/// binary's source revision, which is the immutable generator/workflow pin
+/// selected by the setup action. Keeping the revision as an explicit input
+/// makes the identity dependency reviewable without changing the wire schema.
+fn command_digest_for_revision(unit: &CiUnit, scope: Scope, workflow_revision: &str) -> String {
+    let commands = unit.commands(scope);
+    let mut input = Vec::new();
+    input.extend_from_slice(COMMAND_DIGEST_DOMAIN);
+    push_framed_strings(&mut input, [scope_name(scope)]);
+    push_framed_strings(&mut input, [workflow_revision]);
+    push_framed_strings(&mut input, commands.iter().map(String::as_str));
+    push_framed_strings(&mut input, unit.phases.iter().map(|phase| phase.as_str()));
+    push_framed_strings(&mut input, unit.check_commands.iter().map(String::as_str));
+    let digest = Sha256::digest(input);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        output.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+        output.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
     }
-    format!("{:016x}", super::content_digest_bytes(input.as_bytes()))
+    output
+}
+
+/// Append a counted sequence of length-prefixed UTF-8 strings to an identity
+/// digest. Every semantic list uses this helper, including empty lists.
+fn push_framed_strings<'a>(input: &mut Vec<u8>, values: impl IntoIterator<Item = &'a str>) {
+    let values = values.into_iter().collect::<Vec<_>>();
+    input.extend_from_slice(&(values.len() as u64).to_be_bytes());
+    for value in values {
+        let bytes = value.as_bytes();
+        input.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+        input.extend_from_slice(bytes);
+    }
 }
 
 fn write_kind_matrices(
@@ -2175,9 +2377,15 @@ mod scope_event_tests {
 #[cfg(test)]
 mod runner_lane_tests {
     use super::{
-        collect_manifests, expand_affected_units, plan_providers_for_value, watched_units, CiUnit,
-        Scope,
+        collect_manifests, command_digest_for_revision, expand_affected_units,
+        expected_work_plan_digest, plan_providers_for_value, push_framed_strings,
+        tests::{must, selection_config},
+        watched_units, CiUnit, PlannedUnit, Scope, ValidationPhase, COMMAND_DIGEST_DOMAIN,
+        HEX_DIGITS,
     };
+    use crate::s2::provider::ProviderId;
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeSet;
     use std::path::Path;
 
     #[test]
@@ -2234,6 +2442,160 @@ mod runner_lane_tests {
         };
         assert_eq!(unit.commands(Scope::Affected), &["pr".to_owned()]);
         assert_eq!(unit.commands(Scope::Full), &["full".to_owned()]);
+    }
+
+    #[test]
+    fn command_digest_uses_count_and_length_framed_sha256() {
+        let mut unit = CiUnit {
+            id: "digest".to_owned(),
+            label: "digest".to_owned(),
+            kind: "rust".to_owned(),
+            root: ".".to_owned(),
+            watch: Vec::new(),
+            pr_commands: vec!["ab".to_owned(), "c".to_owned()],
+            full_commands: vec!["full".to_owned()],
+            phases: Vec::new(),
+            check_commands: Vec::new(),
+            depends_on: Vec::new(),
+            tool_version: None,
+            cache: None,
+            platform: "linux-x64".to_owned(),
+            trust: "untrusted-ok".to_owned(),
+            capabilities: super::RuntimeCapabilities::default(),
+            workspace_check: false,
+            reads_closed: false,
+        };
+        let digest = command_digest_for_revision(&unit, Scope::Affected, "workflow-pin");
+        assert_eq!(
+            digest.len(),
+            64,
+            "SHA-256 must be rendered as lowercase hex"
+        );
+        assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+
+        let mut framed = COMMAND_DIGEST_DOMAIN.to_vec();
+        push_framed_strings(&mut framed, ["affected"]);
+        push_framed_strings(&mut framed, ["workflow-pin"]);
+        push_framed_strings(&mut framed, ["ab", "c"]);
+        push_framed_strings(&mut framed, []);
+        push_framed_strings(&mut framed, []);
+        let expected = Sha256::digest(framed)
+            .iter()
+            .flat_map(|byte| {
+                [
+                    HEX_DIGITS[usize::from(byte >> 4)],
+                    HEX_DIGITS[usize::from(byte & 0x0f)],
+                ]
+            })
+            .map(char::from)
+            .collect::<String>();
+        assert_eq!(digest, expected);
+
+        // A newline-delimited encoding would collide for the one-command
+        // `"ab\nc"` form and the two-command `"ab"`, `"c"` form.
+        unit.pr_commands = vec!["a".to_owned(), "bc".to_owned()];
+        assert_ne!(
+            digest,
+            command_digest_for_revision(&unit, Scope::Affected, "workflow-pin")
+        );
+        unit.pr_commands = vec!["ab\nc".to_owned()];
+        assert_ne!(
+            digest,
+            command_digest_for_revision(&unit, Scope::Affected, "workflow-pin")
+        );
+    }
+
+    #[test]
+    fn command_digest_binds_ordered_phases_checks_and_workflow_pin() {
+        let mut unit = CiUnit {
+            id: "digest-inputs".to_owned(),
+            label: "digest-inputs".to_owned(),
+            kind: "rust".to_owned(),
+            root: ".".to_owned(),
+            watch: Vec::new(),
+            pr_commands: vec!["fmt".to_owned(), "test".to_owned()],
+            full_commands: vec!["fmt".to_owned(), "test".to_owned()],
+            phases: vec![ValidationPhase::Fmt, ValidationPhase::Test],
+            check_commands: vec!["cargo check --locked".to_owned()],
+            depends_on: Vec::new(),
+            tool_version: None,
+            cache: None,
+            platform: "linux-x64".to_owned(),
+            trust: "untrusted-ok".to_owned(),
+            capabilities: super::RuntimeCapabilities::default(),
+            workspace_check: false,
+            reads_closed: false,
+        };
+        let baseline = command_digest_for_revision(&unit, Scope::Affected, "pin-a");
+
+        unit.phases.swap(0, 1);
+        assert_ne!(
+            baseline,
+            command_digest_for_revision(&unit, Scope::Affected, "pin-a"),
+            "reordering positional phase tags must change executable identity"
+        );
+        unit.phases.swap(0, 1);
+
+        unit.check_commands[0].push_str(" --all-targets");
+        assert_ne!(
+            baseline,
+            command_digest_for_revision(&unit, Scope::Affected, "pin-a"),
+            "changing prerequisite check commands must change executable identity"
+        );
+        unit.check_commands[0] = "cargo check --locked".to_owned();
+
+        unit.check_commands = vec![
+            "cargo check --locked".to_owned(),
+            "cargo test --locked".to_owned(),
+        ];
+        let ordered_checks = command_digest_for_revision(&unit, Scope::Affected, "pin-a");
+        unit.check_commands.reverse();
+        assert_ne!(
+            ordered_checks,
+            command_digest_for_revision(&unit, Scope::Affected, "pin-a"),
+            "reordering prerequisite check commands must change executable identity"
+        );
+
+        // Restore every other input before isolating the immutable pin.
+        unit.check_commands = vec!["cargo check --locked".to_owned()];
+        assert_ne!(
+            baseline,
+            command_digest_for_revision(&unit, Scope::Affected, "pin-b"),
+            "changing the immutable workflow pin must change command identity"
+        );
+
+        let config = selection_config();
+        let plan_a = must(
+            expected_work_plan_digest(
+                &[PlannedUnit {
+                    unit_id: "app".to_owned(),
+                    providers: BTreeSet::from([ProviderId::GithubHosted]),
+                    command_digest: baseline.clone(),
+                }],
+                &config,
+                "base-sha",
+                "head-sha",
+            ),
+            "the baseline command identity must produce a plan identity",
+        );
+        let plan_b = must(
+            expected_work_plan_digest(
+                &[PlannedUnit {
+                    unit_id: "app".to_owned(),
+                    providers: BTreeSet::from([ProviderId::GithubHosted]),
+                    command_digest: command_digest_for_revision(&unit, Scope::Affected, "pin-b"),
+                }],
+                &config,
+                "base-sha",
+                "head-sha",
+            ),
+            "the changed command identity must produce a plan identity",
+        );
+        assert_eq!(plan_a.len(), 64, "strict plan identity remains SHA-256");
+        assert_ne!(
+            plan_a, plan_b,
+            "the strict expected-plan identity must bind the workflow-pinned command identity"
+        );
     }
 
     #[test]
@@ -2584,6 +2946,9 @@ fn planned_no_work_reason(selection: &UnitSelection<'_>) -> Result<Option<String
 ///   model, and an empty matrix means exactly one unmatrixed item — the
 ///   unit's single verdict on that lane — never zero, never many.
 /// - required: always true. A selected, eligible unit must succeed.
+/// - `platform`/`command_digest`: the typed execution platform and the distinct
+///   per-unit command identity the result verdict binds to; neither is the
+///   aggregate plan digest.
 /// - `planned_skip`: never set. The planner excludes units from the plan with
 ///   a declared reason instead of pre-skipping them; a reported skip still
 ///   needs the planner's recorded reason to hold.
@@ -2598,6 +2963,9 @@ fn planned_no_work_reason(selection: &UnitSelection<'_>) -> Result<Option<String
 /// - `base_sha`/`head_sha`: the plan's transport identity, exactly as the
 ///   plan saw it. The aggregate compares these against its own checkout and
 ///   rejects any file from another plan — including a stale no-work file.
+/// - `plan_digest`: the aggregate plan identity, separate from every unit's
+///   command digest.
+#[cfg(test)]
 fn write_expected_work_file(
     path: &Path,
     planned: &[PlannedUnit],
@@ -2605,6 +2973,51 @@ fn write_expected_work_file(
     base_sha: &str,
     head_sha: &str,
 ) -> Result<(), GeneratorError> {
+    write_expected_work_file_inner(path, planned, config, base_sha, head_sha, None)
+}
+
+/// Write the strict live-result transport fields for the generated schema-2
+/// plan. The compatibility wrapper above remains available to deterministic
+/// legacy fixtures that intentionally exercise the pre-identity file shape.
+fn write_expected_work_file_with_identity(
+    path: &Path,
+    planned: &[PlannedUnit],
+    config: &CiConfig,
+    base_sha: &str,
+    head_sha: &str,
+    plan_digest: &str,
+) -> Result<(), GeneratorError> {
+    write_expected_work_file_inner(path, planned, config, base_sha, head_sha, Some(plan_digest))
+}
+
+/// Compute the digest over the exact semantic fields emitted in the strict
+/// expected-work document. This is deliberately derived from the document
+/// shape, rather than from the planner's selection/exclusion digest, so the
+/// aggregate can recompute it independently from the downloaded artifact.
+fn expected_work_plan_digest(
+    planned: &[PlannedUnit],
+    config: &CiConfig,
+    base_sha: &str,
+    head_sha: &str,
+) -> Result<String, GeneratorError> {
+    let document = expected_work_document(planned, config, base_sha, head_sha, true)?;
+    let text = serde_json::to_string(&document).map_err(|error| {
+        GeneratorError::usage(format!("serialize expected plan identity: {error}"))
+    })?;
+    crate::s2::reuse::canonical_expected_plan_digest_from_json(&text).map_err(GeneratorError::usage)
+}
+
+/// Build the expected-work document before its optional authenticated digest
+/// field is added. Legacy fixtures use the pre-identity shape; live planning
+/// includes the typed platform and command fields required by the strict
+/// canonical digest.
+fn expected_work_document(
+    planned: &[PlannedUnit],
+    config: &CiConfig,
+    base_sha: &str,
+    head_sha: &str,
+    include_identity: bool,
+) -> Result<serde_json::Value, GeneratorError> {
     let depends: BTreeMap<&str, &[String]> = config
         .unit
         .iter()
@@ -2619,12 +3032,28 @@ fn write_expected_work_file(
                 unit.unit_id
             )));
         }
-        units.push(serde_json::json!({
+        let mut unit_json = serde_json::json!({
             "id": unit.unit_id,
             "lanes": unit.providers.iter().map(ProviderId::as_str).collect::<Vec<_>>(),
             "matrix": Vec::<String>::new(),
             "required": true,
-        }));
+        });
+        if include_identity {
+            let platform = config
+                .unit
+                .iter()
+                .find(|candidate| candidate.id == unit.unit_id)
+                .ok_or_else(|| {
+                    GeneratorError::usage(format!(
+                        "CI unit `{}` is missing from the configuration",
+                        unit.unit_id
+                    ))
+                })?
+                .platform()?;
+            unit_json["platform"] = serde_json::json!(platform.as_str());
+            unit_json["command_digest"] = serde_json::json!(&unit.command_digest);
+        }
+        units.push(unit_json);
         prerequisites.insert(
             unit.unit_id.clone(),
             depends
@@ -2634,13 +3063,38 @@ fn write_expected_work_file(
                 }),
         );
     }
-    let document = serde_json::json!({
+    let mut document = serde_json::json!({
         "planned_no_work": planned.is_empty(),
         "units": units,
         "prerequisites": prerequisites,
         "base_sha": base_sha,
         "head_sha": head_sha,
     });
+    if include_identity {
+        document["schema"] = serde_json::json!(crate::s2::reuse::S2_WORK_RESULTS_SCHEMA);
+    }
+    Ok(document)
+}
+
+fn write_expected_work_file_inner(
+    path: &Path,
+    planned: &[PlannedUnit],
+    config: &CiConfig,
+    base_sha: &str,
+    head_sha: &str,
+    plan_digest: Option<&str>,
+) -> Result<(), GeneratorError> {
+    let mut document =
+        expected_work_document(planned, config, base_sha, head_sha, plan_digest.is_some())?;
+    if let Some(expected_digest) = plan_digest {
+        let canonical = expected_work_plan_digest(planned, config, base_sha, head_sha)?;
+        if canonical != expected_digest {
+            return Err(GeneratorError::usage(format!(
+                "expected-work plan digest `{expected_digest}` does not match its canonical digest `{canonical}`"
+            )));
+        }
+        document["plan_digest"] = serde_json::json!(canonical);
+    }
     let text = serde_json::to_string_pretty(&document)
         .map_err(|error| GeneratorError::usage(format!("serialize expected work: {error}")))?;
     // The plan job runs in a fresh checkout with no parent directory, so
@@ -5164,7 +5618,7 @@ pub(crate) mod tests {
         clippy::panic,
         reason = "tests need setup failures to name their root cause"
     )]
-    fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
+    pub(super) fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
         match result {
             Ok(value) => value,
             Err(error) => panic!("{context}: {error}"),
@@ -5922,7 +6376,7 @@ pub(crate) mod tests {
         assert_eq!(record.key, "example-docker-seed-Linux-X64");
     }
 
-    fn selection_config() -> CiConfig {
+    pub(super) fn selection_config() -> CiConfig {
         let unit = |id: &str, watch: &[&str], depends_on: &[&str]| CiUnit {
             id: id.to_owned(),
             label: id.to_owned(),
@@ -9730,6 +10184,44 @@ workspace_check = true
         );
     }
 
+    #[test]
+    fn record_result_writes_schema2_identity_document() -> Result<(), Box<dyn Error>> {
+        let dir = s4_dir("record-result");
+        let path = dir.join("nested/result.json");
+        write_result_record(
+            &path,
+            ResultRecord {
+                repository: "example/repository".to_owned(),
+                base_sha: "base-sha".to_owned(),
+                head_sha: "head-sha".to_owned(),
+                run_id: "run-7".to_owned(),
+                run_attempt: "2".to_owned(),
+                plan_digest: "plan-7".to_owned(),
+                unit: "rust-alpha".to_owned(),
+                lane: "github-hosted".to_owned(),
+                provider: "github-hosted".to_owned(),
+                platform: "linux-x64".to_owned(),
+                command_digest: "command-7".to_owned(),
+                outcome: "success".to_owned(),
+            },
+        )?;
+        let document: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+        assert_eq!(document.get("schema"), Some(&serde_json::json!(2)));
+        assert_eq!(document["results"].as_array().map(Vec::len), Some(1));
+        assert_eq!(document["results"][0]["command_digest"], "command-7");
+        assert_eq!(document["results"][0]["platform"], "linux-x64");
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn record_result_outcome_maps_non_green_statuses() {
+        assert_eq!(result_outcome("success"), "success");
+        assert_eq!(result_outcome("cancelled"), "cancelled");
+        assert_eq!(result_outcome("failure"), "failure");
+        assert_eq!(result_outcome("skipped"), "failure");
+    }
+
     // S4 aggregate wiring cut: the planner's expected work binds the
     // required-check aggregate, and a proven no-work plan passes via planner
     // + aggregate only, with an explicit machine-readable reason.
@@ -10155,7 +10647,7 @@ trust = "untrusted-ok"
             Some(0),
         );
         let dir = s4_dir("no-work");
-        let (verdict, exit) = s4_verdict(&dir, &expected, r#"{"results": []}"#);
+        let (verdict, exit) = s4_verdict(&dir, &expected, r#"{"results":[]}"#);
         assert!(verdict.passed, "failures: {:?}", verdict.failures);
         assert!(exit.is_ok(), "no-work must pass the aggregate: {exit:?}");
         assert_eq!(
@@ -10397,6 +10889,60 @@ trust = "untrusted-ok"
             }),
             "the aggregate notes the build input: {:?}",
             verdict.explanations
+        );
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn expected_work_writer_emits_distinct_live_identity_fields() -> Result<(), Box<dyn Error>> {
+        let config = selection_config();
+        let planned = vec![PlannedUnit {
+            unit_id: "app".to_owned(),
+            providers: BTreeSet::from([ProviderId::GithubHosted]),
+            command_digest: "command-digest".to_owned(),
+        }];
+        let dir = s4_dir("expected-live-identity");
+        let path = dir.join("expected.json");
+        let canonical = expected_work_plan_digest(&planned, &config, "base-sha", "head-sha")?;
+        write_expected_work_file_with_identity(
+            &path, &planned, &config, "base-sha", "head-sha", &canonical,
+        )?;
+        let expected_text = std::fs::read_to_string(&path)?;
+        let recomputed = crate::s2::reuse::canonical_expected_plan_digest_from_json(&expected_text)
+            .map_err(|error| format!("recompute expected plan digest: {error}"))?;
+        assert_eq!(recomputed, canonical);
+        let document: serde_json::Value = serde_json::from_str(&expected_text)?;
+        assert_eq!(
+            document
+                .get("plan_digest")
+                .and_then(serde_json::Value::as_str),
+            Some(canonical.as_str())
+        );
+        let unit = &document["units"][0];
+        assert_eq!(
+            unit.get("platform").and_then(serde_json::Value::as_str),
+            Some("linux-x64")
+        );
+        assert_eq!(
+            unit.get("command_digest")
+                .and_then(serde_json::Value::as_str),
+            Some("command-digest")
+        );
+        assert_ne!(
+            unit.get("command_digest"),
+            document.get("plan_digest"),
+            "the command identity is not the aggregate plan identity"
+        );
+        let mut hostile = document.clone();
+        hostile["units"][0]["platform"] = serde_json::json!("macos-arm64");
+        let hostile_text = serde_json::to_string(&hostile)?;
+        let hostile_digest =
+            crate::s2::reuse::canonical_expected_plan_digest_from_json(&hostile_text)
+                .map_err(|error| format!("recompute hostile expected plan digest: {error}"))?;
+        assert_ne!(
+            hostile_digest, canonical,
+            "changing a typed expected-plan field changes the independently recomputable identity"
         );
         std::fs::remove_dir_all(dir)?;
         Ok(())
@@ -11084,10 +11630,33 @@ trust = "untrusted-ok"
                 .map(Vec::len),
             Some(0),
         );
+        let canonical = crate::s2::reuse::canonical_expected_plan_digest_from_json(&expected)
+            .map_err(|error| format!("recompute plan output digest: {error}"))?;
+        assert_eq!(
+            document
+                .get("plan_digest")
+                .and_then(serde_json::Value::as_str),
+            Some(canonical.as_str()),
+            "plan output publishes the digest the aggregate independently recomputes",
+        );
         // The bound file scores against the same SHAs: proven no-work plus
         // zero results passes with the machine-readable reason.
-        let verdict =
-            crate::s2::reuse::aggregate_files(&expected, r#"{"results": []}"#, &base, &head)?;
+        let run = crate::s2::provider::RunIdentity {
+            repository_id: "example/s4-plan".to_owned(),
+            source_sha: head.clone(),
+            run_id: "test-run".to_owned(),
+            run_attempt: "1".to_owned(),
+            plan_digest: canonical.clone(),
+            command_digests: BTreeMap::new(),
+            platforms: BTreeMap::new(),
+        };
+        let verdict = crate::s2::reuse::aggregate_files_with_identity(
+            &expected,
+            r#"{"schema":2,"results":[]}"#,
+            &base,
+            &head,
+            &run,
+        )?;
         assert!(verdict.passed, "failures: {:?}", verdict.failures);
         assert_eq!(
             explicit_no_work_line(&expected, &verdict).as_deref(),
@@ -11097,6 +11666,10 @@ trust = "untrusted-ok"
         );
         let outputs = must(std::fs::read_to_string(&output_path), "read github output");
         assert!(outputs.contains("planned_no_work=true"), "{outputs}");
+        assert!(
+            outputs.contains(&format!("plan_digest={canonical}")),
+            "the GitHub output threads the same canonical digest to result collection: {outputs}"
+        );
         assert!(
             outputs.contains("no_work_reason=no changed path selected a workload unit"),
             "{outputs}",
