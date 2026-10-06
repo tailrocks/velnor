@@ -1908,7 +1908,7 @@ pub(crate) const CARGO_STORE_SUBTREES: [(&str, &str); 3] = [
 /// scope on the execution path). It selects the canonical namespace; the
 /// selected cache root carries no slot-specific component.
 pub(crate) fn cargo_store_host(temp_host: &Path, trust_scope: &str) -> anyhow::Result<PathBuf> {
-    crate::storage::cache_class_path(trust_scope, "cargo")
+    crate::storage::cache_class_path_for_job_temp(temp_host, trust_scope, "cargo")
         .with_context(|| format!("resolve Cargo store for job temp {}", temp_host.display()))
 }
 
@@ -1959,7 +1959,7 @@ pub(crate) fn cargo_executable_store_host(
 ) -> anyhow::Result<PathBuf> {
     Ok(cargo_store_host(temp_host, trust_scope)?
         .join("bin")
-        .join(repository_key))
+        .join(sanitize_store_key(repository_key)))
 }
 
 /// Host-persistent mise tool store (installs + cache subdirs are mounted).
@@ -1968,7 +1968,7 @@ pub(crate) fn cargo_executable_store_host(
 /// scope on the execution path). It selects the canonical namespace; the
 /// selected cache root carries no slot-specific component.
 pub(crate) fn mise_store_host(temp_host: &Path, trust_scope: &str) -> anyhow::Result<PathBuf> {
-    crate::storage::cache_class_path(trust_scope, "mise")
+    crate::storage::cache_class_path_for_job_temp(temp_host, trust_scope, "mise")
         .with_context(|| format!("resolve mise store for job temp {}", temp_host.display()))
 }
 
@@ -1998,7 +1998,7 @@ pub(crate) fn mise_executable_store_host(
 ) -> anyhow::Result<PathBuf> {
     Ok(mise_store_host(temp_host, trust_scope)?
         .join("installs")
-        .join(repository_key))
+        .join(sanitize_store_key(repository_key)))
 }
 
 /// Host-persistent per-version mise BINARY store, scoped by trust + repository.
@@ -2015,7 +2015,7 @@ pub(crate) fn mise_binary_store_host(
 ) -> anyhow::Result<PathBuf> {
     Ok(mise_store_host(temp_host, trust_scope)?
         .join("binaries")
-        .join(repository_key))
+        .join(sanitize_store_key(repository_key)))
 }
 
 /// Host-persistent Playwright browser downloads, scoped by trust + repository.
@@ -2071,8 +2071,11 @@ fn repository_scoped_home_cache_store_host(
     repository_key: &str,
     store_leaf: &str,
 ) -> anyhow::Result<PathBuf> {
-    crate::storage::cache_class_path(trust_scope, "caches")
-        .map(|root| root.join(repository_key).join(store_leaf))
+    crate::storage::cache_class_path_for_job_temp(temp_host, trust_scope, "caches")
+        .map(|root| {
+            root.join(sanitize_store_key(repository_key))
+                .join(store_leaf)
+        })
         .with_context(|| {
             format!(
                 "resolve {store_leaf} cache for job temp {}",
@@ -2792,8 +2795,9 @@ mod tests {
     #[test]
     fn executable_tool_store_hosts_are_scoped_by_trust_and_repo() {
         let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
-        let cargo = crate::storage::cache_class_path("trusted", "cargo").unwrap();
-        let mise = crate::storage::cache_class_path("trusted", "mise").unwrap();
+        let cargo =
+            crate::storage::cache_class_path_for_job_temp(temp, "trusted", "cargo").unwrap();
+        let mise = crate::storage::cache_class_path_for_job_temp(temp, "trusted", "mise").unwrap();
 
         assert_eq!(
             cargo_executable_store_host(temp, "trusted", "ChainArgos/java-monorepo").unwrap(),
@@ -2837,19 +2841,19 @@ mod tests {
             cargo_store_host(temp, "trusted")
                 .unwrap()
                 .join("registry/cache"),
-            crate::storage::cache_class_path("trusted", "cargo")
+            crate::storage::cache_class_path_for_job_temp(temp, "trusted", "cargo")
                 .unwrap()
                 .join("registry/cache")
         );
         assert_eq!(
             cargo_store_host(temp, "trusted").unwrap().join("git/db"),
-            crate::storage::cache_class_path("trusted", "cargo")
+            crate::storage::cache_class_path_for_job_temp(temp, "trusted", "cargo")
                 .unwrap()
                 .join("git/db")
         );
         assert_eq!(
             mise_store_host(temp, "trusted").unwrap().join("cache"),
-            crate::storage::cache_class_path("trusted", "mise")
+            crate::storage::cache_class_path_for_job_temp(temp, "trusted", "mise")
                 .unwrap()
                 .join("cache")
         );
@@ -3119,9 +3123,13 @@ mod tests {
         other_slot.temp_host = "/var/lib/velnor/work/slot-4/job-c/temp".into();
         other_slot.slot_store_key = Some(slot_store_key(4));
 
-        let expected = crate::storage::cache_class_path("trusted", "mise")
-            .unwrap()
-            .join("installs/acme_repo/slots/slot-3");
+        let repo_key = first.repository_store_key().unwrap();
+        let expected =
+            crate::storage::cache_class_path_for_job_temp(&first.temp_host, "trusted", "mise")
+                .unwrap()
+                .join("installs")
+                .join(&repo_key)
+                .join("slots/slot-3");
         assert_eq!(first.mise_executable_store_host().unwrap(), expected);
         assert_eq!(same_slot.mise_executable_store_host().unwrap(), expected);
         // Materializing the command writes an env file, so root this half of
@@ -3137,9 +3145,11 @@ mod tests {
         assert!(rendered(&warm.start_args().unwrap()).contains(&expected_mount));
         assert_eq!(
             other_slot.mise_executable_store_host().unwrap(),
-            crate::storage::cache_class_path("trusted", "mise")
+            crate::storage::cache_class_path_for_job_temp(&other_slot.temp_host, "trusted", "mise")
                 .unwrap()
-                .join("installs/acme_repo/slots/slot-4")
+                .join("installs")
+                .join(&repo_key)
+                .join("slots/slot-4")
         );
         assert_ne!(
             first.mise_executable_store_host().unwrap(),
@@ -3516,8 +3526,14 @@ mod tests {
         assert!(args.contains(&"/daemon/work/job-1/temp:/__t".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp:/daemon/work/job-1/temp".into()));
         assert!(args.contains(&"/daemon/work/job-1/workspace:/daemon/work/job-1/workspace".into()));
-        let expected_mbx_mount = "/daemon/work/test-cache/mbx:/var/cache/mbx".to_owned();
-        assert!(args.contains(&expected_mbx_mount));
+        let expected_mbx_cache_mount =
+            "/daemon/work/test-cache/mbx/slots/velnor-job-1:/var/cache/mbx/slots/velnor-job-1"
+                .to_owned();
+        let expected_mbx_target_mount =
+            "/daemon/work/test-cache/mbx/targets/slots/velnor-job-1:/var/cache/mbx/targets/slots/velnor-job-1"
+                .to_owned();
+        assert!(args.contains(&expected_mbx_cache_mount));
+        assert!(args.contains(&expected_mbx_target_mount));
         assert!(args.contains(&"/daemon/work/job-1/home:/github/home".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp/_github_workflow:/github/workflow".into()));
         assert!(args.contains(&"/daemon/work/job-1/actions:/__a:ro".into()));
@@ -4085,8 +4101,13 @@ mod tests {
         assert!(has_mount(&args, &spec.temp_host, "/tmp"));
         assert!(has_mount(
             &args,
-            spec.mbx_store_host.as_ref().unwrap(),
-            "/var/cache/mbx"
+            &spec.mbx_cache_store_host().unwrap(),
+            &spec.mbx_cache_container_dir()
+        ));
+        assert!(has_mount(
+            &args,
+            &spec.mbx_target_store_host().unwrap(),
+            &spec.mbx_target_container_dir()
         ));
         assert!(has_mount(&args, &spec.temp_host, "/github/runner_temp"));
         assert!(has_mount(&args, &spec.temp_host, "/github/file_commands"));
@@ -4504,23 +4525,31 @@ mod tests {
             .map(|entry| mount_container(&entry).to_owned())
             .collect();
         containers.sort_unstable();
-        assert_eq!(
-            containers,
-            [
-                "/__a",
-                "/__t",
-                "/__tool",
-                "/__w",
-                "/github/file_commands",
-                "/github/home",
-                "/github/runner_temp",
-                "/github/workflow",
-                "/github/workspace",
-                "/tmp",
-                "/var/cache/mbx",
-                "/var/run/docker.sock",
-            ]
-        );
+        // Slot-leaf mbx mounts keep one slot from seeing another slot's
+        // future mount source; the engine socket only exists on Linux hosts.
+        let linux_socket: &[&str] = if cfg!(target_os = "linux") {
+            &["/var/run/docker.sock"]
+        } else {
+            &[]
+        };
+        let expected: Vec<&str> = [
+            "/__a",
+            "/__t",
+            "/__tool",
+            "/__w",
+            "/github/file_commands",
+            "/github/home",
+            "/github/runner_temp",
+            "/github/workflow",
+            "/github/workspace",
+            "/tmp",
+            "/var/cache/mbx/slots/slot-1",
+            "/var/cache/mbx/targets/slots/slot-1",
+        ]
+        .into_iter()
+        .chain(linux_socket.iter().copied())
+        .collect();
+        assert_eq!(containers, expected);
     }
 
     /// Main and post node actions are prepared by the same call with the same
@@ -4530,7 +4559,7 @@ mod tests {
         let spec = slotted_spec("node-path-post");
         let path_prepend = [
             "/opt/mise/installs/node/22.18.0/bin".to_owned(),
-            "/root/.cargo/bin".to_owned(),
+            "/github/home/.cargo/bin".to_owned(),
         ];
         let main = spec
             .prepare_run_node_action_args(
@@ -4556,7 +4585,7 @@ mod tests {
             mount_args(prepared)
                 .into_iter()
                 .filter(|entry| {
-                    ["/opt/mise/installs", "/root/.cargo"]
+                    ["/opt/mise/installs", "/github/home/.cargo/bin"]
                         .iter()
                         .any(|prefix| mount_container(entry).starts_with(prefix))
                 })
@@ -4588,13 +4617,13 @@ mod tests {
             .unwrap();
         let args = rendered(&prepared);
 
-        // Only the plain absolute entry mounts; unusable entries are skipped
+        // No store-backed entry, no mount: unusable entries are skipped
         // while the recorded PATH itself stays verbatim.
         assert_eq!(
             args.iter()
                 .filter(|arg| **arg == mount(Path::new("/opt/mise/bin"), "/opt/mise/bin"))
                 .count(),
-            1
+            0
         );
         assert!(args.contains(&"PATH=:bin/tools:/opt/mise/shims/../..:/usr/local/bin:/opt/mise/bin:/opt/mise/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into()));
     }
@@ -4732,8 +4761,13 @@ mod tests {
         assert!(has_mount(&args, &spec.temp_host, "/tmp"));
         assert!(has_mount(
             &args,
-            spec.mbx_store_host.as_ref().unwrap(),
-            "/var/cache/mbx"
+            &spec.mbx_cache_store_host().unwrap(),
+            &spec.mbx_cache_container_dir()
+        ));
+        assert!(has_mount(
+            &args,
+            &spec.mbx_target_store_host().unwrap(),
+            &spec.mbx_target_container_dir()
         ));
         assert!(has_mount(&args, &spec.temp_host, "/github/runner_temp"));
         assert!(has_mount(&args, &spec.temp_host, "/github/file_commands"));

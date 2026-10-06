@@ -156,8 +156,12 @@ pub fn github_job_container_spec(
 }
 
 pub(crate) fn github_repository_store_key(job: &AgentJobRequestMessage) -> Option<String> {
+    // The server URL defaults to the public host when the job carries none,
+    // matching the checkout planner and trust derivation: a repository id
+    // alone still addresses a persistent, origin-scoped store.
+    let server_url = job_variable(job, "github.server_url").unwrap_or("https://github.com");
     crate::store_catalog::repository_store_key(
-        job_variable(job, "github.server_url")?,
+        server_url,
         job_variable(job, "github.repository_id")?,
     )
 }
@@ -702,6 +706,29 @@ fn expand_template_token(value: &Value) -> anyhow::Result<ContextValue> {
             Value::Object(_) => anyhow::bail!("TemplateToken object reached scalar expansion"),
         });
     };
+    if object_member(object, "type").is_none() {
+        // Untagged objects are raw mappings, not string-literal tokens: every
+        // template-token envelope carries an explicit integer `type`. Expand
+        // member-wise like a mapping token so raw service/container maps keep
+        // working without a parse round trip.
+        let mut expanded: Vec<(String, ContextValue)> = Vec::with_capacity(object.len());
+        for (key, member) in object {
+            if key.is_empty() {
+                anyhow::bail!("TemplateToken map key must be non-empty");
+            }
+            if expanded
+                .iter()
+                .any(|(existing, _)| velnor_model::ordinal_ignore_case_eq(existing, key))
+            {
+                anyhow::bail!("case-insensitive duplicate TemplateToken map key {key:?}");
+            }
+            expanded.push((key.clone(), expand_template_token(member)?));
+        }
+        return Ok(ContextValue::Object {
+            case_sensitive: false,
+            entries: expanded,
+        });
+    }
     let token_type = match object_member(object, "type") {
         None => Some(0),
         Some(Value::Number(value)) if !value.is_f64() => Some(

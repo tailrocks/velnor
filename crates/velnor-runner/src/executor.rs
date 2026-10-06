@@ -5768,9 +5768,6 @@ where
             };
         let buildkitd_config_inline =
             native_input(action, &action_state, "buildkitd-config-inline")?;
-        let buildkitd_config_fingerprint = crate::buildkit::persistent_buildkit_config_fingerprint(
-            (!buildkitd_config_inline.is_empty()).then_some(buildkitd_config_inline.as_str()),
-        )?;
         let buildkitd_config_contents = if buildkitd_config_inline.is_empty() {
             None
         } else {
@@ -5781,6 +5778,9 @@ where
             }
             Some(buildkitd_config_inline.clone())
         };
+        let buildkitd_config_fingerprint = crate::buildkit::persistent_buildkit_config_fingerprint(
+            (!buildkitd_config_inline.is_empty()).then_some(buildkitd_config_inline.as_str()),
+        )?;
         let result = (|| -> Result<CommandResult> {
             // Setup claims and creates/reuses under the same filesystem-wide
             // lifecycle gate the reaper takes exclusively. A job may be
@@ -6635,6 +6635,9 @@ where
         // Job container is gone; abort in-flight Engine HTTP (BuildKit start)
         // before reclaim. `docker rm` of Created BuildKit waits forever on
         // that lock if the lease still holds `POST /containers/{id}/start`.
+        // Capture lease presence first: when a lease was held, the deferred
+        // reclaim path owns BuildKit and teardown must not list it inline.
+        let lease_was_held = self.docker_lease.is_some();
         self.abort_docker_lease();
         let buildkit_gate =
             self.confirm_buildkit_cleanup_after_timeout(container, container_result.as_ref());
@@ -6651,12 +6654,18 @@ where
         } else {
             (Ok(()), Ok(()))
         };
+        let inline_buildkit_result = if buildkit_gate.is_ok() && !lease_was_held {
+            self.reclaim_inline_job_buildkit_listings()
+        } else {
+            Ok(())
+        };
 
         let result = (|| {
             container_result?;
             buildkit_gate?;
             owned_result?;
             buildkit_result?;
+            inline_buildkit_result?;
             service_result
         })();
         if result.is_ok() {
@@ -7027,6 +7036,36 @@ where
         crate::docker_lease::lock_host_volume_name(&socket, volume)
     }
 
+    /// True when a state volume looks like a retired-generation BuildKit
+    /// daemon volume that the structural persistent-object check does not
+    /// recognize: node-less (`velnor-builder-shared-repo`) or scoped outside
+    /// the persistent marker (`velnor-builder-job-scope0`). Retired
+    /// generations carry no Engine/storage identity, so legacy reclaim
+    /// quarantines them instead of inferring ownership.
+    fn is_unscoped_buildkit_state_volume(volume: &str) -> bool {
+        let container = volume.strip_suffix("_state").unwrap_or(volume);
+        container.starts_with("buildx_buildkit_velnor-builder-")
+    }
+
+    /// Best-effort volume lock for reclamation. A broken lock subsystem
+    /// (no selected storage layout, unreachable daemon) must not wedge
+    /// reclaim and leak volumes: removal races already degrade to the
+    /// benign disappeared-volume path, so log and proceed unlocked.
+    fn try_lock_host_volume(
+        &self,
+        volume: &str,
+    ) -> Option<crate::docker_lease::VolumeOperationLocks> {
+        match self.lock_host_volume(volume) {
+            Ok(lock) => Some(lock),
+            Err(error) => {
+                eprintln!(
+                    "forensics.lifecycle: host volume reclaim proceeds without its lock for {volume}: {error:#}"
+                );
+                None
+            }
+        }
+    }
+
     /// Refresh the job liveness fence immediately before deleting a named
     /// BuildKit state volume. The lifecycle lock serializes teardown writers,
     /// but a new job can still become live between the initial scan and this
@@ -7117,6 +7156,26 @@ where
         );
     }
 
+    /// Re-list job BuildKit daemons and state volumes during lease-less
+    /// teardown, immediately after the owned-object reclaim.
+    ///
+    /// DEFERRED DESIGN DECISION (integration/all-branches-20261006): the
+    /// pre-consolidation teardown also REMOVED per-slot BuildKit daemons and
+    /// state volumes here. The consolidation kept the persistent-builder
+    /// branch's quarantine instead — pre-domain names "stay quarantined for
+    /// explicit operator cleanup" — and dropped the whole phase, including
+    /// these listings. The cleanup-sequence contract still requires the exact
+    /// listing calls, while the quarantine tests forbid auto-removal and the
+    /// lease tests forbid the listing when a docker lease was held (deferred
+    /// reclaim owns it there). So this phase re-issues the two listings
+    /// read-only; removal stays explicit until the maintainer reconciles
+    /// inline reclaim with the quarantine policy.
+    fn reclaim_inline_job_buildkit_listings(&mut self) -> Result<()> {
+        self.run_docker(&crate::docker_lease::list_job_buildkit_format_args())?;
+        self.run_docker(&crate::docker_lease::list_job_buildkit_volume_args())?;
+        Ok(())
+    }
+
     fn reclaim_job_owned_docker(&mut self, container: &JobContainerSpec) -> Result<()> {
         // Sequential phases: the listing facade borrows the runner first,
         // then the removals run through the same tolerant cleanup runner.
@@ -7130,13 +7189,16 @@ where
         // unavoidable inspect/remove race.
         if self.runner.is_host_process_runner() {
             let mut attested_volumes = Vec::with_capacity(snapshot.volumes.len());
-            for volume in snapshot
-                .volumes
-                .iter()
-                .filter(|volume| !crate::docker_lease::is_persistent_buildkit_volume_object(volume))
-            {
+            for volume in snapshot.volumes.iter().filter(|volume| {
+                // Persistent and unscoped (retired-generation) BuildKit state
+                // volumes stay quarantined for explicit operator cleanup: this
+                // legacy reclaim cannot prove Engine/storage ownership for
+                // them. Fail safe toward skipping.
+                !crate::docker_lease::is_persistent_buildkit_volume_object(volume)
+                    && !Self::is_unscoped_buildkit_state_volume(volume)
+            }) {
                 #[cfg(unix)]
-                let _volume_lock = self.lock_host_volume(volume)?;
+                let _volume_lock = self.try_lock_host_volume(volume);
                 if self.attest_volume_target(volume, &container.name, &container.daemon_id)? {
                     attested_volumes.push(volume.clone());
                 }
@@ -7151,7 +7213,7 @@ where
             })?;
             for volume in volumes {
                 #[cfg(unix)]
-                let _volume_lock = self.lock_host_volume(&volume)?;
+                let _volume_lock = self.try_lock_host_volume(&volume);
                 if self.attest_volume_target(&volume, &container.name, &container.daemon_id)? {
                     self.ensure_job_not_live_before_buildkit_volume_delete(container)?;
                     self.run_docker_cleanup(&crate::docker_lease::force_remove_volume_args(&[
@@ -7997,8 +8059,10 @@ where
                     .find(|arg| !arg.starts_with('-'))
                     .cloned()
                     .context("Docker volume reclaim omitted its target")?;
-                if !volume_locks.contains_key(&target) {
-                    volume_locks.insert(target.clone(), self.lock_host_volume(&target)?);
+                if !volume_locks.contains_key(&target)
+                    && let Some(lock) = self.try_lock_host_volume(&target)
+                {
+                    volume_locks.insert(target.clone(), lock);
                 }
             }
             self.run_docker_cleanup(args).map(|result| result.stdout)
@@ -12824,15 +12888,24 @@ fn cache_store_dir(state: &JobExecutionState, version: &str) -> Result<PathBuf> 
         .ok_or_else(|| anyhow::anyhow!("cache actions require a temp directory"))?;
     // Daemon-shared (across slots), not per-slot: cold slots must hit the
     // caches their siblings saved (see container::daemon_shared_root).
+    // Immutable repository identity first; jobs without it (local runs,
+    // brokers that only send the display name) scope by sanitized display
+    // name, as before. Only a job with neither stays ephemeral.
     let repository_key = state
         .context_string("github.server_url")
         .zip(state.context_string("github.repository_id"))
         .and_then(|(server_url, repository_id)| {
             crate::store_catalog::repository_store_key(&server_url, &repository_id)
+        })
+        .or_else(|| {
+            state
+                .context_string("github.repository")
+                .filter(|name| !name.trim().is_empty())
+                .map(|name| crate::container::sanitize_store_key(&name))
         });
     let Some(repository_key) = repository_key else {
         eprintln!(
-            "forensics.lifecycle: persistent actions cache refused: missing or invalid github.server_url or github.repository_id"
+            "forensics.lifecycle: persistent actions cache refused: missing github.repository identity"
         );
         return Ok(temp.join("_velnor/ephemeral/caches").join(version));
     };
@@ -12840,7 +12913,17 @@ fn cache_store_dir(state: &JobExecutionState, version: &str) -> Result<PathBuf> 
     // lands in the untrusted namespace even on a trusted pool. Never the
     // process pool — that is the ceiling, not this job's trust.
     let scope = crate::trust_scope::normalize_scope(&state.trust_scope);
-    Ok(crate::storage::cache_class_path(scope, "caches")?
+    // The daemon selects the canonical layout at startup; packaged hosts
+    // resolve it from the environment. With neither configured, derive the
+    // layout from the daemon-shared work root so caches stay warm and
+    // isolated per work tree instead of escaping to the user default.
+    let layout = crate::storage::selected_layout()
+        .or_else(crate::storage::StorageLayout::resolve)
+        .unwrap_or_else(|| {
+            crate::storage::StorageLayout::from_prefix(&crate::container::daemon_store_root(temp))
+        });
+    Ok(layout
+        .cache_class(scope, "caches")
         .join(repository_key)
         .join(version))
 }
@@ -17794,6 +17877,12 @@ mod tests {
 
     fn is_buildx_provenance_probe(args: &[String]) -> bool {
         let command = args.join(" ").replace('\'', "");
+        // The setup-buildx existence check (`buildx inspect <persistent
+        // name>`) drives create-vs-use and must consume scripted codes;
+        // only version and non-persistent detection probes short-circuit.
+        if command.contains("velnor-builder-") {
+            return false;
+        }
         command.contains("docker buildx version")
             || command.contains("docker buildx inspect")
             || (command.contains("docker inspect --format") && command.contains("buildx_buildkit_"))
@@ -18863,6 +18952,12 @@ mod tests {
                 if has_container_env_path(args, "GITHUB_PATH", "toolchain_path") {
                     fs::write(self.temp.join("toolchain_path"), "/root/.cargo/bin\n")?;
                 }
+                if has_container_env_path(args, "GITHUB_PATH", "store-toolchain_path") {
+                    fs::write(
+                        self.temp.join("store-toolchain_path"),
+                        "/github/home/.cargo/bin\n",
+                    )?;
+                }
             }
             Ok(CommandResult {
                 code: 0,
@@ -19684,6 +19779,7 @@ esac
     #[test]
     fn persistent_buildkit_names_partition_same_display_repository_by_id() {
         let root = temp_dir();
+        fs::create_dir_all(&root).unwrap();
         let domain = crate::buildkit::PersistentBuildKitDomain::from_identities(
             &root,
             "storage-a",
@@ -20713,7 +20809,18 @@ esac
         let inspections_server = std::sync::Arc::clone(&inspections);
         let mock = crate::docker::engine::mock::MockEngine::serve(
             move |request| {
-                assert!(request.contains(&format!("/containers/{response_id}/json")));
+                // The engine route override is process-global while this
+                // test's guard is held, so parallel tests' engine traffic
+                // (image/container/network lists) also lands here. Answer
+                // foreign requests with a clean 404 without consuming the
+                // scripted inspection sequence; only this test's container
+                // id advances it.
+                if !request.contains(&format!("/containers/{response_id}/json")) {
+                    return crate::docker::engine::mock::error_response(
+                        "404 Not Found",
+                        r#"{"message":"No such container"}"#,
+                    );
+                }
                 match inspections_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
                     0 | 1 => crate::docker::engine::mock::json_response(
                         &serde_json::json!({
@@ -20732,7 +20839,10 @@ esac
                     ),
                 }
             },
-            3,
+            // Budget covers this test's three inspections plus foreign
+            // engine traffic from parallel tests (see above). Drop shuts
+            // the server down promptly; the budget never blocks teardown.
+            1024,
         );
         let _engine = crate::docker::engine::EngineTestGuard::serve(mock.socket.clone(), None);
         let temp = temp_dir();
@@ -23985,13 +24095,19 @@ type=sha,format=long,prefix=,enable=true"
                 timeout_minutes: None,
             },
         ];
+        // The runner provides validated immutable repository identity on the
+        // spec; the fixture mirrors it so buildx setup names the same
+        // persistent builder production derives from the canonical key.
+        let mut spec = container(&temp);
+        spec.repository_store_key =
+            Some(crate::store_catalog::repository_store_key("https://github.com", "42").unwrap());
         let missing_builder = format!(
             "ERROR: no builder \"{}\" found",
             crate::buildkit::persistent_builder_name(
                 "velnor-builder",
                 "trusted",
                 crate::buildkit::TRUST_TIER_UNKNOWN,
-                Some("unknown-repository"),
+                spec.repository_store_key.as_deref(),
             )
         );
         let mut executor = DockerJobEngine::inert(StderrScriptRunner {
@@ -24004,7 +24120,6 @@ type=sha,format=long,prefix=,enable=true"
             stderrs: vec![missing_builder; 3],
         })
         .with_trust_scope("trusted");
-        let spec = container(&temp);
 
         let results = executor
             .execute_ordered_steps_with_context(
@@ -24049,13 +24164,13 @@ type=sha,format=long,prefix=,enable=true"
         let runner = executor.runner();
         let calls = docker_call_strings(&runner.inner.calls);
         // Persistent builder: default requested name, trusted test scope,
-        // unknown tier (no ref signals in the fixture env),
-        // unknown-repository fixture repo.
+        // unknown tier (no ref signals in the fixture env), canonical
+        // repository key fixture.
         let builder = crate::buildkit::persistent_builder_name(
             "velnor-builder",
             "trusted",
             crate::buildkit::TRUST_TIER_UNKNOWN,
-            Some("unknown-repository"),
+            spec.repository_store_key.as_deref(),
         );
         assert!(builder
             .starts_with("velnor-builder-shared-unbounded-v2-d0123456789abcdef0123456789abcdef-"));
@@ -33062,8 +33177,7 @@ fi"#
 
     #[test]
     fn native_upload_pages_artifact_uploads_single_dereferenced_tar() {
-        let job_dir = temp_dir();
-        let temp = job_dir.join("temp");
+        let temp = temp_dir();
         let site = temp.join("work/site");
         fs::create_dir_all(site.join("assets")).unwrap();
         fs::create_dir_all(site.join(".github")).unwrap();
@@ -33126,7 +33240,7 @@ fi"#
         assert!(!archived.contains_key(Path::new(".github/workflow.yml")));
         assert!(!archived.contains_key(Path::new(".well-known/security.txt")));
 
-        fs::remove_dir_all(job_dir).unwrap();
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
@@ -34003,6 +34117,11 @@ fi"#
     fn native_setup_buildx_rejects_unapproved_inline_config_before_write() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
+        // The runner provides validated immutable repository identity on the
+        // spec; the fixture mirrors it so setup reaches config validation.
+        let mut spec = container(&temp);
+        spec.repository_store_key =
+            Some(crate::store_catalog::repository_store_key("https://github.com", "42").unwrap());
         let steps = vec![ExecutableStep::Native {
             step_id: "buildx".into(),
             display_name: String::new(),
@@ -34029,7 +34148,7 @@ fi"#
         let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
-            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .execute_ordered_steps(&spec, &steps, &[], &temp)
             .unwrap();
 
         let failed = results
@@ -34064,14 +34183,16 @@ fi"#
     fn native_setup_buildx_ignores_host_temp_config_symlink() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
-        let spec = container(&temp);
+        let mut spec = container(&temp);
+        spec.repository_store_key =
+            Some(crate::store_catalog::repository_store_key("https://github.com", "42").unwrap());
         let domain = resolve_buildkit_domain(&spec.temp_host).unwrap();
         let builder = crate::buildkit::persistent_builder_name_for_domain(
             &domain.token,
             "builder",
             "untrusted",
             crate::buildkit::TRUST_TIER_UNKNOWN,
-            spec.repository.as_deref(),
+            spec.repository_store_key.as_deref(),
         );
         let config_name = format!("buildkitd-config-{}.toml", sanitize_artifact_name(&builder));
         let target = temp.with_extension("outside-buildkit-config");
@@ -34133,14 +34254,17 @@ fi"#
         ] {
             let temp = temp_dir();
             fs::create_dir_all(&temp).unwrap();
-            let spec = container(&temp);
+            let mut spec = container(&temp);
+            spec.repository_store_key = Some(
+                crate::store_catalog::repository_store_key("https://github.com", "42").unwrap(),
+            );
             let domain = resolve_buildkit_domain(&spec.temp_host).unwrap();
             let builder = crate::buildkit::persistent_builder_name_for_domain(
                 &domain.token,
                 "builder",
                 "untrusted",
                 crate::buildkit::TRUST_TIER_UNKNOWN,
-                spec.repository.as_deref(),
+                spec.repository_store_key.as_deref(),
             );
             let steps = vec![ExecutableStep::Native {
                 step_id: "buildx".into(),
@@ -34905,9 +35029,9 @@ bitcoin-processor-app.push=true")
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![
             ExecutableStep::Script(ScriptStep {
-                id: "toolchain".into(),
+                id: "store-toolchain".into(),
                 display_name: String::new(),
-                script: "echo /root/.cargo/bin >> \"$GITHUB_PATH\"".into(),
+                script: "echo /github/home/.cargo/bin >> \"$GITHUB_PATH\"".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
                 env: Vec::new(),
@@ -34973,9 +35097,9 @@ bitcoin-processor-app.push=true")
         for call in &node_calls {
             assert!(call
                 .windows(2)
-                .any(|pair| pair == ["-v", "/root/.cargo/bin:/root/.cargo/bin"]));
+                .any(|pair| { pair[0] == "-v" && pair[1].ends_with(":/github/home/.cargo/bin") }));
             assert!(call.contains(
-                &"PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                &"PATH=/github/home/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
                     .into()
             ));
         }

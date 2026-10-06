@@ -517,12 +517,9 @@ pub(crate) fn run_gc_with(
                 )
             })
             .and_then(|pinned| {
-                remove_candidate(
-                    &candidate,
-                    pinned,
-                    pinned.anchor_identity.device,
-                    &|| Ok(()),
-                )
+                remove_candidate(&candidate, pinned, pinned.anchor_identity.device, &|_| {
+                    Ok(())
+                })
             });
         let outcome = match &result {
             Ok(CandidateRemovalOutcome::Removed) => "deleted",
@@ -1260,48 +1257,6 @@ pub fn reclaim(
     )
 }
 
-/// Reclaim ordinary cache candidates after capacity admission fails for
-/// `pressure_path`. Candidate bytes from another filesystem cannot satisfy
-/// this reservation.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn reclaim_for_capacity_pressure_with_pin(
-    layout: &crate::storage::StorageLayout,
-    work_root: &Path,
-    pressure_path: &Path,
-    target_bytes: u64,
-    in_use_scopes: &BTreeSet<String>,
-    expected_pressure: &crate::host_capacity::HostCapacityPin,
-) -> Result<ReclaimReport> {
-    let pressure = pin_pressure_path(pressure_path, expected_pressure)?;
-    let expected_volume_uuid = pressure_volume_uuid(&pressure)?;
-    let pressure_device = expected_pressure.device_id();
-    let pressure_sample = |_: &Path| {
-        pressure
-            .probe()
-            .ok()
-            .filter(|capacity| {
-                capacity.filesystem_device == pressure_device
-                    && capacity.volume_fingerprint.as_deref() == Some(&expected_volume_uuid)
-            })
-            .map(PressureSample::from_capacity)
-    };
-    reclaim_work_root_with_layout_on_device(
-        work_root,
-        &layout.run_root,
-        &layout.log_root,
-        ReclaimGoal::Amount(target_bytes),
-        in_use_scopes,
-        false,
-        layout,
-        None,
-        Some(pressure_device),
-        &candidate_device_id,
-        Some(pressure_path),
-        Some(&pressure),
-        &pressure_sample,
-    )
-}
-
 /// Reclaim until the pinned filesystem reaches an absolute free-space floor.
 /// The floor is evaluated from a fresh sample after both reclaim locks are held.
 pub(crate) fn reclaim_for_capacity_floor_with_pin(
@@ -1517,6 +1472,27 @@ impl ReclaimGoal {
         }
     }
 }
+
+/// Control-flow stop: pressure cleared at an unlink boundary before this
+/// candidate's own deletions covered the baseline deficit, so the clear
+/// came from elsewhere. The removal helper restores the quarantined
+/// remainder; the reclaim loop stops without recording a failure.
+#[derive(Debug)]
+struct PressureClearedAtUnlinkBoundary {
+    path: PathBuf,
+}
+
+impl std::fmt::Display for PressureClearedAtUnlinkBoundary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "pressure cleared before deleting {}",
+            self.path.display()
+        )
+    }
+}
+
+impl std::error::Error for PressureClearedAtUnlinkBoundary {}
 
 fn pressure_volume_uuid(pressure: &crate::host_capacity::HostCapacityPin) -> Result<String> {
     let capacity = pressure
@@ -1917,7 +1893,7 @@ fn reclaim_work_root_with_layout_on_device(
             bytes: entry.bytes,
             reason: "reclaim-target".into(),
         };
-        let validate_pressure_before_delete = || {
+        let validate_pressure_before_delete = |_unlinking: &Path| {
             if let (Some(pressure_path), Some(baseline)) = (pressure_path, pressure_pass_baseline) {
                 match pressure_sample(pressure_path) {
                     Some(current) => {
@@ -1926,11 +1902,23 @@ fn reclaim_work_root_with_layout_on_device(
                             current.available_bytes,
                         );
                         if !goal.still_pressured(current, freed) {
+                            // This hook runs before every unlink of the
+                            // in-progress candidate, whose paths may already
+                            // be quarantine-renamed. When the candidate
+                            // alone covers the baseline deficit, its own
+                            // unlinks presumably cleared the goal: finish
+                            // the remainder, since aborting now would leave
+                            // a half-removed directory that is neither
+                            // reported nor accounted. Otherwise the clear
+                            // came from elsewhere: bail so the quarantined
+                            // remainder is restored and the pass stops
+                            // before touching another candidate.
                             pressure_cleared.set(true);
-                            bail!(
-                                "pressure cleared before deleting {}",
-                                candidate.path.display()
-                            );
+                            if candidate.bytes < goal.remaining_bytes(baseline, 0) {
+                                return Err(anyhow::anyhow!(PressureClearedAtUnlinkBoundary {
+                                    path: candidate.path.clone(),
+                                }));
+                            }
                         }
                     }
                     None => {
@@ -2012,7 +2000,10 @@ fn reclaim_work_root_with_layout_on_device(
                 }
             }
             Err(error) => {
-                if pressure_cleared.get() {
+                if error
+                    .downcast_ref::<PressureClearedAtUnlinkBoundary>()
+                    .is_some()
+                {
                     break;
                 }
                 report
@@ -2251,12 +2242,9 @@ pub(crate) fn enforce_compiler_store_budget(
                 )
             })
             .and_then(|pinned| {
-                remove_candidate(
-                    &candidate,
-                    pinned,
-                    pinned.anchor_identity.device,
-                    &|| Ok(()),
-                )
+                remove_candidate(&candidate, pinned, pinned.anchor_identity.device, &|_| {
+                    Ok(())
+                })
             });
         match removed {
             Ok(CandidateRemovalOutcome::Removed) => {
@@ -2282,7 +2270,7 @@ fn remove_candidate(
     candidate: &EvictionCandidate,
     pinned: &PinnedCacheCandidate,
     expected_device: u64,
-    before_delete: &impl Fn() -> Result<()>,
+    before_delete: &impl Fn(&Path) -> Result<()>,
 ) -> Result<CandidateRemovalOutcome> {
     if candidate.store == CacheStore::StableWorkspace {
         let stable_root = candidate
@@ -2375,7 +2363,7 @@ fn remove_candidate(
             &pinned.anchor_identity,
             &pinned.candidate_identity,
             &pinned.directory,
-            &|_| before_delete(),
+            &|path| before_delete(path),
         )?;
         return Ok(CandidateRemovalOutcome::Removed);
     }
@@ -2386,7 +2374,7 @@ fn remove_candidate(
         &pinned.anchor_identity,
         &pinned.candidate_identity,
         &pinned.directory,
-        &|_| before_delete(),
+        &|path| before_delete(path),
     )?;
     Ok(CandidateRemovalOutcome::Removed)
 }
@@ -4367,7 +4355,7 @@ mod tests {
                     &candidate,
                     &pinned,
                     expected_device,
-                    &|| Ok(()),
+                    &|_| Ok(()),
                 ))
                 .unwrap()
         });
@@ -4412,7 +4400,7 @@ mod tests {
                     &candidate,
                     &pinned,
                     expected_device,
-                    &|| Ok(()),
+                    &|_| Ok(()),
                 ))
                 .unwrap()
         });
@@ -4469,7 +4457,7 @@ mod tests {
                     &candidate,
                     &pinned,
                     expected_device,
-                    &|| Ok(()),
+                    &|_| Ok(()),
                 ))
                 .unwrap()
         });
@@ -4526,7 +4514,7 @@ mod tests {
         fs::rename(candidate_parent, &saved_parent).unwrap();
         symlink(&outside, candidate_parent).unwrap();
 
-        let error = remove_candidate(&eviction, pinned, expected_device, &|| Ok(())).unwrap_err();
+        let error = remove_candidate(&eviction, pinned, expected_device, &|_| Ok(())).unwrap_err();
         assert!(
             format!("{error:#}").contains("symlink")
                 || format!("{error:#}").contains("without following links"),
@@ -4718,18 +4706,44 @@ mod tests {
             backdate(candidate, EMERGENCY_MIN_IDLE * 2);
         }
         assert_eq!(work_catalog.artifacts(), actual.parent().unwrap());
+        // Existence-driven pressure, not a live-statfs floor: a one-byte
+        // absolute margin on a live volume races background filesystem
+        // activity. Removal quarantines the candidate before unlinking, so
+        // the first gone sample only proves a rename; the pass clears on
+        // the second consecutive gone sample, once our own unlinks have
+        // covered the deficit and the remainder must be finished.
+        let gone_streak = std::cell::Cell::new(0u32);
+        let pressure_sample = |_: &Path| {
+            if actual.exists() {
+                gone_streak.set(0);
+            } else {
+                gone_streak.set(gone_streak.get().saturating_add(1));
+            }
+            Some(if gone_streak.get() >= 2 {
+                PressureSample {
+                    available_bytes: 100,
+                    used_percent: 0,
+                }
+            } else {
+                PressureSample {
+                    available_bytes: 10,
+                    used_percent: 0,
+                }
+            })
+        };
         let pin = crate::host_capacity::HostCapacityPin::open(&work_root).unwrap();
-        let required_free_bytes = pin.probe().unwrap().available_bytes + 1;
 
-        let report = reclaim_for_capacity_floor_with_pin(
+        let report = reclaim_for_disk_pressure_on_device(
+            &work_root,
+            ReclaimGoal::AvailableFloor(100),
+            &[work_root.clone()],
             &layout,
-            &work_root,
-            &work_root,
-            required_free_bytes,
-            &BTreeSet::new(),
-            &pin,
-        )
-        .unwrap();
+            None,
+            pin.device_id(),
+            &candidate_device_id,
+            None,
+            &pressure_sample,
+        );
 
         assert!(
             !actual.exists(),
@@ -4770,17 +4784,44 @@ mod tests {
             backdate(candidate, EMERGENCY_MIN_IDLE * 2);
         }
         assert_eq!(work_catalog.artifacts(), actual.parent().unwrap());
+        // Existence-driven pressure, not a live-statfs amount goal: a
+        // one-byte target on a live volume races background filesystem
+        // activity. Removal quarantines the candidate before unlinking, so
+        // the first gone sample only proves a rename; the pass clears on
+        // the second consecutive gone sample, once our own unlinks have
+        // covered the deficit and the remainder must be finished.
+        let gone_streak = std::cell::Cell::new(0u32);
+        let pressure_sample = |_: &Path| {
+            if actual.exists() {
+                gone_streak.set(0);
+            } else {
+                gone_streak.set(gone_streak.get().saturating_add(1));
+            }
+            Some(if gone_streak.get() >= 2 {
+                PressureSample {
+                    available_bytes: 100,
+                    used_percent: 0,
+                }
+            } else {
+                PressureSample {
+                    available_bytes: 10,
+                    used_percent: 0,
+                }
+            })
+        };
         let pin = crate::host_capacity::HostCapacityPin::open(&work_root).unwrap();
 
-        let report = reclaim_for_capacity_pressure_with_pin(
+        let report = reclaim_for_disk_pressure_on_device(
+            &work_root,
+            ReclaimGoal::Amount(1),
+            &[work_root.clone()],
             &layout,
-            &work_root,
-            &work_root,
-            1,
-            &BTreeSet::new(),
-            &pin,
-        )
-        .unwrap();
+            None,
+            pin.device_id(),
+            &candidate_device_id,
+            None,
+            &pressure_sample,
+        );
 
         assert!(
             !actual.exists(),
@@ -5594,7 +5635,11 @@ mod tests {
             crate::store_catalog::repository_store_key("https://github.com", "1").unwrap();
         let catalog = StoreCatalog::for_work_root_with_layout(&work, &layout);
         let registry = catalog.cargo(trust_scope).join("registry");
-        let canonical_bin = catalog.cargo(trust_scope).join("bin").join(&repository_key);
+        // Store roots are unsplit: per-repo candidates descend from the
+        // whole `bin` root at collection depth, like every other
+        // repository-scoped class.
+        let bin_root = catalog.cargo(trust_scope).join("bin");
+        let canonical_bin = bin_root.join(&repository_key);
         fs::create_dir_all(registry.join("cache/index")).unwrap();
         fs::write(registry.join("cache/index/crate"), b"crate").unwrap();
         fs::create_dir_all(&canonical_bin).unwrap();
@@ -5610,7 +5655,7 @@ mod tests {
             .into_iter()
             .filter(|store| {
                 store.kind == CacheStore::Cargo
-                    && (store.path == registry || store.path == canonical_bin)
+                    && (store.path == registry || store.path == bin_root)
             })
             .collect();
         let mut entries = Vec::new();

@@ -440,6 +440,24 @@ pub fn cache_class_path(trust_scope: &str, class: &str) -> Result<PathBuf> {
     cache_class_path_with_layout(trust_scope, class, None)
 }
 
+/// Resolve a trust-partitioned store class for one job temp dir.
+///
+/// The daemon selects the canonical layout at startup and packaged hosts
+/// resolve it from the environment; both win here. With neither configured,
+/// derive the layout from the daemon-shared work root so stores stay warm
+/// and isolated per work tree instead of escaping to the user default
+/// (same fallback as the actions-cache store dir).
+pub(crate) fn cache_class_path_for_job_temp(
+    temp_host: &Path,
+    trust_scope: &str,
+    class: &str,
+) -> Result<PathBuf> {
+    let layout = selected_or_resolved_layout().unwrap_or_else(|| {
+        StorageLayout::from_prefix(&crate::container::daemon_store_root(temp_host))
+    });
+    Ok(layout.cache_class(crate::trust_scope::normalize_scope(trust_scope), class))
+}
+
 pub fn cache_class_path_with_layout(
     trust_scope: &str,
     class: &str,
