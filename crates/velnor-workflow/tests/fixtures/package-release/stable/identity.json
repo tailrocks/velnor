@@ -1,0 +1,18 @@
+{
+  "manifest": {
+    "assets": [
+      {
+        "name": "package.tar.gz",
+        "sha256": "eaa28c660449a5b079b677446d87a0555e6d2c7d2a152e5b0220a5f4526904ce"
+      }
+    ],
+    "schema": "example.consumer-manifest-v1",
+    "source_commit": "0123456789abcdef0123456789abcdef01234567",
+    "source_ref": "refs/heads/main",
+    "source_repository": "example/project",
+    "version": "1.2.3"
+  },
+  "source_digest": "0123456789abcdef0123456789abcdef01234567",
+  "source_ref": "refs/heads/main",
+  "source_repository": "example/project"
+}

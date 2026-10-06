@@ -608,15 +608,27 @@ fn profile_admission_expression(
 fn lane_admission_with_lanes_input(config: &ProjectConfig) -> String {
     let admission =
         WorkflowIr::from_config(config).lane_admission_expression(LaneAdmission::Velnor);
-    let prefix = "github.event_name == 'workflow_dispatch' && (";
+    let prefixes = [
+        "github.event_name == 'workflow_dispatch' && (",
+        "github.event_name=='workflow_dispatch'&&(",
+    ];
+    let prefix = prefixes
+        .iter()
+        .find(|prefix| admission.matches(**prefix).count() == 1);
     if admission
         .matches("github.event_name == 'workflow_dispatch'")
         .count()
+        + admission
+            .matches("github.event_name=='workflow_dispatch'")
+            .count()
         != 1
-        || admission.matches(prefix).count() != 1
+        || prefix.is_none()
     {
         return format!("({admission}) && false");
     }
+    let Some(prefix) = prefix else {
+        return format!("({admission}) && false");
+    };
     let Some(selector_start) = admission.find(prefix) else {
         return format!("({admission}) && false");
     };
@@ -1060,7 +1072,7 @@ mod tests {
             mise_lock_backends: std::collections::BTreeMap::new(),
             mise_install_deps: crate::s2::MiseInstallDeps::default(),
             github_cache: config::CacheGithubSection::default(),
-            velnor_host_cache: config::CacheVelnorSection::default(),
+            host_cache: config::CacheHostSection::default(),
         }
     }
 

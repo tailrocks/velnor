@@ -3147,29 +3147,6 @@ fn canonical_api_step_findings(
         .as_ref()
         .and_then(config::RepoGenerationConfig::repository)
         .unwrap_or_default();
-    let mut declared_ruleset_contexts = generation
-        .as_ref()
-        .map(|generation| generation.ruleset_required_status_checks().to_vec())
-        .filter(|contexts| !contexts.is_empty())
-        .unwrap_or_else(|| {
-            if generation
-                .as_ref()
-                .and_then(config::RepoGenerationConfig::ci_required)
-                .unwrap_or(true)
-            {
-                vec!["ci-required".to_owned()]
-            } else {
-                Vec::new()
-            }
-        });
-    if let Some(generation) = &generation {
-        declared_ruleset_contexts
-            .extend(generation.ruleset_external_status_checks().iter().cloned());
-    }
-    declared_ruleset_contexts.push("Policy".to_owned());
-    declared_ruleset_contexts.sort();
-    declared_ruleset_contexts.dedup();
-    let declared_ruleset_contexts = declared_ruleset_contexts.join(",");
     let hosted = velnor_policy.runners != "velnor";
     let expected = if hosted {
         let revision = match entrypoint_policy_revision(root) {
@@ -3194,6 +3171,27 @@ fn canonical_api_step_findings(
             "main"
         } else {
             velnor_policy.default_branch.as_str()
+        };
+        let declared_ruleset_contexts = {
+            let mut contexts: BTreeSet<String> = generation
+                .as_ref()
+                .map(|generation| generation.ruleset_required_status_checks().to_vec())
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            if contexts.is_empty()
+                && generation
+                    .as_ref()
+                    .and_then(config::RepoGenerationConfig::ci_required)
+                    .unwrap_or(true)
+            {
+                contexts.insert(crate::reuse::REQUIRED_CHECK.to_owned());
+            }
+            if let Some(generation) = generation.as_ref() {
+                contexts.extend(generation.ruleset_external_status_checks().iter().cloned());
+            }
+            contexts.insert("Policy".to_owned());
+            contexts.into_iter().collect::<Vec<_>>().join(",")
         };
         let rendered = super::policy_job(&super::PolicyJobSpec {
             candidate_artifact_wiring: true,
@@ -3718,7 +3716,9 @@ fn audit_required_artifact_producer_job(
             failures,
             producer_path,
             &format!(
-                "required-artifact producer `{profile_id}` if must match its canonical lane admission, including its configured absence"
+                "required-artifact producer `{profile_id}` if must match its canonical lane admission, including its configured absence; actual={:?}; expected={:?}",
+                mapping_value(producer_job.as_mapping().unwrap_or(&Mapping::new()), "if").and_then(Value::as_str),
+                admission
             ),
         );
     }
@@ -4344,7 +4344,9 @@ fn audit_required_artifact_consumer_job(
             failures,
             path,
             &format!(
-                "consumer profile `{consumer_id}` if must preserve verifier success propagation and its canonical lane admission, including its configured absence"
+                "consumer profile `{consumer_id}` if must preserve verifier success propagation and its canonical lane admission, including its configured absence; actual={:?}; expected={:?}",
+                mapping_value(job.as_mapping().unwrap_or(&Mapping::new()), "if").and_then(Value::as_str),
+                expected_admission
             ),
         );
     }
@@ -4770,9 +4772,12 @@ fn canonical_lanes_input_profile_runner(
     }
     let hosted_runner = generation.github_runner().unwrap_or("ubuntu-24.04");
     let labels_json = super::primitives::lanes_labels_json(labels);
+    let default_branch = generation
+        .default_branch()
+        .unwrap_or(&velnor_policy.default_branch);
     let expected_runs_on = match runner {
         "github" => format!(
-            "${{{{ (github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor') && fromJSON('{labels_json}') || {} }}}}",
+            "${{{{ (github.ref == 'refs/heads/{default_branch}' && github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor') && fromJSON('{labels_json}') || {} }}}}",
             super::primitives::json_string(hosted_runner)
         ),
         "velnor" => format!(
@@ -4995,8 +5000,8 @@ fn has_safe_runner_gate(
     }
     // Dual-lane automatic Velnor jobs admit same-repository pull_request plus
     // the default-branch push/schedule (and merge_group when emitted) plus a
-    // lane-selecting dispatch on any ref: dispatch needs write access on a
-    // ref of this repository, the authorship the runner already trusts
+    // lane-selecting dispatch from the configured default branch.
+    // The generated gate must match the same policy in all callers.
     // (`TrustClass::derive`, `velnor_dispatch_selection_expression`).
     // That generated shape is trusted even when the advisory checkout lacks
     // `.github/ci/project.toml` and only carries `.github-gen`.
@@ -5239,19 +5244,10 @@ fn is_generated_velnor_pr_gate(value: &str, default_branch: &str) -> bool {
     // `TrustClass::Trusted` without consulting the ref
     // (`velnor_dispatch_selection_expression` states the argument). The
     // ref-gated shapes above stay accepted for older rendered trees.
-    let explicit_dispatch_any_ref =
-        "(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'))";
-    let default_dispatch_any_ref =
-        "(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'||github.event.inputs.runner==''))";
     [automatic.as_str(), automatic_merge_group.as_str()]
         .into_iter()
         .any(|automatic| {
-            for dispatch in [
-                explicit_dispatch.as_str(),
-                default_dispatch.as_str(),
-                explicit_dispatch_any_ref,
-                default_dispatch_any_ref,
-            ] {
+            for dispatch in [explicit_dispatch.as_str(), default_dispatch.as_str()] {
                 let combined = format!("{automatic}||{dispatch}");
                 if value == combined || value == format!("({combined})") {
                     return true;

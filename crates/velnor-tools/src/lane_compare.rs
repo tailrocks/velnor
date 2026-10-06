@@ -13,8 +13,8 @@
 //! Data sources (V2 jobs have no v1 log archive — `runs/{id}/logs` contains
 //! no Velnor per-step files and `jobs/{id}/logs` 404s, as recorded in the
 //! evidence record):
-//! - step metadata: `actions/runs/{id}/jobs` (numbers, names, conclusions,
-//!   started/completed),
+//! - step metadata: `actions/runs/{id}/attempts/{attempt}/jobs` (numbers,
+//!   names, conclusions, started/completed),
 //! - per-step expandability: the job page HTML `<check-step …>` elements
 //!   (`data-log-url` presence — exactly what the UI renders),
 //! - lane log content: `jobs/{id}/logs` for the GitHub lane; the Velnor
@@ -23,12 +23,14 @@
 use anyhow::{bail, Context, Result};
 use clap::{ArgAction, Args, ValueEnum};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use url::Url;
 
 #[derive(Debug, Args)]
 pub struct LaneCompareArgs {
@@ -47,13 +49,15 @@ pub struct LaneCompareArgs {
     /// Velnor-vs-GitHub slowdown percentage tolerated above the baseline.
     #[arg(long, default_value_t = 25.0)]
     pub regress_threshold: f64,
-    /// Number of recent completed both-lane runs to inspect in --watch mode.
+    /// Number of newest workflow runs to inspect in --watch mode. Every run in
+    /// this raw window must be completed successfully with a valid full paired-lane
+    /// census and evidence; incomplete runs fail instead of falling back to older history.
     #[arg(long, default_value_t = 5)]
     pub since: usize,
-    /// Compare exactly this GitHub-lane job id (skips name-based pairing).
+    /// Compare this GitHub-lane job id as a diagnostic subset after full-run validation.
     #[arg(long, requires = "velnor_job")]
     pub github_job: Option<u64>,
-    /// Compare exactly this Velnor-lane job id (skips name-based pairing).
+    /// Compare this Velnor-lane job id as a diagnostic subset after full-run validation.
     #[arg(long, requires = "github_job")]
     pub velnor_job: Option<u64>,
     /// Directory for the report and raw evidence.
@@ -105,10 +109,51 @@ fn wall_budget_verdict(class: RunClass, seconds: i64) -> BudgetVerdict {
 #[derive(Debug, Deserialize)]
 struct JobsResponse {
     total_count: u64,
-    jobs: Vec<Job>,
+    jobs: Vec<ApiJob>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct ApiRepository {
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    full_name: Option<String>,
+}
+
+/// Identity fields returned by the attempt-scoped Actions jobs endpoint.
+/// Keep these separate from the comparison model so test-only fixtures cannot
+/// accidentally bypass the production identity gate.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct ApiJob {
+    id: u64,
+    run_id: u64,
+    run_attempt: u64,
+    head_sha: String,
+    name: String,
+    status: String,
+    conclusion: Option<String>,
+    html_url: String,
+    url: String,
+    run_url: String,
+    #[serde(default)]
+    repository: Option<ApiRepository>,
+    steps: Vec<Step>,
+}
+
+impl ApiJob {
+    fn into_job(self) -> Job {
+        Job {
+            id: self.id,
+            name: self.name,
+            status: self.status,
+            conclusion: self.conclusion,
+            html_url: Some(self.html_url),
+            steps: self.steps,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 struct Job {
     id: u64,
     name: String,
@@ -118,7 +163,7 @@ struct Job {
     steps: Vec<Step>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 struct Step {
     name: String,
     #[allow(dead_code)]
@@ -143,6 +188,15 @@ struct HtmlStep {
     external_id: String,
 }
 
+/// Parsed HTML evidence plus the digest of the exact response body. The
+/// parsed step map drives comparison; the digest binds watch snapshots to the
+/// raw payload without retaining or serializing the whole page in identity.
+#[derive(Debug, Clone)]
+struct HtmlEvidence {
+    steps: BTreeMap<u64, HtmlStep>,
+    digest: String,
+}
+
 /// Lane-level log-content affordances (per-step blobs are not API-reachable
 /// for V2 jobs, so content is judged per lane, structure per step).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -151,6 +205,121 @@ struct LaneLogStats {
     timestamped_lines: usize,
     group_markers: usize,
     ansi: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct RunSummary {
+    id: u64,
+    status: String,
+    conclusion: Option<String>,
+    event: String,
+    head_sha: String,
+    run_attempt: u64,
+    url: String,
+    html_url: String,
+    #[serde(default)]
+    repository: Option<ApiRepository>,
+}
+
+#[derive(Debug, Clone)]
+struct PairEvidence {
+    github_html: BTreeMap<u64, HtmlStep>,
+    velnor_html: BTreeMap<u64, HtmlStep>,
+    github_html_digest: String,
+    velnor_html_digest: String,
+    github_log: String,
+    velnor_log: String,
+    github_log_digest: String,
+    velnor_log_digest: String,
+    github_content: LaneLogStats,
+    velnor_content: LaneLogStats,
+}
+
+#[derive(Debug, Clone)]
+struct ValidatedRun {
+    summary: RunSummary,
+    job_identities: Vec<ApiJob>,
+    artifact_identities: BTreeMap<String, ArtifactRef>,
+    census: PairingCensus,
+    pair_evidence: BTreeMap<(u64, u64), PairEvidence>,
+}
+
+#[derive(Debug, Clone)]
+struct FetchedJobs {
+    jobs: Vec<Job>,
+    identities: Vec<ApiJob>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunEvidenceIdentity {
+    summary: RunSummary,
+    jobs: Vec<ApiJob>,
+    artifacts: BTreeMap<String, ArtifactRef>,
+    payload_digests: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct LaneRunSnapshot {
+    stats: LaneStats,
+    identity: RunEvidenceIdentity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComparisonScope {
+    FullRun,
+    SubsetDiagnostic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComparisonDecision {
+    AuxiliaryPass,
+    DiagnosticOnly,
+    Fail,
+}
+
+fn comparison_decision(
+    scope: ComparisonScope,
+    strict: bool,
+    worse_rows: usize,
+    budget_failures: usize,
+) -> ComparisonDecision {
+    if scope == ComparisonScope::SubsetDiagnostic {
+        return ComparisonDecision::DiagnosticOnly;
+    }
+    if worse_rows > 0 || budget_failures > 0 {
+        return if strict {
+            ComparisonDecision::Fail
+        } else {
+            ComparisonDecision::DiagnosticOnly
+        };
+    }
+    if !strict || scope == ComparisonScope::SubsetDiagnostic {
+        ComparisonDecision::DiagnosticOnly
+    } else {
+        ComparisonDecision::AuxiliaryPass
+    }
+}
+
+fn select_pairs(
+    census: &PairingCensus,
+    selected_jobs: Option<(u64, u64)>,
+    run_id: u64,
+) -> Result<(Vec<(Job, Job)>, ComparisonScope)> {
+    let Some((github_id, velnor_id)) = selected_jobs else {
+        return Ok((census.matched_pairs(), ComparisonScope::FullRun));
+    };
+    let selected = census
+        .matched
+        .iter()
+        .find(|(github, velnor, _)| github.id == github_id && velnor.id == velnor_id)
+        .map(|(github, velnor, _)| (github.clone(), velnor.clone()));
+    selected
+        .map(|pair| (vec![pair], ComparisonScope::SubsetDiagnostic))
+        .with_context(|| {
+            format!(
+                "selected jobs {github_id}/{velnor_id} are not a validated pair in run {run_id}; selectors cannot bypass the census"
+            )
+        })
 }
 
 pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
@@ -163,27 +332,16 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
         None => super::latest_fixture_run_id(&args.repo, &args.workflow)?,
     };
 
-    let jobs = fetch_run_jobs(&args.repo, run_id)?;
-    let census = match (args.github_job, args.velnor_job) {
-        (Some(_), Some(_)) => None,
-        _ => Some(pair_lane_census(&jobs)),
-    };
-    let pairs = match (args.github_job, args.velnor_job) {
-        (Some(gh), Some(vl)) => {
-            let github = jobs
-                .iter()
-                .find(|job| job.id == gh)
-                .with_context(|| format!("job {gh} not found in run {run_id}"))?;
-            let velnor = jobs
-                .iter()
-                .find(|job| job.id == vl)
-                .with_context(|| format!("job {vl} not found in run {run_id}"))?;
-            vec![(github.clone(), velnor.clone())]
-        }
-        _ => census
-            .as_ref()
-            .map(PairingCensus::matched_pairs)
-            .unwrap_or_default(),
+    let summary = fetch_run_summary(&args.repo, run_id)?;
+    validate_run_summary(&summary, run_id)?;
+    let fetched_jobs = fetch_run_jobs(&args.repo, run_id, &summary)?;
+    let jobs = fetched_jobs.jobs;
+    let job_identities = fetched_jobs.identities;
+    let census = pair_lane_census(&jobs);
+    let selected_jobs = match (args.github_job, args.velnor_job) {
+        (Some(github), Some(velnor)) => Some((github, velnor)),
+        (None, None) => None,
+        _ => bail!("--github-job and --velnor-job must be supplied together"),
     };
 
     let out_dir = if args.output_dir.is_absolute() {
@@ -203,69 +361,66 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
     writeln!(report)?;
     writeln!(
         report,
-        "Gate: equal-or-better — zero rows where the GitHub lane shows \
-         information the Velnor lane lacks. Strict mode also requires a 1:1 \
-         GitHub↔Velnor bijection of comparison units."
+        "Comparison: equal-or-better — zero rows where the GitHub lane shows \
+         information the Velnor lane lacks. Expected comparison units come \
+         from the complete Actions jobs census; selectors cannot redefine it."
     )?;
     writeln!(report)?;
-    if let Some(census) = &census {
-        report.push_str(&format_pairing_report(census)?);
-    } else {
-        writeln!(
-            report,
-            "Pairing: explicit `--github-job` / `--velnor-job` override; \
-             full-run bijection skipped."
-        )?;
-    }
+    report.push_str(&format_pairing_report(&census)?);
 
-    let pairing_failures = census
-        .as_ref()
-        .is_some_and(PairingCensus::has_parity_failures);
-    if args.strict && pairing_failures {
-        writeln!(report, "\n## Result")?;
-        writeln!(report)?;
-        writeln!(
-            report,
-            "**FAIL** — pairing bijection failed (orphans, duplicates, \
-             skipped counterpart, and/or ambiguous names)."
-        )?;
-        let report_path = run_dir.join("report.md");
-        fs::write(&report_path, &report)
-            .with_context(|| format!("write {}", report_path.display()))?;
-        println!("{report}");
-        println!("report: {}", report_path.display());
-        bail!("lane-compare gate failed: pairing bijection; see report above");
-    }
-
-    for (github, velnor) in &pairs {
-        for job in [github, velnor] {
-            if job_is_skipped(job) {
-                continue;
-            }
-            if job.status != "completed" {
-                bail!(
-                    "job {} ({}) is {}, not completed — compare a finished run",
-                    job.name,
-                    job.id,
-                    job.status
-                );
-            }
+    let validated = match validate_run_evidence(
+        &args.repo,
+        run_id,
+        &jobs,
+        &job_identities,
+        census.clone(),
+        summary,
+        args.class.is_some(),
+    ) {
+        Ok(validated) => validated,
+        Err(error) => {
+            writeln!(report, "\n## Evidence")?;
+            writeln!(report)?;
+            writeln!(report, "**FAIL** — {error:#}")?;
+            writeln!(report, "\n## Result")?;
+            writeln!(report)?;
+            writeln!(
+                report,
+                "**FAIL** — run evidence is incomplete or not successful; no comparison gate result."
+            )?;
+            let report_path = run_dir.join("report.md");
+            fs::write(&report_path, &report)
+                .with_context(|| format!("write {}", report_path.display()))?;
+            println!("{report}");
+            println!("report: {}", report_path.display());
+            return Err(error.context("lane-compare run evidence validation failed"));
         }
-    }
+    };
+    writeln!(report, "## Independently fetched evidence")?;
+    writeln!(report)?;
+    writeln!(
+        report,
+        "Actions run `{}`: status `{}`, conclusion `{}`, event `{}`, head `{}`; attempt `{}`.",
+        validated.summary.id,
+        validated.summary.status,
+        validated.summary.conclusion.as_deref().unwrap_or("-"),
+        validated.summary.event,
+        validated.summary.head_sha,
+        validated.summary.run_attempt,
+    )?;
+    writeln!(
+        report,
+        "Validated {} nonempty GitHub↔Velnor comparison unit(s) from the complete paginated jobs census and {} required Velnor job-log artifact(s).",
+        validated.census.matched.len(),
+        validated.pair_evidence.len(),
+    )?;
+    writeln!(
+        report,
+        "Limit: lane-compare is auxiliary. It does not independently prove expected source/ref, checkout SHA, required-check association, provider, runner, host, or trust identity; the independent checker must bind those facts."
+    )?;
+    writeln!(report)?;
 
-    // Lane content: GitHub jobs expose a per-job log download; Velnor V2 jobs
-    // do not (no v1 archive), so read the matching Velnor job-log artifact for
-    // each paired job. A single aggregate would give every pair the union of
-    // every job's timestamp/group/ANSI affordances.
-    let expected_velnor_job_ids = pairs
-        .iter()
-        .map(|(_, velnor)| velnor.id)
-        .collect::<Vec<_>>();
-    let velnor_logs = fetch_velnor_job_log_artifacts(&args.repo, run_id, &expected_velnor_job_ids)
-        .unwrap_or_else(|error| {
-            eprintln!("warning: velnor job-log artifacts unavailable: {error:#}");
-            BTreeMap::new()
-        });
+    let (pairs, scope) = select_pairs(&validated.census, selected_jobs, run_id)?;
     if let Some(class) = args.class {
         writeln!(report)?;
         writeln!(report, "## §2.11 Velnor budget ({class:?})")?;
@@ -293,71 +448,57 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
     }
 
     for (github, velnor) in &pairs {
-        let github_html = fetch_job_html_steps(github).unwrap_or_else(|error| {
-            eprintln!("warning: {}: {error:#}", github.id);
-            BTreeMap::new()
-        });
-        let velnor_html = fetch_job_html_steps(velnor).unwrap_or_else(|error| {
-            eprintln!("warning: {}: {error:#}", velnor.id);
-            BTreeMap::new()
-        });
-        let github_content = fetch_github_job_log(&args.repo, github.id)
-            .map(|text| {
-                let stats = analyze_lane_log(&text);
-                let _ = fs::write(run_dir.join(format!("github-job-{}.log", github.id)), text);
-                stats
-            })
-            .unwrap_or_else(|error| {
-                eprintln!("warning: github job log {}: {error:#}", github.id);
-                LaneLogStats::default()
-            });
-        let velnor_stats = velnor_logs
-            .get(&velnor.id)
-            .map(|content| {
-                let _ = fs::write(
-                    run_dir.join(format!("velnor-job-{}.log", velnor.id)),
-                    content,
-                );
-                analyze_lane_log(content)
-            })
-            .unwrap_or_default();
+        let evidence = validated
+            .pair_evidence
+            .get(&(github.id, velnor.id))
+            .with_context(|| {
+                format!(
+                    "missing validated evidence for pair {}/{}",
+                    github.id, velnor.id
+                )
+            })?;
+        fs::write(
+            run_dir.join(format!("github-job-{}.log", github.id)),
+            &evidence.github_log,
+        )?;
+        fs::write(
+            run_dir.join(format!("velnor-job-{}.log", velnor.id)),
+            &evidence.velnor_log,
+        )?;
         let (section, worse) = compare_pair(
             github,
             velnor,
-            &github_html,
-            &velnor_html,
-            github_content,
-            velnor_stats,
+            &evidence.github_html,
+            &evidence.velnor_html,
+            evidence.github_content,
+            evidence.velnor_content,
         )?;
         worse_total += worse;
         report.push_str(&section);
     }
     writeln!(report, "\n## Result")?;
     writeln!(report)?;
-    if worse_total == 0 && budget_failures == 0 {
-        writeln!(
+    let decision = comparison_decision(scope, args.strict, worse_total, budget_failures);
+    match decision {
+        ComparisonDecision::AuxiliaryPass => writeln!(
             report,
-            "**PASS** — no paired step is less informative than the GitHub lane."
-        )?;
-        if pairing_failures {
-            writeln!(
-                report,
-                "Pairing orphans/duplicates/skipped counterparts/ambiguous names \
-                 are reported above; `--strict false` does not fail on them."
-            )?;
-        }
-    } else {
-        writeln!(
+            "**AUXILIARY PASS** — no paired step is less informative than the GitHub lane; this is not an authoritative goal/checker gate."
+        )?,
+        ComparisonDecision::DiagnosticOnly => writeln!(
+            report,
+            "**DIAGNOSTIC ONLY** — selected scope or non-strict mode cannot produce a full-run gate result ({} parity row(s), {} §2.11 budget failure(s)).",
+            worse_total,
+            budget_failures,
+        )?,
+        ComparisonDecision::Fail => writeln!(
             report,
             "**FAIL** — {worse_total} parity row(s) and {budget_failures} §2.11 budget failure(s)."
-        )?;
+        )?,
     }
     writeln!(report)?;
     writeln!(
         report,
-        "Known documented divergence (not gated): V2 jobs have no v1 log \
-         archive, so the per-job raw-log download 404s on the Velnor lane; \
-         the `job-log` artifact is the workaround."
+        "Required log and HTML evidence were fetched fail-closed. A missing, empty, malformed, truncated, or unavailable artifact/log is an evidence failure, not an empty comparison."
     )?;
 
     let report_path = run_dir.join("report.md");
@@ -365,8 +506,12 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
     println!("{report}");
     println!("report: {}", report_path.display());
 
-    if args.strict && (worse_total > 0 || budget_failures > 0 || pairing_failures) {
+    if decision == ComparisonDecision::Fail {
         bail!("lane-compare gate failed: {worse_total} worse row(s), {budget_failures} budget failure(s); see report above");
+    }
+    if decision == ComparisonDecision::DiagnosticOnly && scope == ComparisonScope::SubsetDiagnostic
+    {
+        bail!("lane-compare subset diagnostic is not a full-run gate; see report above");
     }
     Ok(())
 }
@@ -406,16 +551,91 @@ fn lane_compare_watch(root: &Path, args: LaneCompareArgs) -> Result<()> {
     fs::create_dir_all(&watch_dir)
         .with_context(|| format!("create output directory {}", watch_dir.display()))?;
 
-    let mut samples = Vec::new();
-    for run_id in run_ids {
-        samples.push(lane_stats_for_run(&args.repo, run_id)?);
+    let samples = run_ids
+        .iter()
+        .map(|run_id| lane_stats_for_run(&args.repo, *run_id))
+        .collect::<Result<Vec<_>>>()?;
+    // Re-fetch every admitted sample after the baseline inputs have been
+    // assembled. A run's jobs, logs, or artifacts can change while the watch
+    // command is running; never report evidence for the first observation.
+    let rechecked_samples = run_ids
+        .iter()
+        .map(|run_id| lane_stats_for_run(&args.repo, *run_id))
+        .collect::<Result<Vec<_>>>()?;
+    if !evidence_snapshots_stable(&samples, &rechecked_samples) {
+        let current = rechecked_samples
+            .first()
+            .map(|snapshot| snapshot.stats.clone())
+            .context("rechecked run sample unexpectedly empty")?;
+        let baseline = LaneStats {
+            baseline_runs: rechecked_samples.len().saturating_sub(1),
+            timing_complete: false,
+            timing_issues: vec![
+                "run evidence changed between the initial and rechecked snapshots".to_owned(),
+            ],
+            ..LaneStats::default()
+        };
+        let verdict = RegressionVerdict {
+            regression: false,
+            not_proven: true,
+            reasons: baseline.timing_issues.clone(),
+        };
+        let report = regression_report(&args.repo, &args.workflow, &baseline, &current, &verdict)?;
+        let report_path = watch_dir.join("report.md");
+        fs::write(&report_path, &report)
+            .with_context(|| format!("write {}", report_path.display()))?;
+        let json_path = watch_dir.join("latest-stats.json");
+        fs::write(&json_path, serde_json::to_vec_pretty(&current)?)
+            .with_context(|| format!("write {}", json_path.display()))?;
+        println!("{report}");
+        println!("report: {}", report_path.display());
+        println!("stats: {}", json_path.display());
+        bail!("lane-compare watch evidence changed during collection; result is not proven");
     }
-    let current = samples
+    let stats_samples = samples
+        .iter()
+        .map(|snapshot| snapshot.stats.clone())
+        .collect::<Vec<_>>();
+    let current = stats_samples
         .first()
         .cloned()
         .context("recent run sample unexpectedly empty")?;
-    let baseline = baseline_from_samples(&samples[1..])
-        .context("recent run sample did not contain a usable baseline")?;
+    let baseline = match baseline_from_samples(&stats_samples[1..]) {
+        Some(baseline) => baseline,
+        None => {
+            let mut timing_issues = stats_samples[1..]
+                .iter()
+                .flat_map(|sample| sample.timing_issues.iter().cloned())
+                .collect::<Vec<_>>();
+            if timing_issues.is_empty() {
+                timing_issues.push(
+                    "baseline samples have missing or changing workload timing evidence".to_owned(),
+                );
+            }
+            let baseline = LaneStats {
+                baseline_runs: samples.len().saturating_sub(1),
+                timing_issues: timing_issues.clone(),
+                ..LaneStats::default()
+            };
+            let verdict = RegressionVerdict {
+                regression: false,
+                not_proven: true,
+                reasons: timing_issues,
+            };
+            let report =
+                regression_report(&args.repo, &args.workflow, &baseline, &current, &verdict)?;
+            let report_path = watch_dir.join("report.md");
+            fs::write(&report_path, &report)
+                .with_context(|| format!("write {}", report_path.display()))?;
+            let json_path = watch_dir.join("latest-stats.json");
+            fs::write(&json_path, serde_json::to_vec_pretty(&current)?)
+                .with_context(|| format!("write {}", json_path.display()))?;
+            println!("{report}");
+            println!("report: {}", report_path.display());
+            println!("stats: {}", json_path.display());
+            bail!("lane-compare watch evidence is not proven: baseline workload set or timing changed");
+        }
+    };
     let verdict = is_regression(&baseline, &current, args.regress_threshold);
 
     let report = regression_report(&args.repo, &args.workflow, &baseline, &current, &verdict)?;
@@ -429,13 +649,17 @@ fn lane_compare_watch(root: &Path, args: LaneCompareArgs) -> Result<()> {
     println!("report: {}", report_path.display());
     println!("stats: {}", json_path.display());
 
-    if verdict.regression {
+    if verdict.regression || verdict.not_proven {
         bail!(
             "lane-compare regression gate failed: {}",
             verdict.reasons.join("; ")
         );
     }
     Ok(())
+}
+
+fn evidence_snapshots_stable(first: &[LaneRunSnapshot], second: &[LaneRunSnapshot]) -> bool {
+    first == second
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -454,8 +678,6 @@ fn recent_run_args(repo: &str, workflow: &str, limit: usize) -> Vec<String> {
         repo.to_owned(),
         "--workflow".to_owned(),
         workflow.to_owned(),
-        "--status".to_owned(),
-        "success".to_owned(),
         "--limit".to_owned(),
         limit.max(2).to_string(),
         "--json".to_owned(),
@@ -474,7 +696,15 @@ fn recent_run_items(repo: &str, workflow: &str, limit: usize) -> Result<Vec<RunL
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    serde_json::from_slice(&output.stdout).context("parse gh run list output")
+    let runs: Vec<RunListItem> =
+        serde_json::from_slice(&output.stdout).context("parse gh run list output")?;
+    let mut seen_ids = BTreeSet::new();
+    for run in &runs {
+        if !seen_ids.insert(run.database_id) {
+            bail!("gh run list repeated run id {}", run.database_id);
+        }
+    }
+    Ok(runs)
 }
 
 fn recent_complete_both_lane_runs(
@@ -482,49 +712,99 @@ fn recent_complete_both_lane_runs(
     workflow: &str,
     limit: usize,
 ) -> Result<Vec<RunListItem>> {
-    let target = limit.max(2);
-    let mut fetch_limit = target;
-    let mut inspected = BTreeSet::new();
-    let mut selected = Vec::new();
-    loop {
-        let candidates = recent_run_items(repo, workflow, fetch_limit)?;
-        let mut new_candidate = false;
-        for run in &candidates {
-            if !inspected.insert(run.database_id) {
-                continue;
-            }
-            new_candidate = true;
-            if !run.status.eq_ignore_ascii_case("completed")
-                || !run
-                    .conclusion
-                    .as_deref()
-                    .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
-            {
-                continue;
-            }
-            let jobs = fetch_run_jobs(repo, run.database_id).with_context(|| {
-                format!(
-                    "inspect both-lane census for successful run {}",
-                    run.database_id
-                )
-            })?;
-            if has_complete_both_lane_census(&jobs) {
-                selected.push(run.clone());
-                if selected.len() == target {
-                    return Ok(selected);
-                }
-            }
-        }
-        if candidates.len() < fetch_limit || !new_candidate {
-            return Ok(selected);
-        }
-        let Some(next_limit) = fetch_limit.checked_mul(2) else {
-            return Ok(selected);
-        };
-        fetch_limit = next_limit;
-    }
+    recent_complete_both_lane_runs_with(
+        repo,
+        workflow,
+        limit,
+        recent_run_items,
+        fetch_run_summary,
+        fetch_run_jobs,
+    )
 }
 
+fn recent_complete_both_lane_runs_with<ListRuns, FetchSummary, FetchJobs>(
+    repo: &str,
+    workflow: &str,
+    limit: usize,
+    mut list_runs: ListRuns,
+    mut fetch_summary: FetchSummary,
+    mut fetch_jobs: FetchJobs,
+) -> Result<Vec<RunListItem>>
+where
+    ListRuns: FnMut(&str, &str, usize) -> Result<Vec<RunListItem>>,
+    FetchSummary: FnMut(&str, u64) -> Result<RunSummary>,
+    FetchJobs: FnMut(&str, u64, &RunSummary) -> Result<FetchedJobs>,
+{
+    let target = limit.max(2);
+    let candidates = list_runs(repo, workflow, target)?;
+    validate_run_list(&candidates, target)?;
+    for run in &candidates {
+        if !run.status.eq_ignore_ascii_case("completed")
+            || !run
+                .conclusion
+                .as_deref()
+                .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
+        {
+            bail!(
+                "recent run {} is not a successful completed run (status `{}`, conclusion `{}`); watch sample is not proven",
+                run.database_id,
+                run.status,
+                run.conclusion.as_deref().unwrap_or("missing")
+            );
+        }
+        let summary = fetch_summary(repo, run.database_id).with_context(|| {
+            format!(
+                "inspect run identity for successful run {}",
+                run.database_id
+            )
+        })?;
+        validate_run_summary_identity(&summary, repo, run.database_id).with_context(|| {
+            format!(
+                "validate run identity for successful run {}",
+                run.database_id
+            )
+        })?;
+        let fetched_jobs = fetch_jobs(repo, run.database_id, &summary).with_context(|| {
+            format!(
+                "inspect both-lane census for successful run {}",
+                run.database_id
+            )
+        })?;
+        let census = pair_lane_census(&fetched_jobs.jobs);
+        validate_census(&census, run.database_id).with_context(|| {
+            format!(
+                "validate both-lane census for successful run {}",
+                run.database_id
+            )
+        })?;
+        for (github, velnor, _) in &census.matched {
+            validate_job_success(github, Lane::GitHub, run.database_id)?;
+            validate_job_success(velnor, Lane::Velnor, run.database_id)?;
+        }
+    }
+    Ok(candidates)
+}
+
+fn validate_run_list(candidates: &[RunListItem], limit: usize) -> Result<()> {
+    if candidates.len() > limit {
+        bail!(
+            "gh run list returned {} items for requested limit {limit}",
+            candidates.len()
+        );
+    }
+    let mut seen_ids = BTreeSet::new();
+    for run in candidates {
+        if run.database_id == 0 {
+            bail!("gh run list returned run id 0");
+        }
+        if !seen_ids.insert(run.database_id) {
+            bail!("gh run list repeated run id {}", run.database_id);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn has_complete_both_lane_census(jobs: &[Job]) -> bool {
     let census = pair_lane_census(jobs);
     !census.matched.is_empty() && !census.has_parity_failures()
@@ -557,26 +837,660 @@ fn save_jobs_json(run_dir: &Path, jobs: &[Job]) -> Result<()> {
     .context("save jobs.json")
 }
 
-fn fetch_run_jobs(repo: &str, run_id: u64) -> Result<Vec<Job>> {
+fn fetch_run_jobs(repo: &str, run_id: u64, summary: &RunSummary) -> Result<FetchedJobs> {
+    if summary.id != run_id {
+        bail!(
+            "run jobs request identity mismatch: expected {run_id}, summary is {}",
+            summary.id
+        );
+    }
     let mut jobs = Vec::new();
+    let mut identities = Vec::new();
+    let mut seen_ids = BTreeSet::new();
     let mut page = 1u32;
+    let mut total_count = None;
     loop {
         let payload = gh_api_bytes(&format!(
-            "repos/{repo}/actions/runs/{run_id}/jobs?per_page=100&page={page}"
+            "repos/{repo}/actions/runs/{run_id}/attempts/{}/jobs?per_page=100&page={page}",
+            summary.run_attempt
         ))?;
         let response: JobsResponse =
             serde_json::from_slice(&payload).context("parse run jobs response")?;
+        total_count.get_or_insert(response.total_count);
+        if total_count != Some(response.total_count) {
+            bail!("run {run_id} jobs API changed total_count while paging");
+        }
         let fetched = response.jobs.len();
-        jobs.extend(response.jobs);
-        if fetched == 0 || jobs.len() as u64 >= response.total_count {
+        for api_job in response.jobs {
+            validate_api_job_identity(&api_job, repo, summary)?;
+            if !seen_ids.insert(api_job.id) {
+                bail!("run {run_id} jobs API repeated job id {}", api_job.id);
+            }
+            identities.push(api_job.clone());
+            jobs.push(api_job.into_job());
+        }
+        let total = total_count.unwrap_or_default();
+        if jobs.len() as u64 > total {
+            bail!("run {run_id} jobs API returned more rows than total_count {total}");
+        }
+        if jobs.len() as u64 == total {
             break;
         }
-        page += 1;
+        if fetched == 0 {
+            bail!(
+                "run {run_id} jobs API ended after {} of {total} jobs; census is truncated",
+                jobs.len(),
+            );
+        }
+        page = page
+            .checked_add(1)
+            .context("run jobs API page number overflow")?;
     }
     if jobs.is_empty() {
         bail!("run {run_id} has no jobs in {repo}");
     }
-    Ok(jobs)
+    Ok(FetchedJobs { jobs, identities })
+}
+
+fn fetch_run_summary(repo: &str, run_id: u64) -> Result<RunSummary> {
+    let payload = gh_api_bytes(&format!("repos/{repo}/actions/runs/{run_id}"))?;
+    let summary: RunSummary = serde_json::from_slice(&payload)
+        .with_context(|| format!("parse run {run_id} summary response"))?;
+    validate_run_summary_identity(&summary, repo, run_id)?;
+    Ok(summary)
+}
+
+fn validate_run_summary_identity(summary: &RunSummary, repo: &str, run_id: u64) -> Result<()> {
+    validate_run_summary(summary, run_id)?;
+    validate_api_url(
+        &summary.url,
+        &format!("/repos/{repo}/actions/runs/{run_id}"),
+        "workflow run API URL",
+    )?;
+    validate_github_url(
+        &summary.html_url,
+        &format!("/{repo}/actions/runs/{run_id}"),
+        "workflow run HTML URL",
+    )?;
+    let repository = summary
+        .repository
+        .as_ref()
+        .context("workflow run response omitted repository identity")?;
+    if repository.full_name.as_deref() != Some(repo) {
+        bail!(
+            "workflow run belongs to repository {:?}, expected {repo}",
+            repository.full_name
+        );
+    }
+    if repository.id.is_none_or(|id| id == 0) {
+        bail!("workflow run response omitted a valid repository id");
+    }
+    Ok(())
+}
+
+fn validate_run_summary(summary: &RunSummary, run_id: u64) -> Result<()> {
+    if summary.id != run_id {
+        bail!(
+            "run summary identity mismatch: expected {run_id}, received {}",
+            summary.id
+        );
+    }
+    if summary.run_attempt == 0 {
+        bail!("run {run_id} has invalid run_attempt 0");
+    }
+    if !summary.status.eq_ignore_ascii_case("completed") {
+        bail!(
+            "run {run_id} is {}, not completed; incomplete runs cannot produce comparison evidence",
+            summary.status
+        );
+    }
+    if !summary
+        .conclusion
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("success"))
+    {
+        bail!(
+            "run {run_id} conclusion is {}, not success",
+            summary.conclusion.as_deref().unwrap_or("missing")
+        );
+    }
+    if summary.event.trim().is_empty() {
+        bail!("run {run_id} has no event identity");
+    }
+    if summary.head_sha.len() != 40
+        || !summary
+            .head_sha
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        bail!("run {run_id} has no valid source head SHA");
+    }
+    Ok(())
+}
+
+fn validate_api_job_identity(job: &ApiJob, repo: &str, summary: &RunSummary) -> Result<()> {
+    if job.id == 0 {
+        bail!("run {} jobs API returned job id 0", summary.id);
+    }
+    if job.run_id != summary.id {
+        bail!(
+            "job {} belongs to run {}, expected {}",
+            job.id,
+            job.run_id,
+            summary.id
+        );
+    }
+    if job.run_attempt != summary.run_attempt {
+        bail!(
+            "job {} belongs to attempt {}, expected {}",
+            job.id,
+            job.run_attempt,
+            summary.run_attempt
+        );
+    }
+    if job.head_sha != summary.head_sha {
+        bail!("job {} head SHA differs from workflow run", job.id);
+    }
+    validate_job_html_url(&job.html_url, repo, summary.id, job.id)?;
+    validate_api_url(
+        &job.url,
+        &format!("/repos/{repo}/actions/jobs/{}", job.id),
+        "job API URL",
+    )?;
+    validate_api_url(
+        &job.run_url,
+        &format!("/repos/{repo}/actions/runs/{}", summary.id),
+        "job run API URL",
+    )?;
+    if let Some(repository) = &job.repository {
+        if repository.full_name.as_deref() != Some(repo) {
+            bail!(
+                "job {} belongs to repository {:?}, expected {repo}",
+                job.id,
+                repository.full_name
+            );
+        }
+        if let (Some(job_repository_id), Some(run_repository_id)) = (
+            repository.id,
+            summary
+                .repository
+                .as_ref()
+                .and_then(|repository| repository.id),
+        ) && job_repository_id != run_repository_id
+        {
+            bail!(
+                "job {} belongs to repository id {}, expected {}",
+                job.id,
+                job_repository_id,
+                run_repository_id
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_job_html_url(value: &str, repo: &str, run_id: u64, job_id: u64) -> Result<()> {
+    validate_github_url(
+        value,
+        &format!("/{repo}/actions/runs/{run_id}/job/{job_id}"),
+        "job HTML URL",
+    )
+}
+
+fn validate_api_url(value: &str, expected_path: &str, label: &str) -> Result<()> {
+    let parsed = parse_safe_url(value, "api.github.com")?;
+    if parsed.path() != expected_path {
+        bail!("{label} is not bound to {expected_path}");
+    }
+    Ok(())
+}
+
+fn validate_github_url(value: &str, expected_path: &str, label: &str) -> Result<()> {
+    let parsed = parse_safe_url(value, "github.com")?;
+    if parsed.path() != expected_path {
+        bail!("{label} is not bound to {expected_path}");
+    }
+    Ok(())
+}
+
+fn parse_safe_url(value: &str, host: &str) -> Result<Url> {
+    let parsed = Url::parse(value).with_context(|| format!("parse {host} URL"))?;
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some(host)
+        || parsed.port().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        bail!("URL has an unsafe origin or components");
+    }
+    Ok(parsed)
+}
+
+fn validate_census(census: &PairingCensus, run_id: u64) -> Result<()> {
+    if census.matched.is_empty() {
+        bail!(
+            "run {run_id} has an empty comparison census; at least one nonempty GitHub↔Velnor workload pair is required"
+        );
+    }
+    if census.has_parity_failures() {
+        bail!(
+            "run {run_id} comparison census is not a complete 1:1 bijection; orphans, duplicates, skipped counterparts, or ambiguous names are present"
+        );
+    }
+    Ok(())
+}
+
+fn validate_job_success(job: &Job, lane: Lane, run_id: u64) -> Result<()> {
+    if !job.status.eq_ignore_ascii_case("completed") {
+        bail!(
+            "run {run_id} {} job {} ({}) is {}, not completed",
+            lane_name(lane),
+            job.id,
+            job.name,
+            job.status
+        );
+    }
+    if !job
+        .conclusion
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("success"))
+    {
+        bail!(
+            "run {run_id} {} job {} ({}) conclusion is {}, not success",
+            lane_name(lane),
+            job.id,
+            job.name,
+            job.conclusion.as_deref().unwrap_or("missing")
+        );
+    }
+    Ok(())
+}
+
+fn lane_name(lane: Lane) -> &'static str {
+    match lane {
+        Lane::GitHub => "GitHub",
+        Lane::Velnor => "Velnor",
+    }
+}
+
+fn step_is_skipped(step: &Step) -> bool {
+    step.status.eq_ignore_ascii_case("skipped")
+        || step
+            .conclusion
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("skipped"))
+}
+
+fn validate_job_step_numbers(job: &Job, lane: Lane, run_id: u64) -> Result<()> {
+    let mut numbers = BTreeSet::new();
+    for step in &job.steps {
+        if step.number == 0 {
+            bail!(
+                "run {run_id} {} job {} has invalid step number 0",
+                lane_name(lane),
+                job.id
+            );
+        }
+        if !numbers.insert(step.number) {
+            bail!(
+                "run {run_id} {} job {} repeats step number {}",
+                lane_name(lane),
+                job.id,
+                step.number
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_html_step_coverage(
+    job: &Job,
+    lane: Lane,
+    html: &BTreeMap<u64, HtmlStep>,
+    run_id: u64,
+) -> Result<()> {
+    let job_numbers: BTreeSet<u64> = job.steps.iter().map(|step| step.number).collect();
+    let missing: Vec<String> = job
+        .steps
+        .iter()
+        .filter(|step| !step_is_skipped(step) && !html.contains_key(&step.number))
+        .map(|step| format!("{} ({})", step.number, step.name))
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "run {run_id} {} job {} HTML evidence is missing executed step(s): {}",
+            lane_name(lane),
+            job.id,
+            missing.join(", ")
+        );
+    }
+    let unexpected: Vec<String> = html
+        .keys()
+        .filter(|number| !job_numbers.contains(number))
+        .map(u64::to_string)
+        .collect();
+    if !unexpected.is_empty() {
+        bail!(
+            "run {run_id} {} job {} HTML evidence has unexpected step number(s): {}",
+            lane_name(lane),
+            job.id,
+            unexpected.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn assess_run_evidence(
+    run_id: u64,
+    jobs: &[Job],
+    census: PairingCensus,
+    summary: RunSummary,
+    pair_evidence: BTreeMap<(u64, u64), PairEvidence>,
+) -> Result<ValidatedRun> {
+    validate_run_summary(&summary, run_id)?;
+    validate_census(&census, run_id)?;
+    let job_ids: BTreeSet<u64> = jobs.iter().map(|job| job.id).collect();
+    if job_ids.len() != jobs.len() {
+        bail!("run {run_id} jobs census contains duplicate job identities");
+    }
+    for (github, velnor, _) in &census.matched {
+        if !job_ids.contains(&github.id) || !job_ids.contains(&velnor.id) {
+            bail!(
+                "run {run_id} pairing census references job {} or {} outside the supplied jobs census",
+                github.id,
+                velnor.id
+            );
+        }
+        validate_job_success(github, Lane::GitHub, run_id)?;
+        validate_job_success(velnor, Lane::Velnor, run_id)?;
+        validate_job_step_numbers(github, Lane::GitHub, run_id)?;
+        validate_job_step_numbers(velnor, Lane::Velnor, run_id)?;
+        let evidence = pair_evidence
+            .get(&(github.id, velnor.id))
+            .with_context(|| {
+                format!(
+                    "missing HTML/log evidence for validated pair {}/{} in run {run_id}",
+                    github.id, velnor.id
+                )
+            })?;
+        if evidence.github_html.is_empty() || evidence.velnor_html.is_empty() {
+            bail!(
+                "run {run_id} pair {}/{} has missing HTML check-step evidence",
+                github.id,
+                velnor.id
+            );
+        }
+        validate_html_step_coverage(github, Lane::GitHub, &evidence.github_html, run_id)?;
+        validate_html_step_coverage(velnor, Lane::Velnor, &evidence.velnor_html, run_id)?;
+        require_nonempty_evidence(
+            &format!("GitHub job {} log", github.id),
+            &evidence.github_log,
+        )?;
+        require_nonempty_evidence(
+            &format!("Velnor job {} log", velnor.id),
+            &evidence.velnor_log,
+        )?;
+    }
+    if pair_evidence.len() != census.matched.len() {
+        bail!(
+            "run {run_id} evidence census has {} pair payload(s) for {} expected pair(s)",
+            pair_evidence.len(),
+            census.matched.len()
+        );
+    }
+    Ok(ValidatedRun {
+        summary,
+        job_identities: Vec::new(),
+        artifact_identities: BTreeMap::new(),
+        census,
+        pair_evidence,
+    })
+}
+
+fn ensure_run_snapshot_stable(first: &RunSummary, second: &RunSummary) -> Result<()> {
+    if first != second {
+        bail!(
+            "run {} identity changed while evidence was collected; comparison is not proven",
+            first.id
+        );
+    }
+    Ok(())
+}
+
+fn evidence_identity(validated: &ValidatedRun) -> RunEvidenceIdentity {
+    let mut payload_digests = BTreeMap::new();
+    for ((github_id, velnor_id), evidence) in &validated.pair_evidence {
+        let prefix = format!("pair/{github_id}/{velnor_id}");
+        payload_digests.insert(
+            format!("{prefix}/github-html"),
+            evidence.github_html_digest.clone(),
+        );
+        payload_digests.insert(
+            format!("{prefix}/velnor-html"),
+            evidence.velnor_html_digest.clone(),
+        );
+        payload_digests.insert(
+            format!("{prefix}/github-log"),
+            evidence.github_log_digest.clone(),
+        );
+        payload_digests.insert(
+            format!("{prefix}/velnor-log"),
+            evidence.velnor_log_digest.clone(),
+        );
+    }
+    RunEvidenceIdentity {
+        summary: validated.summary.clone(),
+        jobs: canonical_job_identities(&validated.job_identities),
+        artifacts: validated.artifact_identities.clone(),
+        payload_digests,
+    }
+}
+
+fn canonical_job_identities(jobs: &[ApiJob]) -> Vec<ApiJob> {
+    let mut canonical = jobs.to_vec();
+    canonical.sort_by_key(|job| job.id);
+    canonical
+}
+
+fn ensure_evidence_identity_stable(
+    first: &RunEvidenceIdentity,
+    second: &RunEvidenceIdentity,
+) -> Result<()> {
+    if first != second {
+        bail!(
+            "run {} full run/job/artifact identity changed before acceptance; comparison is not proven",
+            first.summary.id
+        );
+    }
+    Ok(())
+}
+
+/// Re-fetch the complete identity snapshot used to bind evidence to one run.
+///
+/// Re-fetches the run summary, attempt-scoped job census, artifact
+/// metadata/archive, and every HTML/log payload digest. This closes the race
+/// in which any identity or evidence payload changes after the first read.
+fn fetch_run_evidence_identity(repo: &str, run_id: u64) -> Result<RunEvidenceIdentity> {
+    let summary = fetch_run_summary(repo, run_id)?;
+    validate_run_summary(&summary, run_id)?;
+    let fetched_jobs = fetch_run_jobs(repo, run_id, &summary)?;
+    let census = pair_lane_census(&fetched_jobs.jobs);
+    validate_census(&census, run_id)?;
+    for (github, velnor, _) in &census.matched {
+        validate_job_success(github, Lane::GitHub, run_id)?;
+        validate_job_success(velnor, Lane::Velnor, run_id)?;
+    }
+    let expected_velnor_job_ids: Vec<u64> = census
+        .matched
+        .iter()
+        .map(|(_, velnor, _)| velnor.id)
+        .collect();
+    let artifact_evidence =
+        fetch_velnor_job_log_artifacts(repo, run_id, &summary, &expected_velnor_job_ids)?;
+    let mut payload_digests = BTreeMap::new();
+    for (github, velnor, _) in &census.matched {
+        let github_html = fetch_job_html_steps(github, repo, &summary).with_context(|| {
+            format!(
+                "recheck GitHub job {} HTML evidence for run {run_id}",
+                github.id
+            )
+        })?;
+        let velnor_html = fetch_job_html_steps(velnor, repo, &summary).with_context(|| {
+            format!(
+                "recheck Velnor job {} HTML evidence for run {run_id}",
+                velnor.id
+            )
+        })?;
+        let github_log = fetch_github_job_log(repo, github.id).with_context(|| {
+            format!(
+                "recheck GitHub job {} log evidence for run {run_id}",
+                github.id
+            )
+        })?;
+        let velnor_log = artifact_evidence
+            .content_by_job
+            .get(&velnor.id)
+            .with_context(|| format!("missing Velnor job-log evidence for job {}", velnor.id))?;
+        let prefix = format!("pair/{}/{}", github.id, velnor.id);
+        payload_digests.insert(format!("{prefix}/github-html"), github_html.digest);
+        payload_digests.insert(format!("{prefix}/velnor-html"), velnor_html.digest);
+        payload_digests.insert(
+            format!("{prefix}/github-log"),
+            sha256_digest(github_log.as_bytes()),
+        );
+        payload_digests.insert(
+            format!("{prefix}/velnor-log"),
+            sha256_digest(velnor_log.as_bytes()),
+        );
+    }
+    Ok(RunEvidenceIdentity {
+        summary,
+        jobs: canonical_job_identities(&fetched_jobs.identities),
+        artifacts: artifact_evidence.artifacts,
+        payload_digests,
+    })
+}
+
+fn validate_complete_timing(census: &PairingCensus, run_id: u64) -> Result<()> {
+    for (github, velnor, key) in &census.matched {
+        if job_duration_seconds(github).is_none() {
+            bail!(
+                "run {run_id} GitHub job {} ({key}) has incomplete, reversed, out-of-order, or overlapping executed-step timing",
+                github.id
+            );
+        }
+        if job_duration_seconds(velnor).is_none() {
+            bail!(
+                "run {run_id} Velnor job {} ({key}) has incomplete, reversed, out-of-order, or overlapping executed-step timing",
+                velnor.id
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_run_evidence(
+    repo: &str,
+    run_id: u64,
+    jobs: &[Job],
+    job_identities: &[ApiJob],
+    census: PairingCensus,
+    summary: RunSummary,
+    require_timing: bool,
+) -> Result<ValidatedRun> {
+    validate_run_summary(&summary, run_id)?;
+    if jobs.len() != job_identities.len() {
+        bail!(
+            "run {run_id} jobs identity count {} differs from comparison jobs count {}",
+            job_identities.len(),
+            jobs.len()
+        );
+    }
+    validate_census(&census, run_id)?;
+    for (github, velnor, _) in &census.matched {
+        validate_job_success(github, Lane::GitHub, run_id)?;
+        validate_job_success(velnor, Lane::Velnor, run_id)?;
+    }
+    let expected_velnor_job_ids: Vec<u64> = census
+        .matched
+        .iter()
+        .map(|(_, velnor, _)| velnor.id)
+        .collect();
+    let artifact_evidence =
+        fetch_velnor_job_log_artifacts(repo, run_id, &summary, &expected_velnor_job_ids)?;
+    if require_timing {
+        validate_complete_timing(&census, run_id)?;
+    }
+    let velnor_logs = &artifact_evidence.content_by_job;
+    let mut pair_evidence = BTreeMap::new();
+    for (github, velnor, _) in &census.matched {
+        let github_html = fetch_job_html_steps(github, repo, &summary).with_context(|| {
+            format!(
+                "fetch GitHub job {} HTML evidence for run {run_id}",
+                github.id
+            )
+        })?;
+        let velnor_html = fetch_job_html_steps(velnor, repo, &summary).with_context(|| {
+            format!(
+                "fetch Velnor job {} HTML evidence for run {run_id}",
+                velnor.id
+            )
+        })?;
+        let github_log = fetch_github_job_log(repo, github.id).with_context(|| {
+            format!(
+                "fetch GitHub job {} log evidence for run {run_id}",
+                github.id
+            )
+        })?;
+        let velnor_log = velnor_logs
+            .get(&velnor.id)
+            .with_context(|| format!("missing Velnor job-log evidence for job {}", velnor.id))?
+            .clone();
+        let github_content = analyze_lane_log(&github_log);
+        let velnor_content = analyze_lane_log(&velnor_log);
+        if github_content.lines == 0 || velnor_content.lines == 0 {
+            bail!(
+                "run {run_id} pair {}/{} has empty log evidence",
+                github.id,
+                velnor.id
+            );
+        }
+        let github_log_digest = sha256_digest(github_log.as_bytes());
+        let velnor_log_digest = sha256_digest(velnor_log.as_bytes());
+        pair_evidence.insert(
+            (github.id, velnor.id),
+            PairEvidence {
+                github_html: github_html.steps,
+                velnor_html: velnor_html.steps,
+                github_html_digest: github_html.digest,
+                velnor_html_digest: velnor_html.digest,
+                github_log,
+                velnor_log,
+                github_log_digest,
+                velnor_log_digest,
+                github_content,
+                velnor_content,
+            },
+        );
+    }
+    let final_summary = fetch_run_summary(repo, run_id)
+        .with_context(|| format!("recheck run {run_id} identity after evidence collection"))?;
+    ensure_run_snapshot_stable(&summary, &final_summary)?;
+    let validated = assess_run_evidence(run_id, jobs, census, final_summary, pair_evidence)?;
+    let validated = ValidatedRun {
+        summary: validated.summary,
+        job_identities: job_identities.to_vec(),
+        artifact_identities: artifact_evidence.artifacts,
+        census: validated.census,
+        pair_evidence: validated.pair_evidence,
+    };
+    let initial_identity = evidence_identity(&validated);
+    let rechecked_identity = fetch_run_evidence_identity(repo, run_id)
+        .with_context(|| format!("recheck full run/job/artifact snapshot for run {run_id}"))?;
+    ensure_evidence_identity_stable(&initial_identity, &rechecked_identity)?;
+    Ok(validated)
 }
 
 /// `gh api` subprocess: bypasses the reqwest TLS-fingerprint throttling GitHub
@@ -595,9 +1509,18 @@ fn gh_api_bytes(path: &str) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
+fn require_nonempty_evidence(kind: &str, text: &str) -> Result<()> {
+    if text.trim().is_empty() {
+        bail!("{kind} evidence is empty");
+    }
+    Ok(())
+}
+
 fn fetch_github_job_log(repo: &str, job_id: u64) -> Result<String> {
     let bytes = gh_api_bytes(&format!("repos/{repo}/actions/jobs/{job_id}/logs"))?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    let log = String::from_utf8(bytes).context("GitHub job log is not UTF-8")?;
+    require_nonempty_evidence(&format!("GitHub job {job_id} log"), &log)?;
+    Ok(log)
 }
 
 fn github_auth_token() -> Result<String> {
@@ -619,7 +1542,10 @@ fn github_auth_token() -> Result<String> {
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    let token = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let token = String::from_utf8(output.stdout)
+        .context("GitHub CLI authentication token is not UTF-8")?
+        .trim()
+        .to_owned();
     if token.is_empty() {
         bail!("GitHub authentication token is empty");
     }
@@ -628,25 +1554,51 @@ fn github_auth_token() -> Result<String> {
 
 /// Job page HTML via authenticated curl (`gh api` cannot fetch web routes —
 /// curl also sidesteps the reqwest TLS-fingerprint throttle).
-fn fetch_job_html_steps(job: &Job) -> Result<BTreeMap<u64, HtmlStep>> {
+fn fetch_job_html_steps(job: &Job, repo: &str, summary: &RunSummary) -> Result<HtmlEvidence> {
     let url = job
         .html_url
         .as_deref()
         .with_context(|| format!("job {} has no html_url", job.id))?;
+    validate_job_html_url(url, repo, summary.id, job.id)?;
     let token = github_auth_token()?;
     fetch_job_html_steps_with_token(job.id, url, &token)
 }
 
-fn fetch_job_html_steps_with_token(
+fn fetch_job_html_steps_with_token(job_id: u64, url: &str, token: &str) -> Result<HtmlEvidence> {
+    const ARGS: &[&str] = &[
+        "-fsS",
+        "--max-redirs",
+        "0",
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
+    ];
+    fetch_job_html_steps_with_curl_args(job_id, url, token, ARGS)
+}
+
+#[cfg(test)]
+fn fetch_job_html_steps_with_token_http_fixture(
     job_id: u64,
     url: &str,
     token: &str,
-) -> Result<BTreeMap<u64, HtmlStep>> {
+) -> Result<HtmlEvidence> {
+    fetch_job_html_steps_with_curl_args(job_id, url, token, &["-fsS", "--max-redirs", "0"])
+}
+
+fn fetch_job_html_steps_with_curl_args(
+    job_id: u64,
+    url: &str,
+    token: &str,
+    base_args: &[&str],
+) -> Result<HtmlEvidence> {
     if token.trim().is_empty() {
         bail!("GitHub authentication token is empty");
     }
+    let mut args = base_args.to_vec();
+    args.extend(["-H", "@-", url]);
     let mut child = Command::new("curl")
-        .args(["-fsSL", "-H", "@-", url])
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -665,44 +1617,71 @@ fn fetch_job_html_steps_with_token(
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    let html = String::from_utf8_lossy(&output.stdout);
-    let steps = parse_check_steps(&html);
+    let html = String::from_utf8(output.stdout).context("GitHub job page is not UTF-8")?;
+    let steps = parse_check_steps(&html)?;
     if steps.is_empty() {
         bail!("job {job_id} page contained no check-step evidence");
     }
-    Ok(steps)
+    Ok(HtmlEvidence {
+        steps,
+        digest: sha256_digest(html.as_bytes()),
+    })
 }
 
 /// Extract `<check-step …>` elements: `data-number` plus whether
 /// `data-log-url` is non-empty (that attribute is exactly what makes a step
 /// expandable in the UI).
-fn parse_check_steps(html: &str) -> BTreeMap<u64, HtmlStep> {
+fn parse_check_steps(html: &str) -> Result<BTreeMap<u64, HtmlStep>> {
     let mut steps = BTreeMap::new();
     let mut rest = html;
-    while let Some(start) = rest.find("<check-step") {
+    while let Some(start) = find_check_step_start(rest) {
         let element = &rest[start..];
         let Some(end) = element.find('>') else {
-            break;
+            bail!("malformed <check-step> element without closing `>`");
         };
         let element = &element[..end];
-        if let Some(number) =
-            attr_value(element, "data-number").and_then(|value| value.parse::<u64>().ok())
-        {
-            steps.insert(
-                number,
-                HtmlStep {
-                    number,
-                    expandable: attr_value(element, "data-log-url")
-                        .is_some_and(|value| !value.is_empty()),
-                    external_id: attr_value(element, "data-external-id")
-                        .unwrap_or_default()
-                        .to_string(),
-                },
-            );
+        let number_text =
+            attr_value(element, "data-number").context("<check-step> is missing data-number")?;
+        let number = number_text
+            .parse::<u64>()
+            .with_context(|| format!("invalid <check-step> data-number `{number_text}`"))?;
+        if number == 0 {
+            bail!("invalid <check-step> data-number `0`; step numbers start at 1");
         }
+        if steps.contains_key(&number) {
+            bail!("duplicate <check-step> data-number {number}");
+        }
+        steps.insert(
+            number,
+            HtmlStep {
+                number,
+                expandable: attr_value(element, "data-log-url")
+                    .is_some_and(|value| !value.is_empty()),
+                external_id: attr_value(element, "data-external-id")
+                    .unwrap_or_default()
+                    .to_string(),
+            },
+        );
         rest = &rest[start + end..];
     }
-    steps
+    Ok(steps)
+}
+
+fn find_check_step_start(html: &str) -> Option<usize> {
+    const MARKER: &str = "<check-step";
+    let mut offset = 0;
+    while let Some(found) = html[offset..].find(MARKER) {
+        let start = offset + found;
+        let after = html.as_bytes().get(start + MARKER.len()).copied();
+        if matches!(
+            after,
+            Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
+        ) {
+            return Some(start);
+        }
+        offset = start + MARKER.len();
+    }
+    None
 }
 
 fn attr_value<'a>(element: &'a str, name: &str) -> Option<&'a str> {
@@ -713,78 +1692,290 @@ fn attr_value<'a>(element: &'a str, name: &str) -> Option<&'a str> {
     Some(&rest[..end])
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct ArtifactWorkflowRun {
+    id: u64,
+    head_sha: String,
+    #[serde(default)]
+    repository_id: Option<u64>,
+    #[serde(default)]
+    run_attempt: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct ArtifactRef {
+    id: u64,
+    name: String,
+    #[serde(default)]
+    digest: Option<String>,
+    #[serde(default)]
+    expired: Option<bool>,
+    #[serde(default)]
+    archive_download_url: Option<String>,
+    #[serde(default)]
+    workflow_run: Option<ArtifactWorkflowRun>,
+}
+
+#[derive(Debug, Clone)]
+struct ArtifactEvidence {
+    content_by_job: BTreeMap<u64, String>,
+    artifacts: BTreeMap<String, ArtifactRef>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ArtifactsResponse {
+    total_count: u64,
+    artifacts: Vec<ArtifactRef>,
+}
+
+fn collect_job_log_artifacts(
+    pages: impl IntoIterator<Item = Result<ArtifactsResponse>>,
+    expected_job_ids: &[u64],
+) -> Result<BTreeMap<String, ArtifactRef>> {
+    let expected: BTreeSet<String> = expected_job_ids
+        .iter()
+        .map(|id| format!("job-log-{id}"))
+        .collect();
+    if expected.is_empty() {
+        bail!("cannot collect Velnor job-log artifacts without expected job ids");
+    }
+    if expected.len() != expected_job_ids.len() {
+        bail!("expected Velnor job-log artifact census contains duplicate job ids");
+    }
+    let mut collected = BTreeMap::new();
+    let mut seen_ids = BTreeSet::new();
+    let mut observed = 0u64;
+    let mut total_count = None;
+    let mut saw_page = false;
+    for page in pages {
+        let page = page?;
+        saw_page = true;
+        observed = observed
+            .checked_add(page.artifacts.len() as u64)
+            .context("artifacts API row count overflow")?;
+        total_count.get_or_insert(page.total_count);
+        if total_count != Some(page.total_count) {
+            bail!("artifacts API changed total_count while paging");
+        }
+        for artifact in page.artifacts {
+            if artifact.id == 0 || artifact.name.trim().is_empty() {
+                bail!("artifacts API returned an artifact with an empty name");
+            }
+            if !seen_ids.insert(artifact.id) {
+                bail!("artifacts API repeated artifact id {}", artifact.id);
+            }
+            if collected.insert(artifact.name.clone(), artifact).is_some() {
+                bail!("artifacts API repeated artifact name");
+            }
+        }
+        let total = total_count.unwrap_or_default();
+        if observed > total {
+            bail!("artifacts API returned more rows than total_count {total}");
+        }
+    }
+    if !saw_page {
+        bail!("artifacts API returned no pages");
+    }
+    let total = total_count.context("artifacts API omitted total_count")?;
+    if observed != total {
+        bail!("artifacts API pages are truncated: observed {observed} of {total} rows");
+    }
+    let missing: Vec<String> = expected
+        .iter()
+        .filter(|name| !collected.contains_key(*name))
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "missing required Velnor job-log artifact(s): {}",
+            missing.join(", ")
+        );
+    }
+    Ok(collected)
+}
+
+fn validate_artifact_metadata(
+    artifact: &ArtifactRef,
+    repo: &str,
+    summary: &RunSummary,
+) -> Result<()> {
+    if artifact.id == 0 || artifact.name.trim().is_empty() {
+        bail!("artifact metadata has no valid id/name");
+    }
+    if artifact.expired != Some(false) {
+        bail!("artifact {} is expired or has no expiry state", artifact.id);
+    }
+    let workflow_run = artifact
+        .workflow_run
+        .as_ref()
+        .with_context(|| format!("artifact {} has no workflow run identity", artifact.id))?;
+    if workflow_run.id != summary.id {
+        bail!(
+            "artifact {} belongs to run {}, expected {}",
+            artifact.id,
+            workflow_run.id,
+            summary.id
+        );
+    }
+    if workflow_run.head_sha != summary.head_sha {
+        bail!(
+            "artifact {} head SHA differs from workflow run",
+            artifact.id
+        );
+    }
+    // The artifact-list endpoint omits workflow_run.run_attempt on real
+    // responses. Enforce it when the authoritative payload supplies it.
+    if let Some(artifact_attempt) = workflow_run.run_attempt
+        && artifact_attempt != summary.run_attempt
+    {
+        bail!(
+            "artifact {} belongs to run attempt {}, expected {}",
+            artifact.id,
+            artifact_attempt,
+            summary.run_attempt
+        );
+    }
+    let repository_id = summary
+        .repository
+        .as_ref()
+        .and_then(|repository| repository.id)
+        .filter(|id| *id != 0)
+        .context("workflow run has no valid repository identity for artifact binding")?;
+    if workflow_run.repository_id != Some(repository_id) {
+        bail!(
+            "artifact {} belongs to repository id {:?}, expected {}",
+            artifact.id,
+            workflow_run.repository_id,
+            repository_id
+        );
+    }
+    let archive_url = artifact
+        .archive_download_url
+        .as_deref()
+        .with_context(|| format!("artifact {} has no archive download URL", artifact.id))?;
+    validate_api_url(
+        archive_url,
+        &format!("/repos/{repo}/actions/artifacts/{}/zip", artifact.id),
+        "artifact archive URL",
+    )?;
+    let digest = artifact
+        .digest
+        .as_deref()
+        .with_context(|| format!("artifact {} has no archive digest", artifact.id))?;
+    if !digest.starts_with("sha256:") || digest.len() != "sha256:".len() + 64 {
+        bail!("artifact {} has an invalid archive digest", artifact.id);
+    }
+    if !digest["sha256:".len()..]
+        .chars()
+        .all(|character| character.is_ascii_hexdigit())
+    {
+        bail!("artifact {} has an invalid archive digest", artifact.id);
+    }
+    Ok(())
+}
+
+fn sha256_digest(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in digest.as_slice() {
+        hex.push(char::from(HEX[usize::from(byte >> 4)]));
+        hex.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    format!("sha256:{hex}")
+}
+
+fn decode_job_log_archive(zip_bytes: &[u8], artifact_name: &str) -> Result<String> {
+    let cursor = std::io::Cursor::new(zip_bytes);
+    let mut zip = zip::ZipArchive::new(cursor)
+        .with_context(|| format!("open {artifact_name} artifact zip"))?;
+    if zip.len() != 1 {
+        bail!(
+            "{artifact_name} artifact must contain exactly one entry, found {}",
+            zip.len()
+        );
+    }
+    let mut file = zip
+        .by_index(0)
+        .with_context(|| format!("read {artifact_name} artifact entry"))?;
+    if !file.is_file() || file.name() != "job-log.txt" {
+        bail!("{artifact_name} artifact must contain one regular job-log.txt entry");
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("read {artifact_name} artifact file"))?;
+    let content = String::from_utf8(bytes)
+        .with_context(|| format!("{artifact_name} artifact log is not UTF-8"))?;
+    require_nonempty_evidence(&format!("Velnor artifact {artifact_name}"), &content)?;
+    Ok(content)
+}
+
 /// Download the exact per-job `job-log-<job-id>` artifacts needed by this
 /// comparison. Keeping the result keyed by job prevents one pair from
 /// inheriting another pair's log affordances.
 fn fetch_velnor_job_log_artifacts(
     repo: &str,
     run_id: u64,
+    summary: &RunSummary,
     expected_job_ids: &[u64],
-) -> Result<BTreeMap<u64, String>> {
-    let mut artifacts = Vec::new();
-    let mut page = 1_u64;
+) -> Result<ArtifactEvidence> {
+    let mut pages = Vec::new();
+    let mut page_number = 1u32;
+    let mut observed = 0u64;
+    let mut total_count = None;
     loop {
         let payload = gh_api_bytes(&format!(
-            "repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100&page={page}"
+            "repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100&page={page_number}"
         ))?;
-        let response: serde_json::Value =
+        let page: ArtifactsResponse =
             serde_json::from_slice(&payload).context("parse artifacts response")?;
-        let page_artifacts = response
-            .get("artifacts")
-            .and_then(|value| value.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let fetched = page_artifacts.len();
-        let total_count = response.get("total_count").and_then(|value| value.as_u64());
-        artifacts.extend(page_artifacts);
-        if fetched == 0
-            || fetched < 100
-            || total_count.is_some_and(|total| artifacts.len() as u64 >= total)
-        {
+        let fetched = page.artifacts.len() as u64;
+        observed = observed
+            .checked_add(fetched)
+            .context("artifacts API row count overflow")?;
+        total_count.get_or_insert(page.total_count);
+        if total_count != Some(page.total_count) {
+            bail!("artifacts API changed total_count while paging");
+        }
+        let total = total_count.unwrap_or_default();
+        if observed > total {
+            bail!("artifacts API returned more rows than total_count {total}");
+        }
+        let done = observed == total;
+        pages.push(Ok(page));
+        if done {
             break;
         }
-        page += 1;
-    }
-    let mut artifact_ids = BTreeMap::new();
-    for artifact in artifacts {
-        let name = artifact.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let Some(job_id) = expected_job_ids
-            .iter()
-            .copied()
-            .find(|job_id| name == format!("job-log-{job_id}"))
-        else {
-            continue;
-        };
-        let artifact_id = artifact
-            .get("id")
-            .and_then(|v| v.as_u64())
-            .with_context(|| format!("job-log-{job_id} artifact has no id"))?;
-        if artifact_ids.insert(job_id, artifact_id).is_some() {
-            bail!("duplicate job-log-{job_id} artifacts in run {run_id}");
+        if fetched == 0 {
+            bail!(
+                "artifacts API ended after {observed} of {total} rows; required log census is truncated"
+            );
         }
+        page_number = page_number
+            .checked_add(1)
+            .context("artifacts API page number overflow")?;
     }
+
+    let artifacts = collect_job_log_artifacts(pages, expected_job_ids)?;
     let mut content_by_job = BTreeMap::new();
     for job_id in expected_job_ids {
-        let artifact_id = artifact_ids
-            .get(job_id)
-            .with_context(|| format!("missing job-log-{job_id} artifact in run {run_id}"))?;
-        let zip_bytes = gh_api_bytes(&format!("repos/{repo}/actions/artifacts/{artifact_id}/zip"))?;
-        let cursor = std::io::Cursor::new(zip_bytes);
-        let mut zip = zip::ZipArchive::new(cursor).context("open job-log artifact zip")?;
-        let mut content = String::new();
-        for index in 0..zip.len() {
-            let mut file = zip.by_index(index).context("read artifact entry")?;
-            if file.is_dir() {
-                continue;
-            }
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes).context("read artifact file")?;
-            content.push_str(&String::from_utf8_lossy(&bytes));
-            content.push('\n');
+        let name = format!("job-log-{job_id}");
+        let artifact = artifacts
+            .get(&name)
+            .with_context(|| format!("missing required artifact {name}"))?;
+        validate_artifact_metadata(artifact, repo, summary)?;
+        let zip_bytes = gh_api_bytes(&format!(
+            "repos/{repo}/actions/artifacts/{}/zip",
+            artifact.id
+        ))?;
+        let expected_digest = artifact
+            .digest
+            .as_deref()
+            .context("validated artifact digest disappeared")?;
+        if sha256_digest(&zip_bytes) != expected_digest {
+            bail!("{name} archive digest does not match artifact metadata");
         }
-        if content.trim().is_empty() {
-            bail!("job-log-{job_id} artifact in run {run_id} is empty");
-        }
+        let content = decode_job_log_archive(&zip_bytes, &name)?;
         if content_by_job.insert(*job_id, content).is_some() {
             bail!("duplicate Velnor job-log content for job {job_id}");
         }
@@ -792,7 +1983,10 @@ fn fetch_velnor_job_log_artifacts(
     if content_by_job.is_empty() {
         bail!("no Velnor job-log artifacts requested for run {run_id}");
     }
-    Ok(content_by_job)
+    Ok(ArtifactEvidence {
+        content_by_job,
+        artifacts,
+    })
 }
 
 /// Test-only view of [`classify_job_name`]: the lane of a comparison job.
@@ -1149,6 +2343,8 @@ pub struct LaneStats {
     pub run_id: u64,
     pub baseline_runs: usize,
     pub parity_worse_rows: usize,
+    pub timing_complete: bool,
+    pub timing_issues: Vec<String>,
     pub jobs: BTreeMap<String, JobClassStats>,
 }
 
@@ -1171,6 +2367,7 @@ impl JobClassStats {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegressionVerdict {
     pub regression: bool,
+    pub not_proven: bool,
     pub reasons: Vec<String>,
 }
 
@@ -1180,6 +2377,38 @@ pub fn is_regression(
     threshold_pct: f64,
 ) -> RegressionVerdict {
     let mut reasons = Vec::new();
+    let mut not_proven = false;
+    let baseline_units: BTreeSet<&String> = baseline.jobs.keys().collect();
+    let current_units: BTreeSet<&String> = current.jobs.keys().collect();
+    if baseline_units != current_units {
+        not_proven = true;
+        reasons.push(format!(
+            "workload set drift: baseline has {} unit(s), current has {} unit(s); no full-unit timing comparison is proven",
+            baseline_units.len(),
+            current_units.len(),
+        ));
+    }
+    if baseline.jobs.is_empty() || current.jobs.is_empty() {
+        not_proven = true;
+        reasons.push("missing workload timing evidence".to_owned());
+    }
+    if !baseline.timing_complete {
+        not_proven = true;
+        reasons.push(format_timing_issues("baseline", &baseline.timing_issues));
+    }
+    if !current.timing_complete {
+        not_proven = true;
+        reasons.push(format_timing_issues("current", &current.timing_issues));
+    }
+    if baseline
+        .jobs
+        .values()
+        .chain(current.jobs.values())
+        .any(|stats| stats.velnor_ratio().is_none())
+    {
+        not_proven = true;
+        reasons.push("incomplete or malformed workload timing evidence".to_owned());
+    }
     if current.parity_worse_rows > 0 {
         reasons.push(format!(
             "parity diff: {} worse row(s)",
@@ -1209,39 +2438,62 @@ pub fn is_regression(
     }
 
     RegressionVerdict {
-        regression: !reasons.is_empty(),
+        regression: !reasons.is_empty() && !not_proven,
+        not_proven,
         reasons,
     }
 }
 
-fn lane_stats_for_run(repo: &str, run_id: u64) -> Result<LaneStats> {
-    let jobs = fetch_run_jobs(repo, run_id)?;
-    let census = pair_lane_census(&jobs);
-    if census.matched.is_empty() {
-        bail!("run {run_id} has no both-lane job pairs");
-    }
+fn lane_stats_for_run(repo: &str, run_id: u64) -> Result<LaneRunSnapshot> {
+    let summary = fetch_run_summary(repo, run_id)?;
+    validate_run_summary(&summary, run_id)?;
+    let fetched_jobs = fetch_run_jobs(repo, run_id, &summary)?;
+    let census = pair_lane_census(&fetched_jobs.jobs);
+    let validated = validate_run_evidence(
+        repo,
+        run_id,
+        &fetched_jobs.jobs,
+        &fetched_jobs.identities,
+        census,
+        summary,
+        true,
+    )?;
 
     let mut stats = LaneStats {
         run_id,
         baseline_runs: 1,
         parity_worse_rows: 0,
+        timing_complete: true,
+        timing_issues: Vec::new(),
         jobs: BTreeMap::new(),
     };
-    for (github, velnor, key) in &census.matched {
-        let github_html = fetch_job_html_steps(github).unwrap_or_default();
-        let velnor_html = fetch_job_html_steps(velnor).unwrap_or_default();
+    for (github, velnor, key) in &validated.census.matched {
+        let evidence = validated
+            .pair_evidence
+            .get(&(github.id, velnor.id))
+            .with_context(|| {
+                format!(
+                    "missing validated evidence for pair {}/{}",
+                    github.id, velnor.id
+                )
+            })?;
         let (_section, worse) = compare_pair(
             github,
             velnor,
-            &github_html,
-            &velnor_html,
-            LaneLogStats::default(),
-            LaneLogStats::default(),
+            &evidence.github_html,
+            &evidence.velnor_html,
+            evidence.github_content,
+            evidence.velnor_content,
         )?;
         stats.parity_worse_rows += worse;
         let (Some(github_seconds), Some(velnor_seconds)) =
             (job_duration_seconds(github), job_duration_seconds(velnor))
         else {
+            stats.timing_complete = false;
+            stats.timing_issues.push(format!(
+                "pair {}/{} ({}) has incomplete timing evidence",
+                github.id, velnor.id, key
+            ));
             continue;
         };
         stats.jobs.insert(
@@ -1252,11 +2504,24 @@ fn lane_stats_for_run(repo: &str, run_id: u64) -> Result<LaneStats> {
             },
         );
     }
-    Ok(stats)
+    Ok(LaneRunSnapshot {
+        stats,
+        identity: evidence_identity(&validated),
+    })
 }
 
 fn baseline_from_samples(samples: &[LaneStats]) -> Option<LaneStats> {
     if samples.is_empty() {
+        return None;
+    }
+    let expected_units: BTreeSet<&String> = samples[0].jobs.keys().collect();
+    if expected_units.is_empty()
+        || samples
+            .iter()
+            .any(|sample| sample.jobs.keys().collect::<BTreeSet<_>>() != expected_units)
+    {
+        // A timing baseline with an empty or changing workload set would hide
+        // missing units by averaging only whatever happened to be present.
         return None;
     }
     let mut sums: BTreeMap<String, (f64, f64, usize)> = BTreeMap::new();
@@ -1269,9 +2534,6 @@ fn baseline_from_samples(samples: &[LaneStats]) -> Option<LaneStats> {
         }
     }
     if sums.is_empty() {
-        // No baseline sample produced a complete timing pair. A baseline with
-        // no job timings would silently skip every regression comparison and
-        // false-green the gate, so refuse the baseline instead.
         return None;
     }
     let jobs = sums
@@ -1294,8 +2556,24 @@ fn baseline_from_samples(samples: &[LaneStats]) -> Option<LaneStats> {
             .map(|sample| sample.parity_worse_rows)
             .sum::<usize>()
             / samples.len(),
+        timing_complete: samples.iter().all(|sample| sample.timing_complete),
+        timing_issues: samples
+            .iter()
+            .flat_map(|sample| sample.timing_issues.iter().cloned())
+            .collect(),
         jobs,
     })
+}
+
+fn format_timing_issues(scope: &str, issues: &[String]) -> String {
+    if issues.is_empty() {
+        format!("{scope} workload timing evidence is incomplete")
+    } else {
+        format!(
+            "{scope} workload timing evidence is incomplete: {}",
+            issues.join("; ")
+        )
+    }
 }
 
 fn regression_report(
@@ -1350,7 +2628,17 @@ fn regression_report(
         current.parity_worse_rows
     )?;
     writeln!(report)?;
-    if verdict.regression {
+    if verdict.not_proven {
+        writeln!(report, "## Result")?;
+        writeln!(report)?;
+        writeln!(
+            report,
+            "**NOT PROVEN** — workload/evidence sets are not comparable."
+        )?;
+        for reason in &verdict.reasons {
+            writeln!(report, "- {reason}")?;
+        }
+    } else if verdict.regression {
         writeln!(report, "## Result")?;
         writeln!(report)?;
         writeln!(report, "**FAIL**")?;
@@ -1371,13 +2659,26 @@ fn regression_report(
 fn job_duration_seconds(job: &Job) -> Option<i64> {
     let mut started = None;
     let mut completed = None;
+    let mut previous_started = None;
+    let mut previous_completed = None;
+    let mut executed_steps = 0usize;
     for step in &job.steps {
-        let (Some(step_start), Some(step_end)) = (
-            step.started_at.as_deref().and_then(parse_rfc3339),
-            step.completed_at.as_deref().and_then(parse_rfc3339),
-        ) else {
+        if step_is_skipped(step) {
             continue;
-        };
+        }
+        executed_steps += 1;
+        let step_start = step.started_at.as_deref().and_then(parse_rfc3339)?;
+        let step_end = step.completed_at.as_deref().and_then(parse_rfc3339)?;
+        if step_end < step_start {
+            return None;
+        }
+        if previous_started.is_some_and(|previous| step_start < previous)
+            || previous_completed.is_some_and(|previous| step_start < previous)
+        {
+            return None;
+        }
+        previous_started = Some(step_start);
+        previous_completed = Some(step_end);
         started = Some(started.map_or(step_start, |current: time::OffsetDateTime| {
             current.min(step_start)
         }));
@@ -1385,9 +2686,12 @@ fn job_duration_seconds(job: &Job) -> Option<i64> {
             current.max(step_end)
         }));
     }
-    started
-        .zip(completed)
-        .map(|(started, completed)| (completed - started).whole_seconds())
+    if executed_steps == 0 {
+        return None;
+    }
+    started.zip(completed).and_then(|(started, completed)| {
+        (completed >= started).then_some((completed - started).whole_seconds())
+    })
 }
 
 enum AlignedRow<'a> {
@@ -1511,7 +2815,7 @@ fn strip_blob_timestamp(line: &str) -> Option<&str> {
 fn step_duration_seconds(step: &Step) -> Option<i64> {
     let started = parse_rfc3339(step.started_at.as_deref()?)?;
     let completed = parse_rfc3339(step.completed_at.as_deref()?)?;
-    Some((completed - started).whole_seconds())
+    (completed >= started).then_some((completed - started).whole_seconds())
 }
 
 fn parse_rfc3339(value: &str) -> Option<time::OffsetDateTime> {
@@ -1519,7 +2823,7 @@ fn parse_rfc3339(value: &str) -> Option<time::OffsetDateTime> {
 }
 
 fn executed(step: &Step) -> bool {
-    step.conclusion.as_deref() != Some("skipped")
+    !step_is_skipped(step)
 }
 
 fn duration_cell(step: &Step) -> String {
@@ -1556,11 +2860,13 @@ fn step_verdict(
     }
     let gh_expandable = github_html.get(&github.number).map(|step| step.expandable);
     let vl_expandable = velnor_html.get(&velnor.number).map(|step| step.expandable);
-    if executed(github)
-        && executed(velnor)
-        && let (Some(true), Some(false)) = (gh_expandable, vl_expandable)
-    {
-        worse.push("not expandable".to_string());
+    if executed(github) && executed(velnor) {
+        match (gh_expandable, vl_expandable) {
+            (None, _) => worse.push("missing GitHub HTML check-step evidence".to_string()),
+            (_, None) => worse.push("missing Velnor HTML check-step evidence".to_string()),
+            (Some(true), Some(false)) => worse.push("not expandable".to_string()),
+            _ => {}
+        }
     }
     if worse.is_empty() {
         ("ok".to_string(), false)
@@ -1758,6 +3064,233 @@ mod tests {
         }
     }
 
+    fn successful_summary() -> RunSummary {
+        RunSummary {
+            id: 42,
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            event: "pull_request".to_owned(),
+            head_sha: "a".repeat(40),
+            run_attempt: 1,
+            url: "https://api.github.com/repos/tailrocks/velnor/actions/runs/42".to_owned(),
+            html_url: "https://github.com/tailrocks/velnor/actions/runs/42".to_owned(),
+            repository: Some(ApiRepository {
+                id: Some(1_255_367_013),
+                full_name: Some("tailrocks/velnor".to_owned()),
+            }),
+        }
+    }
+
+    fn run_item(id: u64, status: &str, conclusion: Option<&str>) -> RunListItem {
+        RunListItem {
+            database_id: id,
+            status: status.to_owned(),
+            conclusion: conclusion.map(str::to_owned),
+        }
+    }
+
+    fn summary_for_run_item(run: &RunListItem) -> RunSummary {
+        let mut summary = successful_summary();
+        summary.id = run.database_id;
+        summary.status.clone_from(&run.status);
+        summary.conclusion.clone_from(&run.conclusion);
+        summary.url = format!(
+            "https://api.github.com/repos/tailrocks/velnor/actions/runs/{}",
+            run.database_id
+        );
+        summary.html_url = format!(
+            "https://github.com/tailrocks/velnor/actions/runs/{}",
+            run.database_id
+        );
+        summary
+    }
+
+    fn successful_pair_jobs() -> Vec<Job> {
+        vec![
+            named_job(1, "Rust · rust-policy / GitHub"),
+            named_job(2, "Rust · rust-policy / Velnor"),
+        ]
+    }
+
+    fn select_watch_fixture(
+        runs: &[RunListItem],
+        jobs_by_run: &BTreeMap<u64, Vec<Job>>,
+        since: usize,
+    ) -> Result<Vec<RunListItem>> {
+        recent_complete_both_lane_runs_with(
+            "tailrocks/velnor",
+            "compat.yml",
+            since,
+            |_, _, limit| Ok(runs.iter().take(limit).cloned().collect()),
+            |_, run_id| {
+                let run = runs
+                    .iter()
+                    .find(|run| run.database_id == run_id)
+                    .with_context(|| format!("missing fixture run {run_id}"))?;
+                Ok(summary_for_run_item(run))
+            },
+            |_, run_id, _| {
+                Ok(FetchedJobs {
+                    jobs: jobs_by_run.get(&run_id).cloned().unwrap_or_default(),
+                    identities: Vec::new(),
+                })
+            },
+        )
+    }
+
+    fn artifact_ref(id: u64, name: &str) -> ArtifactRef {
+        ArtifactRef {
+            id,
+            name: name.to_owned(),
+            digest: Some(format!("sha256:{}", "a".repeat(64))),
+            expired: Some(false),
+            archive_download_url: Some(format!(
+                "https://api.github.com/repos/tailrocks/velnor/actions/artifacts/{id}/zip"
+            )),
+            workflow_run: Some(ArtifactWorkflowRun {
+                id: 42,
+                head_sha: "a".repeat(40),
+                repository_id: Some(1_255_367_013),
+                // The real artifact-list endpoint omits workflow_run.run_attempt.
+                run_attempt: None,
+            }),
+        }
+    }
+
+    fn api_job_fixture() -> ApiJob {
+        ApiJob {
+            id: 7,
+            run_id: 42,
+            run_attempt: 1,
+            head_sha: "a".repeat(40),
+            name: "Rust · rust-policy / GitHub".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            html_url: "https://github.com/tailrocks/velnor/actions/runs/42/job/7".to_owned(),
+            url: "https://api.github.com/repos/tailrocks/velnor/actions/jobs/7".to_owned(),
+            run_url: "https://api.github.com/repos/tailrocks/velnor/actions/runs/42".to_owned(),
+            repository: None,
+            steps: Vec::new(),
+        }
+    }
+
+    fn evidence_snapshot_fixture() -> LaneRunSnapshot {
+        LaneRunSnapshot {
+            stats: LaneStats {
+                run_id: 42,
+                baseline_runs: 1,
+                parity_worse_rows: 0,
+                timing_complete: true,
+                timing_issues: Vec::new(),
+                jobs: BTreeMap::new(),
+            },
+            identity: RunEvidenceIdentity {
+                summary: successful_summary(),
+                jobs: vec![api_job_fixture()],
+                artifacts: BTreeMap::from([(
+                    "job-log-7".to_owned(),
+                    artifact_ref(101, "job-log-7"),
+                )]),
+                payload_digests: BTreeMap::from([
+                    (
+                        "pair/7/8/github-html".to_owned(),
+                        sha256_digest(b"github html"),
+                    ),
+                    (
+                        "pair/7/8/velnor-html".to_owned(),
+                        sha256_digest(b"velnor html"),
+                    ),
+                    (
+                        "pair/7/8/github-log".to_owned(),
+                        sha256_digest(b"github log"),
+                    ),
+                    (
+                        "pair/7/8/velnor-log".to_owned(),
+                        sha256_digest(b"velnor log"),
+                    ),
+                ]),
+            },
+        }
+    }
+
+    fn zip_fixture(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut archive = zip::ZipWriter::new(cursor);
+        for (name, contents) in entries {
+            archive
+                .start_file(*name, zip::write::FileOptions::<()>::default())
+                .unwrap();
+            archive.write_all(contents).unwrap();
+        }
+        archive.finish().unwrap().into_inner()
+    }
+
+    fn html_for_steps(numbers: &[u64]) -> BTreeMap<u64, HtmlStep> {
+        numbers
+            .iter()
+            .map(|number| {
+                (
+                    *number,
+                    HtmlStep {
+                        number: *number,
+                        expandable: true,
+                        external_id: format!("external-{number}"),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn pair_evidence(github: &Job, velnor: &Job) -> PairEvidence {
+        PairEvidence {
+            github_html: html_for_steps(
+                &github
+                    .steps
+                    .iter()
+                    .map(|step| step.number)
+                    .collect::<Vec<_>>(),
+            ),
+            velnor_html: html_for_steps(
+                &velnor
+                    .steps
+                    .iter()
+                    .map(|step| step.number)
+                    .collect::<Vec<_>>(),
+            ),
+            github_html_digest: sha256_digest(b"github html"),
+            velnor_html_digest: sha256_digest(b"velnor html"),
+            github_log_digest: sha256_digest(b"github log\n"),
+            velnor_log_digest: sha256_digest(b"velnor log\n"),
+            github_log: "github log\n".to_owned(),
+            velnor_log: "velnor log\n".to_owned(),
+            github_content: analyze_lane_log("github log\n"),
+            velnor_content: analyze_lane_log("velnor log\n"),
+        }
+    }
+
+    fn valid_pair_fixture() -> (Vec<Job>, PairingCensus, BTreeMap<(u64, u64), PairEvidence>) {
+        let github = Job {
+            id: 1,
+            name: "Rust · rust-policy / GitHub".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            html_url: None,
+            steps: vec![step(1, "Run check", "success")],
+        };
+        let velnor = Job {
+            id: 2,
+            name: "Rust · rust-policy / Velnor".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            html_url: None,
+            steps: vec![step(1, "Run check", "success")],
+        };
+        let jobs = vec![github.clone(), velnor.clone()];
+        let census = pair_lane_census(&jobs);
+        let evidence = BTreeMap::from([((github.id, velnor.id), pair_evidence(&github, &velnor))]);
+        (jobs, census, evidence)
+    }
+
     #[test]
     fn lane_detection_and_pair_key_match_fixture_naming() {
         assert_eq!(
@@ -1783,7 +3316,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_run_query_limits_successful_runs() {
+    fn recent_run_query_includes_terminal_state_for_validation() {
         let args = recent_run_args("tailrocks/velnor", "compat.yml", 1);
         assert_eq!(
             args,
@@ -1794,14 +3327,581 @@ mod tests {
                 "tailrocks/velnor".to_owned(),
                 "--workflow".to_owned(),
                 "compat.yml".to_owned(),
-                "--status".to_owned(),
-                "success".to_owned(),
                 "--limit".to_owned(),
                 "2".to_owned(),
                 "--json".to_owned(),
                 "databaseId,status,conclusion".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn watch_since_sets_the_newest_raw_run_window() {
+        let args = recent_run_args("tailrocks/velnor", "compat.yml", 5);
+        let limit_index = args
+            .iter()
+            .position(|argument| argument == "--limit")
+            .unwrap();
+        assert_eq!(args[limit_index + 1], "5");
+        assert_eq!(args[args.len() - 1], "databaseId,status,conclusion");
+    }
+
+    #[test]
+    fn watch_uses_only_the_newest_since_runs_as_its_raw_window() {
+        let runs = vec![
+            run_item(9, "completed", Some("success")),
+            run_item(8, "completed", Some("success")),
+            run_item(7, "completed", Some("success")),
+        ];
+        let jobs_by_run = BTreeMap::from([
+            (9, successful_pair_jobs()),
+            (8, successful_pair_jobs()),
+            (7, successful_pair_jobs()),
+        ]);
+
+        let selected = select_watch_fixture(&runs, &jobs_by_run, 2).unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|run| run.database_id)
+                .collect::<Vec<_>>(),
+            vec![9, 8]
+        );
+    }
+
+    #[test]
+    fn watch_fails_on_newest_in_progress_run_without_falling_back() {
+        let runs = vec![
+            run_item(9, "in_progress", None),
+            run_item(8, "completed", Some("success")),
+        ];
+        let mut list_calls = 0;
+        let error = recent_complete_both_lane_runs_with(
+            "tailrocks/velnor",
+            "compat.yml",
+            2,
+            |_, _, limit| {
+                list_calls += 1;
+                assert_eq!(limit, 2);
+                Ok(runs.clone())
+            },
+            |_, _| bail!("in-progress run summary should not be fetched"),
+            |_, _, _| bail!("in-progress run jobs should not be fetched"),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("run 9 is not a successful completed run"),
+            "{error:#}"
+        );
+        assert_eq!(list_calls, 1, "watch must not expand past its raw window");
+    }
+
+    #[test]
+    fn watch_fails_on_newest_workflow_failure_without_falling_back() {
+        let runs = vec![
+            run_item(9, "completed", Some("failure")),
+            run_item(8, "completed", Some("success")),
+        ];
+        let jobs_by_run =
+            BTreeMap::from([(9, successful_pair_jobs()), (8, successful_pair_jobs())]);
+        let error = select_watch_fixture(&runs, &jobs_by_run, 2).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("run 9 is not a successful completed run"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn watch_fails_on_newest_control_only_or_incomplete_pair_run() {
+        let runs = vec![
+            run_item(9, "completed", Some("success")),
+            run_item(8, "completed", Some("success")),
+        ];
+
+        let control_only =
+            BTreeMap::from([(9, vec![named_job(3, "lint")]), (8, successful_pair_jobs())]);
+        let error = select_watch_fixture(&runs, &control_only, 2).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("empty comparison census"),
+            "{error:#}"
+        );
+
+        let missing_counterpart = BTreeMap::from([
+            (9, vec![named_job(1, "Rust · rust-policy / GitHub")]),
+            (8, successful_pair_jobs()),
+        ]);
+        let error = select_watch_fixture(&runs, &missing_counterpart, 2).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("successful run 9"),
+            "{error:#}"
+        );
+        assert!(format!("{error:#}").contains("census"), "{error:#}");
+
+        let skipped_counterpart = BTreeMap::from([
+            (
+                9,
+                vec![
+                    named_job(1, "Rust · rust-policy / GitHub"),
+                    named_job_status(
+                        2,
+                        "Rust · rust-policy / Velnor",
+                        "completed",
+                        Some("skipped"),
+                    ),
+                ],
+            ),
+            (8, successful_pair_jobs()),
+        ]);
+        let error = select_watch_fixture(&runs, &skipped_counterpart, 2).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("successful run 9"),
+            "{error:#}"
+        );
+        assert!(format!("{error:#}").contains("census"), "{error:#}");
+
+        let ambiguous = BTreeMap::from([
+            (9, vec![named_job(1, "github-to-velnor sync")]),
+            (8, successful_pair_jobs()),
+        ]);
+        let error = select_watch_fixture(&runs, &ambiguous, 2).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("successful run 9"),
+            "{error:#}"
+        );
+        assert!(format!("{error:#}").contains("census"), "{error:#}");
+    }
+
+    #[test]
+    fn watch_fails_on_newest_paired_lane_failure_without_falling_back() {
+        let runs = vec![
+            run_item(9, "completed", Some("success")),
+            run_item(8, "completed", Some("success")),
+        ];
+        let mut failed_pair = successful_pair_jobs();
+        failed_pair[1].conclusion = Some("failure".to_owned());
+        let jobs_by_run = BTreeMap::from([(9, failed_pair), (8, successful_pair_jobs())]);
+
+        let error = select_watch_fixture(&runs, &jobs_by_run, 2).unwrap_err();
+        assert!(format!("{error:#}").contains("Velnor job 2"), "{error:#}");
+        assert!(format!("{error:#}").contains("not success"), "{error:#}");
+    }
+
+    #[test]
+    fn watch_selection_rejects_duplicate_run_ids() {
+        let runs = vec![
+            run_item(9, "completed", Some("success")),
+            run_item(9, "completed", Some("success")),
+        ];
+        let jobs_by_run = BTreeMap::from([(9, successful_pair_jobs())]);
+        let error = select_watch_fixture(&runs, &jobs_by_run, 2).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("repeated run id 9"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn explicit_selector_requires_validated_full_census_and_is_diagnostic_only() {
+        let (jobs, census, evidence) = valid_pair_fixture();
+        let validated =
+            assess_run_evidence(42, &jobs, census, successful_summary(), evidence).unwrap();
+        let (pairs, scope) = select_pairs(&validated.census, Some((1, 2)), 42).unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(scope, ComparisonScope::SubsetDiagnostic);
+        assert_eq!(
+            comparison_decision(scope, true, 0, 0),
+            ComparisonDecision::DiagnosticOnly
+        );
+        assert_eq!(
+            comparison_decision(scope, true, 1, 0),
+            ComparisonDecision::DiagnosticOnly
+        );
+        assert!(select_pairs(&validated.census, Some((1, 999)), 42).is_err());
+    }
+
+    #[test]
+    fn per_pair_evidence_keeps_pair_a_from_receiving_pair_b_log() {
+        let github_a = Job {
+            id: 1,
+            name: "Rust · workload-a / GitHub".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            html_url: None,
+            steps: vec![step(1, "Run A", "success")],
+        };
+        let velnor_a = Job {
+            id: 2,
+            name: "Rust · workload-a / Velnor".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            html_url: None,
+            steps: vec![step(1, "Run A", "success")],
+        };
+        let github_b = Job {
+            id: 3,
+            name: "Rust · workload-b / GitHub".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            html_url: None,
+            steps: vec![step(1, "Run B", "success")],
+        };
+        let velnor_b = Job {
+            id: 4,
+            name: "Rust · workload-b / Velnor".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            html_url: None,
+            steps: vec![step(1, "Run B", "success")],
+        };
+        let jobs = vec![
+            github_a.clone(),
+            velnor_a.clone(),
+            github_b.clone(),
+            velnor_b.clone(),
+        ];
+        let census = pair_lane_census(&jobs);
+        let mut evidence_a = pair_evidence(&github_a, &velnor_a);
+        evidence_a.github_log = "github-a\n".to_owned();
+        evidence_a.velnor_log = "velnor-a\n".to_owned();
+        evidence_a.github_content = analyze_lane_log(&evidence_a.github_log);
+        evidence_a.velnor_content = analyze_lane_log(&evidence_a.velnor_log);
+        let mut evidence_b = pair_evidence(&github_b, &velnor_b);
+        evidence_b.github_log = "github-b\n".to_owned();
+        evidence_b.velnor_log = "velnor-b\n".to_owned();
+        evidence_b.github_content = analyze_lane_log(&evidence_b.github_log);
+        evidence_b.velnor_content = analyze_lane_log(&evidence_b.velnor_log);
+        let evidence = BTreeMap::from([
+            ((github_a.id, velnor_a.id), evidence_a),
+            ((github_b.id, velnor_b.id), evidence_b),
+        ]);
+
+        let validated = assess_run_evidence(42, &jobs, census, successful_summary(), evidence)
+            .expect("both pair evidence records should validate");
+        let pair_a = &validated.pair_evidence[&(github_a.id, velnor_a.id)];
+        let pair_b = &validated.pair_evidence[&(github_b.id, velnor_b.id)];
+        assert_eq!(pair_a.velnor_log, "velnor-a\n");
+        assert_eq!(pair_b.velnor_log, "velnor-b\n");
+        assert_ne!(pair_a.velnor_log, pair_b.velnor_log);
+    }
+
+    #[test]
+    fn run_evidence_rejects_empty_or_failed_census_and_jobs() {
+        let jobs = vec![named_job(1, "Control / Planning")];
+        let census = pair_lane_census(&jobs);
+        assert!(
+            assess_run_evidence(42, &jobs, census, successful_summary(), BTreeMap::new()).is_err()
+        );
+
+        let (mut jobs, _, evidence) = valid_pair_fixture();
+        jobs[1].conclusion = Some("failure".to_owned());
+        let census = pair_lane_census(&jobs);
+        assert!(assess_run_evidence(42, &jobs, census, successful_summary(), evidence).is_err());
+
+        let (jobs, census, evidence) = valid_pair_fixture();
+        let mut summary = successful_summary();
+        summary.conclusion = Some("failure".to_owned());
+        assert!(assess_run_evidence(42, &jobs, census, summary, evidence).is_err());
+    }
+
+    #[test]
+    fn run_summary_requires_exact_terminal_run_and_head_identity() {
+        let mut summary = successful_summary();
+        assert!(validate_run_summary(&summary, 42).is_ok());
+
+        summary.id = 41;
+        assert!(validate_run_summary(&summary, 42).is_err());
+        summary.id = 42;
+        summary.status = "in_progress".to_owned();
+        assert!(validate_run_summary(&summary, 42).is_err());
+        summary.status = "completed".to_owned();
+        summary.head_sha = "not-a-sha".to_owned();
+        assert!(validate_run_summary(&summary, 42).is_err());
+    }
+
+    #[test]
+    fn run_and_job_identity_are_bound_to_attempt_source_and_repository() {
+        let summary = successful_summary();
+        assert!(validate_run_summary_identity(&summary, "tailrocks/velnor", 42).is_ok());
+
+        let mut job = api_job_fixture();
+        assert!(validate_api_job_identity(&job, "tailrocks/velnor", &summary).is_ok());
+
+        job.run_id = 41;
+        assert!(validate_api_job_identity(&job, "tailrocks/velnor", &summary).is_err());
+        job.run_id = 42;
+        job.run_attempt = 2;
+        assert!(validate_api_job_identity(&job, "tailrocks/velnor", &summary).is_err());
+        job.run_attempt = 1;
+        job.head_sha = "b".repeat(40);
+        assert!(validate_api_job_identity(&job, "tailrocks/velnor", &summary).is_err());
+        job.head_sha = "a".repeat(40);
+        job.repository = Some(ApiRepository {
+            id: Some(999),
+            full_name: Some("other/repository".to_owned()),
+        });
+        assert!(validate_api_job_identity(&job, "tailrocks/velnor", &summary).is_err());
+
+        let mut wrong_run_repository = summary.clone();
+        wrong_run_repository.repository = Some(ApiRepository {
+            id: Some(1_255_367_013),
+            full_name: Some("other/repository".to_owned()),
+        });
+        assert!(
+            validate_run_summary_identity(&wrong_run_repository, "tailrocks/velnor", 42).is_err()
+        );
+        let mut missing_run_repository = summary;
+        missing_run_repository.repository = None;
+        assert!(
+            validate_run_summary_identity(&missing_run_repository, "tailrocks/velnor", 42).is_err()
+        );
+    }
+
+    #[test]
+    fn run_snapshot_must_be_unchanged_across_evidence_calls() {
+        let first = successful_summary();
+        assert!(ensure_run_snapshot_stable(&first, &first).is_ok());
+
+        let mut changed_attempt = first.clone();
+        changed_attempt.run_attempt = 2;
+        assert!(ensure_run_snapshot_stable(&first, &changed_attempt).is_err());
+
+        let mut changed_head = first.clone();
+        changed_head.head_sha = "b".repeat(40);
+        assert!(ensure_run_snapshot_stable(&first, &changed_head).is_err());
+    }
+
+    #[test]
+    fn watch_snapshot_comparison_includes_run_job_artifact_and_payload_identity() {
+        let first = evidence_snapshot_fixture();
+        assert!(evidence_snapshots_stable(
+            std::slice::from_ref(&first),
+            std::slice::from_ref(&first),
+        ));
+
+        let mut changed = first.clone();
+        changed.identity.summary.run_attempt = 2;
+        assert!(!evidence_snapshots_stable(
+            std::slice::from_ref(&first),
+            std::slice::from_ref(&changed),
+        ));
+
+        changed = first.clone();
+        changed.identity.jobs[0].head_sha = "b".repeat(40);
+        assert!(!evidence_snapshots_stable(
+            std::slice::from_ref(&first),
+            std::slice::from_ref(&changed),
+        ));
+
+        changed = first.clone();
+        changed
+            .identity
+            .payload_digests
+            .get_mut("pair/7/8/github-html")
+            .unwrap()
+            .clone_from(&sha256_digest(b"changed github html"));
+        assert!(!evidence_snapshots_stable(
+            std::slice::from_ref(&first),
+            std::slice::from_ref(&changed),
+        ));
+
+        changed = first.clone();
+        changed
+            .identity
+            .artifacts
+            .get_mut("job-log-7")
+            .unwrap()
+            .digest = Some(format!("sha256:{}", "b".repeat(64)));
+        assert!(!evidence_snapshots_stable(
+            std::slice::from_ref(&first),
+            std::slice::from_ref(&changed),
+        ));
+
+        changed = first.clone();
+        changed
+            .identity
+            .payload_digests
+            .get_mut("pair/7/8/github-log")
+            .unwrap()
+            .clone_from(&sha256_digest(b"changed github log"));
+        assert!(!evidence_snapshots_stable(
+            std::slice::from_ref(&first),
+            std::slice::from_ref(&changed),
+        ));
+    }
+
+    #[test]
+    fn standalone_identity_recheck_detects_run_job_and_artifact_mutations() {
+        let first = evidence_snapshot_fixture().identity;
+        assert!(ensure_evidence_identity_stable(&first, &first).is_ok());
+
+        let mut changed = first.clone();
+        changed.summary.run_attempt = 2;
+        assert!(ensure_evidence_identity_stable(&first, &changed).is_err());
+
+        let mut changed = first.clone();
+        changed.jobs[0].name = "Rust · changed / GitHub".to_owned();
+        assert!(ensure_evidence_identity_stable(&first, &changed).is_err());
+
+        let mut changed = first.clone();
+        changed
+            .artifacts
+            .get_mut("job-log-7")
+            .unwrap()
+            .archive_download_url = Some(
+            "https://api.github.com/repos/tailrocks/velnor/actions/artifacts/999/zip".to_owned(),
+        );
+        assert!(ensure_evidence_identity_stable(&first, &changed).is_err());
+    }
+
+    #[test]
+    fn canonical_job_urls_reject_redirects_and_unsafe_origins() {
+        assert!(validate_job_html_url(
+            "https://github.com/tailrocks/velnor/actions/runs/42/job/7",
+            "tailrocks/velnor",
+            42,
+            7,
+        )
+        .is_ok());
+        for url in [
+            "http://github.com/tailrocks/velnor/actions/runs/42/job/7",
+            "https://evil.example/tailrocks/velnor/actions/runs/42/job/7",
+            "https://github.com/tailrocks/velnor/actions/runs/41/job/7",
+            "https://github.com/tailrocks/velnor/actions/runs/42/job/7?redirect=evil",
+            "https://user:secret@github.com/tailrocks/velnor/actions/runs/42/job/7",
+        ] {
+            assert!(
+                validate_job_html_url(url, "tailrocks/velnor", 42, 7).is_err(),
+                "unsafe or noncanonical URL accepted: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_metadata_binds_available_attempt_source_and_digest_identity() {
+        let summary = successful_summary();
+        let artifact_fixture = serde_json::json!({
+            "id": 101,
+            "name": "job-log-9001",
+            "digest": format!("sha256:{}", "a".repeat(64)),
+            "expired": false,
+            "archive_download_url": "https://api.github.com/repos/tailrocks/velnor/actions/artifacts/101/zip",
+            "workflow_run": {
+                "id": 42,
+                "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repository_id": 1255367013
+            }
+        });
+        let artifact: ArtifactRef = serde_json::from_value(artifact_fixture)
+            .expect("deserialize artifact fixture without run_attempt");
+        assert!(validate_artifact_metadata(&artifact, "tailrocks/velnor", &summary).is_ok());
+
+        let mut supplied_mismatch = artifact.clone();
+        supplied_mismatch.workflow_run.as_mut().unwrap().run_attempt = Some(2);
+        assert!(
+            validate_artifact_metadata(&supplied_mismatch, "tailrocks/velnor", &summary).is_err()
+        );
+
+        let mut foreign_source = artifact.clone();
+        foreign_source.workflow_run.as_mut().unwrap().repository_id = Some(999);
+        assert!(validate_artifact_metadata(&foreign_source, "tailrocks/velnor", &summary).is_err());
+
+        let mut malformed_digest = artifact;
+        malformed_digest.digest = Some("sha256:not-a-digest".to_owned());
+        assert!(
+            validate_artifact_metadata(&malformed_digest, "tailrocks/velnor", &summary).is_err()
+        );
+    }
+
+    #[test]
+    fn job_log_archive_requires_one_exact_utf8_regular_file() {
+        let valid = zip_fixture(&[("job-log.txt", b"log\n")]);
+        assert_eq!(
+            decode_job_log_archive(&valid, "job-log-7").unwrap(),
+            "log\n"
+        );
+
+        let extra = zip_fixture(&[("job-log.txt", b"log\n"), ("extra.txt", b"x")]);
+        assert!(decode_job_log_archive(&extra, "job-log-7").is_err());
+
+        let wrong_name = zip_fixture(&[("other.txt", b"log\n")]);
+        assert!(decode_job_log_archive(&wrong_name, "job-log-7").is_err());
+
+        let invalid_utf8 = zip_fixture(&[("job-log.txt", &[0xff, 0xfe])]);
+        assert!(decode_job_log_archive(&invalid_utf8, "job-log-7").is_err());
+
+        let directory = {
+            let cursor = std::io::Cursor::new(Vec::new());
+            let mut archive = zip::ZipWriter::new(cursor);
+            archive
+                .add_directory("job-log.txt", zip::write::FileOptions::<()>::default())
+                .unwrap();
+            archive.finish().unwrap().into_inner()
+        };
+        assert!(decode_job_log_archive(&directory, "job-log-7").is_err());
+    }
+
+    #[test]
+    fn run_evidence_rejects_partial_html_and_duplicate_step_numbers() {
+        let (mut jobs, _, evidence) = valid_pair_fixture();
+        jobs[0].steps.push(step(2, "Run security", "success"));
+        let census = pair_lane_census(&jobs);
+        let error = assess_run_evidence(42, &jobs, census, successful_summary(), evidence)
+            .expect_err("partial HTML must not pass");
+        assert!(
+            error.to_string().contains("missing executed step"),
+            "{error:#}"
+        );
+
+        let (mut jobs, _, evidence) = valid_pair_fixture();
+        jobs[0].steps.push(step(1, "Duplicate", "success"));
+        let census = pair_lane_census(&jobs);
+        let error = assess_run_evidence(42, &jobs, census, successful_summary(), evidence)
+            .expect_err("duplicate API step numbers must not pass");
+        assert!(
+            error.to_string().contains("repeats step number"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn artifact_census_rejects_missing_duplicate_and_truncated_pages() {
+        let complete = vec![
+            Ok(ArtifactsResponse {
+                total_count: 101,
+                artifacts: (1..=100)
+                    .map(|id| artifact_ref(id, &format!("unrelated-{id}")))
+                    .collect(),
+            }),
+            Ok(ArtifactsResponse {
+                total_count: 101,
+                artifacts: vec![artifact_ref(101, "job-log-9001")],
+            }),
+        ];
+        let collected = collect_job_log_artifacts(complete, &[9001]).unwrap();
+        assert_eq!(collected["job-log-9001"].id, 101);
+
+        let truncated = vec![Ok(ArtifactsResponse {
+            total_count: 101,
+            artifacts: (1..=100)
+                .map(|id| artifact_ref(id, &format!("unrelated-{id}")))
+                .collect(),
+        })];
+        assert!(collect_job_log_artifacts(truncated, &[9001]).is_err());
+
+        let duplicate = vec![Ok(ArtifactsResponse {
+            total_count: 2,
+            artifacts: vec![
+                artifact_ref(1, "job-log-9001"),
+                artifact_ref(2, "job-log-9001"),
+            ],
+        })];
+        assert!(collect_job_log_artifacts(duplicate, &[9001]).is_err());
+
+        let absent = vec![Ok(ArtifactsResponse {
+            total_count: 1,
+            artifacts: vec![artifact_ref(1, "job-log-9002")],
+        })];
+        assert!(collect_job_log_artifacts(absent, &[9001]).is_err());
     }
 
     #[test]
@@ -1862,11 +3962,14 @@ mod tests {
             stream.write_all(body).unwrap();
         });
 
-        let steps =
-            fetch_job_html_steps_with_token(42, &format!("http://{address}/job"), "fixture-token")
-                .unwrap();
+        let steps = fetch_job_html_steps_with_token_http_fixture(
+            42,
+            &format!("http://{address}/job"),
+            "fixture-token",
+        )
+        .unwrap();
         server.join().unwrap();
-        assert_eq!(steps.keys().copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(steps.steps.keys().copied().collect::<Vec<_>>(), vec![1]);
     }
 
     #[test]
@@ -1880,8 +3983,8 @@ mod tests {
         let (section, worse) = compare_pair(
             &github,
             &velnor,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
+            &html_for_steps(&[1]),
+            &html_for_steps(&[1]),
             LaneLogStats::default(),
             LaneLogStats::default(),
         )
@@ -2077,7 +4180,7 @@ mod tests {
   <check-step data-name="Skipped" data-number="3" data-conclusion="skipped" data-log-url="">
   </check-step>
 </check-steps>"#;
-        let steps = parse_check_steps(html);
+        let steps = parse_check_steps(html).unwrap();
         assert_eq!(steps.len(), 2);
         assert!(steps[&1].expandable);
         assert_eq!(
@@ -2085,6 +4188,28 @@ mod tests {
             "e7cf94ab-32aa-4712-be84-b4521dcbad16"
         );
         assert!(!steps[&3].expandable);
+    }
+
+    #[test]
+    fn parse_check_steps_rejects_malformed_zero_and_duplicate_numbers() {
+        assert!(parse_check_steps(
+            r#"<check-steps><check-step data-number="nope"></check-step></check-steps>"#
+        )
+        .is_err());
+        assert!(parse_check_steps(
+            r#"<check-steps><check-step data-number="0"></check-step></check-steps>"#
+        )
+        .is_err());
+        assert!(parse_check_steps(
+            r#"<check-steps><check-step data-number="1"></check-step><check-step data-number="1"></check-step></check-steps>"#
+        )
+        .is_err());
+        assert!(parse_check_steps(r#"<check-steps><check-step data-number="1""#).is_err());
+        assert!(parse_check_steps(
+            r#"<check-steps><check-stepper data-number="1"></check-stepper></check-steps>"#
+        )
+        .unwrap()
+        .is_empty());
     }
 
     #[test]
@@ -2161,6 +4286,16 @@ mod tests {
         );
         assert!(worse, "{verdict}");
         assert!(verdict.contains("not expandable"));
+
+        // Missing HTML is evidence loss, never an equal empty comparison.
+        let (verdict, worse) = step_verdict(
+            &step(2, "Run actions/checkout@v6", "success"),
+            &step(2, "Run actions/checkout@v6", "success"),
+            &html_with(2, true),
+            &BTreeMap::new(),
+        );
+        assert!(worse, "{verdict}");
+        assert!(verdict.contains("missing Velnor HTML"));
 
         // Display-name divergence (e.g. unevaluated `${{ }}` or YAML id).
         let (verdict, worse) = step_verdict(
@@ -2244,7 +4379,7 @@ mod tests {
     }
 
     #[test]
-    fn job_duration_skips_incomplete_and_malformed_steps() {
+    fn job_duration_rejects_incomplete_and_malformed_executed_steps() {
         let mut incomplete = step(1, "incomplete", "success");
         incomplete.completed_at = None;
         let mut malformed = step(2, "malformed", "success");
@@ -2255,7 +4390,7 @@ mod tests {
 
         assert_eq!(
             job_duration_seconds(&job(vec![incomplete, malformed, valid])),
-            Some(7)
+            None
         );
     }
 
@@ -2270,6 +4405,56 @@ mod tests {
             job_duration_seconds(&job(vec![incomplete, malformed])),
             None
         );
+    }
+
+    #[test]
+    fn timing_rejects_reversed_executed_step_ranges() {
+        let mut reversed = step(1, "reversed", "success");
+        reversed.started_at = Some("2026-06-11T07:00:05Z".to_owned());
+        reversed.completed_at = Some("2026-06-11T07:00:04Z".to_owned());
+        assert_eq!(step_duration_seconds(&reversed), None);
+        assert_eq!(job_duration_seconds(&job(vec![reversed])), None);
+    }
+
+    #[test]
+    fn timing_rejects_out_of_order_and_overlapping_executed_steps() {
+        let mut first = step(1, "first", "success");
+        first.started_at = Some("2026-06-11T07:00:10Z".to_owned());
+        first.completed_at = Some("2026-06-11T07:00:10Z".to_owned());
+        let mut out_of_order = step(2, "out of order", "success");
+        out_of_order.started_at = Some("2026-06-11T07:00:09Z".to_owned());
+        out_of_order.completed_at = Some("2026-06-11T07:00:09Z".to_owned());
+        assert_eq!(
+            job_duration_seconds(&job(vec![first.clone(), out_of_order])),
+            None
+        );
+
+        let mut overlapping = step(2, "overlapping", "success");
+        overlapping.started_at = Some("2026-06-11T07:00:09Z".to_owned());
+        overlapping.completed_at = Some("2026-06-11T07:00:11Z".to_owned());
+        assert_eq!(job_duration_seconds(&job(vec![first, overlapping])), None);
+    }
+
+    #[test]
+    fn required_timing_validation_rejects_incomplete_pair_evidence() {
+        let (mut jobs, _, _) = valid_pair_fixture();
+        jobs[1].steps[0].completed_at = None;
+        let census = pair_lane_census(&jobs);
+        let error = validate_complete_timing(&census, 42).expect_err("timing must be complete");
+        assert!(error.to_string().contains("Velnor job 2"), "{error:#}");
+    }
+
+    #[test]
+    fn job_duration_ignores_only_skipped_steps_but_requires_executed_timing() {
+        let mut skipped = step(1, "skipped", "skipped");
+        skipped.status = "skipped".to_owned();
+        skipped.started_at = None;
+        skipped.completed_at = None;
+        assert_eq!(
+            job_duration_seconds(&job(vec![skipped.clone(), step(2, "executed", "success")])),
+            Some(5)
+        );
+        assert_eq!(job_duration_seconds(&job(vec![skipped])), None);
     }
 
     #[test]
@@ -2294,6 +4479,8 @@ mod tests {
             run_id: 42,
             baseline_runs: 1,
             parity_worse_rows: worse_rows,
+            timing_complete: true,
+            timing_issues: Vec::new(),
             jobs: BTreeMap::from([(
                 "compat (app-a".to_string(),
                 JobClassStats {
@@ -2354,6 +4541,58 @@ mod tests {
         let verdict = is_regression(&baseline, &current, 0.0);
 
         assert!(!verdict.regression, "{:?}", verdict.reasons);
+        assert!(verdict.not_proven, "{:?}", verdict.reasons);
+    }
+
+    #[test]
+    fn incomplete_aggregate_timing_is_structured_as_not_proven() {
+        let baseline = lane_stats(100.0, 100.0, 0);
+        let mut current = lane_stats(100.0, 100.0, 0);
+        current.timing_complete = false;
+        current
+            .timing_issues
+            .push("pair 1/2 has incomplete timing evidence".to_owned());
+
+        let verdict = is_regression(&baseline, &current, 0.0);
+
+        assert!(!verdict.regression, "{:?}", verdict.reasons);
+        assert!(verdict.not_proven, "{:?}", verdict.reasons);
+        let report = regression_report(
+            "tailrocks/velnor",
+            "compat.yml",
+            &baseline,
+            &current,
+            &verdict,
+        )
+        .unwrap();
+        assert!(report.contains("**NOT PROVEN**"));
+        assert!(report.contains("pair 1/2"));
+    }
+
+    #[test]
+    fn is_regression_rejects_workload_set_drift_as_not_proven() {
+        let mut baseline = lane_stats(100.0, 100.0, 0);
+        baseline.jobs.insert(
+            "compat (app-b".to_owned(),
+            JobClassStats {
+                github_seconds: 80.0,
+                velnor_seconds: 80.0,
+            },
+        );
+        let current = lane_stats(100.0, 100.0, 0);
+
+        let verdict = is_regression(&baseline, &current, 0.0);
+
+        assert!(!verdict.regression, "{:?}", verdict.reasons);
+        assert!(verdict.not_proven, "{:?}", verdict.reasons);
+        assert!(
+            verdict
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("workload set drift")),
+            "{:?}",
+            verdict.reasons
+        );
     }
 
     #[test]
@@ -2364,13 +4603,10 @@ mod tests {
     }
 
     #[test]
-    fn baseline_from_samples_accepts_partial_timing_coverage() {
+    fn baseline_from_samples_rejects_partial_timing_coverage() {
         let samples = vec![lane_stats(100.0, 110.0, 0), LaneStats::default()];
 
-        let baseline = baseline_from_samples(&samples).expect("baseline should be usable");
-
-        assert_eq!(baseline.baseline_runs, 2);
-        assert_eq!(baseline.jobs.len(), 1);
+        assert!(baseline_from_samples(&samples).is_none());
     }
 
     #[test]

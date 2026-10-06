@@ -227,6 +227,73 @@ pub(crate) enum Platform {
     MacosArm64,
 }
 
+/// Native platform required to execute a candidate Homebrew formula. This is
+/// deliberately separate from [`Platform`]: ordinary verification keeps its
+/// existing platform universe, while Homebrew installation checks need all
+/// four supported native hosts.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum HomebrewPlatform {
+    MacosArm64,
+    MacosX64,
+    LinuxX64,
+    LinuxArm64,
+}
+
+impl HomebrewPlatform {
+    pub(crate) const ALL: [Self; 4] = [
+        Self::MacosArm64,
+        Self::MacosX64,
+        Self::LinuxX64,
+        Self::LinuxArm64,
+    ];
+
+    #[must_use]
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::MacosArm64 => "macos-arm64",
+            Self::MacosX64 => "macos-x64",
+            Self::LinuxX64 => "linux-x64",
+            Self::LinuxArm64 => "linux-arm64",
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn runner(self) -> &'static str {
+        match self {
+            Self::MacosArm64 => "macos-26",
+            Self::MacosX64 => "macos-26-intel",
+            Self::LinuxX64 => "ubuntu-24.04",
+            Self::LinuxArm64 => "ubuntu-24.04-arm",
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn runner_os(self) -> &'static str {
+        match self {
+            Self::MacosArm64 | Self::MacosX64 => "macOS",
+            Self::LinuxX64 | Self::LinuxArm64 => "Linux",
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn runner_arch(self) -> &'static str {
+        match self {
+            Self::MacosArm64 | Self::LinuxArm64 => "ARM64",
+            Self::MacosX64 | Self::LinuxX64 => "X64",
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn machine(self) -> &'static str {
+        match self {
+            Self::MacosArm64 => "arm64",
+            Self::MacosX64 | Self::LinuxX64 => "x86_64",
+            Self::LinuxArm64 => "aarch64",
+        }
+    }
+}
+
 impl Platform {
     #[must_use]
     #[allow(
@@ -495,6 +562,38 @@ pub(crate) fn control_plane_provider(universe: &ProviderSet) -> ProviderId {
 #[must_use]
 pub(crate) fn is_github_owned_label(label: &str) -> bool {
     label.starts_with("ubuntu-") || label.starts_with("macos-") || label.starts_with("windows-")
+}
+
+/// A documented GitHub-hosted image label: the strict audit-side counterpart
+/// of [`is_github_owned_label`]. Scan-time selector validation stays
+/// prefix-lenient so configured labels flow through, but the policy audit
+/// fails closed: only documented images count as hosted, so an undeclared
+/// self-hosted label such as `ubuntu-private` cannot pose as hosted.
+#[must_use]
+pub(crate) fn is_documented_github_hosted_image(label: &str) -> bool {
+    matches!(
+        label,
+        "ubuntu-latest"
+            | "ubuntu-26.04"
+            | "ubuntu-26.04-arm"
+            | "ubuntu-24.04"
+            | "ubuntu-24.04-arm"
+            | "ubuntu-22.04"
+            | "ubuntu-22.04-arm"
+            | "macos-latest"
+            | "macos-latest-large"
+            | "macos-26"
+            | "macos-15-large"
+            | "macos-15"
+            | "macos-14-large"
+            | "macos-14"
+            | "macos-13-large"
+            | "macos-13"
+            | "windows-latest"
+            | "windows-2025"
+            | "windows-2022"
+            | "windows-11"
+    )
 }
 
 /// Stable plan digest over sorted unit IDs × sorted providers × exclusion
@@ -783,6 +882,7 @@ pub(crate) struct RunIdentity {
     pub(crate) run_attempt: String,
     pub(crate) plan_digest: String,
     pub(crate) command_digests: BTreeMap<String, String>,
+    pub(crate) platforms: BTreeMap<String, Platform>,
 }
 
 impl RunIdentity {

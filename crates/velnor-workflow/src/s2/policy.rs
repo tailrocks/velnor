@@ -3214,29 +3214,6 @@ fn canonical_api_step_findings(
         .as_ref()
         .and_then(config::RepoGenerationConfig::repository)
         .unwrap_or_default();
-    let mut declared_ruleset_contexts = generation
-        .as_ref()
-        .map(|generation| generation.ruleset_required_status_checks().to_vec())
-        .filter(|contexts| !contexts.is_empty())
-        .unwrap_or_else(|| {
-            if generation
-                .as_ref()
-                .and_then(config::RepoGenerationConfig::ci_required)
-                .unwrap_or(true)
-            {
-                vec!["ci-required".to_owned()]
-            } else {
-                Vec::new()
-            }
-        });
-    if let Some(generation) = &generation {
-        declared_ruleset_contexts
-            .extend(generation.ruleset_external_status_checks().iter().cloned());
-    }
-    declared_ruleset_contexts.push("Policy".to_owned());
-    declared_ruleset_contexts.sort();
-    declared_ruleset_contexts.dedup();
-    let declared_ruleset_contexts = declared_ruleset_contexts.join(",");
     let hosted = static_local_provider(job, velnor_policy).is_none();
     let expected = if hosted {
         let revision = match entrypoint_policy_revision(root) {
@@ -3261,6 +3238,27 @@ fn canonical_api_step_findings(
             "main"
         } else {
             velnor_policy.default_branch.as_str()
+        };
+        let declared_ruleset_contexts = {
+            let mut contexts: BTreeSet<String> = generation
+                .as_ref()
+                .map(|generation| generation.ruleset_required_status_checks().to_vec())
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            if contexts.is_empty()
+                && generation
+                    .as_ref()
+                    .and_then(config::RepoGenerationConfig::ci_required)
+                    .unwrap_or(true)
+            {
+                contexts.insert(crate::s2::reuse::REQUIRED_CHECK.to_owned());
+            }
+            if let Some(generation) = generation.as_ref() {
+                contexts.extend(generation.ruleset_external_status_checks().iter().cloned());
+            }
+            contexts.insert("Policy".to_owned());
+            contexts.into_iter().collect::<Vec<_>>().join(",")
         };
         let rendered = super::policy_job(&super::PolicyJobSpec {
             candidate_artifact_wiring: true,
@@ -4127,13 +4125,6 @@ fn static_local_provider(job: &Mapping, velnor_policy: &VelnorPolicyContract) ->
     }
     let provider = velnor_policy.provider_for_labels(&labels)?;
     VelnorPolicyContract::is_local_provider(provider).then(|| provider.to_owned())
-}
-
-/// A GitHub-owned execution label: inherently hosted, never a trust fact.
-/// Selectors for local capacity are caller-managed and never carry these
-/// prefixes.
-fn is_github_owned_label(label: &str) -> bool {
-    label.starts_with("ubuntu-") || label.starts_with("macos-") || label.starts_with("windows-")
 }
 
 fn has_safe_runner_gate(
@@ -5091,7 +5082,7 @@ fn is_approved_dynamic_runner(label: &str) -> bool {
 /// equals a declared selector's whole set is that provider; anything else
 /// static is foreign. Label substrings are never consulted.
 fn classify_static_label(label: &str, velnor_policy: &VelnorPolicyContract) -> RunnerAnalysis {
-    if is_github_owned_label(label) {
+    if super::provider::is_documented_github_hosted_image(label) {
         return RunnerAnalysis::default();
     }
     match velnor_policy.provider_for_labels(&[label]) {

@@ -1,11 +1,8 @@
 //! Reconciliation (§5.1 step 9 + startup gate).
 //!
-//! * [`startup`]: reconcile-before-advertise after (re)start. Stale-epoch
-//!   grants reset, the ledger reconciles against the attested live set
-//!   (native rows pass through untouched — this adapter never judges the
-//!   other lane — plus scale-set demand in permit states), and crash
-//!   orphaned `intended` batches move to `uncertain`. Only then may the
-//!   listener advertise capacity.
+//! * [`startup`]: demand recovery after the daemon's global exact-token
+//!   reconciliation. Stale-epoch grants reset and crash-orphaned `intended`
+//!   batches move to `uncertain`. Only then may the listener advertise.
 //! * [`idle_poll`]: bounded uncertain resolution on 202/None polls. Members
 //!   observed `acquired`/`terminal` resolve their batch; the oldest batch
 //!   still uncertain past [`UNCERTAIN_REACQUIRE_AFTER`] is re-acquired once
@@ -16,15 +13,14 @@
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
-use crate::scaleset::capacity::{AcquireOutcome, CapacityLedger, LedgerLane, LedgerPermitState};
+use crate::scaleset::capacity::{CapacityLedger, LedgerLane, LedgerPermitState};
 use crate::scaleset::converge::WorkerLane;
 use crate::scaleset::demand::{DemandState, DemandStore};
 use crate::scaleset::intents::{permit_holder, reconcile_returned_ids, AcquireBatchStore};
 use crate::scaleset::metrics::Metrics;
 use crate::scaleset::scale::QueueSession;
-use crate::scaleset::shared_ledger::to_control_state;
 
 /// How long an uncertain batch waits for `JobAssigned`/`JobCompleted`
 /// observations before idle reconcile re-acquires it.
@@ -46,22 +42,6 @@ pub(crate) const PERMIT_STATES: [DemandState; 7] = [
     DemandState::ProvisionIntent,
 ];
 
-pub(crate) fn permit_state_for_demand(state: DemandState) -> LedgerPermitState {
-    match state {
-        DemandState::Granted => LedgerPermitState::Reserved,
-        DemandState::AcquireIntent | DemandState::Acquired | DemandState::CanceledAcquired => {
-            LedgerPermitState::Acquiring
-        }
-        DemandState::Uncertain | DemandState::CanceledPending => LedgerPermitState::Uncertain,
-        DemandState::ProvisionIntent => LedgerPermitState::Provisioning,
-        DemandState::Observed
-        | DemandState::Eligible
-        | DemandState::Declined
-        | DemandState::CanceledDone
-        | DemandState::Terminal => LedgerPermitState::Uncertain,
-    }
-}
-
 /// What [`startup`] did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StartupReport {
@@ -76,22 +56,144 @@ pub struct StartupReport {
     pub batches_orphaned: u64,
 }
 
-/// Daemon-startup attestation input: every scale-set demand row in a
-/// permit state, across all sets, as `(holder, control permit state)`.
-/// The daemon feeds this plus its native markers into the ONE startup
-/// reconcile so neither lane's live rows go uncertain spuriously.
-pub(crate) fn attest_demand_holders(
-    state_db: &Path,
-) -> Result<Vec<(String, velnor_control::permit_ledger::PermitState)>> {
+/// Daemon-startup attestation input: token-bearing scale-set demand rows
+/// across all sets as `(holder, attempt_token)`. Tokenless legacy rows are
+/// omitted and remain uncertain until serialized worker recovery proves
+/// ownership.
+pub(crate) fn attest_demand_holders(state_db: &Path) -> Result<Vec<(String, String)>> {
     let demand = DemandStore::open(state_db)?;
     let mut attested = Vec::new();
-    for (scale_set_id, request_id, state) in demand.list_in_states_all(&PERMIT_STATES)? {
-        attested.push((
-            permit_holder(scale_set_id, request_id),
-            to_control_state(permit_state_for_demand(state)),
-        ));
+    for (scale_set_id, request_id, _) in demand.list_in_states_all(&PERMIT_STATES)? {
+        let row = demand
+            .get(request_id)?
+            .with_context(|| format!("active demand {request_id} vanished during attestation"))?;
+        if let Some(attempt_token) = row
+            .permit_attempt_token
+            .as_deref()
+            .filter(|token| !token.is_empty())
+        {
+            attested.push((
+                permit_holder(scale_set_id, request_id),
+                attempt_token.to_owned(),
+            ));
+        }
     }
     Ok(attested)
+}
+
+fn required_attempt_token(row: &crate::scaleset::demand::Demand) -> Result<&str> {
+    row.permit_attempt_token
+        .as_deref()
+        .filter(|token| !token.is_empty())
+        .with_context(|| {
+            format!(
+                "active demand {} has no permit attempt token",
+                row.request_id
+            )
+        })
+}
+
+fn batch_attempt_token(
+    batch: &crate::scaleset::intents::AcquireBatch,
+    request_id: i64,
+) -> Result<&str> {
+    let tokens = batch
+        .attempt_tokens
+        .as_ref()
+        .context("acquire batch has no attempt tokens; recovery fails closed")?;
+    if tokens.len() != batch.request_ids.len() {
+        anyhow::bail!(
+            "acquire batch {:?} has misaligned attempt tokens",
+            batch.batch_id
+        );
+    }
+    let index = batch
+        .request_ids
+        .iter()
+        .position(|member| *member == request_id)
+        .with_context(|| format!("request {request_id} is not in batch {:?}", batch.batch_id))?;
+    let token = tokens[index]
+        .as_deref()
+        .context("acquire batch member has no owner token")?;
+    if token.is_empty() {
+        anyhow::bail!(
+            "acquire batch {:?} has an empty attempt token",
+            batch.batch_id
+        );
+    }
+    Ok(token)
+}
+
+fn require_dead_holder<L: CapacityLedger>(
+    ledger: &L,
+    holder: &str,
+    _generation: u64,
+) -> Result<()> {
+    let record = ledger
+        .holders()
+        .map_err(|error| anyhow::anyhow!("list permit holders: {error}"))?
+        .into_iter()
+        .find(|record| record.holder == holder)
+        .with_context(|| format!("permit holder {holder:?} disappeared during recovery"))?;
+    if record.lane != LedgerLane::ScaleSet {
+        anyhow::bail!("permit {holder:?} belongs to another lane");
+    }
+    let pid = record
+        .pid
+        .context("Scale Set permit has no owner pid; recovery fails closed")?;
+    if pid == std::process::id() || crate::permit_guard::pid_alive(pid) {
+        anyhow::bail!("Scale Set permit {holder:?} still has a live owner pid {pid}");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ReleaseKind {
+    Eligible,
+    Canceled,
+    Terminal,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn owned_release<L: CapacityLedger>(
+    ledger: &mut L,
+    demand: &mut DemandStore,
+    scale_set_id: i32,
+    request_id: i64,
+    holder: &str,
+    attempt_token: &str,
+    kind: ReleaseKind,
+    next_demand_state: DemandState,
+) -> Result<bool> {
+    let ledger_demand_state = match kind {
+        ReleaseKind::Eligible => velnor_control::permit_ledger::DemandState::Eligible,
+        ReleaseKind::Canceled => velnor_control::permit_ledger::DemandState::Cancelled,
+        ReleaseKind::Terminal => velnor_control::permit_ledger::DemandState::Terminal,
+    };
+    demand.stage_attempt_release(
+        holder,
+        scale_set_id,
+        request_id,
+        attempt_token,
+        ledger_demand_state,
+        Some(next_demand_state),
+        None,
+    )?;
+    let released = match ledger
+        .release_staged(holder, attempt_token, ledger_demand_state)
+        .map_err(|error| anyhow::anyhow!("release permit {holder:?}: {error}"))?
+    {
+        velnor_control::permit_ledger::OwnedReleaseOutcome::Released => true,
+        velnor_control::permit_ledger::OwnedReleaseOutcome::AlreadyAbsent => false,
+        velnor_control::permit_ledger::OwnedReleaseOutcome::StaleAttempt => {
+            anyhow::bail!("permit {holder:?} belongs to a different attempt token")
+        }
+    };
+    let generation = ledger
+        .generation()
+        .map_err(|error| anyhow::anyhow!("read permit generation after release: {error}"))?;
+    demand.finish_attempt_release(holder, generation)?;
+    Ok(released)
 }
 
 /// Reconcile-before-advertise: run once at adapter start (and after every
@@ -107,10 +209,9 @@ pub fn startup<L: CapacityLedger>(
         .generation()
         .map_err(|error| anyhow::anyhow!("read ledger generation: {error}"))?;
 
-    // An unbatched acquire intent cannot have crossed the network boundary:
-    // both the previous row-first writer and the current batch-first writer
-    // persist the acquire batch before calling `acquirejobs`. Return these
-    // crash orphans to eligibility before ledger attestation.
+    // An unbatched acquire intent cannot have crossed the network boundary.
+    // Its captured attempt can return to eligibility only after serialized
+    // startup proves the previous daemon pid dead. No holder-only fallback.
     let mut unbatched_acquire_intents_recovered = 0;
     for (request_id, state) in demand.list_in_states(
         scale_set_id,
@@ -118,12 +219,37 @@ pub fn startup<L: CapacityLedger>(
     )? {
         if !batches.contains_request(scale_set_id, request_id)? {
             let holder = permit_holder(scale_set_id, request_id);
+            let row = demand
+                .get(request_id)?
+                .with_context(|| format!("unbatched demand {request_id} vanished"))?;
+            let attempt_token = required_attempt_token(&row)?;
+            require_dead_holder(ledger, &holder, generation)?;
             if state == DemandState::CanceledPending {
-                demand.set_state(request_id, DemandState::CanceledDone, None, generation)?;
-                ledger.release_cancelled(&holder)?;
+                if !owned_release(
+                    ledger,
+                    demand,
+                    scale_set_id,
+                    request_id,
+                    &holder,
+                    attempt_token,
+                    ReleaseKind::Canceled,
+                    DemandState::CanceledDone,
+                )? {
+                    anyhow::bail!("unbatched canceled permit {holder:?} no longer exists");
+                }
             } else {
-                demand.set_state(request_id, DemandState::Eligible, None, generation)?;
-                ledger.release_to_eligible(&holder)?;
+                if !owned_release(
+                    ledger,
+                    demand,
+                    scale_set_id,
+                    request_id,
+                    &holder,
+                    attempt_token,
+                    ReleaseKind::Eligible,
+                    DemandState::Eligible,
+                )? {
+                    anyhow::bail!("unbatched permit {holder:?} no longer exists");
+                }
             }
             unbatched_acquire_intents_recovered += 1;
         }
@@ -135,58 +261,157 @@ pub fn startup<L: CapacityLedger>(
     let open_batches = batches.open_batches(scale_set_id, usize::MAX)?;
     let mut batches_orphaned = 0u64;
     for batch in &open_batches {
+        let tokens = batch
+            .attempt_tokens
+            .as_ref()
+            .context("open acquire batch has no attempt tokens; recovery fails closed")?;
+        if tokens.len() != batch.request_ids.len() {
+            anyhow::bail!(
+                "open acquire batch {:?} has misaligned attempt tokens",
+                batch.batch_id
+            );
+        }
+        for (request_id, batch_token) in batch.request_ids.iter().zip(tokens) {
+            let row = demand
+                .get(*request_id)?
+                .with_context(|| format!("batch demand {request_id} vanished"))?;
+            let holder = permit_holder(batch.scale_set_id, *request_id);
+            let state = ledger.holder_state(&holder)?;
+            match (
+                batch_token.as_deref(),
+                row.permit_attempt_token.as_deref(),
+                state,
+            ) {
+                (Some(batch_token), Some(demand_token), Some(_))
+                    if batch_token == demand_token
+                        && ledger.is_current_attempt(&holder, batch_token)? => {}
+                (Some(batch_token), Some(demand_token), None)
+                    if batch_token == demand_token && !row.state.holds_permit() => {}
+                (None, None, None) if !row.state.holds_permit() => {}
+                (Some(_), Some(_), Some(_)) => {
+                    anyhow::bail!("open acquire batch member {holder:?} belongs to another attempt")
+                }
+                (Some(_), Some(_), None) | (None, None, Some(_)) => {
+                    anyhow::bail!("open acquire batch member {holder:?} has no matching permit")
+                }
+                _ => {
+                    anyhow::bail!(
+                        "open acquire batch and demand attempt tokens disagree for request {request_id}"
+                    )
+                }
+            }
+        }
         if batch.state == crate::scaleset::intents::BatchState::Intended {
             batches.resolve(&batch.batch_id, true)?;
-            for request_id in &batch.request_ids {
+            for (request_id, batch_token) in batch.request_ids.iter().zip(tokens) {
                 if let Some(row) = demand.get(*request_id)?
                     && matches!(row.state, DemandState::Granted | DemandState::AcquireIntent)
                 {
-                    demand.set_state(*request_id, DemandState::Uncertain, None, generation)?;
+                    demand.set_state_owned(
+                        *request_id,
+                        DemandState::Uncertain,
+                        None,
+                        generation,
+                        batch_token
+                            .as_deref()
+                            .context("active batch member has no attempt token")?,
+                    )?;
                 }
             }
             batches_orphaned += 1;
         }
     }
 
+    // A grant can be persisted before its permit batch. If reserve committed
+    // in the prior process, release that exact attempt after proving the
+    // old owner dead before resetting its stale local grant.
+    for (request_id, _) in demand.list_in_states(scale_set_id, &[DemandState::Granted])? {
+        let row = demand
+            .get(request_id)?
+            .with_context(|| format!("granted demand {request_id} vanished"))?;
+        if row.generation == generation {
+            continue;
+        }
+        let holder = permit_holder(scale_set_id, request_id);
+        if ledger.holder_state(&holder)?.is_some() {
+            let attempt_token = required_attempt_token(&row)?;
+            if !ledger.is_current_attempt(&holder, attempt_token)? {
+                anyhow::bail!("stale grant permit {holder:?} belongs to another attempt");
+            }
+            require_dead_holder(ledger, &holder, generation)?;
+            if !owned_release(
+                ledger,
+                demand,
+                scale_set_id,
+                request_id,
+                &holder,
+                attempt_token,
+                ReleaseKind::Eligible,
+                DemandState::Eligible,
+            )? {
+                anyhow::bail!("stale grant permit {holder:?} changed owner during recovery");
+            }
+        }
+    }
+
     let stale_grants_reset = demand.reset_stale_grants(scale_set_id, generation)?;
     metrics.add_stale_grants_reset(stale_grants_reset);
 
-    // Attested live set: every recorded native holder passes through as-is
-    // (the other lane's truth is not ours to revise) plus scale-set demand
-    // in permit states. Recorded-but-unattested holders are marked
-    // uncertain (still counted) — reconcile never deletes.
-    let mut alive: Vec<(String, LedgerLane, LedgerPermitState)> = Vec::new();
+    // The daemon startup owns global permit reconciliation and attests both
+    // lanes atomically with captured attempt tokens. The Scale Set listener
+    // only validates its durable projections here; a lane-local reconcile
+    // would either race startup or mark native owners uncertain.
     let holders = ledger
         .holders()
         .map_err(|error| anyhow::anyhow!("list ledger holders: {error}"))?;
-    for holder in &holders {
-        if holder.lane == LedgerLane::Native {
-            alive.push((holder.holder.clone(), holder.lane, holder.state));
+    let mut confirmed = Vec::new();
+    for (request_id, state) in demand.list_in_states(scale_set_id, &PERMIT_STATES)? {
+        let row = demand
+            .get(request_id)?
+            .with_context(|| format!("active demand {request_id} vanished"))?;
+        let holder = permit_holder(scale_set_id, request_id);
+        let recorded = holders.iter().find(|entry| entry.holder == holder);
+        if let Some(recorded) = recorded {
+            let attempt_token = required_attempt_token(&row)?;
+            if recorded.lane != LedgerLane::ScaleSet {
+                anyhow::bail!("active Scale Set demand {holder:?} has a foreign permit lane");
+            }
+            if !ledger.is_current_attempt(&holder, attempt_token)? {
+                anyhow::bail!("active Scale Set demand {holder:?} belongs to another attempt");
+            }
+            confirmed.push(holder.clone());
+        } else if state != DemandState::Granted {
+            anyhow::bail!(
+                "active demand {holder:?} has no permit row; refusing holder-only adoption"
+            );
+        }
+        if matches!(
+            state,
+            DemandState::AcquireIntent | DemandState::Uncertain | DemandState::CanceledPending
+        ) && !batches.contains_request(scale_set_id, request_id)?
+            && state != DemandState::AcquireIntent
+        {
+            anyhow::bail!("uncertain demand {holder:?} has no batch evidence");
         }
     }
-    for (request_id, state) in demand.list_in_states(scale_set_id, &PERMIT_STATES)? {
-        alive.push((
-            permit_holder(scale_set_id, request_id),
-            LedgerLane::ScaleSet,
-            permit_state_for_demand(state),
-        ));
+    // A provably empty ledger holds nothing in either lane, so adopting it
+    // marks nothing and unlocks advertisement without waiting for a global
+    // epoch that may never come in a fresh install. Anything held defers to
+    // the daemon startup's attested global reconcile. Adoption runs only
+    // after the projection validation above refused holder-only adoption.
+    if holders.is_empty() {
+        ledger
+            .reconcile_attempts(&[])
+            .map_err(|error| anyhow::anyhow!("adopt empty permit ledger: {error}"))?;
     }
-    let alive_refs: Vec<(&str, LedgerLane, LedgerPermitState)> = alive
-        .iter()
-        .map(|(holder, lane, state)| (holder.as_str(), *lane, *state))
-        .collect();
-    let report = ledger
-        .reconcile(&alive_refs)
-        .map_err(|error| anyhow::anyhow!("reconcile ledger: {error}"))?;
-
     metrics.inc_reconcile_runs();
     Ok(StartupReport {
         generation,
         stale_grants_reset,
         unbatched_acquire_intents_recovered,
-        adopted: report.adopted,
-        marked_uncertain: report.marked_uncertain,
-        confirmed: report.confirmed,
+        adopted: Vec::new(),
+        marked_uncertain: Vec::new(),
+        confirmed,
         batches_orphaned,
     })
 }
@@ -281,12 +506,44 @@ async fn resolve_from_observations<L: CapacityLedger, W: WorkerLane>(
     for (request_id, row) in batch.request_ids.iter().zip(states.iter()) {
         let Some(row) = row else { continue };
         let holder = permit_holder(batch.scale_set_id, *request_id);
+        let held = ledger.holder_state(&holder)?.is_some();
+        let Some(attempt_token) = row
+            .permit_attempt_token
+            .as_deref()
+            .filter(|token| !token.is_empty())
+        else {
+            if !row.state.holds_permit() && !held {
+                continue;
+            }
+            anyhow::bail!("active batch member {holder:?} has no attempt token");
+        };
+        if batch_attempt_token(batch, *request_id)? != attempt_token {
+            anyhow::bail!("batch and demand attempt tokens disagree for request {request_id}");
+        }
+        if held && !ledger.is_current_attempt(&holder, attempt_token)? {
+            anyhow::bail!("batch member {holder:?} belongs to another attempt");
+        }
+        if !held && row.state.holds_permit() {
+            anyhow::bail!("active batch member {holder:?} has no permit holder");
+        }
         match row.state {
             DemandState::Acquired => {
-                transition_or_adopt(ledger, &holder, LedgerPermitState::Acquiring, generation)?;
+                fenced_transition(
+                    ledger,
+                    &holder,
+                    LedgerPermitState::Acquiring,
+                    generation,
+                    attempt_token,
+                )?;
             }
             DemandState::CanceledAcquired => {
-                transition_or_adopt(ledger, &holder, LedgerPermitState::Acquiring, generation)?;
+                fenced_transition(
+                    ledger,
+                    &holder,
+                    LedgerPermitState::Acquiring,
+                    generation,
+                    attempt_token,
+                )?;
             }
             // The terminal handler owns worker cleanup and permit release.
             // A completion message alone is not cleanup confirmation. The
@@ -299,7 +556,15 @@ async fn resolve_from_observations<L: CapacityLedger, W: WorkerLane>(
                     .owns_terminal_cleanup(*request_id)
                     .map_err(|error| anyhow::anyhow!("check terminal ownership: {error}"))?;
                 if !owned {
-                    fenced_release_orphan(ledger, &holder, generation)?;
+                    fenced_release_orphan(
+                        ledger,
+                        demand,
+                        batch.scale_set_id,
+                        *request_id,
+                        &holder,
+                        generation,
+                        attempt_token,
+                    )?;
                 }
             }
             _ => {}
@@ -316,8 +581,12 @@ async fn resolve_from_observations<L: CapacityLedger, W: WorkerLane>(
 /// holder is a no-op.
 fn fenced_release_orphan<L: CapacityLedger>(
     ledger: &mut L,
+    demand: &mut DemandStore,
+    scale_set_id: i32,
+    request_id: i64,
     holder: &str,
     generation: u64,
+    attempt_token: &str,
 ) -> Result<bool> {
     let fresh = ledger
         .generation()
@@ -327,56 +596,36 @@ fn fenced_release_orphan<L: CapacityLedger>(
             "ledger generation moved during idle resolve (saw {generation}, now {fresh}); retry under the fresh epoch"
         );
     }
-    ledger
-        .release(holder)
-        .map_err(|error| anyhow::anyhow!("release orphaned holder: {error}"))
+    owned_release(
+        ledger,
+        demand,
+        scale_set_id,
+        request_id,
+        holder,
+        attempt_token,
+        ReleaseKind::Terminal,
+        DemandState::Terminal,
+    )
 }
 
-pub(crate) fn transition_or_adopt<L: CapacityLedger>(
+fn fenced_transition<L: CapacityLedger>(
     ledger: &mut L,
     holder: &str,
     state: LedgerPermitState,
     generation: u64,
+    attempt_token: &str,
 ) -> Result<()> {
-    match ledger.transition(holder, state, generation) {
+    match ledger.transition(holder, state, generation, attempt_token) {
         Ok(()) => Ok(()),
         Err(error) if L::is_stale_generation(&error) => {
             let fresh = ledger
                 .generation()
                 .map_err(|error| anyhow::anyhow!("re-read ledger generation: {error}"))?;
-            match ledger.transition(holder, state, fresh) {
-                Ok(()) => Ok(()),
-                Err(_) => adopt_holder(ledger, holder, state, fresh),
-            }
+            ledger
+                .transition(holder, state, fresh, attempt_token)
+                .map_err(|error| anyhow::anyhow!("transition permit {holder:?}: {error}"))
         }
-        Err(_) => adopt_holder(ledger, holder, state, generation),
-    }
-}
-
-/// Adopt a lost holder row back as counted occupancy rather than run
-/// rowless. A full or unconfigured ledger fails the step (the message is
-/// redelivered and the adoption retries); only a stale generation retries
-/// in place, once.
-fn adopt_holder<L: CapacityLedger>(
-    ledger: &mut L,
-    holder: &str,
-    state: LedgerPermitState,
-    generation: u64,
-) -> Result<()> {
-    match ledger.acquire(holder, LedgerLane::ScaleSet, state, generation) {
-        Ok(AcquireOutcome::Acquired | AcquireOutcome::AlreadyHeld) => Ok(()),
-        Ok(AcquireOutcome::StaleGeneration) => {
-            let fresh = ledger
-                .generation()
-                .map_err(|error| anyhow::anyhow!("re-read ledger generation: {error}"))?;
-            match ledger.acquire(holder, LedgerLane::ScaleSet, state, fresh) {
-                Ok(AcquireOutcome::Acquired | AcquireOutcome::AlreadyHeld) => Ok(()),
-                Ok(outcome) => anyhow::bail!("adopt lost holder {holder}: ledger says {outcome:?}"),
-                Err(error) => anyhow::bail!("adopt lost holder {holder}: {error}"),
-            }
-        }
-        Ok(outcome) => anyhow::bail!("adopt lost holder {holder}: ledger says {outcome:?}"),
-        Err(error) => anyhow::bail!("adopt lost holder {holder}: {error}"),
+        Err(error) => Err(anyhow::anyhow!("transition permit {holder:?}: {error}")),
     }
 }
 
@@ -399,8 +648,22 @@ async fn reacquire_batch<Q: QueueSession, L: CapacityLedger>(
         for request_id in &batch.request_ids {
             if let Some(row) = demand.get(*request_id)? {
                 match row.state {
-                    DemandState::Uncertain => members.push(*request_id),
+                    DemandState::Uncertain => {
+                        let attempt_token = required_attempt_token(&row)?;
+                        if batch_attempt_token(batch, *request_id)? != attempt_token {
+                            anyhow::bail!(
+                                "batch and demand attempt tokens disagree for request {request_id}"
+                            );
+                        }
+                        members.push(*request_id);
+                    }
                     DemandState::CanceledPending => {
+                        let attempt_token = required_attempt_token(&row)?;
+                        if batch_attempt_token(batch, *request_id)? != attempt_token {
+                            anyhow::bail!(
+                                "batch and demand attempt tokens disagree for request {request_id}"
+                            );
+                        }
                         members.push(*request_id);
                         canceled_pending.insert(*request_id);
                     }
@@ -427,34 +690,65 @@ async fn reacquire_batch<Q: QueueSession, L: CapacityLedger>(
     };
     let (acquired, missing) = reconcile_returned_ids(&uncertain, &returned);
     for request_id in &acquired {
+        let row = demand
+            .get(*request_id)?
+            .with_context(|| format!("acquired demand {request_id} vanished"))?;
+        let attempt_token = required_attempt_token(&row)?;
+        if batch_attempt_token(batch, *request_id)? != attempt_token {
+            anyhow::bail!("batch and demand attempt tokens disagree for request {request_id}");
+        }
         let state = if canceled_pending.contains(request_id) {
             DemandState::CanceledAcquired
         } else {
             DemandState::Acquired
         };
-        demand.set_state(*request_id, state, None, generation)?;
-        transition_or_adopt(
+        demand.set_state_owned(*request_id, state, None, generation, attempt_token)?;
+        fenced_transition(
             ledger,
             &permit_holder(batch.scale_set_id, *request_id),
             LedgerPermitState::Acquiring,
             generation,
+            attempt_token,
         )?;
     }
     for request_id in &missing {
         let holder = permit_holder(batch.scale_set_id, *request_id);
+        let row = demand
+            .get(*request_id)?
+            .with_context(|| format!("missing demand {request_id} vanished"))?;
+        let attempt_token = required_attempt_token(&row)?;
+        if batch_attempt_token(batch, *request_id)? != attempt_token {
+            anyhow::bail!("batch and demand attempt tokens disagree for request {request_id}");
+        }
         if canceled_pending.contains(request_id) {
             // The cancellation message was already ACKed. Once the batch
             // proves this request was not acquired, close this old attempt;
             // upstream sends a new JobAvailable for the requeued job.
-            demand.set_state(*request_id, DemandState::CanceledDone, None, generation)?;
-            ledger
-                .release_cancelled(&holder)
-                .map_err(|error| anyhow::anyhow!("release canceled holder: {error}"))?;
+            if !owned_release(
+                ledger,
+                demand,
+                batch.scale_set_id,
+                *request_id,
+                &holder,
+                attempt_token,
+                ReleaseKind::Canceled,
+                DemandState::CanceledDone,
+            )? {
+                anyhow::bail!("canceled permit {holder:?} disappeared during batch recovery");
+            }
         } else {
-            ledger
-                .release_to_eligible(&holder)
-                .map_err(|error| anyhow::anyhow!("release missing holder: {error}"))?;
-            demand.set_state(*request_id, DemandState::Eligible, None, generation)?;
+            if !owned_release(
+                ledger,
+                demand,
+                batch.scale_set_id,
+                *request_id,
+                &holder,
+                attempt_token,
+                ReleaseKind::Eligible,
+                DemandState::Eligible,
+            )? {
+                anyhow::bail!("missing permit {holder:?} disappeared during batch recovery");
+            }
         }
     }
     metrics.add_acquired_ids(acquired.len() as u64);
@@ -540,6 +834,7 @@ mod tests {
         fn note_assigned(
             &mut self,
             _assigned: &velnor_model::ScaleSetJobAssigned,
+            _attempt_token: &str,
         ) -> Result<(), Self::Error> {
             Ok(())
         }
@@ -547,6 +842,7 @@ mod tests {
         fn note_started(
             &mut self,
             _started: &velnor_model::ScaleSetJobStarted,
+            _attempt_token: &str,
         ) -> Result<(), Self::Error> {
             Ok(())
         }
@@ -554,6 +850,7 @@ mod tests {
         fn note_terminal(
             &mut self,
             _completed: &velnor_model::ScaleSetJobCompleted,
+            _attempt_token: &str,
         ) -> Result<(), Self::Error> {
             Ok(())
         }
@@ -573,6 +870,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("state.db")
+    }
+
+    fn acquire_test(
+        ledger: &mut MemLedger,
+        holder: &str,
+        state: LedgerPermitState,
+        generation: u64,
+    ) -> String {
+        match ledger
+            .acquire(holder, LedgerLane::ScaleSet, state, generation)
+            .unwrap()
+        {
+            AcquireOutcome::Acquired { attempt_token } => attempt_token,
+            outcome => panic!("unexpected test acquisition outcome: {outcome:?}"),
+        }
     }
 
     fn push_offer(id: i64) -> velnor_model::ScaleSetJobAvailable {
@@ -598,7 +910,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_reconciles_before_advertising() {
+    fn startup_refuses_holder_only_scale_set_adoption() {
         let path = temp_path("startup");
         let mut demand = DemandStore::open(&path).unwrap();
         let mut batches = AcquireBatchStore::open(&path).unwrap();
@@ -613,11 +925,10 @@ mod tests {
         demand
             .set_state(11, DemandState::Acquired, None, 0)
             .unwrap();
-        let report = startup(&mut ledger, &mut demand, &mut batches, 7, &metrics).unwrap();
-        // No row existed for the attested holder: adopted as counted occupancy.
-        assert_eq!(report.adopted, vec!["scaleset/7/11".to_owned()]);
-        assert_eq!(ledger.advertised_free().unwrap(), Some(3));
-        assert_eq!(metrics.snapshot().reconcile_runs, 1);
+        let error = startup(&mut ledger, &mut demand, &mut batches, 7, &metrics).unwrap_err();
+        assert!(error.to_string().contains("no permit row"), "{error:#}");
+        assert_eq!(ledger.occupied().unwrap(), 0);
+        assert_eq!(ledger.advertised_free().unwrap(), None);
     }
 
     #[test]
@@ -634,17 +945,11 @@ mod tests {
             .set_state(12, DemandState::AcquireIntent, None, 0)
             .unwrap();
         let holder = permit_holder(7, 12);
-        assert_eq!(
-            ledger
-                .acquire(
-                    &holder,
-                    LedgerLane::ScaleSet,
-                    LedgerPermitState::Acquiring,
-                    0,
-                )
-                .unwrap(),
-            AcquireOutcome::Acquired
-        );
+        let attempt_token = acquire_test(&mut ledger, &holder, LedgerPermitState::Acquiring, 0);
+        demand
+            .set_permit_attempt_token(12, None, &attempt_token)
+            .unwrap();
+        ledger.set_test_holder_pid(&holder, Some(u32::MAX));
 
         let report = startup(&mut ledger, &mut demand, &mut batches, 7, &metrics).unwrap();
         assert_eq!(report.unbatched_acquire_intents_recovered, 1);
@@ -680,21 +985,19 @@ mod tests {
             .set_state(21, DemandState::AcquireIntent, None, 0)
             .unwrap();
         let holders = vec![permit_holder(7, 21)];
-        batches
-            .record_intended("acq-orphan", 7, &[21], &holders, 0)
-            .unwrap();
         let generation = ledger.generation().unwrap();
-        assert_eq!(
-            ledger
-                .acquire(
-                    &holders[0],
-                    LedgerLane::ScaleSet,
-                    LedgerPermitState::Acquiring,
-                    generation
-                )
-                .unwrap(),
-            AcquireOutcome::Acquired
+        let attempt_token = acquire_test(
+            &mut ledger,
+            &holders[0],
+            LedgerPermitState::Acquiring,
+            generation,
         );
+        demand
+            .set_permit_attempt_token(21, None, &attempt_token)
+            .unwrap();
+        batches
+            .record_intended("acq-orphan", 7, &[21], &holders, &[attempt_token], 0)
+            .unwrap();
 
         let report = startup(&mut ledger, &mut demand, &mut batches, 7, &metrics).unwrap();
         assert_eq!(report.batches_orphaned, 1);
@@ -717,28 +1020,39 @@ mod tests {
         let mut batches = AcquireBatchStore::open(&path).unwrap();
         let mut ledger = MemLedger::new();
         ledger.set_max_jobs(4);
-        ledger.reconcile(&[]).unwrap();
+        ledger.reconcile_attempts(&[]).unwrap();
         let metrics = Metrics::new();
         let generation = ledger.generation().unwrap();
 
+        let mut holders = Vec::new();
+        let mut attempt_tokens = Vec::new();
         for id in [31, 32] {
             demand.submit_offer(7, &push_offer(id), generation).unwrap();
             demand
                 .set_state(id, DemandState::Uncertain, None, generation)
                 .unwrap();
             let holder = permit_holder(7, id);
-            ledger
-                .acquire(
-                    &holder,
-                    LedgerLane::ScaleSet,
-                    LedgerPermitState::Acquiring,
-                    generation,
-                )
+            let attempt_token = acquire_test(
+                &mut ledger,
+                &holder,
+                LedgerPermitState::Acquiring,
+                generation,
+            );
+            demand
+                .set_permit_attempt_token(id, None, &attempt_token)
                 .unwrap();
+            holders.push(holder);
+            attempt_tokens.push(attempt_token);
         }
-        let holders = vec![permit_holder(7, 31), permit_holder(7, 32)];
         batches
-            .record_intended("acq-idle", 7, &[31, 32], &holders, generation)
+            .record_intended(
+                "acq-idle",
+                7,
+                &[31, 32],
+                &holders,
+                &attempt_tokens,
+                generation,
+            )
             .unwrap();
         batches.resolve("acq-idle", true).unwrap();
         // Age the batch past the re-acquire horizon.
@@ -790,7 +1104,7 @@ mod tests {
         let mut batches = AcquireBatchStore::open(&path).unwrap();
         let mut ledger = MemLedger::new();
         ledger.set_max_jobs(4);
-        ledger.reconcile(&[]).unwrap();
+        ledger.reconcile_attempts(&[]).unwrap();
         let metrics = Metrics::new();
         let generation = ledger.generation().unwrap();
 
@@ -798,23 +1112,34 @@ mod tests {
         // release never landed (crash between the row write and the
         // terminal path). No worker row exists and a completed job emits
         // no further messages, so the lane disowns cleanup.
+        let mut attempt_tokens = Vec::new();
         for id in [41, 42] {
             demand.submit_offer(7, &push_offer(id), generation).unwrap();
             demand
                 .set_state(id, DemandState::Terminal, None, generation)
                 .unwrap();
-            ledger
-                .acquire(
-                    &permit_holder(7, id),
-                    LedgerLane::ScaleSet,
-                    LedgerPermitState::Uncertain,
-                    generation,
-                )
+            let holder = permit_holder(7, id);
+            let attempt_token = acquire_test(
+                &mut ledger,
+                &holder,
+                LedgerPermitState::Uncertain,
+                generation,
+            );
+            demand
+                .set_permit_attempt_token(id, None, &attempt_token)
                 .unwrap();
+            attempt_tokens.push(attempt_token);
         }
         let holders = vec![permit_holder(7, 41), permit_holder(7, 42)];
         batches
-            .record_intended("acq-orphan", 7, &[41, 42], &holders, generation)
+            .record_intended(
+                "acq-orphan",
+                7,
+                &[41, 42],
+                &holders,
+                &attempt_tokens,
+                generation,
+            )
             .unwrap();
         batches.resolve("acq-orphan", true).unwrap();
         assert_eq!(ledger.occupied().unwrap(), 2);
@@ -849,7 +1174,7 @@ mod tests {
         let mut batches = AcquireBatchStore::open(&path).unwrap();
         let mut ledger = MemLedger::new();
         ledger.set_max_jobs(4);
-        ledger.reconcile(&[]).unwrap();
+        ledger.reconcile_attempts(&[]).unwrap();
         let metrics = Metrics::new();
         let generation = ledger.generation().unwrap();
 
@@ -858,13 +1183,14 @@ mod tests {
             .set_state(43, DemandState::Terminal, None, generation)
             .unwrap();
         let holder = permit_holder(7, 43);
-        ledger
-            .acquire(
-                &holder,
-                LedgerLane::ScaleSet,
-                LedgerPermitState::Cleaning,
-                generation,
-            )
+        let attempt_token = acquire_test(
+            &mut ledger,
+            &holder,
+            LedgerPermitState::Cleaning,
+            generation,
+        );
+        demand
+            .set_permit_attempt_token(43, None, &attempt_token)
             .unwrap();
         batches
             .record_intended(
@@ -872,6 +1198,7 @@ mod tests {
                 7,
                 &[43],
                 std::slice::from_ref(&holder),
+                std::slice::from_ref(&attempt_token),
                 generation,
             )
             .unwrap();
@@ -905,19 +1232,31 @@ mod tests {
     fn fenced_orphan_release_bails_on_moved_epoch() {
         let mut ledger = MemLedger::new();
         ledger.set_max_jobs(4);
-        ledger.reconcile(&[]).unwrap();
+        ledger.reconcile_attempts(&[]).unwrap();
         let generation = ledger.generation().unwrap();
+        let mut demand = DemandStore::open(&temp_path("fenced-orphan-release")).unwrap();
+        demand.submit_offer(7, &push_offer(44), generation).unwrap();
         let holder = permit_holder(7, 44);
-        ledger
-            .acquire(
-                &holder,
-                LedgerLane::ScaleSet,
-                LedgerPermitState::Uncertain,
-                generation,
-            )
-            .unwrap();
+        let attempt_token = acquire_test(
+            &mut ledger,
+            &holder,
+            LedgerPermitState::Uncertain,
+            generation,
+        );
         ledger.begin_epoch();
-        let error = fenced_release_orphan(&mut ledger, &holder, generation).unwrap_err();
+        demand
+            .set_permit_attempt_token(44, None, &attempt_token)
+            .unwrap();
+        let error = fenced_release_orphan(
+            &mut ledger,
+            &mut demand,
+            7,
+            44,
+            &holder,
+            generation,
+            &attempt_token,
+        )
+        .unwrap_err();
         assert!(
             error.to_string().contains("retry under the fresh epoch"),
             "unexpected fence error: {error:#}"

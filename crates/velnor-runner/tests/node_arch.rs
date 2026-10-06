@@ -254,13 +254,18 @@ fn guardian_completes_a_cycle_without_job_execution() {
 fn packaged_units_have_no_controller_partof_to_workers() {
     let controller = include_str!("../debian/velnor-controller@.service");
     let slot = include_str!("../debian/velnor-slot@.service");
-    let job = include_str!("../debian/velnor-job@.service");
+    // No packaged per-job unit: workers run as transient units under the
+    // jobs slice, so no packaged file may reappear.
+    let job_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("debian/velnor-job@.service");
+    assert!(
+        !job_path.exists(),
+        "packaged velnor-job@.service must stay deleted"
+    );
     assert!(!controller.lines().any(|line| line.starts_with("PartOf=")));
     assert!(!slot.lines().any(|line| line.starts_with("PartOf=")));
-    assert!(!job.lines().any(|line| line.starts_with("PartOf=")));
     assert!(slot.contains("velnor-runner slot"));
     assert!(slot.contains("--generation 1"));
-    assert!(job.contains("KillMode=control-group"));
     assert!(include_str!("../debian/velnor-guardian.service").contains("velnor-runner guardian"));
     assert!(!include_str!("../debian/velnor-guardian.service")
         .lines()
@@ -321,10 +326,6 @@ fn packaged_units_have_no_controller_partof_to_workers() {
         "job process is the transitional executor"
     );
     assert!(!daemon_src_has_args_json());
-    assert!(
-        !job.contains("--once"),
-        "packaged job unit must not pass --once: {job}"
-    );
     let postinst = include_str!("../debian/postinst");
     assert!(
         postinst.contains("NEVER") && postinst.contains("restart"),
@@ -1443,7 +1444,8 @@ fn job_once_without_exec_persists_only_after_ownership() {
 fn daemon_acquisition_path_marks_job_running_at_start() {
     use velnor_model::JobId;
     use velnor_runner::node::complete::{
-        confirm_acquisition, intend_acquisition, record_job_started, resolve_acquisition,
+        confirm_acquisition, intend_acquisition, record_job_started,
+        resolve_acquisition_at_endpoint,
     };
     let dir = scratch("daemon-running");
     let mut journal = Journal::open(dir.join("journal.db")).unwrap();
@@ -1459,7 +1461,15 @@ fn daemon_acquisition_path_marks_job_running_at_start() {
         1_000,
     )
     .unwrap();
-    resolve_acquisition(&mut journal, &job_id, &job_id, "plan-1", generation).unwrap();
+    resolve_acquisition_at_endpoint(
+        &mut journal,
+        &job_id,
+        &job_id,
+        "plan-1",
+        generation,
+        "https://run.example/run",
+    )
+    .unwrap();
     confirm_acquisition(&mut journal, &job_id, &slot_id, generation).unwrap();
     assert_eq!(
         journal.load_state().unwrap().jobs[0].phase,

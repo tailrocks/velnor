@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::job_summary::JobConclusion;
+use crate::{context_value::ContextValue, job_summary::JobConclusion};
 
 /// Serializable plan both backends execute.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,7 +31,7 @@ pub struct GuestJobPlan {
     pub workspace: String,
     /// GitHub expression context needed for runtime step resolution. Secrets
     /// are already admitted job inputs and remain inside the isolated guest.
-    pub context_data: Vec<(String, serde_json::Value)>,
+    pub context_data: Vec<(String, ContextValue)>,
     pub cache: Vec<GuestCacheOp>,
     pub artifacts: Vec<GuestArtifactOp>,
     pub annotations: Vec<String>,
@@ -126,6 +126,8 @@ impl GuestJobPlan {
     /// # Errors
     /// JSON serialization failure.
     pub fn encode(&self) -> Result<Vec<u8>, String> {
+        ContextValue::object(self.context_data.clone())
+            .map_err(|error| format!("guest plan encode context_data: {error}"))?;
         serde_json::to_vec(self).map_err(|error| format!("guest plan encode: {error}"))
     }
 
@@ -167,7 +169,14 @@ impl GuestJobPlan {
                 return Err(format!("guest plan decode: missing field `{field}`"));
             }
         }
-        serde_json::from_value(value).map_err(|error| format!("guest plan decode: {error}"))
+        // Deserialize the original byte stream after the presence check. Going
+        // through `Value` here would silently collapse duplicate wire fields,
+        // defeating the strict tagged ContextValue schema below.
+        let plan: Self =
+            serde_json::from_slice(bytes).map_err(|error| format!("guest plan decode: {error}"))?;
+        ContextValue::object(plan.context_data.clone())
+            .map_err(|error| format!("guest plan decode context_data: {error}"))?;
+        Ok(plan)
     }
 
     /// Isolation label for Docker objects owned by this plan.
@@ -247,7 +256,33 @@ mod tests {
                 value: "true".into(),
             }],
             workspace: "/__w".into(),
-            context_data: Vec::new(),
+            context_data: vec![(
+                "github".into(),
+                ContextValue::object(vec![(
+                    "event".into(),
+                    ContextValue::case_sensitive_object(vec![
+                        (
+                            "nan".into(),
+                            ContextValue::non_finite(crate::NonFinite::NaN),
+                        ),
+                        (
+                            "positive".into(),
+                            ContextValue::non_finite(crate::NonFinite::PositiveInfinity),
+                        ),
+                        (
+                            "negative".into(),
+                            ContextValue::non_finite(crate::NonFinite::NegativeInfinity),
+                        ),
+                        (
+                            "$velnor_context_value".into(),
+                            ContextValue::String("number".into()),
+                        ),
+                        ("value".into(), ContextValue::Number(4.into())),
+                    ])
+                    .unwrap(),
+                )])
+                .unwrap(),
+            )],
             cache: vec![GuestCacheOp {
                 digest: "abc".into(),
                 bytes: Vec::new(),
@@ -264,9 +299,66 @@ mod tests {
         };
         let bytes = plan.encode().unwrap();
         assert_eq!(GuestJobPlan::decode(&bytes).unwrap(), plan);
+        let message = crate::VsockMessage::DeliverPlan {
+            job_id: plan.job_id.clone(),
+            isolation_id: plan.isolation_id.clone(),
+            generation: plan.generation,
+            execution_nonce: "nonce".into(),
+            plan_sha256: "digest".into(),
+            plan_bytes: bytes.clone(),
+        };
+        let framed = message.encode().unwrap();
+        let decoded = crate::VsockMessage::decode(&framed).unwrap();
+        let crate::VsockMessage::DeliverPlan { plan_bytes, .. } = decoded else {
+            panic!("expected delivered plan");
+        };
+        assert_eq!(GuestJobPlan::decode(&plan_bytes).unwrap(), plan);
+        let mut duplicate_roots = plan.clone();
+        duplicate_roots
+            .context_data
+            .push(("GITHUB".into(), ContextValue::Null));
+        assert!(duplicate_roots.encode().is_err());
         let json = String::from_utf8(bytes).unwrap();
         assert!(!json.contains("docker.sock"));
         assert!(!json.contains("signing"));
+        assert!(json.contains("\"$velnor_context_value\":\"non_finite\""));
+        assert!(json.contains("\"$velnor_context_value\":\"string\""));
+    }
+
+    #[test]
+    fn guest_plan_decode_rejects_duplicate_context_wire_discriminators() {
+        let plan = GuestJobPlan {
+            isolation_id: "job-1".into(),
+            generation: 1,
+            job_id: "job-1".into(),
+            daemon_id: "test-daemon".into(),
+            image: "velnor/job-ubuntu:26.04".into(),
+            services: Vec::new(),
+            steps: Vec::new(),
+            timeout_ms: 1000,
+            cancel_requested: false,
+            fail: false,
+            cache_digest: None,
+            command_files: Vec::new(),
+            outputs: Vec::new(),
+            env: Vec::new(),
+            workspace: "/__w".into(),
+            context_data: vec![("github".into(), ContextValue::Null)],
+            cache: Vec::new(),
+            artifacts: Vec::new(),
+            annotations: Vec::new(),
+            summary: String::new(),
+            buildx: false,
+            testcontainers: false,
+        };
+        let valid = plan.encode().unwrap();
+        let valid = String::from_utf8(valid).unwrap();
+        let malformed = valid.replace(
+            "\"$velnor_context_value\":\"null\"",
+            "\"$velnor_context_value\":\"null\",\"$velnor_context_value\":\"string\",\"value\":\"x\"",
+        );
+        assert_ne!(malformed, valid);
+        assert!(GuestJobPlan::decode(malformed.as_bytes()).is_err());
     }
 
     #[test]

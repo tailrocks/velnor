@@ -90,6 +90,7 @@ fn checkout_guest_inputs_carry_token_and_flags() {
         condition: None,
         continue_on_error: false,
         timeout_minutes: None,
+        pull_request_fallback_ref: None,
     };
     let inputs =
         super::backend::executable_inputs(&crate::executor::ExecutableStep::Checkout(plan));
@@ -370,15 +371,17 @@ fn docker_backend_accepts_an_unbounded_job_slice() {
 fn docker_backend_rejects_any_surviving_slice_ceiling() {
     for (property, value) in [
         ("CPUQuotaPerSecUSec", "950ms"),
-        ("MemoryMax", "17179869184"),
         ("MemoryHigh", "16106127360"),
+        ("MemoryMax", "17179869184"),
+        ("MemorySwapMax", "8589934592"),
+        ("TasksMax", "256"),
     ] {
         let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
         let mut fs = MemoryFs::default();
         let docker = socket_for(ExecutionBackendKind::Docker);
         fs.write(&docker, b"socket").unwrap();
         let mut state =
-            "LoadState=loaded\nCPUQuotaPerSecUSec=infinity\nMemoryMax=infinity\nMemoryHigh=infinity\n"
+            "LoadState=loaded\nCPUQuotaPerSecUSec=infinity\nMemoryHigh=infinity\nMemoryMax=infinity\nMemorySwapMax=infinity\nTasksMax=infinity\n"
                 .to_string();
         state = state.replace(
             &format!("{property}=infinity"),
@@ -400,7 +403,7 @@ fn docker_backend_rejects_any_surviving_slice_ceiling() {
         let error = preflight_selected(&file, &mut world).unwrap_err();
         let message = error.to_string();
         assert!(
-            message.contains("no CPU/RAM ceiling") && message.contains(property),
+            message.contains("no resource ceiling") && message.contains(property),
             "a surviving {property} ceiling must fail closed: {message}"
         );
     }
@@ -466,10 +469,13 @@ fn docker_backend_cancel_runs_docker_rm_force() {
     let mut fs = MemoryFs::default();
     let docker = socket_for(ExecutionBackendKind::Docker);
     fs.write(&docker, b"socket").unwrap();
+    let immutable_id = "e".repeat(64);
+    assert_eq!(immutable_id.len(), 64);
+    assert!(immutable_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
     let mut runner = RecordingCommands {
         next: CommandResult {
             code: 0,
-            stdout: "ok".into(),
+            stdout: immutable_id.clone(),
             stderr: String::new(),
         },
         ..RecordingCommands::default()
@@ -491,14 +497,29 @@ fn docker_backend_cancel_runs_docker_rm_force() {
         session.start(&mut world).unwrap();
         session.cancel(&mut world).unwrap();
     }
+    let job_name = "velnor-job-job-cancel-docker";
     assert!(
         runner.calls.iter().any(|(program, args)| {
             program == "docker"
-                && args.contains(&"rm".to_string())
-                && args.contains(&"--force".to_string())
-                && args.iter().any(|arg| arg.contains("job-cancel-docker"))
+                && args.first().is_some_and(|arg| arg == "inspect")
+                && args.get(1).is_some_and(|arg| arg == "--format={{.Id}}")
+                && args.last().is_some_and(|arg| arg == job_name)
         }),
-        "docker cancel must rm --force the job container, got {:?}",
+        "docker cancel must resolve the canonical job name, got {:?}",
+        runner.calls
+    );
+    assert!(
+        runner.calls.iter().any(|(program, args)| {
+            program == "docker"
+                && args
+                    == &vec![
+                        "rm".to_owned(),
+                        "--force".to_owned(),
+                        "--".to_owned(),
+                        immutable_id.clone(),
+                    ]
+        }),
+        "docker cancel must remove the captured immutable ID, got {:?}",
         runner.calls
     );
 }

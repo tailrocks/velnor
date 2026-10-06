@@ -395,8 +395,12 @@ pub fn parse_message_response(body: &[u8]) -> Result<ParsedMessage, String> {
     let batched: Vec<serde_json::Value> = serde_json::from_str(&envelope.body)
         .map_err(|error| format!("failed to unmarshal batched messages: {error}"))?;
     for raw in &batched {
-        let kind: BatchedKind = serde_json::from_value(raw.clone())
-            .map_err(|error| format!("failed to decode job message type: {error}"))?;
+        let kind = if raw.is_null() {
+            BatchedKind::default()
+        } else {
+            serde_json::from_value(raw.clone())
+                .map_err(|error| format!("failed to decode job message type: {error}"))?
+        };
         match kind.message_type {
             BatchedMessageType::JobAvailable => {
                 let job: ScaleSetJobAvailable = serde_json::from_value(raw.clone())
@@ -460,10 +464,26 @@ fn append_message_id_to_queue_url(mut url: Url, message_id: i32) -> Url {
     url
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize)]
 struct BatchedKind {
-    #[serde(default, rename = "messageType")]
+    #[serde(
+        default,
+        rename = "messageType",
+        deserialize_with = "deserialize_null_batched_message_type"
+    )]
     message_type: BatchedMessageType,
+}
+
+fn deserialize_null_batched_message_type<'de, D>(
+    deserializer: D,
+) -> Result<BatchedMessageType, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(
+        <Option<BatchedMessageType> as serde::Deserialize>::deserialize(deserializer)?
+            .unwrap_or_default(),
+    )
 }
 
 /// Batched dispatch lenient on unknown types (upstream ignores them).
@@ -612,6 +632,36 @@ mod tests {
         let parsed = parse_message_response(&serde_json::to_vec(&envelope).unwrap()).unwrap();
         assert!(parsed.job_available_messages.is_empty());
         assert!(parsed.job_assigned_messages.is_empty());
+        assert_eq!(parsed.unknown_message_types, vec!["?"]);
+    }
+
+    #[test]
+    fn batched_message_with_null_type_uses_go_zero_string_and_is_ignored() {
+        let envelope = serde_json::json!({
+            "messageId": 9,
+            "messageType": "RunnerScaleSetJobMessages",
+            "body": "[{\"messageType\":null,\"runnerRequestId\":null}]"
+        });
+        let parsed = parse_message_response(&serde_json::to_vec(&envelope).unwrap()).unwrap();
+        assert!(parsed.job_available_messages.is_empty());
+        assert!(parsed.job_assigned_messages.is_empty());
+        assert!(parsed.job_started_messages.is_empty());
+        assert!(parsed.job_completed_messages.is_empty());
+        assert_eq!(parsed.unknown_message_types, vec!["?"]);
+    }
+
+    #[test]
+    fn null_batched_message_uses_go_zero_kind_and_is_ignored() {
+        let envelope = serde_json::json!({
+            "messageId": 9,
+            "messageType": "RunnerScaleSetJobMessages",
+            "body": "[null]"
+        });
+        let parsed = parse_message_response(&serde_json::to_vec(&envelope).unwrap()).unwrap();
+        assert!(parsed.job_available_messages.is_empty());
+        assert!(parsed.job_assigned_messages.is_empty());
+        assert!(parsed.job_started_messages.is_empty());
+        assert!(parsed.job_completed_messages.is_empty());
         assert_eq!(parsed.unknown_message_types, vec!["?"]);
     }
 }

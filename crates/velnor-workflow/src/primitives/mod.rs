@@ -22,6 +22,11 @@ pub(crate) mod prepared_tools;
 mod regen;
 pub(crate) mod release;
 pub(crate) mod renovate;
+#[allow(
+    dead_code,
+    reason = "consolidation port: runner-guard WIP preserved from stash, wire-up pending"
+)]
+mod runner_guard;
 pub(crate) mod runtime_products;
 pub(crate) mod snapshot;
 pub(crate) mod watch;
@@ -991,7 +996,8 @@ pub(crate) fn lanes_runs_on(
             lanes_labels_json(&config.velnor_labels),
         )),
         RunnerMode::Github | RunnerMode::Both => Ok(format!(
-            "${{{{ (github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor') && fromJSON('{}') || {} }}}}",
+            "${{{{ (github.ref == 'refs/heads/{}' && github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor') && fromJSON('{}') || {} }}}}",
+            config.default_branch,
             lanes_labels_json(&config.velnor_labels),
             json_string(&config.github_runner),
         )),

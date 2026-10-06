@@ -32,12 +32,12 @@ EnvironmentFile=-/etc/velnor/secrets.env
 Environment=MISE_LOCKFILE=1
 Environment=MISE_LOCKED=1
 Environment=MISE_LOCKED_VERIFY_PROVENANCE=1
-# Plan 010: prove the installed binary/package/manifest are coherent with the
-# atomically activated release record BEFORE the daemon starts. A missing or
-# mismatched tuple fails closed here, so a mixed old/new tuple never runs.
-ExecStartPre=/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock /usr/bin/velnor-runner release verify-installed
-ExecStart=/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock /usr/bin/velnor-runner daemon \
-  --url ${VELNOR_URL} \
+# Plan 010: the daemon proves the installed binary/package/manifest are
+# coherent with the atomically activated release record inside its own
+# process-lifetime package guard (no outer flock, no ExecStartPre), so a
+# missing or mismatched tuple fails closed and a mixed old/new tuple
+# never runs.
+ExecStart=/usr/bin/velnor-runner daemon \
   --name ${VELNOR_NAME} \
   --labels ${VELNOR_LABELS} \
   --slots ${VELNOR_SLOTS} \

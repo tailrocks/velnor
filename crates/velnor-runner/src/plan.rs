@@ -4,8 +4,8 @@ use crate::{
     container::{JobContainerSpec, ServiceContainerSpec},
     executor::{ExecutableStep, JobExecutionSummary, StepExecutionResult, StepLog},
 };
-use serde_json::Value;
 use std::{collections::BTreeMap, path::PathBuf};
+use velnor_model::ContextValue;
 
 #[derive(Debug, Clone)]
 pub struct NormalizedJobPlan {
@@ -56,7 +56,7 @@ pub struct JobExecutionPlan {
     pub job_container: JobContainerSpec,
     pub services: Vec<ServiceContainerSpec>,
     pub env: Vec<(String, String)>,
-    pub context_data: Vec<(String, Value)>,
+    pub context_data: Vec<(String, ContextValue)>,
     pub defaults: NormalizedRunDefaults,
 }
 
@@ -104,6 +104,7 @@ mod tests {
     fn container_spec(root: &std::path::Path) -> JobContainerSpec {
         JobContainerSpec {
             name: "velnor-job".into(),
+            completion_generation: uuid::Uuid::new_v4(),
             image: "ubuntu:24.04".into(),
             network: "velnor-net".into(),
             workspace_host: root.join("workspace"),
@@ -123,7 +124,11 @@ mod tests {
             docker_host_work_dir: None,
             verify_bind_mounts: true,
             daemon_id: "test-daemon".into(),
-            repository: Some("ChainArgos/java-monorepo".into()),
+            repository: None,
+            repository_store_key: crate::store_catalog::repository_store_key(
+                "https://github.com",
+                "42",
+            ),
             store_trust_scope: "release".to_owned(),
             mbx_store_host: None,
             sccache_store_host: None,

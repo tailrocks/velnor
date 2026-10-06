@@ -131,6 +131,7 @@ async fn start(globals: &GlobalArgs, args: HostStartArgs) -> Result<(), CommandE
         dry_run_jobs: false,
         dump_job_message: None,
         docker_image,
+        mode: velnor_runner::args::HostMode::NativeOnly,
         max_jobs: None,
         permit_ledger: None,
         scale_set_config: None,

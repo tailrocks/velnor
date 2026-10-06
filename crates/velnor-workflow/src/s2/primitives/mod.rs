@@ -25,6 +25,11 @@ mod providers;
 mod regen;
 pub(crate) mod release;
 pub(crate) mod renovate;
+#[allow(
+    dead_code,
+    reason = "consolidation port: runtime bootstrap API preserved, wire-up pending"
+)]
+pub(crate) mod runtime_bootstrap;
 pub(crate) mod runtime_products;
 pub(crate) mod snapshot;
 pub(crate) mod watch;
@@ -51,6 +56,7 @@ pub(crate) use ir::{
     validate_xcodegen_tools_are_locked, ProviderAdmission, WorkflowIr, WorkflowKind,
     D19_PIN_FETCH_COMMANDS, GITHUB_WORKFLOW_BYTE_LIMIT, MISE_INSTALL_DEPS_MODEL_VERSION,
 };
+pub(crate) use package_release::release_admission_command;
 
 #[cfg(test)]
 pub(crate) use ir::jq_read_plan_matrix;

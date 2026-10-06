@@ -89,6 +89,16 @@ consumer_repository = "example/tap"
 consumer_branch = "main"
 updater = "./scripts/package-update.sh"
 updater_token_secret = "TAP_TOKEN"
+
+[declare.args.production_inputs]
+release_source = ["src/**", "Cargo.toml", "Cargo.lock"]
+
+[declare.args.production_dependencies]
+runtime_resource = ["resources/**"]
+
+[declare.args.non_production_inputs]
+documentation = ["README.md", "docs/**"]
+verification_fixtures = ["tests/fixtures/**"]
 "#
     )
 }
@@ -154,6 +164,16 @@ fn package_release_hook_renders_and_passes_policy() {
     assert!(workflow.contains("Run repository package verification tasks"));
     assert!(workflow.contains("Run handoff package verification tasks"));
     assert!(workflow.contains("Run published package verification tasks"));
+    let publish_start = workflow.find("\n  publish:").expect("publisher job");
+    let verify_published_start = workflow
+        .find("\n  verify_published:")
+        .expect("fresh published verifier job");
+    let publisher = &workflow[publish_start..verify_published_start];
+    assert!(!publisher.contains("verify-release"));
+    assert!(!publisher.contains("Run handoff package verification tasks"));
+    assert!(!publisher.contains("Run published package verification tasks"));
+    assert!(publisher.contains("runs-on: ubuntu-24.04"));
+    assert!(workflow.contains("  consumer:\n    name: Update consumer from verified immutable release\n    needs: verify_published"));
     assert!(
         workflow.contains("VELNOR_VERIFIED_PACKAGE_DIR: ${{ github.workspace }}/published-package")
     );
@@ -252,9 +272,9 @@ fn package_release_hook_rejects_undeclared_mise_task() {
 fn package_release_hook_renders_locked_pre_publish_migration_with_narrow_tokens() {
     let workspace = temporary_root("pre-publish");
     let root = fixture_root(&workspace.join("repo"));
-    let config = format!(
-        "{}\npre_publish_tasks = [\"migrate-preview-legacy\"]\n",
-        package_config("verify-release")
+    let config = package_config("verify-release").replace(
+        "[declare.args.production_inputs]",
+        "pre_publish_tasks = [\"migrate-preview-legacy\"]\n\n[declare.args.production_inputs]",
     );
     write_inputs(&root, &config, true);
     let generated = generate_in_place(&root);

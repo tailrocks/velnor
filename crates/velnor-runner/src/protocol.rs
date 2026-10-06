@@ -1,5 +1,10 @@
 #![allow(dead_code)]
 
+use crate::runner_json::{
+    clr_big_integer_to_f64, dotnet_double_general, is_clr_uri, non_finite_text,
+    parse_clr_double_text, parse_json_text, JsonNumber, JsonNumberKind, JsonReaderOrigin,
+    OrderedJsonValue,
+};
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
@@ -9,10 +14,11 @@ use reqwest::{
 };
 use rsa::{
     pkcs8::{EncodePrivateKey, LineEnding},
-    rand_core::OsRng,
+    rand_core::{OsRng, RngCore},
     traits::PublicKeyParts,
     BigUint, RsaPrivateKey,
 };
+use serde::de::{DeserializeOwned, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use sha2::Digest;
@@ -27,6 +33,7 @@ use std::{
 };
 use url::Url;
 use uuid::Uuid;
+use velnor_model::{ContextValue, NonFinite};
 
 /// GitHub Actions runner protocol version Velnor implements.
 pub const RUNNER_VERSION: &str = "2.337.0";
@@ -44,8 +51,8 @@ const GITHUB_CONTENTS_MAX_TIME_SECS: u64 = 30;
 const GITHUB_CURL_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const OAUTH_MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS: u32 = 5;
-const RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS: u64 = 5;
-const RUN_SERVICE_ACQUIRE_RETRY_MAX_SECS: u64 = 15;
+const RUN_SERVICE_ACQUIRE_RETRY_MIN_MS: u64 = 5_000;
+const RUN_SERVICE_ACQUIRE_RETRY_MAX_MS: u64 = 15_000;
 const RESULTS_ARTIFACT_MAX_DOWNLOAD_RESPONSE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const RESULTS_ARTIFACT_MAX_ZIP_MEMBERS: usize = 100_000;
 const RESULTS_ARTIFACT_MAX_ZIP_PATH_BYTES: u64 = 64 * 1024 * 1024;
@@ -58,12 +65,25 @@ const RESULTS_ARTIFACT_MAX_CONTROL_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 const RESULTS_ARTIFACT_MAX_LISTED_ARTIFACTS: usize = 100_000;
 const RESULTS_ARTIFACT_MAX_UPLOAD_FILES: usize = 100_000;
 const RESULTS_ARTIFACT_MAX_UPLOAD_PATH_BYTES: u64 = 64 * 1024 * 1024;
+
 const RESULTS_ARTIFACT_MAX_UPLOAD_PATH_DEPTH: usize = 256;
 const RESULTS_ARTIFACT_MAX_UPLOAD_SOURCE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const RESULTS_ARTIFACT_MAX_UPLOAD_ZIP_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const ARTIFACT_TRANSFER_MIN_BYTES_PER_SECOND: u64 = 4 * 1024 * 1024;
 const ARTIFACT_TRANSFER_GRACE_SECONDS: u64 = 120;
 const ARTIFACT_TRANSFER_MAX_SECONDS: u64 = 60 * 60;
+
+/// Sample uniformly from `0..upper_bound`, using rejection to avoid modulo
+/// bias in the run-service retry jitter.
+fn random_u64_below(upper_bound: u64) -> u64 {
+    let threshold = upper_bound.wrapping_neg() % upper_bound;
+    loop {
+        let value = OsRng.next_u64();
+        if value >= threshold {
+            return value % upper_bound;
+        }
+    }
+}
 
 /// Retry category of a broker/completion boundary failure, decided once at
 /// the boundary where the status and body are observed. Retry, abandon, and
@@ -74,16 +94,16 @@ pub enum BrokerErrorCategory {
     /// Transport break, 5xx, 408/429: the same request may succeed later.
     /// Retry with backoff inside the path's bounded attempt budget.
     Transient,
-    /// Deterministic refusal (typed gone, auth/validation 4xx): the same
-    /// inputs fail the same way. Fail fast — no retry — and, on the
-    /// completion path, spend the durable attempt budget at once so the
-    /// slot is released now instead of after hours of doomed retries.
+    /// Deterministic refusal classified as terminal by its owning boundary
+    /// (for example, a typed acquire 404 or non-retriable session-create 4xx).
+    /// Fail fast — no retry — and, on the completion path, spend the durable
+    /// attempt budget at once so the slot is released now instead of after
+    /// hours of doomed retries.
     Terminal,
-    /// Another delivery or holder may own the job (acquire 409, an
-    /// untyped 404/422 a proxy could have produced): never abandon and
-    /// never double-send. Duplicate delivery is safe — the provisional
-    /// intent row re-records idempotently and the `renewjob` oracle
-    /// decides ownership — so the row stays for the oracle.
+    /// Velnor's ownership-safety category: typed acquire 409/422 and session-
+    /// create 409 retain the provisional intent for the `renewjob` oracle.
+    /// actions/runner only says acquire 409/422 are non-retriable; retaining a
+    /// 422 intent is a separate local safety policy, not upstream behavior.
     Conflict,
 }
 
@@ -2347,10 +2367,26 @@ pub async fn github_json_request(
     json_body: Option<String>,
     max_time_secs: u64,
 ) -> Result<(u16, String)> {
+    let response =
+        github_json_http_response(method, url, bearer_token, json_body, max_time_secs).await?;
+    Ok((response.status, response.body))
+}
+
+/// Request form used by run-service acquisition, which must inspect the
+/// response Content-Type just as actions/runner's typed JSON client does.
+async fn github_json_http_response(
+    method: &str,
+    url: &str,
+    bearer_token: &str,
+    json_body: Option<String>,
+    max_time_secs: u64,
+) -> Result<GithubHttpResponse> {
     match github_http_transport()? {
-        "native" => native_json_request(method, url, bearer_token, json_body, max_time_secs).await,
+        "native" => {
+            native_json_http_response(method, url, bearer_token, json_body, max_time_secs).await
+        }
         "curl" => {
-            let response = curl_http_request(
+            curl_http_request(
                 method,
                 url,
                 bearer_token,
@@ -2359,8 +2395,7 @@ pub async fn github_json_request(
                 "application/json",
                 None,
             )
-            .await?;
-            Ok((response.status, response.body))
+            .await
         }
         other => bail!("github HTTP transport selector returned an unknown value: {other}"),
     }
@@ -2418,13 +2453,13 @@ fn native_http_client() -> Result<Client> {
     }
 }
 
-async fn native_json_request(
+async fn native_json_http_response(
     method: &str,
     url: &str,
     bearer_token: &str,
     json_body: Option<String>,
     max_time_secs: u64,
-) -> Result<(u16, String)> {
+) -> Result<GithubHttpResponse> {
     validate_authenticated_url(url)?;
     let method_name = method.to_string();
     let method = Method::from_bytes(method.as_bytes())
@@ -2448,11 +2483,28 @@ async fn native_json_request(
         )
     })?;
     let status = response.status().as_u16();
+    let headers = response.headers().clone();
     let body = response
         .text()
         .await
         .context("read native GitHub response body")?;
-    Ok((status, body))
+    Ok(GithubHttpResponse {
+        status,
+        body,
+        headers,
+    })
+}
+
+async fn native_json_request(
+    method: &str,
+    url: &str,
+    bearer_token: &str,
+    json_body: Option<String>,
+    max_time_secs: u64,
+) -> Result<(u16, String)> {
+    let response =
+        native_json_http_response(method, url, bearer_token, json_body, max_time_secs).await?;
+    Ok((response.status, response.body))
 }
 
 /// Native transport variant that also reports rate-limit telemetry.
@@ -2730,14 +2782,82 @@ fn classify_completion_response(status: u16, body: &str) -> CompletionResponseCl
 /// serde names below are the upstream `DataMember(Name = ...)` wire names, not
 /// the C# property identifiers. `Code` is the property; `statusCode` is the
 /// wire field, and only the wire name may appear here.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RunServiceError {
-    #[serde(default, rename = "source")]
     pub(crate) source: Option<String>,
-    #[serde(default, rename = "statusCode")]
-    pub(crate) code: Option<u16>,
-    #[serde(default, rename = "errorMessage")]
+    pub(crate) code: Option<i32>,
     pub(crate) message: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for RunServiceError {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct RunServiceErrorVisitor;
+
+        impl<'de> Visitor<'de> for RunServiceErrorVisitor {
+            type Value = RunServiceError;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a run-service error object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut error = RunServiceError {
+                    source: None,
+                    code: None,
+                    message: None,
+                };
+                while let Some((key, value)) = map.next_entry::<String, Value>()? {
+                    // Json.NET populates members in wire order, so the last
+                    // case-insensitive alias wins. Deserialize every matching
+                    // occurrence as it arrives; an invalid earlier value
+                    // throws before a later duplicate could replace it.
+                    if clr_ordinal_ignore_case_eq(&key, "source") {
+                        error.source =
+                            clr_json_nullable_string(&value).map_err(serde::de::Error::custom)?;
+                    } else if clr_ordinal_ignore_case_eq(&key, "statusCode") {
+                        error.code = Some(match &value {
+                            Value::Number(number) => {
+                                clr_json_int32(number).map_err(serde::de::Error::custom)?
+                            }
+                            Value::String(value) => value
+                                .trim()
+                                .parse::<i32>()
+                                .map_err(serde::de::Error::custom)?,
+                            _ => {
+                                return Err(serde::de::Error::custom(
+                                    "statusCode must be an Int32",
+                                ));
+                            }
+                        });
+                    } else if clr_ordinal_ignore_case_eq(&key, "errorMessage") {
+                        error.message =
+                            clr_json_nullable_string(&value).map_err(serde::de::Error::custom)?;
+                    }
+                }
+                Ok(error)
+            }
+        }
+
+        deserializer.deserialize_map(RunServiceErrorVisitor)
+    }
+}
+
+fn clr_json_nullable_string(
+    value: &Value,
+) -> std::result::Result<Option<String>, ClrValidationError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::String(value) => Ok(Some(value.clone())),
+        Value::Number(value) => Ok(Some(value.to_string())),
+        Value::Bool(value) => Ok(Some(if *value { "True" } else { "False" }.to_owned())),
+        _ => Err(clr_reader_error("expected CLR string-compatible value")),
+    }
 }
 
 impl RunServiceError {
@@ -2753,13 +2873,12 @@ impl RunServiceError {
 /// `RunServiceHttpClient.TryParseErrorBody` only accepts this source value.
 const RUN_SERVICE_ERROR_SOURCE: &str = "actions-run-service";
 
-/// The `statusCode` of a run-service error body, when the body really is one.
-///
-/// This is the only sanctioned way to read a run-service verdict. The outer
-/// HTTP status is not it: upstream classifies from the body, and an unrelated
-/// proxy or gateway can produce the same outer status with no run-service
-/// meaning at all.
-fn run_service_error_code(body: &str) -> Option<u16> {
+/// The typed `statusCode` of a run-service error body, when the body really is
+/// one. Upstream first uses outer HTTP status to distinguish success from
+/// failure; only a failed response's run-service body can supply a typed error
+/// verdict. This avoids treating an unrelated proxy or gateway status as a
+/// run-service error.
+fn run_service_error_code(body: &str) -> Option<i32> {
     RunServiceError::parse(body).and_then(|error| error.code)
 }
 
@@ -2770,36 +2889,4052 @@ fn is_run_service_job_not_found(body: &str) -> bool {
     run_service_error_code(body) == Some(404)
 }
 
-/// Whether a non-retriable `acquirejob` reply proves this runner will never own
-/// the job behind the broker message.
+/// Typed non-retriable acquire response codes from actions/runner's
+/// `RunServiceHttpClient.GetJobMessageAsync`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcquireJobSkipReason {
+    /// The run service has no message for this acquire request.
+    NotFound,
+    /// The run service reports the request was already acquired.
+    AlreadyAcquired,
+    /// The run service rejected the request as unprocessable.
+    Unprocessable,
+}
+
+/// Classification of one acquire HTTP response. Upstream treats a 2xx HTTP
+/// response as success before inspecting an error envelope. For non-2xx
+/// responses, only typed run-service codes 404, 409, and 422 are special
+/// non-retriable errors; all other exceptions are retried by `RunServer`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcquireJobResponseClass {
+    Success,
+    Skipped(AcquireJobSkipReason),
+    RetryableFailure,
+}
+
+fn classify_acquire_job_response(http_status: u16, body: &str) -> AcquireJobResponseClass {
+    if (200..300).contains(&http_status) {
+        return AcquireJobResponseClass::Success;
+    }
+    if http_status == 0 {
+        return AcquireJobResponseClass::RetryableFailure;
+    }
+
+    match acquire_job_skip_reason(body) {
+        Some(reason) => AcquireJobResponseClass::Skipped(reason),
+        None => AcquireJobResponseClass::RetryableFailure,
+    }
+}
+
+/// Whether actions/runner's `RawHttpClientBase` considers a successful acquire
+/// response body JSON. Its `HasContent` check excludes HTTP 204 and a known
+/// zero-length body; only the exact `application/json` media type is decoded.
+fn is_acquire_job_json_response(
+    http_status: u16,
+    content_length: Option<u64>,
+    content_type: Option<&str>,
+) -> bool {
+    http_status != StatusCode::NO_CONTENT.as_u16()
+        && content_length != Some(0)
+        && content_type
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
+}
+
+/// Json.NET populates read-only collections through their lazy getters. Null
+/// leaves the backing field unset, and a later getter call creates an empty
+/// collection. This applies to collections only; explicit null for a
+/// non-nullable CLR value type is a typed deserialization error.
+trait ClrCollection<'de>: Deserialize<'de> + Default {}
+
+#[derive(Debug)]
+enum ClrWireError {
+    Reader(String),
+    Serialization(String),
+}
+
+#[derive(Debug)]
+struct ClrReaderError(String);
+
+impl fmt::Display for ClrReaderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+#[derive(Debug)]
+enum ClrValidationError {
+    Reader(String),
+    Serialization(String),
+    Context {
+        field: String,
+        source: Box<ClrValidationError>,
+    },
+}
+
+fn clr_reader_error(message: &str) -> ClrValidationError {
+    ClrValidationError::Reader(message.to_owned())
+}
+
+fn clr_serialization_error(message: impl Into<String>) -> ClrValidationError {
+    ClrValidationError::Serialization(message.into())
+}
+
+impl fmt::Display for ClrValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Reader(message) | Self::Serialization(message) => formatter.write_str(message),
+            Self::Context { field, source } => write!(formatter, "{field}: {source}"),
+        }
+    }
+}
+
+impl ClrValidationError {
+    fn is_reader_error(&self) -> bool {
+        match self {
+            Self::Reader(_) => true,
+            Self::Serialization(_) => false,
+            Self::Context { source, .. } => source.is_reader_error(),
+        }
+    }
+
+    fn with_context(self, field: &str) -> Self {
+        Self::Context {
+            field: field.to_owned(),
+            source: Box::new(self),
+        }
+    }
+}
+
+impl From<String> for ClrValidationError {
+    fn from(message: String) -> Self {
+        Self::Serialization(message)
+    }
+}
+
+impl From<&str> for ClrValidationError {
+    fn from(message: &str) -> Self {
+        Self::Serialization(message.to_owned())
+    }
+}
+
+fn clr_de_error<E: serde::de::Error>(error: ClrValidationError) -> E {
+    if error.is_reader_error() {
+        E::custom(ClrReaderError(error.to_string()))
+    } else {
+        E::custom(error.to_string())
+    }
+}
+
+impl fmt::Display for ClrWireError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Reader(message) | Self::Serialization(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for ClrWireError {}
+
+impl serde::de::Error for ClrWireError {
+    fn custom<T: fmt::Display>(message: T) -> Self {
+        let message = message.to_string();
+        if std::any::type_name::<T>() == std::any::type_name::<ClrReaderError>() {
+            Self::Reader(message)
+        } else {
+            Self::Serialization(message)
+        }
+    }
+}
+
+struct ClrValueDeserializer<E> {
+    value: Value,
+    error: std::marker::PhantomData<E>,
+}
+
+impl<E> ClrValueDeserializer<E> {
+    fn new(value: Value) -> Self {
+        Self {
+            value,
+            error: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<'de, E: serde::de::Error> serde::de::IntoDeserializer<'de, E> for ClrValueDeserializer<E> {
+    type Deserializer = Self;
+
+    fn into_deserializer(self) -> Self::Deserializer {
+        self
+    }
+}
+
+impl<'de, E: serde::de::Error> Deserializer<'de> for ClrValueDeserializer<E> {
+    type Error = E;
+
+    fn deserialize_any<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        use serde::de::value::{
+            BoolDeserializer, F64Deserializer, I64Deserializer, MapDeserializer, SeqDeserializer,
+            StringDeserializer, U64Deserializer, UnitDeserializer,
+        };
+
+        match self.value {
+            Value::Null => UnitDeserializer::<E>::new().deserialize_any(visitor),
+            Value::Bool(value) => BoolDeserializer::<E>::new(value).deserialize_any(visitor),
+            Value::Number(value) => {
+                if let Some(value) = value.as_i64() {
+                    I64Deserializer::<E>::new(value).deserialize_any(visitor)
+                } else if let Some(value) = value.as_u64() {
+                    U64Deserializer::<E>::new(value).deserialize_any(visitor)
+                } else if let Some(value) = value.as_f64() {
+                    F64Deserializer::<E>::new(value).deserialize_any(visitor)
+                } else {
+                    Err(E::custom("invalid JSON number"))
+                }
+            }
+            Value::String(value) => StringDeserializer::<E>::new(value).deserialize_any(visitor),
+            Value::Array(values) => {
+                SeqDeserializer::<_, E>::new(values.into_iter().map(ClrValueDeserializer::<E>::new))
+                    .deserialize_any(visitor)
+            }
+            Value::Object(values) => {
+                MapDeserializer::<_, E>::new(values.into_iter().map(|(key, value)| {
+                    (
+                        StringDeserializer::<E>::new(key),
+                        ClrValueDeserializer::<E>::new(value),
+                    )
+                }))
+                .deserialize_any(visitor)
+            }
+        }
+    }
+
+    fn deserialize_option<V>(self, visitor: V) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        if self.value.is_null() {
+            visitor.visit_none()
+        } else {
+            visitor.visit_some(self)
+        }
+    }
+
+    fn deserialize_struct<V>(
+        self,
+        name: &'static str,
+        _fields: &'static [&'static str],
+        visitor: V,
+    ) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        // Newtonsoft rejects JSON arrays for POCO targets even when the
+        // array is empty; serde would otherwise fill a defaulted struct
+        // from an empty sequence.
+        if self.value.is_array() {
+            return Err(serde::de::Error::custom(format!(
+                "Cannot deserialize the current JSON array into type '{name}'"
+            )));
+        }
+        self.deserialize_any(visitor)
+    }
+
+    fn deserialize_newtype_struct<V>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> std::result::Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        visitor.visit_newtype_struct(self)
+    }
+
+    fn is_human_readable(&self) -> bool {
+        true
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes
+        byte_buf unit unit_struct seq tuple tuple_struct map enum identifier ignored_any
+    }
+}
+
+fn deserialize_clr_value<T: DeserializeOwned>(
+    value: Value,
+) -> std::result::Result<T, ClrWireError> {
+    T::deserialize(ClrValueDeserializer::<ClrWireError>::new(value))
+}
+
+impl<'de, T> ClrCollection<'de> for Vec<T> where T: Deserialize<'de> {}
+
+impl<'de, K, V> ClrCollection<'de> for BTreeMap<K, V>
+where
+    K: Ord + Deserialize<'de>,
+    V: Deserialize<'de>,
+{
+}
+
+fn deserialize_clr_collection<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: ClrCollection<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn deserialize_clr_string_list<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Option::<Vec<Value>>::deserialize(deserializer)?;
+    values
+        .unwrap_or_default()
+        .iter()
+        .map(|value| clr_json_nullable_string(value).map_err(clr_de_error::<D::Error>))
+        .collect()
+}
+
+fn deserialize_clr_nullable_string<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    match value {
+        None => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value)),
+        Some(Value::Number(value)) => Ok(Some(value.to_string())),
+        Some(Value::Bool(value)) => Ok(Some(if value { "True" } else { "False" }.to_owned())),
+        Some(_) => Err(clr_de_error::<D::Error>(clr_reader_error(
+            "expected CLR string-compatible value",
+        ))),
+    }
+}
+
+fn deserialize_clr_bool<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Value::deserialize(deserializer)? {
+        Value::Bool(value) => Ok(value),
+        Value::String(value) if value.trim().eq_ignore_ascii_case("true") => Ok(true),
+        Value::String(value) if value.trim().eq_ignore_ascii_case("false") => Ok(false),
+        Value::String(value) if value.is_empty() => Err(clr_de_error::<D::Error>(
+            clr_serialization_error("Boolean cannot be null"),
+        )),
+        Value::String(_) => Err(clr_de_error::<D::Error>(clr_reader_error(
+            "invalid Boolean string",
+        ))),
+        Value::Number(value) => value
+            .as_i64()
+            .map(|value| value != 0)
+            .or_else(|| value.as_u64().map(|value| value != 0))
+            .or_else(|| value.as_f64().map(|value| value != 0.0))
+            .ok_or_else(|| clr_de_error::<D::Error>(clr_reader_error("invalid Boolean number"))),
+        Value::Null => Err(clr_de_error::<D::Error>(clr_serialization_error(
+            "Boolean cannot be null",
+        ))),
+        _ => Err(clr_de_error::<D::Error>(clr_reader_error(
+            "expected CLR Boolean value",
+        ))),
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ClrInt32(i32);
+
+impl<'de> Deserialize<'de> for ClrInt32 {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Value::deserialize(deserializer)? {
+            Value::Number(value) => clr_json_int32(&value)
+                .map(Self)
+                .map_err(clr_de_error::<D::Error>),
+            Value::String(value) if value.is_empty() => Err(clr_de_error::<D::Error>(
+                clr_serialization_error("Int32 cannot be null"),
+            )),
+            Value::String(value) => value
+                .trim()
+                .parse::<i32>()
+                .map(Self)
+                .map_err(|_| clr_de_error::<D::Error>(clr_reader_error("invalid Int32 string"))),
+            Value::Null => Err(clr_de_error::<D::Error>(clr_serialization_error(
+                "Int32 cannot be null",
+            ))),
+            _ => Err(clr_de_error::<D::Error>(clr_reader_error(
+                "expected CLR Int32 value",
+            ))),
+        }
+    }
+}
+
+fn clr_json_int32(value: &serde_json::Number) -> std::result::Result<i32, ClrValidationError> {
+    if let Some(value) = value.as_i64() {
+        return i32::try_from(value).map_err(|_| clr_reader_error("Int32 value is out of range"));
+    }
+    if let Some(value) = value.as_u64() {
+        return i32::try_from(value).map_err(|_| clr_reader_error("Int32 value is out of range"));
+    }
+    value
+        .as_f64()
+        .map(f64::round_ties_even)
+        .filter(|value| *value >= i32::MIN as f64 && *value <= i32::MAX as f64)
+        .map(|value| value as i32)
+        .ok_or_else(|| clr_reader_error("Int32 value is out of range"))
+}
+
+#[derive(Debug, Default)]
+struct ClrTemplateToken;
+
+impl<'de> Deserialize<'de> for ClrTemplateToken {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        validate_clr_template_token(&Value::deserialize(deserializer)?)
+            .map_err(clr_de_error::<D::Error>)?;
+        Ok(Self)
+    }
+}
+
+#[derive(Debug, Default)]
+struct ClrPipelineContextData;
+
+impl<'de> Deserialize<'de> for ClrPipelineContextData {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        validate_clr_pipeline_context_data(&Value::deserialize(deserializer)?)
+            .map_err(clr_de_error::<D::Error>)?;
+        Ok(Self)
+    }
+}
+
+fn clr_member<'a>(object: &'a serde_json::Map<String, Value>, name: &str) -> Option<&'a Value> {
+    object.get(name).or_else(|| {
+        object
+            .iter()
+            .find(|(key, _)| clr_ordinal_ignore_case_eq(key, name))
+            .map(|(_, value)| value)
+    })
+}
+
+fn validate_clr_nullable_string_value(
+    value: &Value,
+) -> std::result::Result<(), ClrValidationError> {
+    match value {
+        Value::Null | Value::String(_) | Value::Number(_) | Value::Bool(_) => Ok(()),
+        _ => Err(clr_reader_error("expected CLR string-compatible value")),
+    }
+}
+
+fn validate_clr_int32_value(
+    value: &Value,
+    nullable: bool,
+) -> std::result::Result<(), ClrValidationError> {
+    match value {
+        Value::Null if nullable => Ok(()),
+        Value::Null => Err(clr_serialization_error("Int32 cannot be null")),
+        Value::Number(number) => clr_json_int32(number).map(|_| ()),
+        Value::String(value) if value.is_empty() && nullable => Ok(()),
+        Value::String(value) if value.is_empty() => {
+            Err(clr_serialization_error("Int32 cannot be null"))
+        }
+        Value::String(value) if value.trim().parse::<i32>().is_ok() => Ok(()),
+        Value::String(_) | Value::Bool(_) | Value::Array(_) | Value::Object(_) => {
+            Err(clr_reader_error("invalid Int32 value"))
+        }
+    }
+}
+
+fn validate_clr_bool_value(
+    value: &Value,
+    nullable: bool,
+) -> std::result::Result<(), ClrValidationError> {
+    match value {
+        Value::Null if nullable => Ok(()),
+        Value::Null => Err(clr_serialization_error("Boolean cannot be null")),
+        Value::Bool(_) => Ok(()),
+        Value::String(value)
+            if value.trim().eq_ignore_ascii_case("true")
+                || value.trim().eq_ignore_ascii_case("false") =>
+        {
+            Ok(())
+        }
+        Value::String(value) if value.is_empty() && nullable => Ok(()),
+        Value::String(value) if value.is_empty() => {
+            Err(clr_serialization_error("Boolean cannot be null"))
+        }
+        Value::String(_) | Value::Array(_) | Value::Object(_) => {
+            Err(clr_reader_error("invalid Boolean value"))
+        }
+        Value::Number(_) => Ok(()),
+    }
+}
+
+fn validate_clr_double_value(value: &Value) -> std::result::Result<(), ClrValidationError> {
+    match value {
+        Value::Number(_) => Ok(()),
+        Value::Bool(_) => Err(clr_reader_error("invalid Double value")),
+        Value::String(value) if value.is_empty() => {
+            Err(clr_serialization_error("Double cannot be null"))
+        }
+        Value::String(value) if parse_clr_double_text(value).is_some() => Ok(()),
+        Value::String(_) => Err(clr_serialization_error("invalid Double value")),
+        Value::Array(_) | Value::Object(_) => Err(clr_reader_error("invalid Double value")),
+        Value::Null => Err(clr_serialization_error("Double cannot be null")),
+    }
+}
+
+fn clr_converter_integer_discriminator(
+    value: &serde_json::Number,
+    field: &str,
+) -> std::result::Result<Option<i32>, ClrValidationError> {
+    if value.is_f64() {
+        // The pinned converters dispatch only integer JTokens. Float tokens
+        // return their existing null value without reading an Int32.
+        return Ok(None);
+    }
+    if let Some(value) = value.as_i64() {
+        return i32::try_from(value)
+            .map(Some)
+            .map_err(|_| clr_serialization_error(format!("{field} integer is outside Int32")));
+    }
+    if let Some(value) = value.as_u64() {
+        return i32::try_from(value)
+            .map(Some)
+            .map_err(|_| clr_serialization_error(format!("{field} integer is outside Int32")));
+    }
+    Err(clr_serialization_error(format!(
+        "{field} integer is outside Int32"
+    )))
+}
+
+fn validate_clr_template_token(value: &Value) -> std::result::Result<(), ClrValidationError> {
+    let Value::Object(object) = value else {
+        // TemplateTokenJsonConverter casts integer reader values to Int64
+        // before constructing NumberToken. Overflow is a retryable conversion
+        // exception, while ordinary scalar/array/null forms are accepted.
+        validate_clr_dynamic_integer(value)?;
+        return Ok(());
+    };
+
+    let token_type = match clr_member(object, "type") {
+        None => 0, // Missing discriminator defaults to String.
+        Some(Value::Number(value)) => {
+            let Some(value) = clr_converter_integer_discriminator(value, "TemplateToken type")?
+            else {
+                return Ok(());
+            };
+            value
+        }
+        Some(_) => return Ok(()), // The converter returns its existing null value.
+    };
+
+    for member in ["file", "line", "col"] {
+        if let Some(value) = clr_member(object, member) {
+            validate_clr_int32_value(value, true).map_err(|error| error.with_context(member))?;
+        }
+    }
+
+    match token_type {
+        0 => {
+            if let Some(value) = clr_member(object, "lit") {
+                validate_clr_nullable_string_value(value)
+                    .map_err(|error| error.with_context("lit"))?;
+            }
+        }
+        1 => {
+            if let Some(value) = clr_member(object, "seq") {
+                match value {
+                    Value::Null => {}
+                    Value::Array(items) => {
+                        for item in items {
+                            validate_clr_template_token(item)?;
+                        }
+                    }
+                    _ => return Err("TemplateToken sequence must be an array".into()),
+                }
+            }
+        }
+        2 => {
+            if let Some(value) = clr_member(object, "map") {
+                match value {
+                    Value::Null => {}
+                    Value::Array(items) => {
+                        for pair in items {
+                            let Some(pair) = pair.as_object() else {
+                                return Err("TemplateToken map item must be an object".into());
+                            };
+                            if let Some(key) = clr_member(pair, "key") {
+                                validate_clr_template_token(key)?;
+                                if let Value::Object(key) = key
+                                    && let Some(Value::Number(kind)) = clr_member(key, "type")
+                                    && let Some(kind) = clr_converter_integer_discriminator(
+                                        kind,
+                                        "TemplateToken type",
+                                    )?
+                                {
+                                    // BasicExpressionToken and InsertExpressionToken
+                                    // derive from ScalarToken and are valid map keys.
+                                    if !matches!(kind, 0 | 3 | 4 | 5 | 6 | 7) {
+                                        return Err("TemplateToken map key must be scalar".into());
+                                    }
+                                }
+                            }
+                            if let Some(value) = clr_member(pair, "value") {
+                                validate_clr_template_token(value)?;
+                            }
+                        }
+                    }
+                    _ => return Err("TemplateToken map must be an array".into()),
+                }
+            }
+        }
+        3 => {
+            if let Some(value) = clr_member(object, "expr") {
+                validate_clr_nullable_string_value(value)
+                    .map_err(|error| error.with_context("expr"))?;
+            }
+        }
+        4 | 7 => {}
+        5 => {
+            if let Some(value) = clr_member(object, "bool") {
+                validate_clr_bool_value(value, false)
+                    .map_err(|error| error.with_context("bool"))?;
+            }
+        }
+        6 => {
+            if let Some(value) = clr_member(object, "num") {
+                validate_clr_double_value(value).map_err(|error| error.with_context("num"))?;
+            }
+        }
+        _ => return Err("unknown TemplateToken type".into()),
+    }
+    Ok(())
+}
+
+fn validate_clr_pipeline_context_data(
+    value: &Value,
+) -> std::result::Result<(), ClrValidationError> {
+    let Value::Object(object) = value else {
+        // PipelineContextDataJsonConverter casts integer reader values to
+        // Int64 before constructing NumberContextData.
+        validate_clr_dynamic_integer(value)?;
+        return Ok(());
+    };
+
+    let context_type = match clr_member(object, "t") {
+        None => 0,
+        Some(Value::Number(value)) => {
+            let Some(value) =
+                clr_converter_integer_discriminator(value, "PipelineContextData type")?
+            else {
+                return Ok(());
+            };
+            value
+        }
+        Some(_) => return Ok(()),
+    };
+
+    match context_type {
+        0 => {
+            if let Some(value) = clr_member(object, "s") {
+                validate_clr_nullable_string_value(value)
+                    .map_err(|error| error.with_context("s"))?;
+            }
+        }
+        1 => {
+            if let Some(value) = clr_member(object, "a") {
+                match value {
+                    Value::Null => {}
+                    Value::Array(items) => {
+                        for item in items {
+                            validate_clr_pipeline_context_data(item)?;
+                        }
+                    }
+                    _ => return Err("PipelineContextData array must be an array".into()),
+                }
+            }
+        }
+        2 | 5 => {
+            if let Some(value) = clr_member(object, "d") {
+                match value {
+                    Value::Null => {}
+                    Value::Array(items) => {
+                        for item in items {
+                            if item.is_null() {
+                                // The pinned pair type is a reference class,
+                                // so Json.NET permits null list entries here.
+                                continue;
+                            }
+                            let Some(pair) = item.as_object() else {
+                                return Err(
+                                    "PipelineContextData dictionary item must be an object".into(),
+                                );
+                            };
+                            if let Some(key) = clr_member(pair, "k") {
+                                validate_clr_nullable_string_value(key)
+                                    .map_err(|error| error.with_context("k"))?;
+                            }
+                            if let Some(value) = clr_member(pair, "v") {
+                                validate_clr_pipeline_context_data(value)?;
+                            }
+                        }
+                    }
+                    _ => return Err("PipelineContextData dictionary must be an array".into()),
+                }
+            }
+        }
+        3 => {
+            if let Some(value) = clr_member(object, "b") {
+                validate_clr_bool_value(value, false).map_err(|error| error.with_context("b"))?;
+            }
+        }
+        4 => {
+            if let Some(value) = clr_member(object, "n") {
+                validate_clr_double_value(value).map_err(|error| error.with_context("n"))?;
+            }
+        }
+        _ => return Err("unknown PipelineContextData type".into()),
+    }
+    Ok(())
+}
+
+fn validate_clr_dynamic_integer(value: &Value) -> std::result::Result<(), ClrValidationError> {
+    let Value::Number(number) = value else {
+        return Ok(());
+    };
+    if number.is_f64() {
+        return Ok(());
+    }
+    if number.as_i64().is_some()
+        || number
+            .as_u64()
+            .is_some_and(|integer| integer <= i64::MAX as u64)
+    {
+        Ok(())
+    } else {
+        Err(clr_serialization_error(
+            "dynamic integer token is outside Int64",
+        ))
+    }
+}
+
+/// Keep the protocol's CLR-oriented name at call sites while sharing the
+/// ordered token tree and source-aware scanner with the wire DTO parser.
+type ClrOrderedValue = OrderedJsonValue;
+
+/// Collapse a trailing run of elision holes to a single hole in projected
+/// arrays. `[,]` parses to two holes (one per empty slot); the decode
+/// pipeline's typed token/context converters and JToken projections keep
+/// one null/undefined instead of surfacing the raw pair.
+fn collapse_trailing_clr_elisions(values: Vec<ClrOrderedValue>) -> Vec<ClrOrderedValue> {
+    let mut trimmed = values;
+    let mut trailing_holes = 0;
+    while trimmed
+        .last()
+        .is_some_and(|value| matches!(value, ClrOrderedValue::Undefined))
+    {
+        trimmed.pop();
+        trailing_holes += 1;
+    }
+    if trailing_holes > 0 {
+        trimmed.push(ClrOrderedValue::Undefined);
+    }
+    trimmed
+}
+
+fn collapse_exact_clr_context_entries(
+    entries: Vec<(String, ClrOrderedValue)>,
+) -> Vec<(String, ContextValue)> {
+    let mut collapsed = Vec::<(String, ContextValue)>::with_capacity(entries.len());
+    for (key, value) in entries {
+        let value = value.into_context_value();
+        if let Some((_, existing)) = collapsed.iter_mut().find(|(existing, _)| existing == &key) {
+            // JObject replaces an exact duplicate in place, preserving the
+            // original property position while assigning the later value.
+            *existing = value;
+        } else {
+            collapsed.push((key, value));
+        }
+    }
+    collapsed
+}
+
+fn context_value_wire_value(
+    entries: Vec<(String, ClrOrderedValue)>,
+    case_sensitive: bool,
+) -> Value {
+    let entries = collapse_exact_clr_context_entries(entries);
+    let value = ContextValue::Object {
+        case_sensitive,
+        entries,
+    };
+    serde_json::to_value(value).unwrap_or(Value::Null)
+}
+
+fn parse_clr_ordered_json(body: &str) -> std::result::Result<ClrOrderedValue, serde_json::Error> {
+    parse_json_text(body)
+}
+
+fn approximate_clr_big_integer(value: &str) -> Value {
+    clr_big_integer_to_f64(value)
+        .and_then(serde_json::Number::from_f64)
+        .map(Value::Number)
+        .unwrap_or_else(|| Value::String(value.to_owned()))
+}
+
+fn clr_big_integer_double_value(decimal: &str) -> Value {
+    let Some(value) = clr_big_integer_to_f64(decimal) else {
+        return Value::String(decimal.to_owned());
+    };
+    serde_json::Number::from_f64(value)
+        .map(Value::Number)
+        .unwrap_or_else(|| {
+            Value::String(
+                non_finite_text(if value.is_sign_negative() {
+                    NonFinite::NegativeInfinity
+                } else {
+                    NonFinite::PositiveInfinity
+                })
+                .to_owned(),
+            )
+        })
+}
+
+fn ordered_number_value(number: JsonNumber) -> Value {
+    match number.kind {
+        JsonNumberKind::Int64(value) => Value::Number(value.into()),
+        JsonNumberKind::Float(value) => serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        JsonNumberKind::BigInteger(value) => approximate_clr_big_integer(&value),
+    }
+}
+
+fn ordered_number_text(number: JsonNumber) -> String {
+    if number.origin == JsonReaderOrigin::TextReader {
+        return number.lexeme;
+    }
+    match number.kind {
+        JsonNumberKind::Int64(value) => value.to_string(),
+        JsonNumberKind::Float(value) => dotnet_double_general(value),
+        JsonNumberKind::BigInteger(value) => value,
+    }
+}
+
+impl OrderedJsonValue {
+    fn collapse_exact_properties(self) -> Self {
+        match self {
+            Self::Array(values) => Self::Array(
+                values
+                    .into_iter()
+                    .map(Self::collapse_exact_properties)
+                    .collect(),
+            ),
+            Self::Object(entries) => {
+                let mut collapsed: Vec<(String, ClrOrderedValue)> = Vec::new();
+                for (name, value) in entries {
+                    let value = value.collapse_exact_properties();
+                    if let Some((_, previous)) =
+                        collapsed.iter_mut().find(|(existing, _)| existing == &name)
+                    {
+                        *previous = value;
+                    } else {
+                        collapsed.push((name, value));
+                    }
+                }
+                Self::Object(collapsed)
+            }
+            Self::Constructor { name, arguments } => Self::Constructor {
+                name,
+                arguments: arguments
+                    .into_iter()
+                    .map(Self::collapse_exact_properties)
+                    .collect(),
+            },
+            value => value,
+        }
+    }
+
+    fn into_context_value(self) -> ContextValue {
+        match self {
+            Self::Null => ContextValue::Null,
+            Self::Bool(value) => ContextValue::Bool(value),
+            Self::Number(JsonNumber {
+                kind: JsonNumberKind::Int64(value),
+                ..
+            }) => ContextValue::Number(value.into()),
+            Self::Number(JsonNumber {
+                kind: JsonNumberKind::Float(value),
+                ..
+            }) => match serde_json::Number::from_f64(value) {
+                Some(number) => ContextValue::Number(number),
+                None => ContextValue::NonFinite(if value.is_nan() {
+                    NonFinite::NaN
+                } else if value.is_sign_negative() {
+                    NonFinite::NegativeInfinity
+                } else {
+                    NonFinite::PositiveInfinity
+                }),
+            },
+            Self::Number(JsonNumber {
+                kind: JsonNumberKind::BigInteger(value),
+                ..
+            }) => ContextValue::BigInteger(value),
+            Self::NonFinite { value, .. } => ContextValue::non_finite(value),
+            Self::String(value) => ContextValue::String(value),
+            Self::Undefined => ContextValue::Undefined,
+            Self::Constructor { name, arguments } => ContextValue::Constructor {
+                name,
+                arguments: arguments
+                    .into_iter()
+                    .map(Self::into_context_value)
+                    .collect(),
+            },
+            Self::Array(values) => ContextValue::Array(
+                collapse_trailing_clr_elisions(values)
+                    .into_iter()
+                    .map(Self::into_context_value)
+                    .collect(),
+            ),
+            Self::Object(values) => ContextValue::Object {
+                case_sensitive: true,
+                entries: collapse_exact_clr_context_entries(values),
+            },
+        }
+    }
+
+    fn into_value(self) -> Value {
+        match self {
+            Self::Null => Value::Null,
+            Self::Bool(value) => Value::Bool(value),
+            Self::Number(number) => ordered_number_value(number),
+            // serde_json cannot represent CLR's bare NaN/Infinity literals.
+            // Keep them out of raw/JToken projections; typed Double slots use
+            // the explicit bridge in `into_clr_value` below. `raw_json` keeps
+            // the exact response for quarantine and diagnostics.
+            Self::NonFinite { .. } => Value::Null,
+            Self::Undefined | Self::Constructor { .. } => Value::Null,
+            Self::String(value) => Value::String(value),
+            Self::Array(values) => Value::Array(values.into_iter().map(Self::into_value).collect()),
+            Self::Object(values) => {
+                let mut object = serde_json::Map::new();
+                for (key, value) in values {
+                    object.insert(key, value.into_value());
+                }
+                Value::Object(object)
+            }
+        }
+    }
+
+    fn into_clr_value(self, shape: ClrWireShape) -> Value {
+        match shape {
+            ClrWireShape::Raw => self.into_value(),
+            ClrWireShape::String => self.into_clr_string_value(),
+            ClrWireShape::Guid
+            | ClrWireShape::Int32
+            | ClrWireShape::Boolean
+            | ClrWireShape::DateTime => self.into_value(),
+            ClrWireShape::Int64 => match self {
+                Self::Number(number) => {
+                    // Convert.ToInt64 rounds floating-point input to even;
+                    // unrepresentable magnitudes stay verbatim for typed
+                    // validation to reject.
+                    let rounded = match number.kind {
+                        JsonNumberKind::Float(value) => Some(value.round_ties_even()),
+                        _ => None,
+                    };
+                    match rounded {
+                        Some(rounded)
+                            if rounded >= i64::MIN as f64
+                                && rounded < 9_223_372_036_854_775_808.0 =>
+                        {
+                            Value::Number((rounded as i64).into())
+                        }
+                        _ => Self::Number(number).into_value(),
+                    }
+                }
+                value => value.into_value(),
+            },
+            ClrWireShape::Uri => match self {
+                Self::Null | Self::Undefined => Value::Null,
+                Self::String(value) if value.is_empty() => Value::Null,
+                value => value.into_value(),
+            },
+            ClrWireShape::Double => match self {
+                Self::NonFinite { value, .. } => Value::String(non_finite_text(value).to_owned()),
+                Self::Number(JsonNumber {
+                    kind: JsonNumberKind::BigInteger(value),
+                    ..
+                }) => clr_big_integer_double_value(&value),
+                Self::Number(JsonNumber {
+                    kind: JsonNumberKind::Int64(value),
+                    ..
+                }) => serde_json::Number::from_f64(value as f64)
+                    .map(Value::Number)
+                    .unwrap_or(Value::Null),
+                Self::Number(JsonNumber {
+                    kind: JsonNumberKind::Float(value),
+                    ..
+                }) => serde_json::Number::from_f64(value)
+                    .map(Value::Number)
+                    .unwrap_or_else(|| {
+                        Value::String(
+                            non_finite_text(if value.is_nan() {
+                                NonFinite::NaN
+                            } else if value.is_sign_negative() {
+                                NonFinite::NegativeInfinity
+                            } else {
+                                NonFinite::PositiveInfinity
+                            })
+                            .to_owned(),
+                        )
+                    }),
+                Self::String(text) => match parse_clr_double_text(&text) {
+                    Some(parsed) => serde_json::Number::from_f64(parsed)
+                        .map(Value::Number)
+                        .unwrap_or_else(|| Value::String(text)),
+                    None => Value::String(text),
+                },
+                value => value.into_value(),
+            },
+            ClrWireShape::Object(schema) => self.into_clr_object(schema),
+            ClrWireShape::Array(schema) => match self {
+                Self::Array(values) => Value::Array(
+                    values
+                        .into_iter()
+                        .map(|value| value.into_clr_value(ClrWireShape::Object(schema)))
+                        .collect(),
+                ),
+                value => value.into_value(),
+            },
+            ClrWireShape::ArrayTemplateToken => match self {
+                Self::Array(values) => Value::Array(
+                    collapse_trailing_clr_elisions(values)
+                        .into_iter()
+                        .map(|value| value.into_clr_value(ClrWireShape::TemplateToken))
+                        .collect(),
+                ),
+                value => value.into_value(),
+            },
+            ClrWireShape::ArrayPipelineContextData => match self {
+                Self::Array(values) => Value::Array(
+                    collapse_trailing_clr_elisions(values)
+                        .into_iter()
+                        .map(|value| value.into_clr_value(ClrWireShape::PipelineContextData))
+                        .collect(),
+                ),
+                value => value.into_value(),
+            },
+            ClrWireShape::RawArray => match self {
+                Self::Array(values) => Value::Array(
+                    values
+                        .into_iter()
+                        .map(Self::into_clr_string_value)
+                        .collect(),
+                ),
+                value => value.into_value(),
+            },
+            ClrWireShape::MapValues(schema) => match self {
+                Self::Object(values) => {
+                    if matches!(schema, ClrWireSchema::PipelineContextData) {
+                        let mut entries = Vec::with_capacity(values.len());
+                        for (key, value) in values {
+                            let value = value.into_clr_value(ClrWireShape::PipelineContextData);
+                            if let Some((_, previous)) =
+                                entries.iter_mut().find(|(name, _)| name == &key)
+                            {
+                                *previous = value;
+                            } else {
+                                entries.push((key, value));
+                            }
+                        }
+                        crate::job_message::ordered_context_data_pair_array_value(entries)
+                    } else {
+                        let mut object = serde_json::Map::new();
+                        for (key, value) in values {
+                            let value = value.into_clr_value(ClrWireShape::Object(schema));
+                            object.insert(key, value);
+                        }
+                        Value::Object(object)
+                    }
+                }
+                Self::Null | Self::Undefined => Value::Null,
+                Self::Array(_) => Value::Bool(false),
+                value => value.into_value(),
+            },
+            ClrWireShape::CaseInsensitiveStringMap => match self {
+                Self::Object(values) => {
+                    let mut object = serde_json::Map::new();
+                    for (key, value) in values {
+                        insert_case_insensitive(&mut object, key, value.into_clr_string_value());
+                    }
+                    Value::Object(object)
+                }
+                value => value.into_value(),
+            },
+            ClrWireShape::ExactStringMap => match self {
+                Self::Object(values) => {
+                    let mut object = serde_json::Map::new();
+                    for (key, value) in values {
+                        object.insert(key, value.into_clr_string_value());
+                    }
+                    Value::Object(object)
+                }
+                value => value.into_value(),
+            },
+            ClrWireShape::PropertyBag => match self {
+                Self::Object(values) => context_value_wire_value(values, false),
+                Self::Null => Value::Null,
+                value => value.into_value(),
+            },
+            ClrWireShape::JTokenObject => match self {
+                Self::Object(values) => context_value_wire_value(values, true),
+                Self::Null => Value::Null,
+                // Option<JObject> accepts null but rejects an Undefined
+                // JValue or JConstructor at this typed root boundary.
+                Self::Undefined | Self::Constructor { .. } => Value::Bool(false),
+                value => value.into_value(),
+            },
+            ClrWireShape::ExactNullableStringMap => match self {
+                Self::Object(values) => {
+                    let mut object = serde_json::Map::new();
+                    for (key, value) in values {
+                        object.insert(key, value.into_clr_string_value());
+                    }
+                    Value::Object(object)
+                }
+                value => value.into_value(),
+            },
+            ClrWireShape::Links => self.into_clr_links(),
+            ClrWireShape::TemplateToken => match self {
+                Self::NonFinite { value, .. } => {
+                    json!({"type": 6, "num": non_finite_text(value)})
+                }
+                value => value.into_clr_template_token(),
+            },
+            ClrWireShape::PipelineContextData => match self {
+                Self::NonFinite { value, .. } => {
+                    json!({"t": 4, "n": non_finite_text(value)})
+                }
+                value => value.into_clr_context_data(),
+            },
+            ClrWireShape::Steps => self.into_clr_steps(),
+            ClrWireShape::ActionReference => self.into_clr_action_reference(),
+        }
+    }
+
+    fn into_clr_object(self, schema: ClrWireSchema) -> Value {
+        let Self::Object(values) = self else {
+            return self.into_value();
+        };
+        let mut object = serde_json::Map::new();
+        for (key, value) in values {
+            let Some(field) = clr_wire_fields(schema)
+                .iter()
+                .find(|field| clr_ordinal_ignore_case_eq(&key, field.name))
+            else {
+                // Json.NET ignores unknown CLR object properties. Preserve
+                // their value without interpreting dictionaries or JTokens.
+                object.insert(key, value.into_value());
+                continue;
+            };
+            let previous = object.remove(field.name);
+            let normalized = match field.shape {
+                ClrWireShape::TemplateToken => {
+                    if matches!(&value, ClrOrderedValue::NonFinite { .. }) {
+                        value.into_clr_value(ClrWireShape::TemplateToken)
+                    } else {
+                        value.into_clr_template_token_with_existing(previous.clone())
+                    }
+                }
+                ClrWireShape::PipelineContextData => {
+                    if matches!(&value, ClrOrderedValue::NonFinite { .. }) {
+                        value.into_clr_value(ClrWireShape::PipelineContextData)
+                    } else {
+                        value.into_clr_context_data_with_existing(previous.clone())
+                    }
+                }
+                shape => value.into_clr_value(shape),
+            };
+            if let Some(previous) = previous {
+                let normalized = match field.shape {
+                    ClrWireShape::TemplateToken | ClrWireShape::PipelineContextData => normalized,
+                    shape => merge_clr_wire_value(shape, previous, normalized),
+                };
+                object.insert(field.name.to_owned(), normalized);
+            } else {
+                object.insert(field.name.to_owned(), normalized);
+            }
+        }
+        Value::Object(object)
+    }
+
+    /// Json.NET's `ReadAsString` converts primitive values at typed string
+    /// dictionary boundaries. Opaque JToken values continue through
+    /// `into_value`, where nonfinite values are intentionally not stringified.
+    fn into_clr_string_value(self) -> Value {
+        match self {
+            Self::Null => Value::Null,
+            Self::String(value) => Value::String(value),
+            Self::Bool(value) => Value::String(if value { "True" } else { "False" }.to_owned()),
+            Self::Number(value) => Value::String(ordered_number_text(value)),
+            Self::NonFinite {
+                value,
+                origin,
+                lexeme,
+            } => Value::String(match origin {
+                JsonReaderOrigin::TextReader => lexeme,
+                JsonReaderOrigin::JObjectReader => non_finite_text(value).to_owned(),
+            }),
+            value => value.into_value(),
+        }
+    }
+
+    fn into_clr_links(self) -> Value {
+        let Self::Object(values) = self else {
+            return self.into_value();
+        };
+        let mut object = serde_json::Map::new();
+        for (key, value) in values {
+            let value = match value {
+                Self::Array(items) => Value::Array(
+                    items
+                        .into_iter()
+                        .map(|item| {
+                            item.into_clr_value(ClrWireShape::Object(ClrWireSchema::ReferenceLink))
+                        })
+                        .collect(),
+                ),
+                item => item.into_clr_value(ClrWireShape::Object(ClrWireSchema::ReferenceLink)),
+            };
+            object.insert(key, value);
+        }
+        Value::Object(object)
+    }
+
+    fn into_clr_template_token(self) -> Value {
+        self.into_clr_template_token_with_existing(None)
+    }
+
+    fn into_clr_template_token_with_existing(self, existing: Option<Value>) -> Value {
+        let mut value = self.collapse_exact_properties();
+        if matches!(&value, Self::NonFinite { .. }) {
+            return value.into_clr_value(ClrWireShape::TemplateToken);
+        }
+        if matches!(&value, Self::Object(_)) {
+            value.set_number_origin(JsonReaderOrigin::JObjectReader);
+        }
+        let Self::Object(values) = value else {
+            return value.into_value();
+        };
+        let kind = match ordered_member(&values, "type") {
+            Some(value) => match ordered_converter_i32(value, "TemplateToken type") {
+                Ok(Some(kind)) => kind,
+                Ok(None) => return existing.unwrap_or(Value::Null),
+                Err(_) => return Value::Null,
+            },
+            None => 0,
+        };
+        let fields = clr_template_token_fields(kind);
+        Self::normalize_named_fields(values, &fields, Some(("type", kind)))
+    }
+
+    fn into_clr_context_data(self) -> Value {
+        self.into_clr_context_data_with_existing(None)
+    }
+
+    fn into_clr_context_data_with_existing(self, existing: Option<Value>) -> Value {
+        let mut value = self.collapse_exact_properties();
+        if matches!(&value, Self::NonFinite { .. }) {
+            return value.into_clr_value(ClrWireShape::PipelineContextData);
+        }
+        if matches!(&value, Self::Object(_)) {
+            value.set_number_origin(JsonReaderOrigin::JObjectReader);
+        }
+        let Self::Object(values) = value else {
+            return match value {
+                Self::Null | Self::Array(_) => Value::Null,
+                Self::Number(JsonNumber {
+                    kind: JsonNumberKind::Int64(value),
+                    ..
+                }) => serde_json::Number::from_f64(value as f64)
+                    .map(Value::Number)
+                    .unwrap_or(Value::Null),
+                Self::Number(JsonNumber {
+                    kind: JsonNumberKind::Float(value),
+                    ..
+                }) => serde_json::Number::from_f64(value)
+                    .map(Value::Number)
+                    .unwrap_or_else(|| {
+                        Value::String(
+                            non_finite_text(if value.is_nan() {
+                                NonFinite::NaN
+                            } else if value.is_sign_negative() {
+                                NonFinite::NegativeInfinity
+                            } else {
+                                NonFinite::PositiveInfinity
+                            })
+                            .to_owned(),
+                        )
+                    }),
+                // `validate_clr_context_occurrences` rejects typed BigInteger
+                // scalars before this projection, matching the converter's
+                // checked `(Int64)` cast.
+                value => value.into_value(),
+            };
+        };
+        let kind = match ordered_member(&values, "t") {
+            Some(value) => match ordered_converter_i32(value, "PipelineContextData type") {
+                Ok(Some(kind)) => kind,
+                Ok(None) => return existing.unwrap_or(Value::Null),
+                Err(_) => return Value::Null,
+            },
+            None => 0,
+        };
+        let fields = clr_context_data_fields(kind);
+        Self::normalize_named_fields(values, &fields, Some(("t", kind)))
+    }
+
+    fn into_clr_steps(self) -> Value {
+        let Self::Array(steps) = self else {
+            return self.into_value();
+        };
+        Value::Array(
+            steps
+                .into_iter()
+                .map(|step| {
+                    let step = step.collapse_exact_properties();
+                    let Self::Object(fields) = &step else {
+                        return step.into_value();
+                    };
+                    let kind = ordered_member(fields, "Type").and_then(ordered_step_type);
+                    match kind {
+                        Some(4) => {
+                            step.into_clr_converter_object(ClrWireSchema::ActionStep, "Type", 4)
+                        }
+                        Some(5) => {
+                            step.into_clr_converter_object(ClrWireSchema::BackgroundStep, "Type", 5)
+                        }
+                        _ => Value::Null,
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    fn into_clr_action_reference(self) -> Value {
+        let mut value = self.collapse_exact_properties();
+        if matches!(&value, Self::Object(_)) {
+            value.set_number_origin(JsonReaderOrigin::JObjectReader);
+        }
+        let Self::Object(values) = value else {
+            return value.into_value();
+        };
+        let kind = ordered_member(&values, "Type").and_then(ordered_action_type);
+        let Some(kind) = kind else {
+            return Value::Null;
+        };
+        let fields = clr_action_reference_fields(kind);
+        Self::normalize_named_fields(values, &fields, Some(("Type", kind)))
+    }
+
+    fn normalize_named_fields(
+        values: Vec<(String, Self)>,
+        fields: &[ClrWireField],
+        discriminator: Option<(&str, i32)>,
+    ) -> Value {
+        let mut object = serde_json::Map::new();
+        for (key, value) in values {
+            let Some(field) = fields
+                .iter()
+                .find(|field| clr_ordinal_ignore_case_eq(&key, field.name))
+            else {
+                continue;
+            };
+            let previous = object.remove(field.name);
+            let normalized = value.into_clr_value(field.shape);
+            let normalized = match (is_mutable_converter_collection(field), previous) {
+                (true, Some(previous)) => merge_clr_wire_value(field.shape, previous, normalized),
+                _ => normalized,
+            };
+            object.insert(field.name.to_owned(), normalized);
+        }
+        if let Some((name, kind)) = discriminator {
+            object.insert(name.to_owned(), Value::from(kind));
+        }
+        Value::Object(object)
+    }
+
+    fn into_clr_converter_object(
+        self,
+        schema: ClrWireSchema,
+        discriminator: &'static str,
+        kind: i32,
+    ) -> Value {
+        let Self::Object(values) = self else {
+            return self.into_value();
+        };
+        let mut object = serde_json::Map::new();
+        for (key, value) in values {
+            let Some(field) = clr_wire_fields(schema)
+                .iter()
+                .find(|field| clr_ordinal_ignore_case_eq(&key, field.name))
+            else {
+                continue;
+            };
+            let previous = object.remove(field.name);
+            let normalized = match field.shape {
+                ClrWireShape::TemplateToken => {
+                    if matches!(&value, ClrOrderedValue::NonFinite { .. }) {
+                        value.into_clr_value(ClrWireShape::TemplateToken)
+                    } else {
+                        value.into_clr_template_token_with_existing(previous.clone())
+                    }
+                }
+                ClrWireShape::PipelineContextData => {
+                    if matches!(&value, ClrOrderedValue::NonFinite { .. }) {
+                        value.into_clr_value(ClrWireShape::PipelineContextData)
+                    } else {
+                        value.into_clr_context_data_with_existing(previous.clone())
+                    }
+                }
+                shape => value.into_clr_value(shape),
+            };
+            // Json.NET Populate reuses mutable collection properties. Aliases
+            // append into the constructor's backing list; null assigns null,
+            // and a later array then starts a fresh list.
+            let normalized = match (is_mutable_converter_collection(field), previous) {
+                (true, Some(previous)) => merge_clr_wire_value(field.shape, previous, normalized),
+                _ => normalized,
+            };
+            object.insert(field.name.to_owned(), normalized);
+        }
+        object.insert(discriminator.to_owned(), Value::from(kind));
+        Value::Object(object)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ClrWireSchema {
+    AgentJob,
+    Plan,
+    Owner,
+    Timeline,
+    JobResources,
+    RepositoryResource,
+    ContainerResource,
+    ServiceEndpoint,
+    ServiceEndpointReference,
+    EndpointAuthorization,
+    VariableValue,
+    MaskHint,
+    Workspace,
+    ActionsEnvironment,
+    DebuggerTunnel,
+    ReferenceLink,
+    TemplatePair,
+    PipelineContextData,
+    ContextPair,
+    ActionStep,
+    BackgroundStep,
+}
+
+#[derive(Clone, Copy)]
+enum ClrWireShape {
+    Raw,
+    String,
+    Guid,
+    Int32,
+    Int64,
+    Boolean,
+    DateTime,
+    Uri,
+    Double,
+    Object(ClrWireSchema),
+    Array(ClrWireSchema),
+    MapValues(ClrWireSchema),
+    CaseInsensitiveStringMap,
+    ExactStringMap,
+    ExactNullableStringMap,
+    PropertyBag,
+    JTokenObject,
+    Links,
+    TemplateToken,
+    PipelineContextData,
+    Steps,
+    ActionReference,
+    ArrayTemplateToken,
+    ArrayPipelineContextData,
+    RawArray,
+}
+
+fn is_mutable_converter_collection(field: &ClrWireField) -> bool {
+    matches!(
+        (field.name, field.shape),
+        ("seq", ClrWireShape::ArrayTemplateToken)
+            | ("map", ClrWireShape::Array(ClrWireSchema::TemplatePair))
+            | ("a", ClrWireShape::ArrayPipelineContextData)
+            | ("d", ClrWireShape::Array(ClrWireSchema::ContextPair))
+    )
+}
+
+#[derive(Clone, Copy)]
+struct ClrWireField {
+    name: &'static str,
+    shape: ClrWireShape,
+}
+
+impl ClrWireField {
+    const fn raw(name: &'static str) -> Self {
+        Self {
+            name,
+            shape: ClrWireShape::Raw,
+        }
+    }
+
+    const fn typed(name: &'static str, shape: ClrWireShape) -> Self {
+        Self { name, shape }
+    }
+
+    const fn string(name: &'static str) -> Self {
+        Self::typed(name, ClrWireShape::String)
+    }
+
+    const fn guid(name: &'static str) -> Self {
+        Self::typed(name, ClrWireShape::Guid)
+    }
+
+    const fn int32(name: &'static str) -> Self {
+        Self::typed(name, ClrWireShape::Int32)
+    }
+
+    const fn int64(name: &'static str) -> Self {
+        Self::typed(name, ClrWireShape::Int64)
+    }
+
+    const fn boolean(name: &'static str) -> Self {
+        Self::typed(name, ClrWireShape::Boolean)
+    }
+
+    const fn date_time(name: &'static str) -> Self {
+        Self::typed(name, ClrWireShape::DateTime)
+    }
+}
+
+fn clr_template_token_fields(kind: i32) -> Vec<ClrWireField> {
+    let mut fields = vec![
+        ClrWireField::raw("type"),
+        ClrWireField::int32("file"),
+        ClrWireField::int32("line"),
+        ClrWireField::int32("col"),
+    ];
+    match kind {
+        0 => fields.push(ClrWireField::string("lit")),
+        1 => fields.push(ClrWireField::typed("seq", ClrWireShape::ArrayTemplateToken)),
+        2 => fields.push(ClrWireField::typed(
+            "map",
+            ClrWireShape::Array(ClrWireSchema::TemplatePair),
+        )),
+        3 | 4 => fields.push(ClrWireField::string("expr")),
+        5 => fields.push(ClrWireField::boolean("bool")),
+        6 => fields.push(ClrWireField::typed("num", ClrWireShape::Double)),
+        _ => {}
+    }
+    fields
+}
+
+fn clr_context_data_fields(kind: i32) -> Vec<ClrWireField> {
+    let mut fields = vec![ClrWireField::raw("t")];
+    match kind {
+        0 => fields.push(ClrWireField::string("s")),
+        1 => fields.push(ClrWireField::typed(
+            "a",
+            ClrWireShape::ArrayPipelineContextData,
+        )),
+        2 | 5 => fields.push(ClrWireField::typed(
+            "d",
+            ClrWireShape::Array(ClrWireSchema::ContextPair),
+        )),
+        3 => fields.push(ClrWireField::boolean("b")),
+        4 => fields.push(ClrWireField::typed("n", ClrWireShape::Double)),
+        _ => {}
+    }
+    fields
+}
+
+fn clr_action_reference_fields(kind: i32) -> Vec<ClrWireField> {
+    let mut fields = vec![ClrWireField::raw("Type")];
+    match kind {
+        1 => {
+            for name in ["Name", "Ref", "RepositoryType", "Path"] {
+                fields.push(ClrWireField::string(name));
+            }
+        }
+        2 => fields.push(ClrWireField::string("Image")),
+        _ => {}
+    }
+    fields
+}
+
+const ROOT_WIRE_FIELDS: &[ClrWireField] = &[
+    ClrWireField::string("MessageType"),
+    ClrWireField::typed("Plan", ClrWireShape::Object(ClrWireSchema::Plan)),
+    ClrWireField::typed("Timeline", ClrWireShape::Object(ClrWireSchema::Timeline)),
+    ClrWireField::guid("JobId"),
+    ClrWireField::string("JobDisplayName"),
+    ClrWireField::string("JobName"),
+    ClrWireField::typed("JobContainer", ClrWireShape::TemplateToken),
+    ClrWireField::typed("JobServiceContainers", ClrWireShape::TemplateToken),
+    ClrWireField::typed("JobOutputs", ClrWireShape::TemplateToken),
+    ClrWireField::int64("RequestId"),
+    ClrWireField::date_time("LockedUntil"),
+    ClrWireField::typed(
+        "Resources",
+        ClrWireShape::Object(ClrWireSchema::JobResources),
+    ),
+    ClrWireField::typed(
+        "ContextData",
+        ClrWireShape::MapValues(ClrWireSchema::PipelineContextData),
+    ),
+    ClrWireField::typed("Workspace", ClrWireShape::Object(ClrWireSchema::Workspace)),
+    ClrWireField::typed("EnvironmentVariables", ClrWireShape::ArrayTemplateToken),
+    ClrWireField::typed(
+        "Variables",
+        ClrWireShape::MapValues(ClrWireSchema::VariableValue),
+    ),
+    ClrWireField::typed("Mask", ClrWireShape::Array(ClrWireSchema::MaskHint)),
+    ClrWireField::typed("Steps", ClrWireShape::Steps),
+    ClrWireField::typed("Defaults", ClrWireShape::ArrayTemplateToken),
+    ClrWireField::typed(
+        "ActionsEnvironment",
+        ClrWireShape::Object(ClrWireSchema::ActionsEnvironment),
+    ),
+    ClrWireField::typed("Snapshot", ClrWireShape::TemplateToken),
+    ClrWireField::string("BillingOwnerId"),
+    ClrWireField::boolean("EnableDebugger"),
+    ClrWireField::typed(
+        "DebuggerTunnel",
+        ClrWireShape::Object(ClrWireSchema::DebuggerTunnel),
+    ),
+    ClrWireField::string("DebuggerWelcomeMessage"),
+    ClrWireField::typed("dependencies", ClrWireShape::RawArray),
+    ClrWireField::typed("FileTable", ClrWireShape::RawArray),
+    ClrWireField::typed("JobSidecarContainers", ClrWireShape::ExactNullableStringMap),
+];
+
+const PLAN_WIRE_FIELDS: &[ClrWireField] = &[
+    ClrWireField::guid("ScopeIdentifier"),
+    ClrWireField::string("PlanType"),
+    ClrWireField::int32("Version"),
+    ClrWireField::guid("PlanId"),
+    ClrWireField::string("PlanGroup"),
+    ClrWireField::typed("ArtifactUri", ClrWireShape::Uri),
+    ClrWireField::typed("ArtifactLocation", ClrWireShape::Uri),
+    ClrWireField::typed("Definition", ClrWireShape::Object(ClrWireSchema::Owner)),
+    ClrWireField::typed("Owner", ClrWireShape::Object(ClrWireSchema::Owner)),
+];
+const OWNER_WIRE_FIELDS: &[ClrWireField] = &[
+    ClrWireField::int32("Id"),
+    ClrWireField::string("Name"),
+    ClrWireField::typed("_links", ClrWireShape::Links),
+];
+const TIMELINE_WIRE_FIELDS: &[ClrWireField] = &[
+    ClrWireField::guid("Id"),
+    ClrWireField::int32("ChangeId"),
+    ClrWireField::typed("Location", ClrWireShape::Uri),
+];
+const JOB_RESOURCES_WIRE_FIELDS: &[ClrWireField] = &[
+    ClrWireField::typed(
+        "Endpoints",
+        ClrWireShape::Array(ClrWireSchema::ServiceEndpoint),
+    ),
+    ClrWireField::typed(
+        "Repositories",
+        ClrWireShape::Array(ClrWireSchema::RepositoryResource),
+    ),
+    ClrWireField::typed(
+        "Containers",
+        ClrWireShape::Array(ClrWireSchema::ContainerResource),
+    ),
+];
+const RESOURCE_WIRE_FIELDS: &[ClrWireField] = &[
+    ClrWireField::string("Alias"),
+    ClrWireField::typed(
+        "Endpoint",
+        ClrWireShape::Object(ClrWireSchema::ServiceEndpointReference),
+    ),
+    ClrWireField::typed("Properties", ClrWireShape::PropertyBag),
+];
+const SERVICE_ENDPOINT_WIRE_FIELDS: &[ClrWireField] = &[
+    ClrWireField::guid("Id"),
+    ClrWireField::string("Name"),
+    ClrWireField::string("Type"),
+    ClrWireField::string("Owner"),
+    ClrWireField::typed("Url", ClrWireShape::Uri),
+    ClrWireField::string("Description"),
+    ClrWireField::typed(
+        "Authorization",
+        ClrWireShape::Object(ClrWireSchema::EndpointAuthorization),
+    ),
+    ClrWireField::guid("GroupScopeId"),
+    ClrWireField::typed("Data", ClrWireShape::CaseInsensitiveStringMap),
+    ClrWireField::boolean("IsShared"),
+    ClrWireField::boolean("IsReady"),
+    ClrWireField::typed("OperationStatus", ClrWireShape::JTokenObject),
+];
+const SERVICE_ENDPOINT_REFERENCE_WIRE_FIELDS: &[ClrWireField] =
+    &[ClrWireField::string("Name"), ClrWireField::guid("Id")];
+const ENDPOINT_AUTHORIZATION_WIRE_FIELDS: &[ClrWireField] = &[
+    ClrWireField::string("Scheme"),
+    ClrWireField::typed("Parameters", ClrWireShape::ExactStringMap),
+];
+const VARIABLE_VALUE_WIRE_FIELDS: &[ClrWireField] = &[
+    ClrWireField::string("Value"),
+    ClrWireField::boolean("IsSecret"),
+];
+const MASK_HINT_WIRE_FIELDS: &[ClrWireField] =
+    &[ClrWireField::raw("Type"), ClrWireField::string("Value")];
+const WORKSPACE_WIRE_FIELDS: &[ClrWireField] = &[ClrWireField::string("Clean")];
+const ACTIONS_ENVIRONMENT_WIRE_FIELDS: &[ClrWireField] = &[
+    ClrWireField::string("Name"),
+    ClrWireField::typed("Url", ClrWireShape::TemplateToken),
+];
+const DEBUGGER_TUNNEL_WIRE_FIELDS: &[ClrWireField] = &[
+    ClrWireField::boolean("Enabled"),
+    ClrWireField::string("HostToken"),
+    ClrWireField::string("TunnelId"),
+    ClrWireField::string("ClusterId"),
+];
+const REFERENCE_LINK_WIRE_FIELDS: &[ClrWireField] = &[ClrWireField::string("Href")];
+const TEMPLATE_PAIR_WIRE_FIELDS: &[ClrWireField] = &[
+    ClrWireField::typed("key", ClrWireShape::TemplateToken),
+    ClrWireField::typed("value", ClrWireShape::TemplateToken),
+];
+const PIPELINE_CONTEXT_DATA_WIRE_FIELDS: &[ClrWireField] = &[];
+const CONTEXT_PAIR_WIRE_FIELDS: &[ClrWireField] = &[
+    ClrWireField::string("k"),
+    ClrWireField::typed("v", ClrWireShape::PipelineContextData),
+];
+const ACTION_STEP_WIRE_FIELDS: &[ClrWireField] = &[
+    ClrWireField::raw("Type"),
+    ClrWireField::guid("Id"),
+    ClrWireField::string("Name"),
+    ClrWireField::string("DisplayName"),
+    ClrWireField::boolean("Enabled"),
+    ClrWireField::string("Condition"),
+    ClrWireField::typed("ContinueOnError", ClrWireShape::TemplateToken),
+    ClrWireField::typed("TimeoutInMinutes", ClrWireShape::TemplateToken),
+    ClrWireField::string("ParallelGroupId"),
+    ClrWireField::typed("Reference", ClrWireShape::ActionReference),
+    ClrWireField::typed("DisplayNameToken", ClrWireShape::TemplateToken),
+    ClrWireField::string("ContextName"),
+    ClrWireField::typed("Environment", ClrWireShape::TemplateToken),
+    ClrWireField::typed("Inputs", ClrWireShape::TemplateToken),
+    ClrWireField::boolean("Background"),
+];
+const BACKGROUND_STEP_WIRE_FIELDS: &[ClrWireField] = &[
+    ClrWireField::raw("Type"),
+    ClrWireField::guid("Id"),
+    ClrWireField::string("Name"),
+    ClrWireField::string("DisplayName"),
+    ClrWireField::boolean("Enabled"),
+    ClrWireField::string("Condition"),
+    ClrWireField::typed("ContinueOnError", ClrWireShape::TemplateToken),
+    ClrWireField::typed("TimeoutInMinutes", ClrWireShape::TemplateToken),
+    ClrWireField::string("ParallelGroupId"),
+    ClrWireField::string("ControlType"),
+    ClrWireField::typed("DisplayNameToken", ClrWireShape::TemplateToken),
+    ClrWireField::typed("StepIds", ClrWireShape::RawArray),
+];
+
+fn clr_wire_fields(schema: ClrWireSchema) -> &'static [ClrWireField] {
+    use ClrWireSchema as S;
+    match schema {
+        S::AgentJob => ROOT_WIRE_FIELDS,
+        S::Plan => PLAN_WIRE_FIELDS,
+        S::Owner => OWNER_WIRE_FIELDS,
+        S::Timeline => TIMELINE_WIRE_FIELDS,
+        S::JobResources => JOB_RESOURCES_WIRE_FIELDS,
+        S::RepositoryResource | S::ContainerResource => RESOURCE_WIRE_FIELDS,
+        S::ServiceEndpoint => SERVICE_ENDPOINT_WIRE_FIELDS,
+        S::ServiceEndpointReference => SERVICE_ENDPOINT_REFERENCE_WIRE_FIELDS,
+        S::EndpointAuthorization => ENDPOINT_AUTHORIZATION_WIRE_FIELDS,
+        S::VariableValue => VARIABLE_VALUE_WIRE_FIELDS,
+        S::MaskHint => MASK_HINT_WIRE_FIELDS,
+        S::Workspace => WORKSPACE_WIRE_FIELDS,
+        S::ActionsEnvironment => ACTIONS_ENVIRONMENT_WIRE_FIELDS,
+        S::DebuggerTunnel => DEBUGGER_TUNNEL_WIRE_FIELDS,
+        S::ReferenceLink => REFERENCE_LINK_WIRE_FIELDS,
+        S::TemplatePair => TEMPLATE_PAIR_WIRE_FIELDS,
+        S::PipelineContextData => PIPELINE_CONTEXT_DATA_WIRE_FIELDS,
+        S::ContextPair => CONTEXT_PAIR_WIRE_FIELDS,
+        S::ActionStep => ACTION_STEP_WIRE_FIELDS,
+        S::BackgroundStep => BACKGROUND_STEP_WIRE_FIELDS,
+    }
+}
+
+fn ordered_member<'a>(
+    members: &'a [(String, ClrOrderedValue)],
+    name: &str,
+) -> Option<&'a ClrOrderedValue> {
+    members
+        .iter()
+        .rfind(|(key, _)| key == name)
+        .or_else(|| {
+            members
+                .iter()
+                .find(|(key, _)| clr_ordinal_ignore_case_eq(key, name))
+        })
+        .map(|(_, value)| value)
+}
+
+fn insert_case_insensitive(object: &mut serde_json::Map<String, Value>, key: String, value: Value) {
+    if let Some(existing) = object
+        .keys()
+        .find(|existing| clr_ordinal_ignore_case_eq(existing, &key))
+        .cloned()
+    {
+        object.insert(existing, value);
+    } else {
+        object.insert(key, value);
+    }
+}
+
+/// Unicode simple-case comparison for Newtonsoft's OrdinalIgnoreCase maps
+/// and typed property lookup. A full uppercase mapping can expand one
+/// character into several (for example sharp s), which ordinal comparison
+/// does not do.
+fn clr_ordinal_ignore_case_eq(left: &str, right: &str) -> bool {
+    crate::job_message::clr_ordinal_ignore_case_eq(left, right)
+}
+
+/// EndpointAuthorization.Parameters and ResourceProperties first deserialize
+/// into ordinal dictionaries, then copy into an OrdinalIgnoreCase dictionary
+/// during OnDeserialized. The copy rejects distinct keys that compare equal;
+/// exact duplicate JSON keys have already taken the last assigned value.
+fn validate_clr_case_collision(
+    value: &ClrOrderedValue,
+) -> std::result::Result<(), ClrValidationError> {
+    let ClrOrderedValue::Object(entries) = value else {
+        return Ok(());
+    };
+    for (index, (key, _)) in entries.iter().enumerate() {
+        if entries[index + 1..]
+            .iter()
+            .any(|(later, _)| key != later && clr_ordinal_ignore_case_eq(key, later))
+        {
+            return Err(clr_serialization_error(
+                "case-insensitive dictionary copy contains duplicate keys",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_clr_nullable_string_map_occurrences(
+    value: &ClrOrderedValue,
+    reject_case_collision: bool,
+) -> std::result::Result<(), ClrValidationError> {
+    let ClrOrderedValue::Object(entries) = value else {
+        return Ok(());
+    };
+    // Newtonsoft materializes each dictionary value in wire order; a bad
+    // earlier value throws before a later duplicate can replace it.
+    for (_, value) in entries {
+        validate_clr_nullable_string_value(&value.clone().into_clr_string_value())?;
+    }
+    if reject_case_collision {
+        validate_clr_case_collision(value)?;
+    }
+    Ok(())
+}
+
+fn validate_clr_merged_case_collisions(
+    value: &Value,
+    shape: ClrWireShape,
+) -> std::result::Result<(), ClrValidationError> {
+    match shape {
+        ClrWireShape::ExactStringMap => {
+            let Some(object) = value.as_object() else {
+                return Ok(());
+            };
+            let keys: Vec<_> = object.keys().collect();
+            for (index, key) in keys.iter().enumerate() {
+                if keys[index + 1..]
+                    .iter()
+                    .any(|later| *key != *later && clr_ordinal_ignore_case_eq(key, later))
+                {
+                    return Err(clr_serialization_error(
+                        "case-insensitive dictionary copy contains duplicate keys",
+                    ));
+                }
+            }
+            Ok(())
+        }
+        // These payloads are already encoded as a strict ContextValue tree;
+        // their source occurrence rules were checked before normalization.
+        ClrWireShape::PropertyBag | ClrWireShape::JTokenObject => Ok(()),
+        ClrWireShape::Object(schema) => {
+            let Some(object) = value.as_object() else {
+                return Ok(());
+            };
+            for field in clr_wire_fields(schema) {
+                if let Some(member) = object.get(field.name) {
+                    validate_clr_merged_case_collisions(member, field.shape)?;
+                }
+            }
+            Ok(())
+        }
+        ClrWireShape::Array(schema) => {
+            if let Some(values) = value.as_array() {
+                for item in values {
+                    validate_clr_merged_case_collisions(item, ClrWireShape::Object(schema))?;
+                }
+            }
+            Ok(())
+        }
+        ClrWireShape::ArrayTemplateToken => {
+            if let Some(values) = value.as_array() {
+                for item in values {
+                    validate_clr_merged_case_collisions(item, ClrWireShape::TemplateToken)?;
+                }
+            }
+            Ok(())
+        }
+        ClrWireShape::ArrayPipelineContextData => {
+            if let Some(values) = value.as_array() {
+                for item in values {
+                    validate_clr_merged_case_collisions(item, ClrWireShape::PipelineContextData)?;
+                }
+            }
+            Ok(())
+        }
+        ClrWireShape::RawArray => Ok(()),
+        ClrWireShape::MapValues(schema) => {
+            if let Some(values) = value.as_object() {
+                for item in values.values() {
+                    validate_clr_merged_case_collisions(item, ClrWireShape::Object(schema))?;
+                }
+            }
+            Ok(())
+        }
+        ClrWireShape::Steps => {
+            if let Some(values) = value.as_array() {
+                for item in values {
+                    let Some(kind) = item
+                        .as_object()
+                        .and_then(|object| object.get("Type"))
+                        .and_then(ordered_step_type_value)
+                    else {
+                        continue;
+                    };
+                    let schema = match kind {
+                        4 => ClrWireSchema::ActionStep,
+                        5 => ClrWireSchema::BackgroundStep,
+                        _ => continue,
+                    };
+                    validate_clr_merged_case_collisions(item, ClrWireShape::Object(schema))?;
+                }
+            }
+            Ok(())
+        }
+        ClrWireShape::Links => Ok(()),
+        ClrWireShape::TemplateToken => validate_clr_merged_template_collisions(value),
+        ClrWireShape::PipelineContextData => Ok(()),
+        ClrWireShape::ActionReference => Ok(()),
+        ClrWireShape::String
+        | ClrWireShape::Guid
+        | ClrWireShape::Int32
+        | ClrWireShape::Int64
+        | ClrWireShape::Boolean
+        | ClrWireShape::DateTime
+        | ClrWireShape::Double
+        | ClrWireShape::Raw
+        | ClrWireShape::Uri
+        | ClrWireShape::CaseInsensitiveStringMap
+        | ClrWireShape::ExactNullableStringMap => Ok(()),
+    }
+}
+
+fn ordered_step_type_value(value: &Value) -> Option<i32> {
+    let ordered = match value {
+        Value::Number(number) => ClrOrderedValue::Number(ordered_json_number(number)?),
+        Value::String(string) => ClrOrderedValue::String(string.clone()),
+        _ => return None,
+    };
+    ordered_step_type(&ordered)
+}
+
+fn ordered_json_number(number: &serde_json::Number) -> Option<JsonNumber> {
+    let kind = if number.is_f64() {
+        JsonNumberKind::Float(number.as_f64()?)
+    } else if let Some(value) = number.as_i64() {
+        JsonNumberKind::Int64(value)
+    } else {
+        JsonNumberKind::BigInteger(number.as_u64()?.to_string())
+    };
+    Some(JsonNumber {
+        kind,
+        lexeme: number.to_string(),
+        origin: JsonReaderOrigin::JObjectReader,
+    })
+}
+
+fn validate_clr_merged_template_collisions(
+    value: &Value,
+) -> std::result::Result<(), ClrValidationError> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    let kind = object.get("type").and_then(Value::as_i64).unwrap_or(0);
+    let child_shape = match kind {
+        1 => Some(ClrWireShape::ArrayTemplateToken),
+        2 => Some(ClrWireShape::Array(ClrWireSchema::TemplatePair)),
+        _ => None,
+    };
+    if let Some(shape) = child_shape
+        && let Some(child) = object.get(if kind == 1 { "seq" } else { "map" })
+    {
+        validate_clr_merged_case_collisions(child, shape)?;
+    }
+    Ok(())
+}
+
+fn merge_clr_wire_value(shape: ClrWireShape, previous: Value, next: Value) -> Value {
+    match shape {
+        ClrWireShape::Object(schema) => merge_clr_wire_objects(schema, previous, next),
+        ClrWireShape::String
+        | ClrWireShape::Guid
+        | ClrWireShape::Int32
+        | ClrWireShape::Int64
+        | ClrWireShape::Boolean
+        | ClrWireShape::DateTime => next,
+        ClrWireShape::Uri => next,
+        ClrWireShape::Double => next,
+        ClrWireShape::Array(_)
+        | ClrWireShape::ArrayTemplateToken
+        | ClrWireShape::ArrayPipelineContextData
+        | ClrWireShape::Steps
+        | ClrWireShape::RawArray => merge_clr_wire_arrays(previous, next),
+        ClrWireShape::MapValues(ClrWireSchema::PipelineContextData) => {
+            crate::job_message::merge_context_data_pair_arrays(previous, next)
+        }
+        ClrWireShape::MapValues(_) => merge_clr_wire_maps(previous, next, false),
+        ClrWireShape::CaseInsensitiveStringMap => merge_clr_wire_maps(previous, next, true),
+        ClrWireShape::ExactStringMap => merge_clr_wire_maps(previous, next, false),
+        // ResourcePropertiesJsonConverter creates a new ResourceProperties
+        // for each occurrence and ignores existingValue; a repeated
+        // Properties member replaces the earlier property bag.
+        ClrWireShape::PropertyBag => next,
+        ClrWireShape::JTokenObject => next,
+        ClrWireShape::ExactNullableStringMap => merge_clr_wire_maps(previous, next, false),
+        ClrWireShape::Links => merge_clr_wire_maps(previous, next, false),
+        ClrWireShape::PipelineContextData
+        | ClrWireShape::TemplateToken
+        | ClrWireShape::ActionReference
+        | ClrWireShape::Raw => next,
+    }
+}
+
+fn merge_clr_wire_arrays(previous: Value, next: Value) -> Value {
+    match (previous, next) {
+        (Value::Array(mut previous), Value::Array(next)) => {
+            previous.extend(next);
+            Value::Array(previous)
+        }
+        (_, next) => next,
+    }
+}
+
+fn merge_clr_wire_maps(previous: Value, next: Value, case_insensitive: bool) -> Value {
+    match (previous, next) {
+        (Value::Object(mut previous), Value::Object(next)) => {
+            for (key, value) in next {
+                if case_insensitive {
+                    insert_case_insensitive(&mut previous, key, value);
+                } else {
+                    previous.insert(key, value);
+                }
+            }
+            Value::Object(previous)
+        }
+        (_, next) => next,
+    }
+}
+
+fn merge_clr_wire_objects(schema: ClrWireSchema, previous: Value, next: Value) -> Value {
+    let (mut previous, next) = match (previous, next) {
+        (Value::Object(previous), Value::Object(next)) => (previous, next),
+        (_, next) => return next,
+    };
+    for (key, value) in next {
+        let field = clr_wire_fields(schema)
+            .iter()
+            .find(|field| clr_ordinal_ignore_case_eq(&key, field.name));
+        if let (Some(field), Some(old_value)) = (field, previous.remove(&key)) {
+            if matches!(schema, ClrWireSchema::EndpointAuthorization) && field.name == "Parameters"
+            {
+                // OnDeserialized copies m_serializedParameters into a fresh
+                // OrdinalIgnoreCase dictionary after each repeated
+                // EndpointAuthorization object, but only when the serialized
+                // source map has entries. Null and empty maps leave the
+                // earlier copied dictionary intact.
+                let replace = value
+                    .as_object()
+                    .is_some_and(|parameters| !parameters.is_empty());
+                previous.insert(
+                    field.name.to_owned(),
+                    if replace { value } else { old_value },
+                );
+                continue;
+            }
+            previous.insert(
+                field.name.to_owned(),
+                merge_clr_wire_value(field.shape, old_value, value),
+            );
+        } else if let Some(field) = field {
+            previous.insert(field.name.to_owned(), value);
+        } else {
+            previous.insert(key, value);
+        }
+    }
+    Value::Object(previous)
+}
+
+fn ordered_i32(value: &ClrOrderedValue) -> Option<i32> {
+    match value {
+        ClrOrderedValue::Number(number) if !number.is_float() => {
+            number.as_i64().and_then(|value| i32::try_from(value).ok())
+        }
+        _ => None,
+    }
+}
+
+fn ordered_converter_i32(
+    value: &ClrOrderedValue,
+    field: &str,
+) -> std::result::Result<Option<i32>, ClrValidationError> {
+    let ClrOrderedValue::Number(number) = value else {
+        return Ok(None);
+    };
+    if number.is_float() {
+        return Ok(None);
+    }
+    let integer = number
+        .as_i64()
+        .ok_or_else(|| clr_serialization_error(format!("{field} integer is outside Int32")))?;
+    i32::try_from(integer)
+        .map(Some)
+        .map_err(|_| clr_serialization_error(format!("{field} integer is outside Int32")))
+}
+
+fn ordered_step_type(value: &ClrOrderedValue) -> Option<i32> {
+    if let Some(value) = ordered_i32(value) {
+        return Some(value);
+    }
+    let ClrOrderedValue::String(value) = value else {
+        return None;
+    };
+    let mut combined = 0;
+    for name in value.trim().split(',') {
+        let number = if name.trim().eq_ignore_ascii_case("Action") {
+            4
+        } else if name.trim().eq_ignore_ascii_case("BackgroundStepControl") {
+            5
+        } else {
+            return None;
+        };
+        combined |= number;
+    }
+    Some(combined)
+}
+
+fn ordered_action_type(value: &ClrOrderedValue) -> Option<i32> {
+    if let Some(value) = ordered_i32(value) {
+        return Some(value);
+    }
+    let ClrOrderedValue::String(value) = value else {
+        return None;
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "repository" => Some(1),
+        "containerregistry" => Some(2),
+        "script" => Some(3),
+        _ => None,
+    }
+}
+
+fn deserialize_clr_string_map<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Option::<BTreeMap<String, Value>>::deserialize(deserializer)?;
+    values
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(key, value)| {
+            clr_json_nullable_string(&value)
+                .map(|value| (key, value))
+                .map_err(clr_de_error::<D::Error>)
+        })
+        .collect()
+}
+
+fn deserialize_clr_nullable_string_map<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<BTreeMap<String, Option<String>>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Option::<BTreeMap<String, Value>>::deserialize(deserializer)?;
+    values
+        .map(|values| {
+            values
+                .into_iter()
+                .map(|(key, value)| {
+                    clr_json_nullable_string(&value)
+                        .map(|value| (key, value))
+                        .map_err(clr_de_error::<D::Error>)
+                })
+                .collect()
+        })
+        .transpose()
+}
+
+fn default_clr_endpoint_data() -> Option<BTreeMap<String, Option<String>>> {
+    Some(BTreeMap::new())
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ClrInt64(i64);
+
+impl<'de> Deserialize<'de> for ClrInt64 {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Value::deserialize(deserializer)? {
+            Value::Number(value) => clr_json_int64_value(&Value::Number(value))
+                .map(Self)
+                .map_err(serde::de::Error::custom),
+            Value::String(value) if value.is_empty() => {
+                Err(serde::de::Error::custom("Int64 cannot be null"))
+            }
+            Value::String(value) => value
+                .trim()
+                .parse::<i64>()
+                .map(Self)
+                .map_err(serde::de::Error::custom),
+            Value::Bool(value) => Ok(Self(if value { 1 } else { 0 })),
+            Value::Null => Err(serde::de::Error::custom("Int64 cannot be null")),
+            value => Err(serde::de::Error::custom(format!(
+                "cannot convert CLR Int64 from {value}"
+            ))),
+        }
+    }
+}
+
+fn clr_json_int64_value(value: &Value) -> std::result::Result<i64, String> {
+    match value {
+        Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                return Ok(value);
+            }
+            if let Some(value) = value.as_u64() {
+                return i64::try_from(value).map_err(|error| error.to_string());
+            }
+            value
+                .as_f64()
+                .map(f64::round_ties_even)
+                .filter(|value| *value >= i64::MIN as f64 && *value < 9_223_372_036_854_775_808.0)
+                .map(|value| value as i64)
+                .ok_or_else(|| "CLR Int64 value is out of range".to_owned())
+        }
+        Value::String(value) => value
+            .trim()
+            .parse::<i64>()
+            .map_err(|error| error.to_string()),
+        Value::Bool(value) => Ok(if *value { 1 } else { 0 }),
+        _ => Err(format!("cannot convert CLR Int64 from {value}")),
+    }
+}
+
+fn deserialize_clr_u16<'de, D>(deserializer: D) -> std::result::Result<u16, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    if value.is_null() {
+        return Err(serde::de::Error::custom("UInt16 cannot be null"));
+    }
+    let integer = clr_json_int64_value(&value).map_err(serde::de::Error::custom)?;
+    u16::try_from(integer).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_clr_is_ready<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::Bool(value) => Ok(value),
+        Value::Number(number) => Ok(number.as_i64() != Some(0)),
+        Value::String(value) => Ok(!value.eq_ignore_ascii_case("false") && value != "0"),
+        // EndpointIsReadyConverter deliberately maps every other token to
+        // true, including null, arrays, and objects.
+        _ => Ok(true),
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ClrGuid(Uuid);
+
+impl<'de> Deserialize<'de> for ClrGuid {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        parse_clr_guid(&value)
+            .map(Self)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Match the string forms accepted by `new Guid(string)`. `Uuid::parse_str`
+/// accepts URNs (which CLR Guid rejects) and does not accept parenthesized or
+/// X-format GUIDs.
+fn parse_clr_guid(value: &str) -> std::result::Result<Uuid, String> {
+    let value = value.trim();
+    if value
+        .get(..9)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("urn:uuid:"))
+    {
+        return Err("URN form is not a CLR Guid string".to_owned());
+    }
+
+    let normalized = if value.starts_with('(') && value.ends_with(')') {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    };
+    if let Ok(guid) = Uuid::parse_str(normalized) {
+        return Ok(guid);
+    }
+
+    // Guid X format: {0xdddddddd,0xdddd,0xdddd,{0xdd,0xdd,...}}.
+    let Some(parts) = normalized
+        .strip_prefix("{0x")
+        .and_then(|value| value.strip_suffix('}'))
+    else {
+        return Err("invalid CLR Guid string".to_owned());
+    };
+    let mut fields = parts.splitn(4, ',');
+    let data1 = parse_clr_guid_hex(fields.next(), 8)?;
+    let data2 = parse_clr_guid_hex(fields.next(), 4)?;
+    let data3 = parse_clr_guid_hex(fields.next(), 4)?;
+    let Some(data4) = fields.next().and_then(|value| value.strip_prefix("{")) else {
+        return Err("invalid CLR Guid X string".to_owned());
+    };
+    let data4 = data4
+        .strip_suffix('}')
+        .ok_or_else(|| "invalid CLR Guid X string".to_owned())?;
+    let mut bytes = Vec::with_capacity(8);
+    for item in data4.split(',') {
+        bytes.push(parse_clr_guid_hex(Some(item), 2)? as u8);
+    }
+    if bytes.len() != 8 {
+        return Err("invalid CLR Guid X string".to_owned());
+    }
+
+    let mut guid_bytes = [0u8; 16];
+    guid_bytes[0..4].copy_from_slice(&(data1 as u32).to_be_bytes());
+    guid_bytes[4..6].copy_from_slice(&(data2 as u16).to_be_bytes());
+    guid_bytes[6..8].copy_from_slice(&(data3 as u16).to_be_bytes());
+    guid_bytes[8..16].copy_from_slice(&bytes);
+    Ok(Uuid::from_bytes(guid_bytes))
+}
+
+fn parse_clr_guid_hex(value: Option<&str>, width: usize) -> std::result::Result<u64, String> {
+    let value = value
+        .ok_or_else(|| "invalid CLR Guid X string".to_owned())?
+        .trim();
+    let value = value.strip_prefix("0x").unwrap_or(value);
+    if value.is_empty()
+        || value.len() > width
+        || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("invalid CLR Guid X string".to_owned());
+    }
+    u64::from_str_radix(value, 16).map_err(|_| "invalid CLR Guid X string".to_owned())
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ClrDateTime;
+
+impl<'de> Deserialize<'de> for ClrDateTime {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Value::deserialize(deserializer)? {
+            Value::String(value) if value.is_empty() => {
+                Err(serde::de::Error::custom("DateTime cannot be null"))
+            }
+            Value::String(value) if is_clr_datetime(&value) => Ok(Self),
+            Value::String(value) if is_clr_microsoft_datetime_out_of_range(&value) => {
+                Err(clr_de_error::<D::Error>(clr_serialization_error(
+                    "Microsoft DateTime ticks are outside the CLR DateTime range",
+                )))
+            }
+            // JsonTextReader.ReadAsDateTime raises JsonReaderException for
+            // malformed date text and non-string token kinds. RawHttpClientBase
+            // catches that exception and returns default(T).
+            Value::String(_)
+            | Value::Number(_)
+            | Value::Bool(_)
+            | Value::Array(_)
+            | Value::Object(_) => Err(clr_de_error::<D::Error>(clr_reader_error(
+                "invalid DateTime reader token",
+            ))),
+            Value::Null => Err(serde::de::Error::custom("DateTime cannot be null")),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ClrUri;
+
+impl<'de> Deserialize<'de> for ClrUri {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Option::<String>::deserialize(deserializer)?;
+        if value.as_deref().is_none_or(is_clr_uri) {
+            Ok(Self)
+        } else {
+            // System.Uri conversion failures are JsonSerializationException,
+            // which the runner's raw client does not swallow.
+            Err(serde::de::Error::custom("invalid CLR Uri"))
+        }
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+enum ClrExpressionValueString {
+    #[default]
+    NullReference,
+    Instance,
+}
+
+impl<'de> Deserialize<'de> for ClrExpressionValueString {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        match value {
+            // ExpressionValueJsonConverter wraps even a null literal in a
+            // non-null ExpressionValue<string>; a missing member remains null.
+            Value::Null => Ok(Self::Instance),
+            Value::String(value) => {
+                if value.len() > 3 && value.starts_with("$[") && value.ends_with(']') {
+                    let expression = &value[2..value.len() - 1];
+                    if expression.trim().is_empty() {
+                        return Err(serde::de::Error::custom(
+                            "CLR ExpressionValue expression cannot be empty",
+                        ));
+                    }
+                }
+                Ok(Self::Instance)
+            }
+            Value::Number(_) | Value::Bool(_) => Ok(Self::Instance),
+            // ExpressionValueJsonConverter calls serializer.Deserialize<T>
+            // after the composite token has already been read. Json.NET then
+            // rejects arrays/objects as JsonSerializationException; these are
+            // retryable and are not swallowed by RawHttpClientBase.
+            Value::Array(_) | Value::Object(_) => Err(clr_de_error::<D::Error>(
+                clr_serialization_error("CLR ExpressionValue<string> must be scalar"),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ClrReferenceLinks;
+
+impl<'de> Deserialize<'de> for ClrReferenceLinks {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        validate_clr_reference_links(&value).map_err(clr_de_error::<D::Error>)?;
+        Ok(Self)
+    }
+}
+
+fn validate_clr_reference_links(value: &Value) -> std::result::Result<(), ClrValidationError> {
+    let Value::Object(links) = value else {
+        return Err(clr_serialization_error("ReferenceLinks must be an object"));
+    };
+    for (name, value) in links {
+        if name.is_empty() {
+            return Err(clr_serialization_error(
+                "ReferenceLinks key cannot be empty",
+            ));
+        }
+        match value {
+            Value::Object(reference) => validate_clr_reference_link(reference)?,
+            Value::Array(references) => {
+                for reference in references {
+                    match reference {
+                        Value::Null => {}
+                        Value::Object(reference) => validate_clr_reference_link(reference)?,
+                        _ => {
+                            return Err(clr_serialization_error(
+                                "ReferenceLinks array item must be a ReferenceLink",
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => {
+                return Err(clr_serialization_error(
+                    "ReferenceLinks value must be a ReferenceLink or array",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_clr_reference_link(
+    reference: &serde_json::Map<String, Value>,
+) -> std::result::Result<(), ClrValidationError> {
+    if let Some(href) = clr_member(reference, "href") {
+        validate_clr_nullable_string_value(href).map_err(|error| error.with_context("href"))?;
+    }
+    Ok(())
+}
+
+/// Accept the ISO and Microsoft date strings emitted by Json.NET's runner
+/// formatter plus common invariant `DateTime.TryParse` fallback forms.
+/// DateParseHandling.None leaves the token as text before this typed conversion.
+/// The .NET fallback accepts more culture forms than Rust's `time` parser;
+/// unsupported CLR-valid date text remains a documented reader-boundary gap.
+fn is_clr_datetime(value: &str) -> bool {
+    use time::{
+        format_description, format_description::well_known::Rfc3339, Date, OffsetDateTime,
+        PrimitiveDateTime,
+    };
+
+    if OffsetDateTime::parse(value, &Rfc3339).is_ok() {
+        return true;
+    }
+
+    if format_description::parse_borrowed::<1>("[year]-[month padding:none]-[day padding:none]")
+        .ok()
+        .is_some_and(|format| Date::parse(value, &format).is_ok())
+    {
+        return true;
+    }
+
+    for format in [
+        "[month repr:long case_sensitive:false] [day padding:none], [year]",
+        "[month repr:short case_sensitive:false] [day padding:none], [year]",
+        "[month padding:none]/[day padding:none]/[year]",
+        "[year]/[month padding:none]/[day padding:none]",
+    ] {
+        if format_description::parse_borrowed::<1>(format)
+            .ok()
+            .is_some_and(|format| Date::parse(value, &format).is_ok())
+        {
+            return true;
+        }
+    }
+
+    for format in [
+        "[year]-[month padding:none]-[day padding:none]T[hour padding:none]:[minute]:[second]",
+        "[year]-[month padding:none]-[day padding:none]T[hour padding:none]:[minute]",
+        "[year]-[month padding:none]-[day padding:none]T[hour padding:none]:[minute]:[second].[subsecond]",
+        "[year]-[month padding:none]-[day padding:none] [hour padding:none]:[minute]",
+        "[year]-[month padding:none]-[day padding:none] [hour padding:none]:[minute]:[second]",
+        "[year]-[month padding:none]-[day padding:none] [hour padding:none]:[minute]:[second].[subsecond]",
+        "[month repr:long case_sensitive:false] [day padding:none], [year] [hour repr:12 padding:none]:[minute] [period case_sensitive:false]",
+        "[month repr:long case_sensitive:false] [day padding:none], [year] [hour repr:12 padding:none]:[minute]:[second] [period case_sensitive:false]",
+        "[month padding:none]/[day padding:none]/[year] [hour repr:12 padding:none]:[minute] [period case_sensitive:false]",
+        "[month padding:none]/[day padding:none]/[year] [hour repr:12 padding:none]:[minute]:[second] [period case_sensitive:false]",
+        "[month padding:none]/[day padding:none]/[year] [hour padding:none]:[minute]",
+        "[month padding:none]/[day padding:none]/[year] [hour padding:none]:[minute]:[second]",
+        "[month padding:none]/[day padding:none]/[year] [hour padding:none]:[minute]:[second].[subsecond]",
+        "[year]/[month padding:none]/[day padding:none] [hour padding:none]:[minute]",
+        "[year]/[month padding:none]/[day padding:none] [hour padding:none]:[minute]:[second]",
+        "[year]/[month padding:none]/[day padding:none] [hour padding:none]:[minute]:[second].[subsecond]",
+    ] {
+        if format_description::parse_borrowed::<1>(format)
+            .ok()
+            .is_some_and(|format| PrimitiveDateTime::parse(value, &format).is_ok())
+        {
+            return true;
+        }
+    }
+
+    is_clr_microsoft_datetime(value)
+}
+
+/// Match Newtonsoft.Json 13.0.3's Microsoft-date parsing. It skips the first
+/// timestamp character when searching for an offset so a negative millisecond
+/// value is not mistaken for an offset; its integer parser accepts a leading
+/// minus but rejects a leading plus. Tick conversion intentionally wraps just
+/// like the unchecked Int64 multiplication/addition in `DateTimeUtils`.
+fn is_clr_microsoft_datetime(value: &str) -> bool {
+    let Some(ticks) = clr_microsoft_datetime_ticks(value) else {
+        return false;
+    };
+
+    const MAX_DATETIME_TICKS: i64 = 3_155_378_975_999_999_999;
+    (0..=MAX_DATETIME_TICKS).contains(&ticks)
+}
+
+fn is_clr_microsoft_datetime_out_of_range(value: &str) -> bool {
+    let Some(ticks) = clr_microsoft_datetime_ticks(value) else {
+        return false;
+    };
+
+    const MAX_DATETIME_TICKS: i64 = 3_155_378_975_999_999_999;
+    !(0..=MAX_DATETIME_TICKS).contains(&ticks)
+}
+
+fn clr_microsoft_datetime_ticks(value: &str) -> Option<i64> {
+    let contents = value
+        .strip_prefix("/Date(")
+        .and_then(|value| value.strip_suffix(")/"))?;
+
+    let offset = contents
+        .char_indices()
+        .skip(1)
+        .find(|(_, character)| matches!(character, '+' | '-'))
+        .map(|(index, _)| index);
+    let millis_text = offset.map_or(contents, |index| &contents[..index]);
+    let millis = parse_newtonsoft_int64(millis_text)?;
+
+    if let Some(offset) = offset {
+        // DateTimeUtils passes the full JSON string to TryReadOffset. Thus its
+        // length check includes the trailing `)/`; a three-digit offset gets
+        // mistaken for hours plus minutes and fails parsing.
+        let full_suffix = &value[("/Date(".len() + offset)..];
+        parse_newtonsoft_int32(full_suffix.get(1..3)?)?;
+        if full_suffix.encode_utf16().count() > 5 {
+            parse_newtonsoft_int32(full_suffix.get(3..5)?)?;
+        }
+    }
+
+    const INITIAL_JAVASCRIPT_DATE_TICKS: i64 = 621_355_968_000_000_000;
+    Some(
+        millis
+            .wrapping_mul(10_000)
+            .wrapping_add(INITIAL_JAVASCRIPT_DATE_TICKS),
+    )
+}
+
+fn parse_newtonsoft_int64(value: &str) -> Option<i64> {
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| value.parse::<i64>().ok())
+        .flatten()
+}
+
+fn parse_newtonsoft_int32(value: &str) -> Option<i32> {
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| value.parse::<i32>().ok())
+        .flatten()
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ClrAgentJobRequestMessage {
+    #[serde(
+        rename = "MessageType",
+        alias = "messageType",
+        deserialize_with = "deserialize_clr_nullable_string"
+    )]
+    message_type: Option<String>,
+    #[serde(rename = "Plan", alias = "plan")]
+    plan: Option<ClrTaskOrchestrationPlanReference>,
+    #[serde(rename = "Timeline", alias = "timeline")]
+    timeline: Option<ClrTimelineReference>,
+    #[serde(rename = "JobId", alias = "jobId")]
+    job_id: ClrGuid,
+    #[serde(
+        rename = "JobDisplayName",
+        alias = "jobDisplayName",
+        deserialize_with = "deserialize_clr_nullable_string"
+    )]
+    job_display_name: Option<String>,
+    #[serde(
+        rename = "JobName",
+        alias = "jobName",
+        deserialize_with = "deserialize_clr_nullable_string"
+    )]
+    job_name: Option<String>,
+    #[serde(rename = "JobContainer", alias = "jobContainer")]
+    job_container: Option<ClrTemplateToken>,
+    #[serde(rename = "JobServiceContainers", alias = "jobServiceContainers")]
+    job_service_containers: Option<ClrTemplateToken>,
+    #[serde(rename = "JobOutputs", alias = "jobOutputs")]
+    job_outputs: Option<ClrTemplateToken>,
+    #[serde(rename = "RequestId", alias = "requestId")]
+    request_id: ClrInt64,
+    #[serde(rename = "LockedUntil", alias = "lockedUntil")]
+    locked_until: ClrDateTime,
+    #[serde(rename = "Resources", alias = "resources")]
+    resources: Option<ClrJobResources>,
+    #[serde(rename = "ContextData", alias = "contextData")]
+    context_data: Option<BTreeMap<String, Option<ClrPipelineContextData>>>,
+    #[serde(rename = "Workspace", alias = "workspace")]
+    workspace: Option<ClrWorkspaceOptions>,
+    #[serde(
+        rename = "EnvironmentVariables",
+        alias = "environmentVariables",
+        deserialize_with = "deserialize_clr_collection"
+    )]
+    environment_variables: Vec<Option<ClrTemplateToken>>,
+    #[serde(
+        rename = "Variables",
+        alias = "variables",
+        deserialize_with = "deserialize_clr_collection"
+    )]
+    variables: BTreeMap<String, Option<ClrVariableValue>>,
+    #[serde(
+        rename = "Mask",
+        alias = "mask",
+        deserialize_with = "deserialize_clr_collection"
+    )]
+    mask_hints: Vec<Option<ClrMaskHint>>,
+    #[serde(
+        rename = "Steps",
+        alias = "steps",
+        deserialize_with = "deserialize_clr_steps"
+    )]
+    steps: Vec<Option<ClrJobStep>>,
+    #[serde(
+        rename = "Defaults",
+        alias = "defaults",
+        deserialize_with = "deserialize_clr_collection"
+    )]
+    defaults: Vec<Option<ClrTemplateToken>>,
+    #[serde(rename = "ActionsEnvironment", alias = "actionsEnvironment")]
+    actions_environment: Option<ClrActionsEnvironmentReference>,
+    #[serde(rename = "Snapshot", alias = "snapshot")]
+    snapshot: Option<ClrTemplateToken>,
+    #[serde(
+        rename = "BillingOwnerId",
+        alias = "billingOwnerId",
+        deserialize_with = "deserialize_clr_nullable_string"
+    )]
+    billing_owner_id: Option<String>,
+    #[serde(
+        rename = "EnableDebugger",
+        alias = "enableDebugger",
+        deserialize_with = "deserialize_clr_bool"
+    )]
+    enable_debugger: bool,
+    #[serde(rename = "DebuggerTunnel", alias = "debuggerTunnel")]
+    debugger_tunnel: Option<ClrDebuggerTunnelInfo>,
+    #[serde(
+        rename = "DebuggerWelcomeMessage",
+        alias = "debuggerWelcomeMessage",
+        deserialize_with = "deserialize_clr_nullable_string"
+    )]
+    debugger_welcome_message: Option<String>,
+    #[serde(
+        rename = "dependencies",
+        deserialize_with = "deserialize_clr_string_list"
+    )]
+    actions_dependencies: Vec<Option<String>>,
+    #[serde(
+        rename = "FileTable",
+        alias = "fileTable",
+        deserialize_with = "deserialize_clr_string_list"
+    )]
+    file_table: Vec<Option<String>>,
+    #[serde(
+        rename = "JobSidecarContainers",
+        alias = "jobSidecarContainers",
+        deserialize_with = "deserialize_clr_nullable_string_map"
+    )]
+    job_sidecar_containers: Option<BTreeMap<String, Option<String>>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ClrTaskOrchestrationPlanReference {
+    #[serde(rename = "ScopeIdentifier", alias = "scopeIdentifier")]
+    scope_identifier: ClrGuid,
+    #[serde(
+        rename = "PlanType",
+        alias = "planType",
+        deserialize_with = "deserialize_clr_nullable_string"
+    )]
+    plan_type: Option<String>,
+    #[serde(rename = "Version", alias = "version")]
+    version: ClrInt32,
+    #[serde(rename = "PlanId", alias = "planId")]
+    plan_id: ClrGuid,
+    #[serde(
+        rename = "PlanGroup",
+        alias = "planGroup",
+        deserialize_with = "deserialize_clr_nullable_string"
+    )]
+    plan_group: Option<String>,
+    #[serde(rename = "ArtifactUri", alias = "artifactUri")]
+    artifact_uri: Option<ClrUri>,
+    #[serde(rename = "ArtifactLocation", alias = "artifactLocation")]
+    artifact_location: Option<ClrUri>,
+    #[serde(rename = "Definition", alias = "definition")]
+    definition: Option<ClrTaskOrchestrationOwner>,
+    #[serde(rename = "Owner", alias = "owner")]
+    owner: Option<ClrTaskOrchestrationOwner>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ClrTaskOrchestrationOwner {
+    #[serde(rename = "Id", alias = "id")]
+    id: ClrInt32,
+    #[serde(
+        rename = "Name",
+        alias = "name",
+        deserialize_with = "deserialize_clr_nullable_string"
+    )]
+    name: Option<String>,
+    #[serde(rename = "_links")]
+    links: Option<ClrReferenceLinks>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ClrTimelineReference {
+    #[serde(rename = "Id", alias = "id")]
+    id: ClrGuid,
+    #[serde(rename = "ChangeId", alias = "changeId")]
+    change_id: ClrInt32,
+    #[serde(rename = "Location", alias = "location")]
+    location: Option<ClrUri>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ClrRepositoryResource {
+    #[serde(
+        rename = "Alias",
+        alias = "alias",
+        deserialize_with = "deserialize_clr_nullable_string"
+    )]
+    alias: Option<String>,
+    #[serde(rename = "Endpoint", alias = "endpoint")]
+    endpoint: Option<ClrServiceEndpointReference>,
+    #[serde(rename = "Properties", alias = "properties")]
+    properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ClrContainerResource {
+    #[serde(
+        rename = "Alias",
+        alias = "alias",
+        deserialize_with = "deserialize_clr_nullable_string"
+    )]
+    alias: Option<String>,
+    #[serde(rename = "Endpoint", alias = "endpoint")]
+    endpoint: Option<ClrServiceEndpointReference>,
+    #[serde(rename = "Properties", alias = "properties")]
+    properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ClrServiceEndpointReference {
+    #[serde(rename = "Name", alias = "name")]
+    name: ClrExpressionValueString,
+    #[serde(rename = "Id", alias = "id")]
+    id: ClrGuid,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ClrServiceEndpoint {
+    #[serde(rename = "Id", alias = "id")]
+    id: ClrGuid,
+    #[serde(rename = "Name", alias = "name")]
+    #[serde(deserialize_with = "deserialize_clr_nullable_string")]
+    name: Option<String>,
+    #[serde(rename = "Type", alias = "type")]
+    #[serde(deserialize_with = "deserialize_clr_nullable_string")]
+    endpoint_type: Option<String>,
+    #[serde(rename = "Owner", alias = "owner")]
+    #[serde(deserialize_with = "deserialize_clr_nullable_string")]
+    owner: Option<String>,
+    #[serde(rename = "Url", alias = "url")]
+    url: Option<ClrUri>,
+    #[serde(rename = "Description", alias = "description")]
+    #[serde(deserialize_with = "deserialize_clr_nullable_string")]
+    description: Option<String>,
+    #[serde(rename = "Authorization", alias = "authorization")]
+    authorization: Option<ClrEndpointAuthorization>,
+    #[serde(rename = "GroupScopeId", alias = "groupScopeId")]
+    group_scope_id: ClrGuid,
+    #[serde(
+        rename = "Data",
+        alias = "data",
+        default = "default_clr_endpoint_data",
+        deserialize_with = "deserialize_clr_nullable_string_map"
+    )]
+    data: Option<BTreeMap<String, Option<String>>>,
+    #[serde(
+        rename = "IsShared",
+        alias = "isShared",
+        deserialize_with = "deserialize_clr_bool"
+    )]
+    is_shared: bool,
+    #[serde(
+        rename = "IsReady",
+        alias = "isReady",
+        default = "default_clr_is_ready",
+        deserialize_with = "deserialize_clr_is_ready"
+    )]
+    is_ready: bool,
+    #[serde(rename = "OperationStatus", alias = "operationStatus")]
+    operation_status: Option<BTreeMap<String, Value>>,
+}
+
+fn default_clr_is_ready() -> bool {
+    true
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ClrEndpointAuthorization {
+    #[serde(
+        rename = "Scheme",
+        alias = "scheme",
+        deserialize_with = "deserialize_clr_nullable_string"
+    )]
+    scheme: Option<String>,
+    #[serde(
+        rename = "Parameters",
+        alias = "parameters",
+        deserialize_with = "deserialize_clr_string_map"
+    )]
+    parameters: BTreeMap<String, Option<String>>,
+}
+
+#[derive(Debug, Default)]
+struct ClrMaskType(i32);
+
+impl<'de> Deserialize<'de> for ClrMaskType {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Value::deserialize(deserializer)? {
+            Value::Number(value) if value.is_f64() => Err(serde::de::Error::custom(
+                "StringEnumConverter does not accept floating-point MaskType values",
+            )),
+            Value::Number(value) => value
+                .as_i64()
+                .map(|value| Self(value as i32))
+                .or_else(|| value.as_u64().map(|value| Self(value as u32 as i32)))
+                .ok_or_else(|| serde::de::Error::custom("MaskType integer is out of range")),
+            Value::String(value) => {
+                clr_enum_integer(&Value::String(value), &[("Variable", 1), ("Regex", 2)])
+                    .map(|value| value.map(Self))
+                    .map_err(serde::de::Error::custom)?
+                    .ok_or_else(|| serde::de::Error::custom("invalid MaskType string"))
+            }
+            _ => Err(serde::de::Error::custom(
+                "MaskType must be an integer or name",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ClrMaskHint {
+    #[serde(rename = "Type", alias = "type")]
+    r#type: ClrMaskType,
+    #[serde(
+        rename = "Value",
+        alias = "value",
+        deserialize_with = "deserialize_clr_nullable_string"
+    )]
+    value: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ClrVariableValue {
+    #[serde(
+        rename = "Value",
+        alias = "value",
+        deserialize_with = "deserialize_clr_nullable_string"
+    )]
+    value: Option<String>,
+    #[serde(
+        rename = "IsSecret",
+        alias = "isSecret",
+        deserialize_with = "deserialize_clr_bool"
+    )]
+    is_secret: bool,
+}
+
+fn default_clr_step_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ClrJobStep {
+    #[serde(rename = "Id", alias = "id")]
+    id: ClrGuid,
+    #[serde(rename = "Name", alias = "name")]
+    #[serde(deserialize_with = "deserialize_clr_nullable_string")]
+    name: Option<String>,
+    #[serde(rename = "DisplayName", alias = "displayName")]
+    #[serde(deserialize_with = "deserialize_clr_nullable_string")]
+    display_name: Option<String>,
+    #[serde(
+        rename = "Enabled",
+        alias = "enabled",
+        default = "default_clr_step_enabled",
+        deserialize_with = "deserialize_clr_bool"
+    )]
+    enabled: bool,
+    #[serde(rename = "Condition", alias = "condition")]
+    #[serde(deserialize_with = "deserialize_clr_nullable_string")]
+    condition: Option<String>,
+    #[serde(
+        rename = "ContinueOnError",
+        alias = "continueOnError",
+        deserialize_with = "deserialize_clr_option_template_token"
+    )]
+    continue_on_error: Option<ClrTemplateToken>,
+    #[serde(
+        rename = "TimeoutInMinutes",
+        alias = "timeoutInMinutes",
+        deserialize_with = "deserialize_clr_option_template_token"
+    )]
+    timeout_in_minutes: Option<ClrTemplateToken>,
+    #[serde(rename = "ParallelGroupId", alias = "parallelGroupId")]
+    #[serde(deserialize_with = "deserialize_clr_nullable_string")]
+    parallel_group_id: Option<String>,
+}
+
+fn deserialize_clr_option_template_token<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<ClrTemplateToken>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<ClrTemplateToken>::deserialize(deserializer)
+}
+
+fn step_member<'a>(object: &'a serde_json::Map<String, Value>, name: &str) -> Option<&'a Value> {
+    object
+        .iter()
+        .find(|(key, _)| clr_ordinal_ignore_case_eq(key, name))
+        .map(|(_, value)| value)
+}
+
+fn clr_enum_integer(
+    value: &Value,
+    names: &[(&str, i32)],
+) -> std::result::Result<Option<i32>, String> {
+    match value {
+        Value::Number(number) => {
+            if let Some(value) = number.as_i64() {
+                return i32::try_from(value)
+                    .map(Some)
+                    .map_err(|_| "enum integer outside Int32".to_owned());
+            }
+            if let Some(value) = number.as_u64() {
+                return i32::try_from(value)
+                    .map(Some)
+                    .map_err(|_| "enum integer outside Int32".to_owned());
+            }
+            // Converters dispatch only integer JTokens; floats return null.
+            Ok(None)
+        }
+        Value::String(value) => {
+            let mut combined = 0i32;
+            for component in value.trim().split(',') {
+                let component = component.trim();
+                let Some(number) = names
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(component))
+                    .map(|(_, value)| *value)
+                    .or_else(|| component.parse::<i32>().ok())
+                else {
+                    return Ok(None);
+                };
+                combined |= number;
+            }
+            Ok(Some(combined))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn validate_clr_string_field(
+    object: &serde_json::Map<String, Value>,
+    name: &str,
+) -> std::result::Result<(), ClrValidationError> {
+    if let Some(value) = step_member(object, name) {
+        validate_clr_nullable_string_value(value).map_err(|error| error.with_context(name))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_clr_guid_field(
+    object: &serde_json::Map<String, Value>,
+    name: &str,
+) -> std::result::Result<(), ClrValidationError> {
+    if let Some(value) = step_member(object, name) {
+        match value {
+            Value::String(value) if parse_clr_guid(value).is_ok() => Ok(()),
+            _ => Err(clr_serialization_error(format!(
+                "{name} must be a non-null CLR Guid"
+            ))),
+        }
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_clr_template_field(
+    object: &serde_json::Map<String, Value>,
+    name: &str,
+) -> std::result::Result<(), ClrValidationError> {
+    if let Some(value) = step_member(object, name) {
+        validate_clr_template_token(value).map_err(|error| error.with_context(name))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_clr_job_step_base(
+    object: &serde_json::Map<String, Value>,
+) -> std::result::Result<(), ClrValidationError> {
+    validate_clr_guid_field(object, "Id")?;
+    for name in ["Name", "DisplayName", "Condition", "ParallelGroupId"] {
+        validate_clr_string_field(object, name)?;
+    }
+    if let Some(value) = step_member(object, "Enabled") {
+        validate_clr_bool_value(value, false)?;
+    }
+    for name in ["ContinueOnError", "TimeoutInMinutes"] {
+        validate_clr_template_field(object, name)?;
+    }
+    Ok(())
+}
+
+fn validate_clr_action_step(
+    object: &serde_json::Map<String, Value>,
+) -> std::result::Result<(), ClrValidationError> {
+    validate_clr_job_step_base(object)?;
+    if let Some(reference) = step_member(object, "Reference") {
+        validate_clr_action_reference(Some(reference))
+            .map_err(|error| error.with_context("Reference"))?;
+    }
+    validate_clr_template_field(object, "DisplayNameToken")?;
+    validate_clr_template_field(object, "Environment")?;
+    validate_clr_template_field(object, "Inputs")?;
+    validate_clr_string_field(object, "ContextName")?;
+    if let Some(background) = step_member(object, "Background") {
+        validate_clr_bool_value(background, false)?;
+    }
+    Ok(())
+}
+
+fn validate_clr_background_step_control(
+    object: &serde_json::Map<String, Value>,
+) -> std::result::Result<(), ClrValidationError> {
+    validate_clr_job_step_base(object)?;
+    validate_clr_string_field(object, "ControlType")?;
+    validate_clr_template_field(object, "DisplayNameToken")?;
+    if let Some(step_ids) = step_member(object, "StepIds") {
+        match step_ids {
+            Value::Null => {}
+            Value::Array(step_ids) => {
+                for step_id in step_ids {
+                    validate_clr_nullable_string_value(step_id)?;
+                }
+            }
+            _ => return Err("StepIds must be a CLR string array".into()),
+        }
+    }
+    Ok(())
+}
+
+fn validate_clr_action_reference(
+    reference: Option<&Value>,
+) -> std::result::Result<(), ClrValidationError> {
+    let Some(Value::Object(object)) = reference else {
+        // The upstream converter returns null when Reference is not an object.
+        return Ok(());
+    };
+    let Some(type_value) = step_member(object, "Type") else {
+        return Ok(());
+    };
+    let Some(action_type) = clr_enum_integer(
+        type_value,
+        &[("Repository", 1), ("ContainerRegistry", 2), ("Script", 3)],
+    )?
+    else {
+        // Invalid non-integer enum text makes the converter return null.
+        return Ok(());
+    };
+    match action_type {
+        1 => {
+            for name in ["Name", "Ref", "RepositoryType", "Path"] {
+                validate_clr_string_field(object, name)?;
+            }
+        }
+        2 => validate_clr_string_field(object, "Image")?,
+        3 => {}
+        _ => return Err(format!("unknown ActionSourceType value {action_type}").into()),
+    }
+    Ok(())
+}
+
+fn deserialize_clr_steps<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<Option<ClrJobStep>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    let Some(items) = value.as_array() else {
+        return if value.is_null() {
+            Ok(Vec::new())
+        } else {
+            Err(serde::de::Error::custom("Steps must be an array"))
+        };
+    };
+    let mut steps = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(object) = item.as_object() else {
+            // StepConverter returns null for non-object entries.
+            steps.push(None);
+            continue;
+        };
+        let Some(type_value) = step_member(object, "Type") else {
+            steps.push(None);
+            continue;
+        };
+        let Some(step_type) =
+            clr_enum_integer(type_value, &[("Action", 4), ("BackgroundStepControl", 5)])
+                .map_err(serde::de::Error::custom)?
+        else {
+            // The converter returns null for non-integer values that are not
+            // enum strings.
+            steps.push(None);
+            continue;
+        };
+        match step_type {
+            4 => validate_clr_action_step(object),
+            5 => validate_clr_background_step_control(object),
+            _ => {
+                return Err(serde::de::Error::custom(format!(
+                    "unknown StepType value {step_type}"
+                )));
+            }
+        }
+        .map_err(clr_de_error::<D::Error>)?;
+        let step = ClrJobStep::deserialize(ClrValueDeserializer::<D::Error>::new(item.clone()))?;
+        steps.push(Some(step));
+    }
+    Ok(steps)
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ClrJobResources {
+    #[serde(
+        rename = "Endpoints",
+        alias = "endpoints",
+        deserialize_with = "deserialize_clr_collection"
+    )]
+    endpoints: Vec<Option<ClrServiceEndpoint>>,
+    #[serde(
+        rename = "Repositories",
+        alias = "repositories",
+        deserialize_with = "deserialize_clr_collection"
+    )]
+    repositories: Vec<Option<ClrRepositoryResource>>,
+    #[serde(
+        rename = "Containers",
+        alias = "containers",
+        deserialize_with = "deserialize_clr_collection"
+    )]
+    containers: Vec<Option<ClrContainerResource>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ClrWorkspaceOptions {
+    #[serde(rename = "Clean", alias = "clean")]
+    #[serde(deserialize_with = "deserialize_clr_nullable_string")]
+    clean: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ClrActionsEnvironmentReference {
+    #[serde(rename = "Name", alias = "name")]
+    #[serde(deserialize_with = "deserialize_clr_nullable_string")]
+    name: Option<String>,
+    #[serde(rename = "Url", alias = "url")]
+    url: Option<ClrTemplateToken>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ClrDebuggerTunnelInfo {
+    #[serde(rename = "TunnelId", alias = "tunnelId")]
+    #[serde(deserialize_with = "deserialize_clr_nullable_string")]
+    tunnel_id: Option<String>,
+    #[serde(rename = "ClusterId", alias = "clusterId")]
+    #[serde(deserialize_with = "deserialize_clr_nullable_string")]
+    cluster_id: Option<String>,
+    #[serde(rename = "HostToken", alias = "hostToken")]
+    #[serde(deserialize_with = "deserialize_clr_nullable_string")]
+    host_token: Option<String>,
+    #[serde(
+        rename = "Port",
+        alias = "port",
+        deserialize_with = "deserialize_clr_u16"
+    )]
+    port: u16,
+}
+
+fn clr_validation_from_wire(error: ClrWireError) -> ClrValidationError {
+    match error {
+        ClrWireError::Reader(message) => ClrValidationError::Reader(message),
+        ClrWireError::Serialization(message) => ClrValidationError::Serialization(message),
+    }
+}
+
+/// Validate every wire occurrence before collapsing duplicates into the
+/// runtime `Value`. Json.NET processes ordinary CLR members in source order;
+/// a bad earlier value still throws even when a later duplicate would replace
+/// it. Converter-backed JToken shapes are handled by their converter path,
+/// whose JObject projection uses the final duplicate member.
+fn validate_clr_ordered_occurrences(
+    value: &ClrOrderedValue,
+    shape: ClrWireShape,
+) -> std::result::Result<(), ClrValidationError> {
+    if matches!(value, ClrOrderedValue::Constructor { .. }) && !matches!(shape, ClrWireShape::Raw) {
+        return Err(clr_serialization_error(
+            "Json.NET constructor token cannot deserialize into this DTO shape",
+        ));
+    }
+    match shape {
+        ClrWireShape::Raw => Ok(()),
+        ClrWireShape::String if matches!(value, ClrOrderedValue::Undefined) => {
+            Err(clr_reader_error("undefined cannot be read as a CLR string"))
+        }
+        ClrWireShape::String => {
+            let normalized = value.clone().into_clr_string_value();
+            // Composite wire values defer to typed struct validation: plain
+            // CLR strings report a reader error there, while expression
+            // strings (endpoint names) report a retryable serialization
+            // error. Deciding here would pre-empt that distinction.
+            if matches!(normalized, Value::Array(_) | Value::Object(_)) {
+                return Ok(());
+            }
+            validate_clr_nullable_string_value(&normalized)
+        }
+        ClrWireShape::Guid => match value {
+            ClrOrderedValue::NonFinite { .. } => {
+                Err(clr_serialization_error("invalid CLR Guid value"))
+            }
+            _ => Ok(()),
+        },
+        ClrWireShape::Int32
+        | ClrWireShape::Int64
+        | ClrWireShape::Boolean
+        | ClrWireShape::DateTime => match value {
+            ClrOrderedValue::Undefined => Err(clr_reader_error(
+                "undefined cannot be read as a CLR primitive value",
+            )),
+            ClrOrderedValue::NonFinite { .. } => {
+                Err(clr_reader_error("invalid nonfinite CLR primitive value"))
+            }
+            _ => Ok(()),
+        },
+        ClrWireShape::Double => match value {
+            ClrOrderedValue::Undefined => {
+                Err(clr_reader_error("undefined cannot be read as a CLR Double"))
+            }
+            _ => validate_clr_double_value(&value.clone().into_clr_value(ClrWireShape::Double)),
+        },
+        ClrWireShape::CaseInsensitiveStringMap => {
+            validate_clr_nullable_string_map_occurrences(value, false)
+        }
+        ClrWireShape::Uri => match value {
+            ClrOrderedValue::Null | ClrOrderedValue::Undefined => Ok(()),
+            ClrOrderedValue::NonFinite { .. } => {
+                Err(clr_serialization_error("invalid CLR Uri value"))
+            }
+            _ => validate_clr_deserialize::<Option<ClrUri>>(value.clone().into_value()),
+        },
+        ClrWireShape::ExactStringMap => validate_clr_nullable_string_map_occurrences(value, true),
+        ClrWireShape::PropertyBag => validate_clr_case_collision(value),
+        ClrWireShape::JTokenObject => match value {
+            ClrOrderedValue::Null | ClrOrderedValue::Object(_) => Ok(()),
+            _ => Err(clr_serialization_error("OperationStatus must be a JObject")),
+        },
+        ClrWireShape::ExactNullableStringMap => {
+            validate_clr_nullable_string_map_occurrences(value, false)
+        }
+        ClrWireShape::Object(schema) => {
+            if matches!(value, ClrOrderedValue::Null | ClrOrderedValue::Undefined) {
+                Ok(())
+            } else {
+                validate_clr_object_occurrences(value, schema)
+            }
+        }
+        ClrWireShape::Array(schema) => {
+            if let ClrOrderedValue::Array(values) = value {
+                for value in values {
+                    if matches!(value, ClrOrderedValue::Null | ClrOrderedValue::Undefined) {
+                        continue;
+                    }
+                    validate_clr_object_occurrences(value, schema)?;
+                }
+            }
+            Ok(())
+        }
+        ClrWireShape::ArrayTemplateToken => {
+            if let ClrOrderedValue::Array(values) = value {
+                for value in values {
+                    validate_clr_ordered_occurrences(value, ClrWireShape::TemplateToken)?;
+                }
+            }
+            Ok(())
+        }
+        ClrWireShape::ArrayPipelineContextData => {
+            if let ClrOrderedValue::Array(values) = value {
+                for value in values {
+                    validate_clr_ordered_occurrences(value, ClrWireShape::PipelineContextData)?;
+                }
+            }
+            Ok(())
+        }
+        ClrWireShape::MapValues(schema) => {
+            let ClrOrderedValue::Object(values) = value else {
+                if matches!(schema, ClrWireSchema::PipelineContextData)
+                    && !matches!(value, ClrOrderedValue::Null)
+                {
+                    return Err(clr_serialization_error(
+                        "ContextData must be an object or null",
+                    ));
+                }
+                return Ok(());
+            };
+            for (_, value) in values {
+                if matches!(value, ClrOrderedValue::Null | ClrOrderedValue::Undefined) {
+                    continue;
+                }
+                if matches!(schema, ClrWireSchema::PipelineContextData) {
+                    validate_clr_ordered_occurrences(value, ClrWireShape::PipelineContextData)?;
+                } else {
+                    validate_clr_object_occurrences(value, schema)?;
+                }
+            }
+            Ok(())
+        }
+        ClrWireShape::Links => {
+            if let ClrOrderedValue::Object(values) = value {
+                for (_, value) in values {
+                    match value {
+                        ClrOrderedValue::Array(values) => {
+                            for value in values {
+                                if !matches!(
+                                    value,
+                                    ClrOrderedValue::Null | ClrOrderedValue::Undefined
+                                ) {
+                                    validate_clr_object_occurrences(
+                                        value,
+                                        ClrWireSchema::ReferenceLink,
+                                    )?;
+                                }
+                            }
+                        }
+                        ClrOrderedValue::Object(_) => {
+                            validate_clr_object_occurrences(value, ClrWireSchema::ReferenceLink)?
+                        }
+                        ClrOrderedValue::Undefined => {}
+                        _ => {}
+                    }
+                }
+            }
+            Ok(())
+        }
+        ClrWireShape::TemplateToken => validate_clr_template_occurrences(value),
+        ClrWireShape::PipelineContextData => validate_clr_context_occurrences(value),
+        ClrWireShape::Steps => {
+            if let ClrOrderedValue::Array(values) = value {
+                for value in values {
+                    let collapsed = value.clone().collapse_exact_properties();
+                    let ClrOrderedValue::Object(fields) = &collapsed else {
+                        continue;
+                    };
+                    let schema = match ordered_member(fields, "Type").and_then(ordered_step_type) {
+                        Some(4) => Some(ClrWireSchema::ActionStep),
+                        Some(5) => Some(ClrWireSchema::BackgroundStep),
+                        _ => None,
+                    };
+                    if let Some(schema) = schema {
+                        validate_clr_object_occurrences(&collapsed, schema)?;
+                    }
+                }
+            }
+            Ok(())
+        }
+        ClrWireShape::RawArray => Ok(()),
+        ClrWireShape::ActionReference => validate_clr_action_reference_occurrences(value),
+    }
+}
+
+fn validate_clr_object_occurrences(
+    value: &ClrOrderedValue,
+    schema: ClrWireSchema,
+) -> std::result::Result<(), ClrValidationError> {
+    if matches!(value, ClrOrderedValue::Constructor { .. }) {
+        return Err(clr_serialization_error(
+            "Json.NET constructor token cannot deserialize into a CLR object",
+        ));
+    }
+    if matches!(value, ClrOrderedValue::Null | ClrOrderedValue::Undefined) {
+        return Ok(());
+    }
+    let ClrOrderedValue::Object(values) = value else {
+        return validate_clr_schema_value(schema, value.clone().into_value());
+    };
+    for (key, value) in values {
+        let Some(field) = clr_wire_fields(schema)
+            .iter()
+            .find(|field| clr_ordinal_ignore_case_eq(key, field.name))
+        else {
+            continue;
+        };
+        validate_clr_ordered_occurrences(value, field.shape)
+            .map_err(|error| error.with_context(field.name))?;
+        let normalized = value.clone().into_clr_value(field.shape);
+        let mut single = serde_json::Map::new();
+        single.insert(field.name.to_owned(), normalized);
+        validate_clr_schema_value(schema, Value::Object(single))
+            .map_err(|error| error.with_context(field.name))?;
+    }
+    let normalized = value.clone().into_clr_value(ClrWireShape::Object(schema));
+    validate_clr_merged_case_collisions(&normalized, ClrWireShape::Object(schema))?;
+    validate_clr_schema_value(schema, normalized)
+}
+
+fn validate_clr_schema_value(
+    schema: ClrWireSchema,
+    value: Value,
+) -> std::result::Result<(), ClrValidationError> {
+    use ClrWireSchema as S;
+    match schema {
+        S::AgentJob => {
+            let mut value = value;
+            project_ordered_context_data_for_clr(&mut value)?;
+            validate_clr_deserialize::<ClrAgentJobRequestMessage>(value)
+        }
+        S::Plan => validate_clr_deserialize::<ClrTaskOrchestrationPlanReference>(value),
+        S::Owner => validate_clr_deserialize::<ClrTaskOrchestrationOwner>(value),
+        S::Timeline => validate_clr_deserialize::<ClrTimelineReference>(value),
+        S::JobResources => validate_clr_deserialize::<ClrJobResources>(value),
+        S::RepositoryResource => validate_clr_deserialize::<ClrRepositoryResource>(value),
+        S::ContainerResource => validate_clr_deserialize::<ClrContainerResource>(value),
+        S::ServiceEndpoint => validate_clr_deserialize::<ClrServiceEndpoint>(value),
+        S::ServiceEndpointReference => {
+            validate_clr_deserialize::<ClrServiceEndpointReference>(value)
+        }
+        S::EndpointAuthorization => validate_clr_deserialize::<ClrEndpointAuthorization>(value),
+        S::VariableValue => validate_clr_deserialize::<ClrVariableValue>(value),
+        S::MaskHint => validate_clr_deserialize::<ClrMaskHint>(value),
+        S::Workspace => validate_clr_deserialize::<ClrWorkspaceOptions>(value),
+        S::ActionsEnvironment => validate_clr_deserialize::<ClrActionsEnvironmentReference>(value),
+        S::DebuggerTunnel => validate_clr_deserialize::<ClrDebuggerTunnelInfo>(value),
+        S::ReferenceLink => {
+            let Some(object) = value.as_object() else {
+                return Err(clr_serialization_error("ReferenceLink must be an object"));
+            };
+            validate_clr_reference_link(object)
+        }
+        S::TemplatePair => {
+            let envelope = json!({"Type": 2, "Map": [value]});
+            validate_clr_deserialize::<ClrTemplateToken>(envelope)
+        }
+        S::PipelineContextData => validate_clr_deserialize::<ClrPipelineContextData>(value),
+        S::ContextPair => {
+            let envelope = json!({"T": 2, "D": [value]});
+            validate_clr_deserialize::<ClrPipelineContextData>(envelope)
+        }
+        S::ActionStep => {
+            let Some(object) = value.as_object() else {
+                return Err(clr_serialization_error("ActionStep must be an object"));
+            };
+            validate_clr_action_step(object)?;
+            validate_clr_deserialize::<ClrJobStep>(value)
+        }
+        S::BackgroundStep => {
+            let Some(object) = value.as_object() else {
+                return Err(clr_serialization_error(
+                    "BackgroundStepControl must be an object",
+                ));
+            };
+            validate_clr_background_step_control(object)?;
+            validate_clr_deserialize::<ClrJobStep>(value)
+        }
+    }
+}
+
+fn project_ordered_context_data_for_clr(
+    value: &mut Value,
+) -> std::result::Result<(), ClrValidationError> {
+    let Some(object) = value.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(name) = object
+        .keys()
+        .find(|name| clr_ordinal_ignore_case_eq(name, "ContextData"))
+        .cloned()
+    else {
+        return Ok(());
+    };
+    let Some(Value::Array(pairs)) = object.get(&name) else {
+        return Ok(());
+    };
+
+    let mut context = serde_json::Map::new();
+    for pair in pairs {
+        let Some(values) = pair.as_array().filter(|values| values.len() == 2) else {
+            return Err(clr_serialization_error(
+                "ordered ContextData pair must contain two values",
+            ));
+        };
+        let Some(key) = values[0].as_str() else {
+            return Err(clr_serialization_error(
+                "ordered ContextData key must be a string",
+            ));
+        };
+        context.insert(key.to_owned(), values[1].clone());
+    }
+    object.insert(name, Value::Object(context));
+    Ok(())
+}
+
+fn validate_clr_deserialize<T: DeserializeOwned>(
+    value: Value,
+) -> std::result::Result<(), ClrValidationError> {
+    deserialize_clr_value::<T>(value)
+        .map(|_| ())
+        .map_err(clr_validation_from_wire)
+}
+
+#[derive(Clone, Copy)]
+enum ClrConverterValidator {
+    TemplateToken,
+    PipelineContextData,
+    ActionReference,
+}
+
+/// Validate each selected typed member before case-insensitive aliases are
+/// folded into one converter value. Json.NET's serializer visits those JObject
+/// members in source order, so an invalid earlier alias still fails even when
+/// a later alias would replace it in the normalized DTO.
+fn validate_clr_selected_converter_occurrences(
+    values: &[(String, ClrOrderedValue)],
+    fields: &[ClrWireField],
+    discriminator: &'static str,
+    kind: i32,
+    validator: ClrConverterValidator,
+) -> std::result::Result<(), ClrValidationError> {
+    for (source_name, value) in values {
+        let Some(field) = fields
+            .iter()
+            .find(|field| clr_ordinal_ignore_case_eq(source_name, field.name))
+        else {
+            continue;
+        };
+        if matches!(field.shape, ClrWireShape::Raw) {
+            continue;
+        }
+
+        validate_clr_ordered_occurrences(value, field.shape)
+            .map_err(|error| error.with_context(source_name))?;
+        let mut envelope = serde_json::Map::new();
+        envelope.insert(
+            field.name.to_owned(),
+            value.clone().into_clr_value(field.shape),
+        );
+        envelope.insert(discriminator.to_owned(), Value::from(kind));
+        let envelope = Value::Object(envelope);
+        let result = match validator {
+            ClrConverterValidator::TemplateToken => {
+                validate_clr_deserialize::<ClrTemplateToken>(envelope)
+            }
+            ClrConverterValidator::PipelineContextData => {
+                validate_clr_deserialize::<ClrPipelineContextData>(envelope)
+            }
+            ClrConverterValidator::ActionReference => {
+                validate_clr_action_reference(Some(&envelope))
+            }
+        };
+        result.map_err(|error| error.with_context(source_name))?;
+    }
+    Ok(())
+}
+
+fn is_ordered_big_integer(value: &ClrOrderedValue) -> bool {
+    matches!(value, ClrOrderedValue::Number(number) if number.big_integer_decimal().is_some())
+}
+
+fn validate_clr_template_occurrences(
+    value: &ClrOrderedValue,
+) -> std::result::Result<(), ClrValidationError> {
+    let mut collapsed = value.clone().collapse_exact_properties();
+    if matches!(collapsed, ClrOrderedValue::Object(_)) {
+        collapsed.set_number_origin(JsonReaderOrigin::JObjectReader);
+    }
+    if is_ordered_big_integer(&collapsed) {
+        // TemplateTokenJsonConverter casts integer tokens to Int64 before
+        // constructing NumberToken; Newtonsoft BigInteger cannot be cast.
+        return Err(clr_serialization_error(
+            "TemplateToken integer scalar is outside Int64",
+        ));
+    }
+    let value = &collapsed;
+    if let ClrOrderedValue::Object(fields) = value {
+        let kind = match ordered_member(fields, "type") {
+            Some(value) => ordered_converter_i32(value, "TemplateToken type")?,
+            None => Some(0),
+        };
+        if let Some(kind) = kind {
+            let selected_fields = clr_template_token_fields(kind);
+            validate_clr_selected_converter_occurrences(
+                fields,
+                &selected_fields,
+                "Type",
+                kind,
+                ClrConverterValidator::TemplateToken,
+            )?;
+        }
+    }
+    let value = value.clone().into_clr_value(ClrWireShape::TemplateToken);
+    validate_clr_deserialize::<ClrTemplateToken>(value)
+}
+
+fn validate_clr_context_occurrences(
+    value: &ClrOrderedValue,
+) -> std::result::Result<(), ClrValidationError> {
+    let mut collapsed = value.clone().collapse_exact_properties();
+    if matches!(collapsed, ClrOrderedValue::Object(_)) {
+        collapsed.set_number_origin(JsonReaderOrigin::JObjectReader);
+    }
+    if is_ordered_big_integer(&collapsed) {
+        // PipelineContextDataJsonConverter casts integer tokens to Int64
+        // before converting them to Double, so BigInteger scalar values fail.
+        return Err(clr_serialization_error(
+            "PipelineContextData integer scalar is outside Int64",
+        ));
+    }
+    let value = &collapsed;
+    if let ClrOrderedValue::Object(fields) = value {
+        let kind = match ordered_member(fields, "t") {
+            Some(value) => ordered_converter_i32(value, "PipelineContextData type")?,
+            None => Some(0),
+        };
+        if let Some(kind) = kind {
+            let selected_fields = clr_context_data_fields(kind);
+            validate_clr_selected_converter_occurrences(
+                fields,
+                &selected_fields,
+                "T",
+                kind,
+                ClrConverterValidator::PipelineContextData,
+            )?;
+        }
+    }
+    let value = value
+        .clone()
+        .into_clr_value(ClrWireShape::PipelineContextData);
+    validate_clr_deserialize::<ClrPipelineContextData>(value)
+}
+
+fn validate_clr_action_reference_occurrences(
+    value: &ClrOrderedValue,
+) -> std::result::Result<(), ClrValidationError> {
+    let mut collapsed = value.clone().collapse_exact_properties();
+    if matches!(collapsed, ClrOrderedValue::Object(_)) {
+        collapsed.set_number_origin(JsonReaderOrigin::JObjectReader);
+    }
+    let value = &collapsed;
+    if let ClrOrderedValue::Object(fields) = value {
+        let kind = ordered_member(fields, "Type").and_then(ordered_action_type);
+        if let Some(kind) = kind {
+            let selected_fields = clr_action_reference_fields(kind);
+            validate_clr_selected_converter_occurrences(
+                fields,
+                &selected_fields,
+                "Type",
+                kind,
+                ClrConverterValidator::ActionReference,
+            )?;
+        }
+    }
+    let value = value.clone().into_clr_value(ClrWireShape::ActionReference);
+    if let Value::Object(object) = &value {
+        validate_clr_action_reference(Some(&Value::Object(object.clone())))?;
+    }
+    Ok(())
+}
+
+/// Decode one acquired CLR-shaped `AgentJobRequestMessage`. The raw wire value
+/// remains available for quarantine and recovery, while this nullable DTO
+/// retains null collection entries and reference-property nulls until the
+/// runner has durably settled the acquired identity. Runtime admission happens
+/// later and must never become an HTTP/JSON acquire retry. The private CLR DTO
+/// validates source serializer behavior; the public wire DTO retains values
+/// consumed by local runtime materialization.
+/// Upstream returns `default(AgentJobRequestMessage)` (null) when there is no
+/// JSON body or when its JSON reader rejects the body; a non-object JSON value
+/// is a typed deserialization failure and therefore remains retryable.
+#[derive(Debug)]
+pub struct AcquiredJobPayload {
+    /// Untouched response value for local quarantine and diagnostics.
+    pub raw: Value,
+    /// Exact response text. `Value` cannot preserve duplicate object members.
+    pub raw_json: String,
+    /// Effective, explicitly supplied identity after CLR case-insensitive
+    /// member assignment. Missing GUID members remain `None` here even though
+    /// the materialized CLR-shaped message carries `Guid.Empty` defaults.
+    pub identity: AcquiredJobIdentity,
+    /// Parsed normalized wire message. `None` means CLR null-success or that
+    /// the validated wire payload could not be represented by Velnor's wire
+    /// DTO; `identity` distinguishes an addressable post-validation parse
+    /// failure from a CLR reader-null/default result.
+    pub message: Option<crate::job_message::WireAgentJobRequestMessage>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct AcquiredJobIdentity {
+    pub job_id: Option<String>,
+    pub plan_id: Option<String>,
+}
+
+fn decode_acquire_job_success_body(
+    http_status: u16,
+    content_length: Option<u64>,
+    content_type: Option<&str>,
+    body: &str,
+) -> std::result::Result<AcquiredJobPayload, serde_json::Error> {
+    if !is_acquire_job_json_response(http_status, content_length, content_type) {
+        return Ok(AcquiredJobPayload {
+            raw: Value::Null,
+            raw_json: body.to_owned(),
+            identity: AcquiredJobIdentity::default(),
+            message: None,
+        });
+    }
+
+    let ordered = match parse_clr_ordered_json(body) {
+        Ok(ClrOrderedValue::Null) => {
+            return Ok(AcquiredJobPayload {
+                raw: Value::Null,
+                raw_json: body.to_owned(),
+                identity: AcquiredJobIdentity::default(),
+                message: None,
+            });
+        }
+        Ok(value) => value,
+        Err(error)
+            if matches!(
+                error.classify(),
+                serde_json::error::Category::Syntax | serde_json::error::Category::Eof
+            ) =>
+        {
+            // RawHttpClientBase catches JsonReaderException and returns
+            // default(T), which is null for AgentJobRequestMessage.
+            return Ok(AcquiredJobPayload {
+                raw: Value::Null,
+                raw_json: body.to_owned(),
+                identity: AcquiredJobIdentity::default(),
+                message: None,
+            });
+        }
+        Err(error) => return Err(error),
+    };
+
+    let raw = ordered.clone().into_value();
+    if let Err(error) =
+        validate_clr_ordered_occurrences(&ordered, ClrWireShape::Object(ClrWireSchema::AgentJob))
+    {
+        if error.is_reader_error() {
+            return Ok(AcquiredJobPayload {
+                raw,
+                raw_json: body.to_owned(),
+                identity: AcquiredJobIdentity::default(),
+                message: None,
+            });
+        }
+        return Err(serde::de::Error::custom(error));
+    }
+    let normalized = ordered
+        .clone()
+        .into_clr_value(ClrWireShape::Object(ClrWireSchema::AgentJob));
+    if !normalized.is_object() {
+        return Err(serde::de::Error::custom(
+            "expected AgentJobRequestMessage object",
+        ));
+    }
+
+    // Keep the upstream contract boundary independent from Velnor's post-
+    // acquire runtime model. JsonReaderException from a typed Json.NET reader
+    // follows RawHttpClientBase's null-success path; typed serialization
+    // failures remain retryable.
+    let mut clr_normalized = normalized.clone();
+    project_ordered_context_data_for_clr(&mut clr_normalized).map_err(serde::de::Error::custom)?;
+    match deserialize_clr_value::<ClrAgentJobRequestMessage>(clr_normalized) {
+        Ok(_) => {}
+        Err(ClrWireError::Reader(_)) => {
+            // Preserve the parsed wire value for local quarantine while
+            // matching RawHttpClientBase's default(T) typed result.
+            return Ok(AcquiredJobPayload {
+                raw,
+                raw_json: body.to_owned(),
+                identity: AcquiredJobIdentity::default(),
+                message: None,
+            });
+        }
+        Err(ClrWireError::Serialization(message)) => {
+            return Err(serde::de::Error::custom(message));
+        }
+    }
+    let identity = acquired_job_identity(&normalized);
+    crate::job_message::WireAgentJobRequestMessage::validate_deserialization_callback_from_normalized_value(
+        &normalized,
+    )
+    .map_err(|error| {
+        <serde_json::Error as serde::de::Error>::custom(format!(
+            "Actions Runner OnDeserialized callback failed: {error}"
+        ))
+    })?;
+    let message = crate::job_message::WireAgentJobRequestMessage::from_ordered_normalized_value(
+        normalized.clone(),
+    );
+    Ok(AcquiredJobPayload {
+        raw,
+        raw_json: body.to_owned(),
+        identity,
+        message: message.ok(),
+    })
+}
+
+fn acquired_job_identity_object_member<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    name: &str,
+) -> Option<&'a Value> {
+    object.get(name).or_else(|| {
+        object
+            .iter()
+            .find(|(key, _)| clr_ordinal_ignore_case_eq(key.as_str(), name))
+            .map(|(_, value)| value)
+    })
+}
+
+fn acquired_job_identity(value: &Value) -> AcquiredJobIdentity {
+    let guid = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .and_then(|value| parse_clr_guid(value).ok())
+            .map(|value| value.hyphenated().to_string())
+    };
+    let job_id = value
+        .as_object()
+        .and_then(|object| acquired_job_identity_object_member(object, "JobId"))
+        .and_then(|value| guid(Some(value)));
+    let plan_id = value
+        .as_object()
+        .and_then(|object| acquired_job_identity_object_member(object, "Plan"))
+        .and_then(Value::as_object)
+        .and_then(|object| acquired_job_identity_object_member(object, "PlanId"))
+        .and_then(|value| guid(Some(value)));
+    AcquiredJobIdentity { job_id, plan_id }
+}
+
+fn acquire_job_skip_reason(body: &str) -> Option<AcquireJobSkipReason> {
+    match run_service_error_code(body)? {
+        404 => Some(AcquireJobSkipReason::NotFound),
+        409 => Some(AcquireJobSkipReason::AlreadyAcquired),
+        422 => Some(AcquireJobSkipReason::Unprocessable),
+        _ => None,
+    }
+}
+
+/// Whether a typed `acquirejob` reply proves that the broker message is gone.
 ///
-/// Only `404` (the message is gone) and `422` (the run service refuses to hand
-/// it over) are definite, and only when the *typed body* says so. `409` is
-/// deliberately excluded: upstream's `RunServiceError` carries `source`,
-/// `statusCode` and `errorMessage` and no runner identity
-/// (`src/Sdk/RSWebApi/Contracts/RunServiceError.cs`), so a conflict cannot
-/// distinguish "this runner acquired the job and then crashed" from "another
-/// runner holds it". Treating a conflict as gone would drop a job this runner
-/// may own; leaving the provisional row lets `renewjob` decide later.
+/// Only typed 404 is proof. Typed 409 has unknown ownership; typed 422 is a
+/// distinct unprocessable response and does not establish that the message is
+/// gone. Both leave the provisional row for the `renewjob` oracle.
 #[must_use]
 pub fn acquire_reply_is_definitely_gone(body: &str) -> bool {
-    matches!(run_service_error_code(body), Some(404 | 422))
+    run_service_error_code(body) == Some(404)
 }
 
 /// Boundary classifier for a non-retriable `acquirejob` reply, produced
 /// where the reply is observed and carried on
-/// [`AcquireJobOutcome::Skipped`]. Only a typed gone is [`BrokerErrorCategory::Terminal`]
-/// (the slot may be freed now); anything else skipped — a 409 held by an
-/// unknown runner, or a 404/422 whose body is not a run-service error at
-/// all — is [`BrokerErrorCategory::Conflict`]: not proven gone, so the
-/// provisional row stays for the `renewjob` oracle and a duplicate broker
-/// delivery re-records the same intent idempotently instead of abandoning
-/// a job this runner may own.
+/// [`AcquireJobOutcome::Skipped`]. Only a typed 404 is
+/// [`BrokerErrorCategory::Terminal`] (the slot may be freed now); typed 409
+/// and 422 remain [`BrokerErrorCategory::Conflict`] under Velnor's local
+/// ownership-safety policy, which retains the provisional intent for the
+/// `renewjob` oracle. actions/runner only defines these as non-retriable
+/// acquire exceptions; it does not define Velnor's intent-retention rule. The
+/// 422 reason remains distinct so callers do not collapse it into a missing
+/// message. Untyped or foreign-sourced bodies are retried before this
+/// classifier is reached.
 pub(crate) fn classify_acquire_skipped(body: &str) -> BrokerErrorCategory {
-    if acquire_reply_is_definitely_gone(body) {
-        BrokerErrorCategory::Terminal
-    } else {
-        BrokerErrorCategory::Conflict
+    match acquire_job_skip_reason(body) {
+        Some(AcquireJobSkipReason::NotFound) => BrokerErrorCategory::Terminal,
+        Some(AcquireJobSkipReason::AlreadyAcquired | AcquireJobSkipReason::Unprocessable)
+        | None => BrokerErrorCategory::Conflict,
     }
 }
 
@@ -2982,7 +7117,7 @@ fn classify_broker_session_create_error(status: u16) -> BrokerErrorCategory {
 pub struct RunServiceClient {
     http: Client,
     bearer_token: String,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(
         clippy::unwrap_used,
         clippy::expect_used,
@@ -3008,31 +7143,34 @@ pub struct RunServiceClient {
 
 #[derive(Debug)]
 pub enum AcquireJobOutcome {
-    Acquired(Value),
+    Acquired(Box<AcquiredJobPayload>),
     Skipped {
         status: StatusCode,
         request_id: Option<String>,
         body: String,
-        /// Boundary-produced [`BrokerErrorCategory`] for this reply:
-        /// [`BrokerErrorCategory::Terminal`] only for a typed gone (the
-        /// acquisition intent may be abandoned), [`BrokerErrorCategory::Conflict`]
-        /// otherwise (the row stays for the `renewjob` oracle). Callers
-        /// match on this category; they never re-derive it from `body`.
+        /// Typed run-service response code that caused upstream to stop
+        /// retrying this failed acquire response.
+        reason: AcquireJobSkipReason,
+        /// Velnor-local boundary category for intent handling:
+        /// [`BrokerErrorCategory::Terminal`] for typed 404 only;
+        /// [`BrokerErrorCategory::Conflict`] for typed 409/422. Callers match
+        /// on the category and the distinct typed reason; they never
+        /// re-derive either from `body`.
         category: BrokerErrorCategory,
     },
 }
 
 #[derive(Debug, thiserror::Error)]
 enum AcquireJobError {
-    #[error("permanent run-service acquire failure: {0:#}")]
-    Permanent(#[source] anyhow::Error),
     #[error("transient run-service acquire failure after retries: {0:#}")]
     Transient(#[source] anyhow::Error),
 }
 
-/// Whether an acquire failure is safe to absorb while the broker session
-/// remains alive. Permanent protocol/configuration failures must tear down the
-/// session so credentials or malformed payloads cannot spin forever.
+/// Whether an acquire error exhausted the transient retry budget.
+///
+/// This classifies the error only. The caller retains the broker session and
+/// acquisition state after any acquire error, including local preflight
+/// failures; this flag does not request session teardown.
 pub(crate) fn is_transient_acquire_error(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause
@@ -3051,7 +7189,7 @@ impl RunServiceClient {
         Ok(Self {
             http,
             bearer_token: bearer_token.into(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             #[allow(
                 clippy::unwrap_used,
                 clippy::expect_used,
@@ -3076,7 +7214,8 @@ impl RunServiceClient {
         })
     }
 
-    #[cfg(test)]
+    /// Override acquire retry delay in unit and `test-support` builds.
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(
         clippy::unwrap_used,
         clippy::expect_used,
@@ -3086,7 +7225,7 @@ impl RunServiceClient {
         clippy::unimplemented,
         reason = "tests may panic"
     )]
-    pub(crate) fn with_acquire_retry_delay_for_test(mut self, delay: Duration) -> Self {
+    pub fn with_acquire_retry_delay_for_test(mut self, delay: Duration) -> Self {
         self.acquire_retry_delay_override = Some(delay);
         self
     }
@@ -3113,54 +7252,84 @@ impl RunServiceClient {
         runner_os: &str,
         billing_owner_id: Option<&str>,
     ) -> Result<AcquireJobOutcome> {
-        let url = run_service_acquire_job_url(run_service_url)
-            .map_err(|error| anyhow::Error::from(AcquireJobError::Permanent(error)))?;
-        let body = serde_json::to_string(&AcquireJobRequest {
-            job_message_id,
-            runner_os,
-            billing_owner_id,
-        })
-        .context("serialize acquire job request")
-        .map_err(|error| anyhow::Error::from(AcquireJobError::Permanent(error)))?;
         let mut attempt = 1;
         loop {
-            let outcome = github_json_request(
-                "POST",
-                url.as_str(),
-                &self.bearer_token,
-                Some(body.clone()),
-                30,
-            )
-            .await;
+            let outcome = match run_service_acquire_job_url(run_service_url).and_then(|url| {
+                serde_json::to_string(&AcquireJobRequest {
+                    job_message_id,
+                    runner_os,
+                    billing_owner_id,
+                })
+                .context("serialize acquire job request")
+                .map(|body| (url, body))
+            }) {
+                Ok((url, body)) => {
+                    github_json_http_response(
+                        "POST",
+                        url.as_str(),
+                        &self.bearer_token,
+                        Some(body),
+                        30,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
 
             let retry_error = match outcome {
-                Ok((status, text)) => {
-                    let status_code =
-                        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-                    if is_non_retriable_acquire_status(status_code) {
-                        return Ok(AcquireJobOutcome::Skipped {
-                            status: status_code,
-                            request_id: None,
-                            category: classify_acquire_skipped(&text),
-                            body: text,
-                        });
-                    }
-                    if !(200..300).contains(&status) {
-                        Some(github_api_error_categorized(
-                            "acquire run-service job",
-                            status,
-                            text,
-                            classify_acquire_attempt_error(status),
-                        ))
-                    } else {
-                        match serde_json::from_str::<Value>(&text) {
-                            Ok(value) => return Ok(AcquireJobOutcome::Acquired(value)),
-                            Err(error) => {
-                                return Err(AcquireJobError::Permanent(
-                                    anyhow::Error::new(error)
-                                        .context("parse acquire run-service job response"),
-                                )
-                                .into());
+                Ok(response) => {
+                    let status = response.status;
+                    let text = response.body;
+                    let content_length = response
+                        .headers
+                        .get(reqwest::header::CONTENT_LENGTH)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| value.parse().ok());
+                    let content_type = response
+                        .headers
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok());
+                    match classify_acquire_job_response(status, &text) {
+                        AcquireJobResponseClass::Skipped(reason) => {
+                            let status_code = StatusCode::from_u16(status)
+                                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                            return Ok(AcquireJobOutcome::Skipped {
+                                status: status_code,
+                                request_id: None,
+                                reason,
+                                category: classify_acquire_skipped(&text),
+                                body: text,
+                            });
+                        }
+                        AcquireJobResponseClass::RetryableFailure => {
+                            Some(github_api_error_categorized(
+                                "acquire run-service job",
+                                status,
+                                text,
+                                // RunServer retries every acquire exception
+                                // except typed 404/409/422. Keep generic
+                                // non-2xx responses on that retry path.
+                                BrokerErrorCategory::Transient,
+                            ))
+                        }
+                        AcquireJobResponseClass::Success => {
+                            match decode_acquire_job_success_body(
+                                status,
+                                content_length,
+                                content_type,
+                                &text,
+                            ) {
+                                Ok(value) => {
+                                    return Ok(AcquireJobOutcome::Acquired(Box::new(value)))
+                                }
+                                Err(error) => Some(github_api_error_categorized(
+                                    "acquire run-service job",
+                                    status,
+                                    format!(
+                                        "parse acquire AgentJobRequestMessage response: {error}"
+                                    ),
+                                    BrokerErrorCategory::Transient,
+                                )),
                             }
                         }
                     }
@@ -3175,31 +7344,25 @@ impl RunServiceClient {
             else {
                 unreachable!("successful acquire returns before retry handling");
             };
-            // Category-driven policy: a terminal failure (deterministic 4xx,
-            // poison payload) fails fast on this attempt instead of burning
-            // the whole retry budget — the bearer token cannot change
-            // mid-call, so the same request fails identically on every
-            // attempt. Only transient and unclassified transport failures
-            // sleep and retry, bounded by `RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS`.
-            if !acquire_attempt_failure_is_transient(&error) {
-                return Err(AcquireJobError::Permanent(error).into());
-            }
+            // Match RunServer's retry boundary: typed 404/409/422 already
+            // returned as `Skipped`; every other exception retries within
+            // the local five-attempt bound.
             if attempt >= RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS {
                 return Err(AcquireJobError::Transient(error).into());
             }
 
             let delay = self.acquire_retry_delay(attempt);
             eprintln!(
-                "acquire run-service job attempt {attempt}/{RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS} failed ({error:#}); retrying in {}s",
-                delay.as_secs()
+                "acquire run-service job attempt {attempt}/{RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS} failed ({error:#}); retrying in {}ms",
+                delay.as_millis()
             );
             tokio::time::sleep(delay).await;
             attempt += 1;
         }
     }
 
-    fn acquire_retry_delay(&self, attempt: u32) -> Duration {
-        #[cfg(test)]
+    fn acquire_retry_delay(&self, _attempt: u32) -> Duration {
+        #[cfg(any(test, feature = "test-support"))]
         #[allow(
             clippy::unwrap_used,
             clippy::expect_used,
@@ -3213,9 +7376,8 @@ impl RunServiceClient {
             return delay;
         }
 
-        let span = RUN_SERVICE_ACQUIRE_RETRY_MAX_SECS - RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS;
-        let jitter = (std::process::id() as u64 + u64::from(attempt) * 7) % (span + 1);
-        Duration::from_secs(RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS + jitter)
+        let span = RUN_SERVICE_ACQUIRE_RETRY_MAX_MS - RUN_SERVICE_ACQUIRE_RETRY_MIN_MS;
+        Duration::from_millis(RUN_SERVICE_ACQUIRE_RETRY_MIN_MS + random_u64_below(span))
     }
 
     fn complete_retry_delay(&self, attempt: u32) -> Duration {
@@ -3375,75 +7537,6 @@ impl RunServiceClient {
             attempt += 1;
         }
     }
-}
-
-/// Retry policy for an `acquirejob` attempt failure. Reads the
-/// boundary-produced [`BrokerErrorCategory`]; unclassified errors
-/// (status-less transport failures, test doubles) fall back to the
-/// historical [`acquire_failure_is_transient`] derivation. `Conflict` is
-/// unreachable here — a 409 returns `Skipped` before the retry path — so any
-/// non-transient verdict fails fast as `Permanent`, and the
-/// `is_transient_acquire_error` session gate keeps its verdicts.
-fn acquire_attempt_failure_is_transient(error: &anyhow::Error) -> bool {
-    match broker_error_category(error) {
-        Some(BrokerErrorCategory::Transient) => true,
-        Some(_) => false,
-        None => acquire_failure_is_transient(error),
-    }
-}
-
-/// Boundary classifier for an `acquirejob` attempt failure that is neither
-/// a skip (404/409/422 return `Skipped` before this point) nor a success.
-/// Same verdict shape as the historical status derivation below, so typing
-/// the producer changes forensics, not policy: transport-shaped and 5xx
-/// failures are [`BrokerErrorCategory::Transient`] (retry inside the
-/// 5-attempt budget), deterministic 4xx refusals are
-/// [`BrokerErrorCategory::Terminal`] (fail fast).
-fn classify_acquire_attempt_error(status: u16) -> BrokerErrorCategory {
-    if matches!(status, 0 | 408 | 429 | 500..=599) {
-        BrokerErrorCategory::Transient
-    } else {
-        BrokerErrorCategory::Terminal
-    }
-}
-
-/// Historical acquire-failure derivation, now the unclassified fallback for
-/// [`acquire_attempt_failure_is_transient`]: timeout/connect transport
-/// failures retry, local faults and deterministic refusals fail fast.
-fn acquire_failure_is_transient(error: &anyhow::Error) -> bool {
-    let Some(api_error) = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<GitHubApiError>())
-    else {
-        // Native request failures expose a reqwest error; status-less failures
-        // expose an I/O error. Filesystem and
-        // executable errors are local faults and must not retain a session
-        // forever as if GitHub were temporarily unavailable.
-        if error.chain().any(|cause| {
-            cause
-                .downcast_ref::<reqwest::Error>()
-                .is_some_and(|error| error.is_timeout() || error.is_connect())
-        }) {
-            return true;
-        }
-        return error.chain().any(|cause| {
-            cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
-                matches!(
-                    error.kind(),
-                    std::io::ErrorKind::TimedOut
-                        | std::io::ErrorKind::ConnectionRefused
-                        | std::io::ErrorKind::ConnectionReset
-                        | std::io::ErrorKind::ConnectionAborted
-                        | std::io::ErrorKind::NotConnected
-                        | std::io::ErrorKind::BrokenPipe
-                        | std::io::ErrorKind::UnexpectedEof
-                        | std::io::ErrorKind::Interrupted
-                )
-            })
-        });
-    };
-
-    matches!(api_error.status, 0 | 408 | 429 | 500..=599)
 }
 
 impl DistributedTaskClient {
@@ -4051,26 +8144,66 @@ async fn parse_acquire_job_response(response: reqwest::Response) -> Result<Acqui
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned);
 
-    if is_non_retriable_acquire_status(status) {
-        let body = response.text().await.unwrap_or_default();
+    if status.is_success() {
+        let content_length = response.content_length();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        let body = response.text().await.map_err(|error| {
+            github_api_error_categorized(
+                "acquire run-service job",
+                status.as_u16(),
+                format!(
+                    "request_id={}, read acquire AgentJobRequestMessage response: {error}",
+                    request_id.as_deref().unwrap_or("unknown")
+                ),
+                BrokerErrorCategory::Transient,
+            )
+        })?;
+        return match decode_acquire_job_success_body(
+            status.as_u16(),
+            content_length,
+            content_type.as_deref(),
+            &body,
+        ) {
+            Ok(value) => Ok(AcquireJobOutcome::Acquired(Box::new(value))),
+            Err(error) => Err(github_api_error_categorized(
+                "acquire run-service job",
+                status.as_u16(),
+                format!(
+                    "request_id={}, parse acquire AgentJobRequestMessage response: {error}",
+                    request_id.unwrap_or_else(|| "unknown".to_string())
+                ),
+                BrokerErrorCategory::Transient,
+            )),
+        };
+    }
+
+    let body = response.text().await.unwrap_or_default();
+    if let AcquireJobResponseClass::Skipped(reason) =
+        classify_acquire_job_response(status.as_u16(), &body)
+    {
         return Ok(AcquireJobOutcome::Skipped {
             status,
             request_id,
+            reason,
             category: classify_acquire_skipped(&body),
             body,
         });
     }
 
-    parse_json_response::<Value>(response, "acquire run-service job")
-        .await
-        .map(AcquireJobOutcome::Acquired)
-}
-
-fn is_non_retriable_acquire_status(status: StatusCode) -> bool {
-    matches!(
-        status,
-        StatusCode::NOT_FOUND | StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY
-    )
+    Err(github_api_error_categorized(
+        "acquire run-service job",
+        status.as_u16(),
+        format!(
+            "request_id={}, body={}",
+            request_id.unwrap_or_else(|| "unknown".to_string()),
+            body
+        ),
+        BrokerErrorCategory::Transient,
+    ))
 }
 
 async fn parse_optional_json_response<T>(
@@ -9954,6 +14087,37 @@ mod tests {
         assert!(!is_run_service_job_not_found(
             r#"{"source":"actions-run-service","code":404,"message":"Job not found"}"#
         ));
+
+        let case_insensitive_and_coerced = RunServiceError::parse(
+            r#"{"SOURCE":"actions-run-service","STATUSCODE":"404","ERRORMESSAGE":"gone"}"#,
+        )
+        .expect("Json.NET matches contract member names without case sensitivity");
+        assert_eq!(case_insensitive_and_coerced.code, Some(404));
+        assert!(is_run_service_job_not_found(
+            r#"{"SOURCE":"actions-run-service","STATUSCODE":"404"}"#
+        ));
+        assert_eq!(
+            classify_acquire_job_response(
+                500,
+                r#"{"SOURCE":"actions-run-service","STATUSCODE":"404"}"#
+            ),
+            AcquireJobResponseClass::Skipped(AcquireJobSkipReason::NotFound)
+        );
+
+        assert_eq!(
+            run_service_error_code(
+                r#"{"source":"actions-run-service","statusCode":500,"STATUSCODE":404}"#
+            ),
+            Some(404),
+            "the last case-insensitive duplicate member wins"
+        );
+        assert_eq!(
+            run_service_error_code(
+                r#"{"source":"actions-run-service","statusCode":"bad","STATUSCODE":404}"#
+            ),
+            None,
+            "an invalid earlier occurrence fails before a later duplicate"
+        );
     }
 
     #[test]
@@ -10022,17 +14186,21 @@ mod tests {
     }
 
     #[test]
-    fn acquire_reply_is_gone_only_for_typed_404_and_422() {
-        for code in [404u16, 422] {
-            assert!(acquire_reply_is_definitely_gone(
-                &upstream_run_service_error_body("actions-run-service", code, "gone").to_string(),
-            ));
-        }
+    fn acquire_reply_is_gone_only_for_typed_404() {
+        assert!(acquire_reply_is_definitely_gone(
+            &upstream_run_service_error_body("actions-run-service", 404, "gone").to_string(),
+        ));
         // A conflict says the job is held. Upstream's error envelope carries no
         // runner identity, so it cannot say *by whom* — abandoning here would
         // drop a job this runner may have acquired before it crashed.
         assert!(!acquire_reply_is_definitely_gone(
             &upstream_run_service_error_body("actions-run-service", 409, "already acquired")
+                .to_string(),
+        ));
+        // 422 is a distinct unprocessable response, not proof that the job is
+        // gone or that this runner never acquired it.
+        assert!(!acquire_reply_is_definitely_gone(
+            &upstream_run_service_error_body("actions-run-service", 422, "unprocessable")
                 .to_string(),
         ));
         // Raw HTTP status is never the oracle: an untyped or foreign-sourced
@@ -10048,21 +14216,33 @@ mod tests {
 
     #[test]
     fn acquire_skipped_category_is_terminal_only_for_typed_gone() {
-        for code in [404u16, 422] {
+        assert_eq!(
+            classify_acquire_skipped(
+                &upstream_run_service_error_body("actions-run-service", 404, "gone").to_string()
+            ),
+            BrokerErrorCategory::Terminal
+        );
+        // Held-by-unknown and unprocessable typed replies are non-retriable
+        // upstream errors, but neither proves the request is gone.
+        for (code, reason) in [
+            (409u16, AcquireJobSkipReason::AlreadyAcquired),
+            (422u16, AcquireJobSkipReason::Unprocessable),
+        ] {
+            let body =
+                upstream_run_service_error_body("actions-run-service", code, "held or refused")
+                    .to_string();
             assert_eq!(
-                classify_acquire_skipped(
-                    &upstream_run_service_error_body("actions-run-service", code, "gone")
-                        .to_string()
-                ),
-                BrokerErrorCategory::Terminal
+                acquire_job_skip_reason(&body),
+                Some(reason),
+                "typed response code {code} must remain distinct"
+            );
+            assert_eq!(
+                classify_acquire_skipped(&body),
+                BrokerErrorCategory::Conflict
             );
         }
-        // Held-by-unknown, untyped, foreign-sourced, and empty replies are
-        // all `Conflict`: not proven gone, so the row stays for the
-        // `renewjob` oracle instead of being abandoned.
+        // Untyped, foreign-sourced, and empty replies are unproven too.
         for body in [
-            upstream_run_service_error_body("actions-run-service", 409, "already acquired")
-                .to_string(),
             r#"{"message":"Not Found"}"#.to_owned(),
             upstream_run_service_error_body("actions-broker", 404, "gone").to_string(),
             String::new(),
@@ -10120,25 +14300,62 @@ mod tests {
     }
 
     #[test]
-    fn acquire_attempt_errors_classify_like_the_legacy_derivation() {
-        // Same verdict shape the loop enforced before the taxonomy, so typing
-        // the producer changes forensics, not policy. 404/409/422 never reach
-        // this classifier (they return `Skipped` first); their mapping here
-        // is a defensive totality, not a policy.
-        for status in [0u16, 408, 429, 500, 503] {
-            assert_eq!(
-                classify_acquire_attempt_error(status),
-                BrokerErrorCategory::Transient,
-                "status {status}"
-            );
-        }
-        for status in [400u16, 401, 403, 404, 409, 422] {
-            assert_eq!(
-                classify_acquire_attempt_error(status),
-                BrokerErrorCategory::Terminal,
-                "status {status}"
-            );
-        }
+    fn acquire_http_and_typed_error_statuses_match_upstream() {
+        let typed_not_found =
+            upstream_run_service_error_body("actions-run-service", 404, "gone").to_string();
+        let typed_already_acquired =
+            upstream_run_service_error_body("actions-run-service", 409, "already acquired")
+                .to_string();
+        let typed_unprocessable =
+            upstream_run_service_error_body("actions-run-service", 422, "unprocessable")
+                .to_string();
+        let typed_other =
+            upstream_run_service_error_body("actions-run-service", 503, "retry later").to_string();
+
+        // HTTP status gates success. A typed error envelope in a 2xx response
+        // is not interpreted as an error by RunServiceHttpClient.
+        assert_eq!(
+            classify_acquire_job_response(200, &typed_not_found),
+            AcquireJobResponseClass::Success
+        );
+        // Once the outer HTTP response fails, only the three typed upstream
+        // error codes stop RunServer's retry loop, even when the outer status
+        // differs from the body's statusCode.
+        assert_eq!(
+            classify_acquire_job_response(500, &typed_not_found),
+            AcquireJobResponseClass::Skipped(AcquireJobSkipReason::NotFound)
+        );
+        assert_eq!(
+            classify_acquire_job_response(503, &typed_already_acquired),
+            AcquireJobResponseClass::Skipped(AcquireJobSkipReason::AlreadyAcquired)
+        );
+        assert_eq!(
+            classify_acquire_job_response(400, &typed_unprocessable),
+            AcquireJobResponseClass::Skipped(AcquireJobSkipReason::Unprocessable)
+        );
+        // A typed but otherwise unrecognized response code follows upstream's
+        // generic exception path and retries, regardless of outer 4xx/5xx.
+        assert_eq!(
+            classify_acquire_job_response(404, &typed_other),
+            AcquireJobResponseClass::RetryableFailure
+        );
+        assert_eq!(
+            classify_acquire_job_response(401, "not a run-service error"),
+            AcquireJobResponseClass::RetryableFailure
+        );
+        assert_eq!(
+            classify_acquire_job_response(
+                404,
+                &upstream_run_service_error_body("actions-broker", 404, "gone").to_string()
+            ),
+            AcquireJobResponseClass::RetryableFailure
+        );
+        // A body cannot manufacture an HTTP response when the transport has
+        // no status.
+        assert_eq!(
+            classify_acquire_job_response(0, &typed_not_found),
+            AcquireJobResponseClass::RetryableFailure
+        );
     }
 
     #[test]
@@ -10798,49 +15015,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn acquire_job_non_retriable_statuses_match_upstream() {
-        assert!(is_non_retriable_acquire_status(StatusCode::NOT_FOUND));
-        assert!(is_non_retriable_acquire_status(StatusCode::CONFLICT));
-        assert!(is_non_retriable_acquire_status(
-            StatusCode::UNPROCESSABLE_ENTITY
-        ));
-        assert!(!is_non_retriable_acquire_status(
-            StatusCode::INTERNAL_SERVER_ERROR
-        ));
-        assert!(!is_non_retriable_acquire_status(StatusCode::UNAUTHORIZED));
-    }
-
-    #[test]
-    fn acquire_failure_classifies_local_faults_separately_from_transport() {
-        // Pins the unclassified fallback the category-driven
-        // `acquire_attempt_failure_is_transient` delegates to: status-less
-        // transport faults retry, local faults and deterministic refusals
-        // fail fast.
-        let permission = anyhow::Error::new(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "private transport directory",
-        ));
-        assert!(!acquire_failure_is_transient(&permission));
-
-        let timeout = anyhow::Error::new(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "request timed out",
-        ));
-        assert!(acquire_failure_is_transient(&timeout));
-
-        let unauthorized = anyhow::Error::from(GitHubApiError {
-            status: StatusCode::UNAUTHORIZED.as_u16(),
-            action: "acquire".into(),
-            body: "invalid token".into(),
-            retry_after_seconds: None,
-            rate_limit_reset_epoch: None,
-            remaining: Some(4999),
-            category: None,
-        });
-        assert!(!acquire_failure_is_transient(&unauthorized));
-    }
-
     #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn acquire_job_retries_transient_failure_before_parsing_job() {
@@ -10861,8 +15035,10 @@ mod tests {
                 if responder_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                     ResponseTemplate::new(500).set_body_string("retry later")
                 } else {
-                    ResponseTemplate::new(200)
-                        .set_body_string(r#"{"plan":{"planId":"plan-1"},"jobId":"job-1"}"#)
+                    ResponseTemplate::new(200).set_body_json(json!({
+                        "plan": {"planId": "00000000-0000-0000-0000-000000000002"},
+                        "jobId": "00000000-0000-0000-0000-000000000001"
+                    }))
                 }
             })
             .expect(2)
@@ -10885,13 +15061,13 @@ mod tests {
         let AcquireJobOutcome::Acquired(job) = outcome else {
             panic!("transient acquire failure must be retried");
         };
-        assert_eq!(job["jobId"], "job-1");
+        assert_eq!(job.raw["jobId"], "00000000-0000-0000-0000-000000000001");
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 
     #[cfg(feature = "test-support")]
     #[tokio::test]
-    async fn acquire_job_rejects_malformed_success_without_retrying_or_swallowing() {
+    async fn acquire_job_returns_typed_default_for_malformed_success_without_retry() {
         use wiremock::{matchers::method, matchers::path, Mock, MockServer, ResponseTemplate};
 
         let transport_guard = crate::test_support::github_http_transport_env().await;
@@ -10899,7 +15075,11 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/run/jobs/123/acquirejob"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_string("not-json"),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -10907,7 +15087,7 @@ mod tests {
         let run_service = RunServiceClient::new("token")
             .unwrap()
             .with_acquire_retry_delay_for_test(Duration::ZERO);
-        let error = run_service
+        let outcome = run_service
             .acquire_job(
                 &format!("{}/run/jobs/123", server.uri()),
                 "broker-message",
@@ -10915,15 +15095,2405 @@ mod tests {
                 None,
             )
             .await
-            .expect_err("malformed success must be a permanent acquire error");
+            .expect("JsonReaderException maps to the typed reference default");
 
-        assert!(!is_transient_acquire_error(&error));
-        assert!(error.to_string().contains("parse acquire run-service job"));
+        let AcquireJobOutcome::Acquired(value) = outcome else {
+            panic!("a successful malformed JSON body remains a successful typed response");
+        };
+        assert!(value.raw.is_null());
+        assert!(value.message.is_none());
     }
 
     #[cfg(feature = "test-support")]
     #[tokio::test]
-    async fn acquire_job_terminal_failure_fails_fast_without_retrying() {
+    async fn acquire_job_retries_non_object_json_typed_decode_failure() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        use wiremock::{
+            matchers::method, matchers::path, Mock, MockServer, Request, ResponseTemplate,
+        };
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let responder_attempts = Arc::clone(&attempts);
+        Mock::given(method("POST"))
+            .and(path("/run/jobs/123/acquirejob"))
+            .respond_with(move |_request: &Request| {
+                if responder_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "application/json")
+                        .set_body_string("[]")
+                } else {
+                    ResponseTemplate::new(200).set_body_json(json!({
+                        "planId": "00000000-0000-0000-0000-000000000002",
+                        "jobId": "00000000-0000-0000-0000-000000000001"
+                    }))
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let run_service = RunServiceClient::new("token")
+            .unwrap()
+            .with_acquire_retry_delay_for_test(Duration::ZERO);
+        let outcome = run_service
+            .acquire_job(
+                &format!("{}/run/jobs/123", server.uri()),
+                "broker-message",
+                std::env::consts::OS,
+                None,
+            )
+            .await
+            .expect("generic typed deserialization errors retry");
+
+        let AcquireJobOutcome::Acquired(value) = outcome else {
+            panic!("the valid second acquire response must be returned");
+        };
+        assert_eq!(value.raw["jobId"], "00000000-0000-0000-0000-000000000001");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn acquire_job_retries_nested_typed_decode_failure() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        use wiremock::{
+            matchers::method, matchers::path, Mock, MockServer, Request, ResponseTemplate,
+        };
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let responder_attempts = Arc::clone(&attempts);
+        Mock::given(method("POST"))
+            .and(path("/run/jobs/123/acquirejob"))
+            .respond_with(move |_request: &Request| {
+                if responder_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "application/json")
+                        .set_body_json(json!({
+                            "resources": {"endpoints": [{"groupScopeId": null}]}
+                        }))
+                } else {
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "application/json")
+                        .set_body_json(json!({
+                            "jobId": "00000000-0000-0000-0000-000000000001"
+                        }))
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let run_service = RunServiceClient::new("token")
+            .unwrap()
+            .with_acquire_retry_delay_for_test(Duration::ZERO);
+        let outcome = run_service
+            .acquire_job(
+                &format!("{}/run/jobs/123", server.uri()),
+                "broker-message",
+                std::env::consts::OS,
+                None,
+            )
+            .await
+            .expect("nested typed deserialization errors retry");
+
+        let AcquireJobOutcome::Acquired(value) = outcome else {
+            panic!("the valid second acquire response must be returned");
+        };
+        assert_eq!(value.raw["jobId"], "00000000-0000-0000-0000-000000000001");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn acquire_job_retries_clr_guid_workspace_and_nested_typed_failures() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        use wiremock::{
+            matchers::method, matchers::path, Mock, MockServer, Request, ResponseTemplate,
+        };
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let responder_attempts = Arc::clone(&attempts);
+        Mock::given(method("POST"))
+            .and(path("/run/jobs/123/acquirejob"))
+            .respond_with(move |_request: &Request| {
+                match responder_attempts.fetch_add(1, Ordering::SeqCst) {
+                    0 => ResponseTemplate::new(200).set_body_json(json!({"jobId": "not-a-guid"})),
+                    1 => ResponseTemplate::new(200).set_body_json(json!({
+                        "jobId": "00000000-0000-0000-0000-000000000001",
+                        "workspace": []
+                    })),
+                    2 => ResponseTemplate::new(200).set_body_json(json!({
+                        "resources": {"endpoints": [{"id": []}]}
+                    })),
+                    _ => ResponseTemplate::new(200).set_body_json(json!({
+                        "jobId": "00000000-0000-0000-0000-000000000001",
+                        "plan": {"planId": "00000000-0000-0000-0000-000000000002"}
+                    })),
+                }
+            })
+            .expect(4)
+            .mount(&server)
+            .await;
+
+        let run_service = RunServiceClient::new("token")
+            .unwrap()
+            .with_acquire_retry_delay_for_test(Duration::ZERO);
+        let outcome = run_service
+            .acquire_job(
+                &format!("{}/run/jobs/123", server.uri()),
+                "broker-message",
+                std::env::consts::OS,
+                None,
+            )
+            .await
+            .expect("CLR GUID, workspace, and endpoint type failures retry");
+
+        let AcquireJobOutcome::Acquired(value) = outcome else {
+            panic!("the valid fourth response must be returned");
+        };
+        assert_eq!(value.raw["jobId"], "00000000-0000-0000-0000-000000000001");
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn acquire_job_keeps_nullable_clr_wire_message_until_runtime_admission() {
+        use wiremock::{matchers::method, matchers::path, Mock, MockServer, ResponseTemplate};
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/run/jobs/123/acquirejob"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "messageType": "PipelineAgentJobRequest",
+                "plan": {"planId": "00000000-0000-0000-0000-000000000002"},
+                "timeline": {"id": "00000000-0000-0000-0000-000000000003"},
+                "jobId": "00000000-0000-0000-0000-000000000001",
+                "jobDisplayName": null,
+                "variables": null,
+                "mask": null,
+                "steps": null,
+                "resources": {"endpoints": null, "repositories": null, "containers": null},
+                "environmentVariables": null,
+                "defaults": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let run_service = RunServiceClient::new("token")
+            .unwrap()
+            .with_acquire_retry_delay_for_test(Duration::ZERO);
+        let outcome = run_service
+            .acquire_job(
+                &format!("{}/run/jobs/123", server.uri()),
+                "broker-message",
+                std::env::consts::OS,
+                None,
+            )
+            .await
+            .expect("partial but syntactically valid DTO is a successful response");
+
+        let AcquireJobOutcome::Acquired(value) = outcome else {
+            panic!("partial job object must not become a retryable response error");
+        };
+        let message = value
+            .message
+            .expect("validated wire model is retained before runtime admission");
+        assert_eq!(
+            message.message_type.as_deref(),
+            Some("PipelineAgentJobRequest")
+        );
+        assert_eq!(message.job_id, "00000000-0000-0000-0000-000000000001");
+        assert!(message.job_display_name.is_none());
+        assert_eq!(message.request_id, 0);
+        assert!(message.variables.is_empty());
+        assert!(message.mask.is_empty());
+        assert!(message.steps.is_empty());
+        assert!(message.resources.as_ref().unwrap().endpoints.is_empty());
+        assert!(message.environment_variables.is_empty());
+        assert!(message.defaults.is_empty());
+        assert!(message.actions_dependencies.is_empty());
+    }
+
+    #[test]
+    fn converter_discriminators_match_newtonsoft_exact_priority_and_selected_subtypes() {
+        let body = r#"{
+            "jobContainer":{"Type":1,"type":0,"lit":"job-token","seq":17},
+            "contextData":{
+                "missing":{"Noise":true},
+                "collision":{"T":1,"t":0,"s":"selected","a":[{"t":99}]},
+                "invalid":{"t":"not-an-integer","a":[{"t":99}]}
+            },
+            "steps":[{
+                "type":5,"Type":4,"StepIds":17,
+                "Reference":{"type":2,"Type":1,"Name":"owner/action","Image":[]}
+            }]
+        }"#;
+        let payload = decode_acquire_job_success_body(
+            200,
+            Some(body.len() as u64),
+            Some("application/json"),
+            body,
+        )
+        .unwrap();
+        assert_eq!(payload.raw_json, body);
+        let message = payload.message.expect("CLR-valid wire DTO is retained");
+
+        let container = message.job_container.as_ref().unwrap();
+        assert_eq!(container["type"], 0);
+        assert_eq!(container["lit"], "job-token");
+        assert!(container.get("seq").is_none());
+
+        let context = message.context_data.as_ref().unwrap();
+        assert_eq!(context["missing"]["t"], 0);
+        assert_eq!(context["missing"].as_object().unwrap().len(), 1);
+        assert_eq!(context["collision"]["t"], 0);
+        assert_eq!(context["collision"]["s"], "selected");
+        assert!(context["collision"].get("a").is_none());
+        assert_eq!(context["invalid"], Value::Null);
+        assert_eq!(message.materialize_context_data().unwrap()["missing"], "");
+        assert_eq!(
+            message.materialize_context_data().unwrap()["collision"],
+            "selected"
+        );
+
+        let step = message.steps[0].as_ref().unwrap();
+        assert_eq!(
+            step.step_kind(),
+            Some(crate::job_message::ActionStepKind::Action)
+        );
+        let reference = step.reference.as_ref().unwrap();
+        assert_eq!(
+            reference.r#type,
+            Some(crate::job_message::ActionReferenceType::Repository)
+        );
+        assert_eq!(reference.name.as_deref(), Some("owner/action"));
+        assert!(reference.image.is_none());
+        assert_eq!(step.step_ids, Vec::<Option<String>>::new());
+    }
+
+    #[test]
+    fn context_map_duplicates_reset_converter_existing_value_and_step_tokens_retain_it() {
+        let body = r#"{"contextData":{"x":"kept","x":{"t":"invalid"}},"steps":[{"Type":4,"Environment":{"type":2},"environment":{"type":"invalid"}}]}"#;
+        let payload = decode_acquire_job_success_body(
+            200,
+            Some(body.len() as u64),
+            Some("application/json"),
+            body,
+        )
+        .unwrap();
+        let message = payload.message.unwrap();
+
+        assert_eq!(message.context_data.as_ref().unwrap()["x"], Value::Null);
+        assert_eq!(
+            message.steps[0].as_ref().unwrap().environment,
+            Some(json!({ "type": 2 }))
+        );
+    }
+
+    #[test]
+    fn acquire_context_data_requires_object_root_before_ordered_pair_projection() {
+        let array_root = r#"{"contextData":[["root",{"t":0,"s":"value"}]]}"#;
+        assert!(
+            decode_acquire_job_success_body(
+                200,
+                Some(array_root.len() as u64),
+                Some("application/json"),
+                array_root,
+            )
+            .is_err(),
+            "raw arrays cannot masquerade as internal ordered ContextData pairs"
+        );
+
+        let undefined_root = r#"{"contextData":undefined}"#;
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(undefined_root.len() as u64),
+            Some("application/json"),
+            undefined_root,
+        )
+        .is_err());
+
+        let constructor_root = r#"{"contextData":new Foo({"root":{"t":0,"s":"value"}})}"#;
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(constructor_root.len() as u64),
+            Some("application/json"),
+            constructor_root,
+        )
+        .is_err());
+
+        let null_root = r#"{"contextData":null}"#;
+        let payload = decode_acquire_job_success_body(
+            200,
+            Some(null_root.len() as u64),
+            Some("application/json"),
+            null_root,
+        )
+        .unwrap();
+        assert!(payload.message.unwrap().context_data.is_none());
+    }
+
+    #[test]
+    fn acquired_nonfinite_scalars_and_converter_overflow_keep_clr_behavior() {
+        let body = r#"{"jobContainer":NaN,"contextData":{"bare":NaN}}"#;
+        let message = decode_acquire_job_success_body(
+            200,
+            Some(body.len() as u64),
+            Some("application/json"),
+            body,
+        )
+        .unwrap()
+        .message
+        .unwrap();
+        assert_eq!(
+            crate::job_message::template_token_context_value(
+                message.job_container.as_ref().unwrap()
+            )
+            .unwrap(),
+            velnor_model::ContextValue::non_finite(velnor_model::NonFinite::NaN)
+        );
+        assert_eq!(
+            message.materialize_context_values().unwrap()["bare"],
+            velnor_model::ContextValue::non_finite(velnor_model::NonFinite::NaN)
+        );
+
+        for body in [
+            r#"{"jobContainer":{"type":2147483648}}"#,
+            r#"{"contextData":{"x":{"t":2147483648}}}"#,
+            r#"{"jobContainer":9223372036854775808}"#,
+            r#"{"contextData":{"x":9223372036854775808}}"#,
+            r#"{"jobContainer":18446744073709551616}"#,
+            r#"{"contextData":{"x":18446744073709551616}}"#,
+            r#"{"jobContainer":{"type":6,"num":null,"Num":1}}"#,
+            r#"{"contextData":{"x":{"t":4,"n":null,"N":1}}}"#,
+            r#"{"jobContainer":{"type":6,"Num":null,"num":1}}"#,
+            r#"{"contextData":{"x":{"t":4,"N":null,"n":1}}}"#,
+        ] {
+            assert!(
+                decode_acquire_job_success_body(
+                    200,
+                    Some(body.len() as u64),
+                    Some("application/json"),
+                    body,
+                )
+                .is_err(),
+                "{body}"
+            );
+        }
+
+        let action_reference_alias =
+            r#"{"steps":[{"Type":4,"Reference":{"Type":1,"name":[],"Name":"valid"}}]}"#;
+        let decoded = decode_acquire_job_success_body(
+            200,
+            Some(action_reference_alias.len() as u64),
+            Some("application/json"),
+            action_reference_alias,
+        )
+        .expect("bad earlier ActionReference alias follows the reader-null boundary");
+        assert!(decoded.message.is_none());
+    }
+
+    #[test]
+    fn acquired_double_materialization_rounds_int64_and_preserves_raw_json() {
+        let body = r#"{"jobId":"00000000-0000-0000-0000-000000000001","plan":{"planId":"00000000-0000-0000-0000-000000000002"},"timeline":{"id":"00000000-0000-0000-0000-000000000003"},"jobContainer":{"type":6,"num":9007199254740993},"contextData":{"number":{"t":4,"n":9007199254740993},"root_integer":9007199254740993,"array_root":[1],"unknown-field":{"t":4,"n":1,"b":[]}}}"#;
+        let payload = decode_acquire_job_success_body(
+            200,
+            Some(body.len() as u64),
+            Some("application/json"),
+            body,
+        )
+        .unwrap();
+
+        assert_eq!(payload.raw_json, body);
+        assert_eq!(
+            payload.raw["contextData"]["number"]["n"],
+            9007199254740993_u64
+        );
+        let message = payload.message.unwrap();
+        let runtime = message.materialize_runtime().unwrap();
+        let token_number = runtime.job_container.as_ref().unwrap()["num"]
+            .as_number()
+            .unwrap();
+        assert!(token_number.is_f64());
+        assert_eq!(token_number.as_f64(), Some(9007199254740992.0));
+        let contexts = runtime.materialize_context_data().unwrap();
+        let context_number = contexts["number"].as_number().unwrap();
+        assert!(context_number.is_f64());
+        assert_eq!(context_number.as_f64(), Some(9007199254740992.0));
+        let root_integer = contexts["root_integer"].as_number().unwrap();
+        assert!(root_integer.is_f64());
+        assert_eq!(root_integer.as_f64(), Some(9007199254740992.0));
+        assert_eq!(contexts["array_root"], Value::Null);
+        assert_eq!(contexts["unknown-field"], 1.0);
+
+        for (integer, expected_bits) in [
+            ("9223372036854776833", 0x43e0_0000_0000_0000),
+            ("18446744073709553665", 0x43f0_0000_0000_0000),
+        ] {
+            let big_integer_double = format!(r#"{{"jobContainer":{{"type":6,"num":{integer}}}}}"#);
+            let payload = decode_acquire_job_success_body(
+                200,
+                Some(big_integer_double.len() as u64),
+                Some("application/json"),
+                &big_integer_double,
+            )
+            .expect("Newtonsoft BigInteger to Double cast succeeds");
+            let runtime = payload
+                .message
+                .expect("typed Double materializes")
+                .materialize_runtime()
+                .unwrap();
+            assert_eq!(
+                runtime.job_container.as_ref().unwrap()["num"]
+                    .as_f64()
+                    .unwrap()
+                    .to_bits(),
+                expected_bits,
+                "CLR truncating BigInteger cast: {integer}"
+            );
+        }
+
+        let big_integer_context = r#"{"contextData":{"x":9223372036854775808}}"#;
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(big_integer_context.len() as u64),
+            Some("application/json"),
+            big_integer_context,
+        )
+        .is_err());
+
+        for body in [
+            r#"{"contextData":{"number":{"t":4,"n":null}}}"#,
+            r#"{"jobContainer":{"type":6,"num":null}}"#,
+        ] {
+            assert!(decode_acquire_job_success_body(
+                200,
+                Some(body.len() as u64),
+                Some("application/json"),
+                body,
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn acquired_converters_collapse_exact_jobject_duplicates_and_keep_existing_tokens() {
+        let body = r#"{"jobId":"00000000-0000-0000-0000-000000000001","plan":{"planId":"00000000-0000-0000-0000-000000000002"},"JobServiceContainers":{"type":2,"map":[]},"JobServiceContainers":{"type":"invalid"},"JobSidecarContainers":{"network":"sidecar"},"steps":[{"Type":4,"Enabled":null,"Enabled":true}]}"#;
+        let payload = decode_acquire_job_success_body(
+            200,
+            Some(body.len() as u64),
+            Some("application/json"),
+            body,
+        )
+        .unwrap();
+        assert_eq!(payload.raw_json, body);
+        let message = payload.message.expect("JObject converter cases are valid");
+
+        let services = message.job_service_containers.as_ref().unwrap();
+        assert_eq!(services["type"], 2);
+        assert_eq!(services["map"], json!([]));
+        assert!(message.steps[0].as_ref().unwrap().enabled);
+    }
+
+    #[test]
+    fn acquired_converter_collection_aliases_append_and_null_resets_lists() {
+        let body = r#"{"jobId":"00000000-0000-0000-0000-000000000001","plan":{"planId":"00000000-0000-0000-0000-000000000002"},"JobContainer":{"type":1,"seq":[{"type":0,"lit":"a"}],"Seq":[{"type":0,"lit":"b"}]},"JobServiceContainers":{"type":2,"map":[{"key":{"type":0,"lit":"ka"},"value":{"type":0,"lit":"va"}}],"Map":[{"key":{"type":0,"lit":"kb"},"value":{"type":0,"lit":"vb"}}]},"contextData":{"array":{"t":1,"a":[{"t":0,"s":"a"}],"A":[{"t":0,"s":"b"}]},"dictionary":{"t":2,"d":[{"k":"a","v":{"t":0,"s":"a"}}],"D":[{"k":"b","v":{"t":0,"s":"b"}}]},"caseSensitive":{"t":5,"d":[{"k":"a","v":{"t":0,"s":"a"}}],"D":[{"k":"b","v":{"t":0,"s":"b"}}]},"reset":{"t":1,"a":[{"t":0,"s":"discard"}],"A":null},"duplicate":{"t":1,"a":[{"t":0,"s":"discard"}],"a":[{"t":0,"s":"kept"}],"A":[{"t":0,"s":"appended"}]}}}"#;
+        let payload = decode_acquire_job_success_body(
+            200,
+            Some(body.len() as u64),
+            Some("application/json"),
+            body,
+        )
+        .unwrap();
+
+        assert_eq!(payload.raw_json, body);
+        let message = payload.message.unwrap();
+        assert_eq!(
+            message.job_container.as_ref().unwrap()["seq"][0]["lit"],
+            "a"
+        );
+        assert_eq!(
+            message.job_container.as_ref().unwrap()["seq"][1]["lit"],
+            "b"
+        );
+        assert_eq!(
+            message.job_service_containers.as_ref().unwrap()["map"][0]["value"]["lit"],
+            "va"
+        );
+        assert_eq!(
+            message.job_service_containers.as_ref().unwrap()["map"][1]["value"]["lit"],
+            "vb"
+        );
+        let context = message.context_data.unwrap();
+        assert_eq!(context["array"]["a"][0]["s"], "a");
+        assert_eq!(context["array"]["a"][1]["s"], "b");
+        assert_eq!(context["dictionary"]["d"].as_array().unwrap().len(), 2);
+        assert_eq!(context["caseSensitive"]["d"].as_array().unwrap().len(), 2);
+        assert!(
+            context["reset"]["a"].is_null(),
+            "a later null alias resets the list"
+        );
+        assert_eq!(context["duplicate"]["a"][0]["s"], "kept");
+        assert_eq!(context["duplicate"]["a"][1]["s"], "appended");
+        assert_eq!(context["duplicate"]["a"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn acquire_success_body_decoding_matches_typed_json_defaults() {
+        let valid_partial = r#"{"jobId":"00000000-0000-0000-0000-000000000001","plan":{"planId":"00000000-0000-0000-0000-000000000002"}}"#;
+        let assert_reader_default = |body: &str| {
+            let payload = decode_acquire_job_success_body(
+                200,
+                Some(body.len() as u64),
+                Some("application/json"),
+                body,
+            )
+            .unwrap();
+            assert_eq!(payload.raw, serde_json::from_str::<Value>(body).unwrap());
+            assert!(payload.message.is_none());
+        };
+        let decoded = decode_acquire_job_success_body(
+            200,
+            Some(valid_partial.len() as u64),
+            Some("application/json; charset=utf-8"),
+            valid_partial,
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.raw,
+            serde_json::json!({
+                "jobId":"00000000-0000-0000-0000-000000000001",
+                "plan":{"planId":"00000000-0000-0000-0000-000000000002"}
+            })
+        );
+        assert!(decoded.message.is_some());
+        for (status, length, content_type, body) in [
+            (204, Some(0), Some("application/json"), ""),
+            (200, Some(0), Some("application/json"), ""),
+            (200, Some(8), Some("text/plain"), "not-json"),
+            (200, Some(8), Some("application/json"), "not-json"),
+            (200, Some(4), Some("application/json"), "null"),
+        ] {
+            let decoded =
+                decode_acquire_job_success_body(status, length, content_type, body).unwrap();
+            assert!(decoded.raw.is_null());
+            assert!(decoded.message.is_none());
+            assert_eq!(decoded.identity, AcquiredJobIdentity::default());
+        }
+        let typed_error_envelope = upstream_run_service_error_body(
+            "actions-run-service",
+            404,
+            "not an error when HTTP succeeded",
+        )
+        .to_string();
+        let decoded = decode_acquire_job_success_body(
+            200,
+            Some(typed_error_envelope.len() as u64),
+            Some("application/json"),
+            &typed_error_envelope,
+        )
+        .expect("2xx HTTP wins before typed error-body parsing");
+        assert!(decoded.message.is_some());
+        assert_eq!(decoded.identity, AcquiredJobIdentity::default());
+        assert!(
+            decode_acquire_job_success_body(200, Some(2), Some("application/json"), "[]").is_err()
+        );
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(12),
+            Some("application/json"),
+            r#"{"jobId":"not-a-guid"}"#
+        )
+        .is_err());
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(14),
+            Some("application/json"),
+            r#"{"workspace":[]}"#
+        )
+        .is_err());
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(19),
+            Some("application/json"),
+            r#"{"lockedUntil":null}"#
+        )
+        .is_err());
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(19),
+            Some("application/json"),
+            r#"{"requestId":null}"#
+        )
+        .is_err());
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(22),
+            Some("application/json"),
+            r#"{"enableDebugger":null}"#
+        )
+        .is_err());
+        assert_reader_default(r#"{"lockedUntil":"not-a-date"}"#);
+        for body in [
+            r#"{"enableDebugger":"not-bool"}"#,
+            r#"{"lockedUntil":123}"#,
+            r#"{"lockedUntil":true}"#,
+            r#"{"lockedUntil":[]}"#,
+            r#"{"lockedUntil":"not-a-date"}"#,
+            r#"{"plan":{"version":"not-int"}}"#,
+            r#"{"jobDisplayName":[]}"#,
+            r#"{"variables":{"x":{"value":[]}}}"#,
+            r#"{"steps":[{"type":"Action","name":[] }]}"#,
+            r#"{"jobContainer":{"type":0,"lit":[]}}"#,
+            r#"{"steps":[{"type":"Action","reference":{"type":"Repository","name":[]}}]}"#,
+        ] {
+            assert_reader_default(body);
+        }
+        for body in [
+            r#"{"plan":{"version":undefined}}"#,
+            r#"{"requestId":undefined}"#,
+            r#"{"enableDebugger":undefined}"#,
+            r#"{"lockedUntil":undefined}"#,
+            r#"{"contextData":{"x":{"t":4,"n":undefined}}}"#,
+        ] {
+            let payload = decode_acquire_job_success_body(
+                200,
+                Some(body.len() as u64),
+                Some("application/json"),
+                body,
+            )
+            .expect("JsonReaderException maps to null-success");
+            assert!(
+                payload.message.is_none(),
+                "undefined typed primitive must produce reader-null disposition: {body}"
+            );
+        }
+        let forged_reader_text = r#"{"plan":"CLR_JSON_READER_ERROR:"}"#;
+        assert!(
+            decode_acquire_job_success_body(
+                200,
+                Some(forged_reader_text.len() as u64),
+                Some("application/json"),
+                forged_reader_text
+            )
+            .is_err(),
+            "payload text cannot forge the typed JsonReaderException category"
+        );
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(18),
+            Some("application/json"),
+            r#"{"lockedUntil":""}"#
+        )
+        .is_err());
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(17),
+            Some("application/json"),
+            r#"{"plan":{"version":""}}"#
+        )
+        .is_err());
+        let assert_typed_datetime = |body: &str| {
+            let decoded = decode_acquire_job_success_body(
+                200,
+                Some(body.len() as u64),
+                Some("application/json"),
+                body,
+            )
+            .unwrap();
+            assert!(decoded.message.is_some(), "valid CLR DateTime: {body}");
+        };
+        assert_typed_datetime(r#"{"lockedUntil":"2026-10-04"}"#);
+        assert_typed_datetime(r#"{"lockedUntil":"October 4, 2026"}"#);
+        assert_typed_datetime(r#"{"lockedUntil":"01/02/2003"}"#);
+        assert_typed_datetime(r#"{"lockedUntil":"01/02/2003 3:04:05 PM"}"#);
+        for date in ["March 4, 2025", "3/4/2025", "March 4, 2025 5:06 PM"] {
+            let body = format!(r#"{{"lockedUntil":"{date}"}}"#);
+            assert_typed_datetime(&body);
+        }
+        assert_typed_datetime(r#"{"lockedUntil":"/Date(-1)/"}"#);
+        for reader_null_date in [
+            r#"{"lockedUntil":"/Date(+1)/"}"#,
+            r#"{"lockedUntil":"/Date(1++1)/"}"#,
+            r#"{"lockedUntil":"/Date(1+010)/"}"#,
+        ] {
+            assert_reader_default(reader_null_date);
+        }
+        assert_typed_datetime(r#"{"lockedUntil":"/Date(1844674407370955)/"}"#);
+        let out_of_range_microsoft_date = r#"{"lockedUntil":"/Date(1000000000000000)/"}"#;
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(out_of_range_microsoft_date.len() as u64),
+            Some("application/json"),
+            out_of_range_microsoft_date
+        )
+        .is_err());
+        assert_typed_datetime(r#"{"lockedUntil":"10/4/2026 13:30:00"}"#);
+        for valid_dotnet_datetime in [
+            r#"{"lockedUntil":"2025-03-04T05:06"}"#,
+            r#"{"lockedUntil":"2025-03-04 05:06:07"}"#,
+        ] {
+            assert_typed_datetime(valid_dotnet_datetime);
+        }
+        let malformed_microsoft_offset = r#"{"lockedUntil":"/Date(0+bogus)/"}"#;
+        assert_reader_default(malformed_microsoft_offset);
+
+        let string_boolean = r#"{"enableDebugger":"true"}"#;
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(string_boolean.len() as u64),
+            Some("application/json"),
+            string_boolean
+        )
+        .is_ok());
+        assert_reader_default(r#"{"enableDebugger":"nonsense"}"#);
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(20),
+            Some("application/json"),
+            r#"{"enableDebugger":""}"#
+        )
+        .is_err());
+
+        for guid in [
+            "(00000000-0000-0000-0000-000000000001)",
+            "{0x00000000,0x0000,0x0000,{0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01}}",
+        ] {
+            let body = json!({"jobId": guid}).to_string();
+            assert!(
+                decode_acquire_job_success_body(
+                    200,
+                    Some(body.len() as u64),
+                    Some("application/json"),
+                    &body
+                )
+                .is_ok(),
+                "CLR Guid parser accepts X and parenthesized forms: {guid}"
+            );
+        }
+        let urn_guid = r#"{"jobId":"urn:uuid:00000000-0000-0000-0000-000000000001"}"#;
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(urn_guid.len() as u64),
+            Some("application/json"),
+            urn_guid
+        )
+        .is_err());
+
+        for body in [r#"{"mask":[{"type":1.0}]}"#, r#"{"mask":[{"type":1.5}]}"#] {
+            assert!(
+                decode_acquire_job_success_body(
+                    200,
+                    Some(body.len() as u64),
+                    Some("application/json"),
+                    body
+                )
+                .is_err(),
+                "StringEnumConverter rejects floating MaskType: {body}"
+            );
+        }
+        let numeric_and_combined_mask_types = json!({
+            "mask": [{"type": 4294967297u64}, {"type": "Variable, Regex"}]
+        })
+        .to_string();
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(numeric_and_combined_mask_types.len() as u64),
+            Some("application/json"),
+            &numeric_and_combined_mask_types
+        )
+        .is_ok());
+
+        let null_context_pair = r#"{"contextData":{"x":{"t":2,"d":[null]}}}"#;
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(null_context_pair.len() as u64),
+            Some("application/json"),
+            null_context_pair
+        )
+        .is_ok());
+
+        for value in [
+            json!({"jobContainer": Value::from(u64::MAX)}),
+            json!({"contextData": {"x": Value::from(u64::MAX)}}),
+        ] {
+            let body = value.to_string();
+            assert!(
+                decode_acquire_job_success_body(
+                    200,
+                    Some(body.len() as u64),
+                    Some("application/json"),
+                    &body
+                )
+                .is_err(),
+                "dynamic integer overflow must retry: {body}"
+            );
+        }
+
+        for body in [
+            r#"{"requestId":"not-int"}"#,
+            r#"{"requestId":[]}"#,
+            r#"{"debuggerTunnel":{"port":"not-int"}}"#,
+            r#"{"debuggerTunnel":{"port":65536}}"#,
+        ] {
+            assert!(
+                decode_acquire_job_success_body(
+                    200,
+                    Some(body.len() as u64),
+                    Some("application/json"),
+                    body
+                )
+                .is_err(),
+                "JsonSerializationException follows the acquire retry path: {body}"
+            );
+        }
+
+        let coerced: ClrAgentJobRequestMessage = serde_json::from_value(json!({
+            "enableDebugger": 1,
+            "plan": {"version": 1.5},
+            "requestId": "1",
+            "debuggerTunnel": {"port": "1"},
+            "jobDisplayName": true
+        }))
+        .expect("Json.NET typed readers coerce primitive tokens");
+        assert!(coerced.enable_debugger);
+        assert_eq!(coerced.plan.unwrap().version.0, 2);
+        assert_eq!(coerced.request_id.0, 1);
+        assert_eq!(coerced.debugger_tunnel.unwrap().port, 1);
+        assert_eq!(coerced.job_display_name.as_deref(), Some("True"));
+
+        for body in [
+            r#"{"jobContainer":{"type":999}}"#,
+            r#"{"contextData":{"github":{"t":999}}}"#,
+        ] {
+            assert!(
+                decode_acquire_job_success_body(
+                    200,
+                    Some(body.len() as u64),
+                    Some("application/json"),
+                    body
+                )
+                .is_err(),
+                "unknown converter discriminator must remain retryable: {body}"
+            );
+        }
+        for body in [
+            r#"{"steps":[{"Type":4,"StepIds":123}]}"#,
+            r#"{"steps":[{"Type":5,"Background":[]}]}"#,
+        ] {
+            assert!(
+                decode_acquire_job_success_body(
+                    200,
+                    Some(body.len() as u64),
+                    Some("application/json"),
+                    body
+                )
+                .is_ok(),
+                "fields absent from this concrete Step variant are ignored: {body}"
+            );
+        }
+        let uppercase_bad_guid = r#"{"JOBID":"not-a-guid"}"#;
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(uppercase_bad_guid.len() as u64),
+            Some("application/json"),
+            uppercase_bad_guid
+        )
+        .is_err());
+        let uppercase_valid_guid = r#"{"JOBID":"00000000-0000-0000-0000-000000000001"}"#;
+        let uppercase_payload = decode_acquire_job_success_body(
+            200,
+            Some(uppercase_valid_guid.len() as u64),
+            Some("application/json"),
+            uppercase_valid_guid,
+        )
+        .unwrap();
+        assert_eq!(
+            uppercase_payload.raw,
+            json!({"JOBID":"00000000-0000-0000-0000-000000000001"})
+        );
+        assert!(uppercase_payload.message.is_some());
+        let whitespace_braced_guid = r#"{"jobId":" {00000000-0000-0000-0000-000000000001} "}"#;
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(whitespace_braced_guid.len() as u64),
+            Some("application/json"),
+            whitespace_braced_guid
+        )
+        .is_ok());
+
+        for body in [
+            r#"{"plan":{"artifactUri":"../artifacts/1"}}"#,
+            r#"{"timeline":{"location":"/timeline/1"}}"#,
+            r#"{"resources":{"endpoints":[{"url":"https://example.invalid/service"}]}}"#,
+            r#"{"plan":{"artifactUri":"http:example.test/a"}}"#,
+            r#"{"plan":{"artifactUri":"http:example.com"}}"#,
+            r#"{"plan":{"artifactUri":"http:/example.test/a"}}"#,
+            r#"{"plan":{"artifactUri":"https:foo"}}"#,
+            r#"{"plan":{"artifactUri":"relative path"}}"#,
+            r#"{"plan":{"artifactUri":"foo\u0001bar"}}"#,
+            r#"{"plan":{"artifactUri":" "}}"#,
+            r#"{"resources":{"endpoints":[{"url":"http://example.test/a b"}]}}"#,
+        ] {
+            assert!(
+                decode_acquire_job_success_body(
+                    200,
+                    Some(body.len() as u64),
+                    Some("application/json"),
+                    body
+                )
+                .is_ok(),
+                "System.Uri accepts relative and absolute references: {body}"
+            );
+        }
+        for body in [
+            r#"{"plan":{"artifactUri":"http://["}}"#,
+            r#"{"plan":{"artifactLocation":"http://["}}"#,
+            r#"{"timeline":{"location":"http://["}}"#,
+            r#"{"resources":{"endpoints":[{"url":"http://["}]}}"#,
+            r#"{"plan":{"artifactUri":"http:\\\\example.test\\a"}}"#,
+            r#"{"plan":{"artifactUri":"http://example.test:99999/"}}"#,
+            r#"{"resources":{"endpoints":[{"url":42}]}}"#,
+        ] {
+            assert!(
+                decode_acquire_job_success_body(
+                    200,
+                    Some(body.len() as u64),
+                    Some("application/json"),
+                    body
+                )
+                .is_err(),
+                "typed System.Uri failures retry: {body}"
+            );
+        }
+        let undefined_uris = r#"{"plan":{"artifactUri":undefined,"artifactLocation":undefined},"timeline":{"location":undefined},"resources":{"endpoints":[{"url":undefined}]}}"#;
+        let undefined_uri_payload = decode_acquire_job_success_body(
+            200,
+            Some(undefined_uris.len() as u64),
+            Some("application/json"),
+            undefined_uris,
+        )
+        .expect("Undefined nullable System.Uri fields become null");
+        let undefined_uri_message = undefined_uri_payload
+            .message
+            .expect("nullable URI fields preserve the otherwise valid DTO");
+        let plan = undefined_uri_message.plan.unwrap();
+        assert!(plan.artifact_uri.is_none());
+        assert!(plan.artifact_location.is_none());
+        assert!(undefined_uri_message
+            .timeline
+            .as_ref()
+            .unwrap()
+            .location
+            .is_none());
+        assert!(
+            undefined_uri_message.resources.as_ref().unwrap().endpoints[0]
+                .as_ref()
+                .unwrap()
+                .url
+                .is_none()
+        );
+
+        let empty_uri = r#"{"plan":{"artifactUri":"","artifactLocation":""},"timeline":{"location":""},"resources":{"endpoints":[{"url":""}]}}"#;
+        let empty_uri_payload = decode_acquire_job_success_body(
+            200,
+            Some(empty_uri.len() as u64),
+            Some("application/json"),
+            empty_uri,
+        )
+        .unwrap();
+        let empty_uri_message = empty_uri_payload
+            .message
+            .expect("empty nullable URI strings become null");
+        let plan = empty_uri_message.plan.unwrap();
+        assert!(plan.artifact_uri.is_none());
+        assert!(plan.artifact_location.is_none());
+        assert!(empty_uri_message
+            .timeline
+            .as_ref()
+            .unwrap()
+            .location
+            .is_none());
+        assert!(empty_uri_message.resources.as_ref().unwrap().endpoints[0]
+            .as_ref()
+            .unwrap()
+            .url
+            .is_none());
+
+        let oversized_uri = json!({"timeline": {"location": "a".repeat(65_520)}}).to_string();
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(oversized_uri.len() as u64),
+            Some("application/json"),
+            &oversized_uri
+        )
+        .is_err());
+        let too_long_uri = "a".repeat(65_520);
+        for body in [
+            json!({"plan": {"artifactUri": too_long_uri.clone()}}).to_string(),
+            json!({"plan": {"artifactLocation": too_long_uri.clone()}}).to_string(),
+            json!({"timeline": {"location": too_long_uri.clone()}}).to_string(),
+            json!({"resources": {"endpoints": [{"url": too_long_uri.clone()}]}}).to_string(),
+        ] {
+            assert!(decode_acquire_job_success_body(
+                200,
+                Some(body.len() as u64),
+                Some("application/json"),
+                &body
+            )
+            .is_err());
+        }
+
+        let sidecar_missing_alias =
+            r#"{"jobSidecarContainers":{"db":"missing"},"resources":{"containers":[]}}"#;
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(sidecar_missing_alias.len() as u64),
+            Some("application/json"),
+            sidecar_missing_alias
+        )
+        .is_err());
+        let max_valid_uri = json!({"timeline": {"location": "a".repeat(65_519)}}).to_string();
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(max_valid_uri.len() as u64),
+            Some("application/json"),
+            &max_valid_uri
+        )
+        .is_ok());
+
+        let expression_name = r#"{"resources":{"repositories":[{"endpoint":{"name":"$[ variables.repo ]"},"properties":{}}]}}"#;
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(expression_name.len() as u64),
+            Some("application/json"),
+            expression_name
+        )
+        .is_ok());
+        for body in [
+            r#"{"resources":{"repositories":[{"endpoint":{"name":"$[ ]"},"properties":{}}]}}"#,
+            r#"{"resources":{"repositories":[{"endpoint":{"name":[]},"properties":{}}]}}"#,
+            r#"{"resources":{"repositories":[{"endpoint":{"name":{}},"properties":{}}]}}"#,
+            r#"{"plan":{"owner":{"_links":{"self":"not-a-reference-link"}}}}"#,
+            r#"{"plan":{"owner":{"_links":{"":{"href":"/"}}}}}"#,
+        ] {
+            assert!(
+                decode_acquire_job_success_body(
+                    200,
+                    Some(body.len() as u64),
+                    Some("application/json"),
+                    body
+                )
+                .is_err(),
+                "CLR expression and reference-link failures retry: {body}"
+            );
+        }
+        for body in [
+            r#"{"resources":{"endpoints":[{"authorization":{"parameters":{"token":[]}}}]}}"#,
+            r#"{"resources":{"endpoints":[{"data":{"token":[]}}]}}"#,
+            r#"{"resources":{"endpoints":[{"data":{"Token":{},"Token":"last"}}]}}"#,
+            r#"{"resources":{"endpoints":[{"authorization":{"parameters":{"Token":[],"token":"last"}}}]}}"#,
+            r#"{"jobSidecarContainers":{"db":{},"db":"container"}}"#,
+        ] {
+            assert_reader_default(body);
+        }
+        let links_with_null_array_entry =
+            r#"{"plan":{"owner":{"_links":{"self":[null,{"href":"/"}]}}}}"#;
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(links_with_null_array_entry.len() as u64),
+            Some("application/json"),
+            links_with_null_array_entry
+        )
+        .is_ok());
+
+        for body in [
+            r#"{"jobContainer":{"type":1.0}}"#,
+            r#"{"contextData":{"github":{"t":1.0}}}"#,
+        ] {
+            assert!(
+                decode_acquire_job_success_body(
+                    200,
+                    Some(body.len() as u64),
+                    Some("application/json"),
+                    body
+                )
+                .is_ok(),
+                "the upstream token converters return null for float discriminators: {body}"
+            );
+        }
+        let thousands_double = r#"{"jobContainer":{"type":6,"num":"1,234"}}"#;
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(thousands_double.len() as u64),
+            Some("application/json"),
+            thousands_double
+        )
+        .is_ok());
+        let scalar_token_map_key = r#"{"jobContainer":{"type":2,"map":[{"key":{"type":3,"expr":"variables.key"},"value":{"type":0,"lit":"x"}}]}}"#;
+        assert!(decode_acquire_job_success_body(
+            200,
+            Some(scalar_token_map_key.len() as u64),
+            Some("application/json"),
+            scalar_token_map_key
+        )
+        .is_ok());
+        let token_null_and_converter_fallbacks = json!({
+            "jobContainer": null,
+            "jobServiceContainers": [],
+            "contextData": {"null": null, "array": []}
+        });
+        let token_body = token_null_and_converter_fallbacks.to_string();
+        let decoded = decode_acquire_job_success_body(
+            200,
+            Some(token_body.len() as u64),
+            Some("application/json"),
+            &token_body,
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.raw, token_null_and_converter_fallbacks,
+            "the acquire boundary preserves raw JSON after CLR wire validation"
+        );
+        assert!(decoded.message.is_some());
+        let null_members = r#"{"plan":null,"timeline":null,"resources":null}"#;
+        let decoded = decode_acquire_job_success_body(
+            200,
+            Some(null_members.len() as u64),
+            Some("application/json"),
+            null_members,
+        )
+        .unwrap();
+        assert!(decoded.raw["plan"].is_null());
+        let message = decoded
+            .message
+            .expect("null reference properties stay on the wire DTO");
+        assert_eq!(message.job_id, crate::protocol::EMPTY_LOCK_TOKEN);
+        assert!(message.plan.is_none());
+        assert!(message.timeline.is_none());
+        assert!(message.resources.is_none());
+        assert!(message.materialize_runtime().is_err());
+    }
+
+    #[test]
+    fn acquire_wire_dictionary_comparers_match_pinned_clr_maps() {
+        let decode = |body: &str| {
+            decode_acquire_job_success_body(
+                200,
+                Some(body.len() as u64),
+                Some("application/json"),
+                body,
+            )
+        };
+
+        let root_maps = r#"{"variables":{"Name":{"value":"one"},"name":{"value":"two"}},"contextData":{"Name":{"t":0,"s":"one"},"name":{"t":0,"s":"two"}}}"#;
+        let decoded = decode(root_maps).expect("root dictionaries are ordinal");
+        let message = decoded.message.expect("root maps materialize");
+        assert_eq!(message.variables.len(), 2);
+        assert!(message.variables.contains_key("Name"));
+        assert!(message.variables.contains_key("name"));
+        let context = message.materialize_context_data().unwrap();
+        assert!(context.contains_key("Name"));
+        assert!(context.contains_key("name"));
+
+        let endpoint_data = r#"{"resources":{"endpoints":[{"data":{"FeedStreamUrl":"first","feedstreamurl":"last"}}]}}"#;
+        let decoded = decode(endpoint_data).expect("endpoint Data is preinitialized CI");
+        let message = decoded.message.expect("endpoint Data materializes");
+        let data = &message.resources.as_ref().unwrap().endpoints[0]
+            .as_ref()
+            .unwrap()
+            .data;
+        assert_eq!(data.len(), 1);
+        assert_eq!(
+            data.get("FeedStreamUrl").and_then(Option::as_deref),
+            Some("last")
+        );
+
+        let unicode_endpoint_data =
+            r#"{"resources":{"endpoints":[{"data":{"Å":"first","å":"last"}}]}}"#;
+        let decoded = decode(unicode_endpoint_data)
+            .expect("OrdinalIgnoreCase endpoint map folds Unicode case variants");
+        let message = decoded.message.expect("Unicode endpoint Data materializes");
+        let data = &message.resources.as_ref().unwrap().endpoints[0]
+            .as_ref()
+            .unwrap()
+            .data;
+        assert_eq!(data.len(), 1);
+        assert_eq!(data.get("Å").and_then(Option::as_deref), Some("last"));
+
+        for collision in [
+            r#"{"resources":{"endpoints":[{"authorization":{"parameters":{"Token":"first","token":"last"}}}]}}"#,
+            r#"{"resources":{"endpoints":[{"authorization":{"parameters":{"Å":"first","å":"last"}}}]}}"#,
+            r#"{"resources":{"repositories":[{"properties":{"Ports":["80"],"ports":["81"]}}]}}"#,
+        ] {
+            assert!(
+                decode(collision).is_err(),
+                "CLR copy into OrdinalIgnoreCase dictionary rejects collisions: {collision}"
+            );
+        }
+
+        let exact_duplicate = r#"{"resources":{"endpoints":[{"authorization":{"parameters":{"Token":"first","Token":"last"}}}]}}"#;
+        let decoded = decode(exact_duplicate).expect("exact ordinal duplicate assigns last value");
+        let message = decoded.message.expect("parameters materialize");
+        let parameters = &message.resources.as_ref().unwrap().endpoints[0]
+            .as_ref()
+            .unwrap()
+            .authorization
+            .as_ref()
+            .unwrap()
+            .parameters;
+        assert_eq!(parameters.len(), 1);
+        assert_eq!(
+            parameters.get("Token").and_then(Option::as_deref),
+            Some("last")
+        );
+    }
+
+    #[test]
+    fn acquire_wire_duplicate_members_follow_clr_population_rules() {
+        let decode = |body: &str| {
+            decode_acquire_job_success_body(
+                200,
+                Some(body.len() as u64),
+                Some("application/json"),
+                body,
+            )
+        };
+
+        let repeated_plan = r#"{"plan":{"planId":"00000000-0000-0000-0000-000000000002","planType":"first"},"PLAN":{"planGroup":"second"}}"#;
+        let message = decode(repeated_plan)
+            .unwrap()
+            .message
+            .expect("repeated Plan objects populate the existing instance");
+        let plan = message.plan.unwrap();
+        assert_eq!(plan.plan_type.as_deref(), Some("first"));
+        assert_eq!(plan.plan_group.as_deref(), Some("second"));
+
+        let repeated_lists = r#"{"mask":[{"type":"Variable","value":"one"}],"MASK":[{"type":"Regex","value":"two"}],"dependencies":["first"],"DEPENDENCIES":["second"]}"#;
+        let message = decode(repeated_lists)
+            .unwrap()
+            .message
+            .expect("repeated mutable collections populate their existing lists");
+        assert_eq!(message.mask.len(), 2);
+        assert_eq!(
+            message
+                .actions_dependencies
+                .iter()
+                .map(Option::as_deref)
+                .collect::<Vec<_>>(),
+            [Some("first"), Some("second")]
+        );
+
+        let null_resets_lists = r#"{"mask":[{"type":"Variable","value":"discard"}],"Mask":null,"resources":{"endpoints":[{"name":"discard"}]},"RESOURCES":{"endpoints":null}}"#;
+        let message = decode(null_resets_lists)
+            .unwrap()
+            .message
+            .expect("explicit null resets mutable collection fields");
+        assert!(message.mask.is_empty());
+        assert!(message.resources.unwrap().endpoints.is_empty());
+
+        let replaced_properties =
+            r#"{"resources":{"repositories":[{"properties":{"old":1},"PROPERTIES":{"new":2}}]}}"#;
+        let message = decode(replaced_properties)
+            .unwrap()
+            .message
+            .expect("ResourceProperties converter replaces existing bags");
+        let resources = message.resources.unwrap();
+        let repository = resources.repositories[0].as_ref().unwrap();
+        assert_eq!(
+            repository.properties,
+            ContextValue::object(vec![("new".to_owned(), ContextValue::Number(2.into()),)])
+                .unwrap()
+        );
+
+        let replaced_authorization_parameters = r#"{"resources":{"endpoints":[{"authorization":{"scheme":"bearer","parameters":{"first":"one"}},"AUTHORIZATION":{"parameters":{"second":"two"}}}]}}"#;
+        let message = decode(replaced_authorization_parameters)
+            .unwrap()
+            .message
+            .expect("repeated authorization callback replaces copied parameters");
+        let resources = message.resources.unwrap();
+        let authorization = resources.endpoints[0]
+            .as_ref()
+            .unwrap()
+            .authorization
+            .as_ref()
+            .unwrap();
+        assert_eq!(authorization.scheme.as_deref(), Some("bearer"));
+        assert_eq!(
+            authorization.parameters,
+            BTreeMap::from([("second".to_owned(), Some("two".to_owned()))])
+        );
+
+        for later_parameters in ["null", "{}"] {
+            let body = format!(
+                r#"{{"resources":{{"endpoints":[{{"authorization":{{"parameters":{{"first":"one"}}}},"AUTHORIZATION":{{"parameters":{later_parameters}}}}}]}}}}"#
+            );
+            let message = decode(&body)
+                .unwrap()
+                .message
+                .expect("null/empty callback map leaves copied parameters intact");
+            let resources = message.resources.unwrap();
+            let authorization = resources.endpoints[0]
+                .as_ref()
+                .unwrap()
+                .authorization
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                authorization.parameters,
+                BTreeMap::from([("first".to_owned(), Some("one".to_owned()))]),
+                "later Parameters={later_parameters}"
+            );
+        }
+    }
+
+    #[test]
+    fn acquired_text_reader_strings_preserve_number_lexemes_and_jobject_strings_format_values() {
+        for (token, expected) in [
+            ("0x10", "0x10"),
+            ("0XFF", "0XFF"),
+            ("010", "010"),
+            ("01", "01"),
+            ("1.", "1."),
+            (".5", ".5"),
+            ("1e309", "1e309"),
+            ("-1e309", "-1e309"),
+            ("1e-5000", "1e-5000"),
+            ("-1e-5000", "-1e-5000"),
+        ] {
+            let body = format!(r#"{{"jobDisplayName":{token}}}"#);
+            let decoded = decode_acquire_job_success_body(
+                200,
+                Some(body.len() as u64),
+                Some("application/json"),
+                &body,
+            )
+            .expect("CLR ReadAsString accepts primitive numbers");
+            let message = decoded.message.expect("partial DTO deserializes");
+            assert_eq!(
+                message.job_display_name.as_deref(),
+                Some(expected),
+                "{token}"
+            );
+            assert_eq!(decoded.raw_json, body);
+        }
+
+        let body = r#"{"contextData":{"x":{"t":0,"s":0x10}}}"#;
+        let decoded = decode_acquire_job_success_body(
+            200,
+            Some(body.len() as u64),
+            Some("application/json"),
+            body,
+        )
+        .expect("JObject-backed ContextData string coercion succeeds");
+        let message = decoded.message.expect("partial DTO deserializes");
+        assert_eq!(message.context_data.as_ref().unwrap()["x"]["s"], "16");
+
+        for (token, expected) in [
+            ("0x10", "16"),
+            ("0XFF", "255"),
+            ("010", "8"),
+            ("01", "1"),
+            ("1.", "1"),
+            (".5", "0.5"),
+            ("1e309", "Infinity"),
+            ("-1e309", "-Infinity"),
+            ("1e-5000", "0"),
+            ("-1e-5000", "-0"),
+            ("1e-7", "1E-07"),
+            ("1e17", "1E+17"),
+        ] {
+            let body = format!(r#"{{"contextData":{{"x":{{"t":0,"s":{token}}}}}}}"#);
+            let decoded = decode_acquire_job_success_body(
+                200,
+                Some(body.len() as u64),
+                Some("application/json"),
+                &body,
+            )
+            .expect("JObjectReader string coercion formats the parsed token");
+            let message = decoded.message.expect("ContextData string materializes");
+            assert_eq!(
+                message.materialize_context_data().unwrap()["x"],
+                expected,
+                "JObjectReader token {token}"
+            );
+        }
+    }
+
+    #[test]
+    fn acquired_double_string_special_whitespace_and_reader_dispositions_match_clr() {
+        for value in ["\u{00a0}+Infinity\u{00a0}", "\u{202f}-infinity\u{202f}"] {
+            let body = format!(r#"{{"jobContainer":{{"type":6,"num":{}}}}}"#, json!(value));
+            let decoded = decode_acquire_job_success_body(
+                200,
+                Some(body.len() as u64),
+                Some("application/json"),
+                &body,
+            )
+            .expect("ReadAsDouble accepts whitespace around special values");
+            let message = decoded.message.expect("typed special Double materializes");
+            let runtime = message.materialize_runtime().unwrap();
+            assert_eq!(
+                runtime.job_container.as_ref().unwrap()["num"].as_str(),
+                Some(value)
+            );
+        }
+
+        for body in [
+            r#"{"jobContainer":{"type":6,"num":true}}"#,
+            r#"{"jobContainer":{"type":6,"num":[]}}"#,
+            r#"{"contextData":{"x":{"t":4,"n":true}}}"#,
+        ] {
+            let decoded = decode_acquire_job_success_body(
+                200,
+                Some(body.len() as u64),
+                Some("application/json"),
+                body,
+            )
+            .expect("JsonReaderException follows null-success disposition");
+            assert!(decoded.message.is_none(), "{body}");
+        }
+
+        for body in [
+            r#"{"jobContainer":{"type":6,"num":null}}"#,
+            r#"{"jobContainer":{"type":6,"num":" 1.5 "}}"#,
+            r#"{"contextData":{"x":{"t":4,"n":null}}}"#,
+        ] {
+            assert!(
+                decode_acquire_job_success_body(
+                    200,
+                    Some(body.len() as u64),
+                    Some("application/json"),
+                    body,
+                )
+                .is_err(),
+                "JsonSerializationException remains retryable: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn acquire_reader_extensions_preserve_undefined_constructors_and_unknown_skips() {
+        let body = "/* head */ {jobName:'run', contextData:{missing:undefined}, environmentVariables:[,], ignored:new Foo(0)} // tail";
+        let decoded = decode_acquire_job_success_body(
+            200,
+            Some(body.len() as u64),
+            Some("application/json"),
+            body,
+        )
+        .expect("comments, unquoted keys, holes, and unknown constructors are accepted");
+        assert_eq!(decoded.raw_json, body);
+        let message = decoded.message.expect("known DTO fields deserialize");
+        assert_eq!(message.job_name.as_deref(), Some("run"));
+        assert_eq!(
+            message.context_data.as_ref().unwrap()["missing"],
+            Value::Null
+        );
+        assert_eq!(message.environment_variables, vec![Value::Null]);
+
+        let undefined_string = r#"{"jobName":undefined}"#;
+        let decoded = decode_acquire_job_success_body(
+            200,
+            Some(undefined_string.len() as u64),
+            Some("application/json"),
+            undefined_string,
+        )
+        .expect("undefined String reader failures follow null-success");
+        assert!(decoded.message.is_none());
+
+        for body in [r#"{"jobName":new Foo(0)}"#, r#"{"plan":new Foo(0)}"#] {
+            assert!(
+                decode_acquire_job_success_body(
+                    200,
+                    Some(body.len() as u64),
+                    Some("application/json"),
+                    body,
+                )
+                .is_err(),
+                "known constructor token fails DTO deserialization: {body}"
+            );
+        }
+
+        let comment_between_key_and_colon = r#"{"jobName"/* gap */:"run"}"#;
+        let decoded = decode_acquire_job_success_body(
+            200,
+            Some(comment_between_key_and_colon.len() as u64),
+            Some("application/json"),
+            comment_between_key_and_colon,
+        )
+        .expect("JsonTextReader syntax failures follow null-success");
+        assert!(decoded.message.is_none());
+    }
+
+    #[test]
+    fn acquire_wire_int64_conversion_matches_clr_before_materialization() {
+        // Json.NET's Int64 conversion uses EnsureType/Convert.ChangeType and
+        // rounds floating-point input (1.5 becomes 2). The ordered boundary
+        // must pass that normalized value to the wire DTO, without retrying.
+        let body = r#"{"jobId":"00000000-0000-0000-0000-000000000001","plan":{"planId":"00000000-0000-0000-0000-000000000002"},"requestId":1.5}"#;
+        let decoded = decode_acquire_job_success_body(
+            200,
+            Some(body.len() as u64),
+            Some("application/json"),
+            body,
+        )
+        .expect("CLR Int64 coercion succeeds");
+        let message = decoded.message.expect("normalized wire DTO materializes");
+        assert_eq!(message.request_id, 2);
+        assert_eq!(
+            decoded.identity.job_id.as_deref(),
+            Some("00000000-0000-0000-0000-000000000001")
+        );
+        assert_eq!(
+            decoded.identity.plan_id.as_deref(),
+            Some("00000000-0000-0000-0000-000000000002")
+        );
+    }
+
+    #[test]
+    fn acquire_wire_nonfinite_literals_reach_typed_token_and_context_values() {
+        let body = r#"{
+            "jobId":"00000000-0000-0000-0000-000000000001",
+            "jobDisplayName":NaN,
+            "jobContainer":{"type":6,"num":NaN},
+            "jobOutputs":Infinity,
+            "contextData":{
+                "nan":{"t":4,"n":NaN},
+                "positive":{"t":4,"n":Infinity},
+                "negative":-Infinity,
+                "literal_marker":{"t":0,"s":"NaN"},
+                "plain_marker":"NaN"
+            }
+        }"#;
+        let decoded = decode_acquire_job_success_body(
+            200,
+            Some(body.len() as u64),
+            Some("application/json"),
+            body,
+        )
+        .expect("Newtonsoft accepts bare NaN and Infinity float tokens");
+        assert_eq!(decoded.raw_json, body);
+        let message = decoded
+            .message
+            .expect("typed nonfinite fields are materialized before acquisition returns");
+        assert_eq!(message.job_display_name.as_deref(), Some("NaN"));
+        let container = message.job_container.as_ref().unwrap();
+        assert_eq!(container["type"], 6);
+        assert_eq!(container["num"], "NaN");
+        let outputs = message.job_outputs.as_ref().unwrap();
+        assert_eq!(outputs["type"], 6);
+        assert_eq!(outputs["num"], "Infinity");
+
+        let context = message
+            .materialize_context_values()
+            .expect("typed context data materializes nonfinite doubles");
+        assert!(matches!(
+            context["nan"],
+            velnor_model::ContextValue::NonFinite(velnor_model::NonFinite::NaN)
+        ));
+        assert!(matches!(
+            context["positive"],
+            velnor_model::ContextValue::NonFinite(velnor_model::NonFinite::PositiveInfinity)
+        ));
+        assert!(matches!(
+            context["negative"],
+            velnor_model::ContextValue::NonFinite(velnor_model::NonFinite::NegativeInfinity)
+        ));
+        assert!(matches!(
+            &context["literal_marker"],
+            velnor_model::ContextValue::String(value) if value == "NaN"
+        ));
+        assert!(matches!(
+            &context["plain_marker"],
+            velnor_model::ContextValue::String(value) if value == "NaN"
+        ));
+
+        let unquoted_nonfinite_name = r#"{NaN : 1}"#;
+        let decoded = decode_acquire_job_success_body(
+            200,
+            Some(unquoted_nonfinite_name.len() as u64),
+            Some("application/json"),
+            unquoted_nonfinite_name,
+        )
+        .expect("JsonTextReader also accepts NaN as an unquoted property name");
+        assert!(decoded.message.is_some());
+
+        let unquoted_infinity_name = r#"{Infinity : 1}"#;
+        let decoded = decode_acquire_job_success_body(
+            200,
+            Some(unquoted_infinity_name.len() as u64),
+            Some("application/json"),
+            unquoted_infinity_name,
+        )
+        .expect("JsonTextReader accepts Infinity as an unquoted property name");
+        assert_eq!(decoded.raw["Infinity"], 1);
+        assert!(decoded.message.is_some());
+
+        let unquoted_negative_infinity_name = r#"{-Infinity:1}"#;
+        let decoded = decode_acquire_job_success_body(
+            200,
+            Some(unquoted_negative_infinity_name.len() as u64),
+            Some("application/json"),
+            unquoted_negative_infinity_name,
+        )
+        .expect("negative Infinity is a JsonReaderException in property position");
+        assert!(decoded.message.is_none());
+    }
+
+    #[test]
+    fn acquire_wire_jtoken_roots_wrap_complete_context_trees() {
+        let body = r#"{
+            "resources": {
+                "repositories": [{
+                    "properties": {
+                        "positive": Infinity,
+                        "negative": -Infinity,
+                        "finite": 1.25,
+                        "literal": "NaN",
+                        "plain_marker": "__VELNOR_CLR_NAN_0__",
+                        "escaped_marker": "__VELNOR_CLR_\u004eAN_0__",
+                        "bare_nan": NaN,
+                        "big_integer_signed_overflow": 9223372036854775808,
+                        "big_integer_unsigned_max": 18446744073709551615,
+                        "big_integer": 18446744073709551616,
+                        "marker": {"$velnor_context_value":"non_finite","value":"NaN"},
+                        "undefined": undefined,
+                        "constructor": new Foo(0, 'x',),
+                        "nested_constructor": new Foo(new Bar(undefined, new Baz(3))),
+                        "constructor_array": [undefined, new Ctor(1, 2)],
+                        "hole_array": [,],
+                        "nested": {"Case": NaN, "case": Infinity},
+                        "array": [NaN, {"inside": -Infinity}],
+                        Infinity : "infinity key",
+                        NaN : NaN
+                    }
+                }],
+                "endpoints": [{
+                    "operationStatus": {
+                        "Case": NaN,
+                        "case": Infinity,
+                        "finite": 2.5,
+                        "big_integer": -123456789012345678901234567890,
+                        "marker": {"$velnor_context_value":"non_finite","value":"NaN"},
+                        "undefined": undefined,
+                        "constructor": new Foo(0, new Bar(undefined))
+                    }
+                }]
+            }
+        }"#;
+        let decoded = decode_acquire_job_success_body(
+            200,
+            Some(body.len() as u64),
+            Some("application/json"),
+            body,
+        )
+        .expect("JObject properties retain Newtonsoft nonfinite values");
+        assert_eq!(decoded.raw_json, body);
+        let message = decoded
+            .message
+            .expect("typed ContextValue trees materialize");
+        let resources = message.resources.as_ref().unwrap();
+        let properties = &resources.repositories[0].as_ref().unwrap().properties;
+
+        assert_eq!(properties.is_case_sensitive(), Some(false));
+        assert!(matches!(
+            properties.get("NAN"),
+            Some(ContextValue::NonFinite(NonFinite::NaN))
+        ));
+        assert!(matches!(
+            properties.get("positive"),
+            Some(ContextValue::NonFinite(NonFinite::PositiveInfinity))
+        ));
+        assert!(matches!(
+            properties.get("negative"),
+            Some(ContextValue::NonFinite(NonFinite::NegativeInfinity))
+        ));
+        assert!(matches!(
+            properties.get("finite"),
+            Some(ContextValue::Number(value)) if value.to_string() == "1.25"
+        ));
+        assert!(matches!(
+            properties.get("literal"),
+            Some(ContextValue::String(value)) if value == "NaN"
+        ));
+        assert!(matches!(
+            properties.get("plain_marker"),
+            Some(ContextValue::String(value)) if value == "__VELNOR_CLR_NAN_0__"
+        ));
+        assert!(matches!(
+            properties.get("escaped_marker"),
+            Some(ContextValue::String(value)) if value == "__VELNOR_CLR_NAN_0__"
+        ));
+        assert!(matches!(
+            properties.get("bare_nan"),
+            Some(ContextValue::NonFinite(NonFinite::NaN))
+        ));
+        assert!(matches!(
+            properties.get("big_integer_signed_overflow"),
+            Some(ContextValue::BigInteger(value)) if value == "9223372036854775808"
+        ));
+        assert!(matches!(
+            properties.get("big_integer_unsigned_max"),
+            Some(ContextValue::BigInteger(value)) if value == "18446744073709551615"
+        ));
+        assert!(matches!(
+            properties.get("big_integer"),
+            Some(ContextValue::BigInteger(value)) if value == "18446744073709551616"
+        ));
+        assert!(matches!(
+            properties.get("undefined"),
+            Some(ContextValue::Undefined)
+        ));
+        assert!(matches!(
+            properties.get("constructor"),
+            Some(ContextValue::Constructor { name, arguments })
+                if name == "Foo"
+                    && matches!(arguments.as_slice(), [
+                        ContextValue::Number(first),
+                        ContextValue::String(second),
+                    ] if first.as_i64() == Some(0) && second == "x")
+        ));
+        assert!(matches!(
+            properties.get("constructor_array"),
+            Some(ContextValue::Array(values))
+                if matches!(values.as_slice(), [
+                    ContextValue::Undefined,
+                    ContextValue::Constructor { name, arguments },
+                ] if name == "Ctor" && arguments.len() == 2)
+        ));
+        assert!(matches!(
+            properties.get("nested_constructor"),
+            Some(ContextValue::Constructor { name, arguments })
+                if name == "Foo" && matches!(arguments.as_slice(), [
+                    ContextValue::Constructor { name, arguments }
+                ] if name == "Bar" && matches!(arguments.as_slice(), [
+                    ContextValue::Undefined,
+                    ContextValue::Constructor { name, arguments }
+                ] if name == "Baz" && matches!(arguments.as_slice(), [ContextValue::Number(value)] if value.as_i64() == Some(3))))
+        ));
+        assert!(matches!(
+            properties.get("hole_array"),
+            Some(ContextValue::Array(values))
+                if matches!(values.as_slice(), [ContextValue::Undefined])
+        ));
+        assert!(matches!(
+            properties.get("infinity"),
+            Some(ContextValue::String(value)) if value == "infinity key"
+        ));
+        let marker = properties.get("marker").expect("marker-shaped user object");
+        assert!(matches!(marker, ContextValue::Object { .. }));
+        assert_eq!(
+            marker.get("$velnor_context_value"),
+            Some(&ContextValue::String("non_finite".to_owned()))
+        );
+        assert_eq!(
+            marker.get("value"),
+            Some(&ContextValue::String("NaN".to_owned()))
+        );
+
+        let nested = properties.get("nested").unwrap();
+        assert_eq!(nested.is_case_sensitive(), Some(true));
+        assert!(matches!(
+            nested.get("Case"),
+            Some(ContextValue::NonFinite(NonFinite::NaN))
+        ));
+        assert!(matches!(
+            nested.get("case"),
+            Some(ContextValue::NonFinite(NonFinite::PositiveInfinity))
+        ));
+        assert!(nested.get("CASE").is_none());
+
+        let array = properties.get("array").unwrap();
+        assert!(matches!(
+            array,
+            ContextValue::Array(values)
+                if matches!(values.first(), Some(ContextValue::NonFinite(NonFinite::NaN)))
+                    && matches!(values.get(1).and_then(|value| value.get("inside")), Some(ContextValue::NonFinite(NonFinite::NegativeInfinity)))
+        ));
+        let endpoint = resources.endpoints[0].as_ref().unwrap();
+        let operation_status = endpoint
+            .operation_status
+            .as_ref()
+            .expect("OperationStatus is a JObject context");
+        assert_eq!(operation_status.is_case_sensitive(), Some(true));
+        assert!(matches!(
+            operation_status.get("Case"),
+            Some(ContextValue::NonFinite(NonFinite::NaN))
+        ));
+        assert!(matches!(
+            operation_status.get("case"),
+            Some(ContextValue::NonFinite(NonFinite::PositiveInfinity))
+        ));
+        assert!(operation_status.get("CASE").is_none());
+        assert!(matches!(
+            operation_status.get("finite"),
+            Some(ContextValue::Number(value)) if value.to_string() == "2.5"
+        ));
+        assert!(matches!(
+            operation_status.get("big_integer"),
+            Some(ContextValue::BigInteger(value)) if value == "-123456789012345678901234567890"
+        ));
+        assert!(matches!(
+            operation_status.get("marker"),
+            Some(ContextValue::Object { .. })
+        ));
+        assert!(matches!(
+            operation_status.get("undefined"),
+            Some(ContextValue::Undefined)
+        ));
+        assert!(matches!(
+            operation_status.get("constructor"),
+            Some(ContextValue::Constructor { name, arguments })
+                if name == "Foo" && matches!(arguments.as_slice(), [
+                    ContextValue::Number(value),
+                    ContextValue::Constructor { name, arguments }
+                ] if value.as_i64() == Some(0) && name == "Bar" && matches!(arguments.as_slice(), [ContextValue::Undefined]))
+        ));
+
+        for body in [
+            r#"{"resources":{"repositories":[{"properties":[]}]}}"#,
+            r#"{"resources":{"endpoints":[{"operationStatus":[]}]}}"#,
+            r#"{"resources":{"endpoints":[{"operationStatus":1}]}}"#,
+        ] {
+            assert!(
+                decode_acquire_job_success_body(
+                    200,
+                    Some(body.len() as u64),
+                    Some("application/json"),
+                    body
+                )
+                .is_err(),
+                "typed JObject/dictionary serialization failures remain retryable: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn acquire_wire_big_integer_bounds_match_newtonsoft_reader() {
+        let body_for_integer = |integer: &str| {
+            format!(
+                "{}{}{}",
+                r#"{"resources":{"repositories":[{"properties":{"huge_integer":"#,
+                integer,
+                r#"}}]}}"#
+            )
+        };
+
+        let accepted = ["9".repeat(380), format!("-{}", "9".repeat(379))];
+        for integer in accepted {
+            let body = body_for_integer(&integer);
+            let payload = decode_acquire_job_success_body(
+                200,
+                Some(body.len() as u64),
+                Some("application/json"),
+                &body,
+            )
+            .expect("JsonTextReader accepts integer lexemes through 380 chars");
+            assert_eq!(payload.raw_json, body);
+            let message = payload.message.expect("BigInteger JToken materializes");
+            let properties = &message.resources.as_ref().unwrap().repositories[0]
+                .as_ref()
+                .unwrap()
+                .properties;
+            assert!(matches!(
+                properties.get("huge_integer"),
+                Some(ContextValue::BigInteger(value)) if value == &integer
+            ));
+        }
+
+        let rejected = body_for_integer(&format!("-{}", "9".repeat(380)));
+        let payload = decode_acquire_job_success_body(
+            200,
+            Some(rejected.len() as u64),
+            Some("application/json"),
+            &rejected,
+        )
+        .expect("JsonTextReader reader errors become null-success");
+        assert_eq!(payload.raw, Value::Null);
+        assert!(payload.message.is_none());
+    }
+
+    #[test]
+    fn acquire_wire_nonfinite_reader_and_uri_dispositions_match_clr() {
+        for body in [
+            r#"{"requestId":NaN}"#,
+            r#"{"lockedUntil":Infinity}"#,
+            r#"{"plan":{"version":-Infinity}}"#,
+            r#"{"enableDebugger":NaN}"#,
+        ] {
+            let decoded = decode_acquire_job_success_body(
+                200,
+                Some(body.len() as u64),
+                Some("application/json"),
+                body,
+            )
+            .expect("JsonReaderException maps to null-success");
+            assert!(decoded.message.is_none(), "body={body}");
+            assert!(decoded.identity.job_id.is_none(), "body={body}");
+        }
+        for body in [
+            r#"{"jobId":NaN}"#,
+            r#"{"resources":{"endpoints":[{"url":Infinity}]}}"#,
+        ] {
+            assert!(
+                decode_acquire_job_success_body(
+                    200,
+                    Some(body.len() as u64),
+                    Some("application/json"),
+                    body
+                )
+                .is_err(),
+                "typed CLR conversion failures remain retryable: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn acquire_wire_dto_preserves_omitted_defaults_and_nullable_references() {
+        let wire: ClrAgentJobRequestMessage = serde_json::from_value(json!({})).unwrap();
+
+        assert_eq!(wire.job_id.0, Uuid::nil());
+        assert_eq!(wire.request_id.0, 0);
+        assert!(!wire.enable_debugger);
+        assert!(wire.message_type.is_none());
+        assert!(wire.plan.is_none());
+        assert!(wire.timeline.is_none());
+
+        let nullable_references: ClrAgentJobRequestMessage = serde_json::from_value(json!({
+            "messageType": null,
+            "plan": null,
+            "timeline": null,
+            "jobDisplayName": null,
+            "jobName": null,
+            "jobContainer": null,
+            "jobServiceContainers": null,
+            "jobOutputs": null,
+            "resources": null,
+            "contextData": null,
+            "workspace": null,
+            "actionsEnvironment": null,
+            "snapshot": null,
+            "billingOwnerId": null,
+            "debuggerTunnel": null,
+            "debuggerWelcomeMessage": null,
+            "jobSidecarContainers": null
+        }))
+        .unwrap();
+        assert!(nullable_references.message_type.is_none());
+        assert!(nullable_references.plan.is_none());
+        assert!(nullable_references.timeline.is_none());
+        assert!(nullable_references.job_display_name.is_none());
+        assert!(nullable_references.job_name.is_none());
+        assert!(nullable_references.job_container.is_none());
+        assert!(nullable_references.job_service_containers.is_none());
+        assert!(nullable_references.job_outputs.is_none());
+        assert!(nullable_references.resources.is_none());
+        assert!(nullable_references.context_data.is_none());
+        assert!(nullable_references.workspace.is_none());
+        assert!(nullable_references.actions_environment.is_none());
+        assert!(nullable_references.snapshot.is_none());
+        assert!(nullable_references.billing_owner_id.is_none());
+        assert!(nullable_references.debugger_tunnel.is_none());
+        assert!(nullable_references.debugger_welcome_message.is_none());
+        assert!(nullable_references.job_sidecar_containers.is_none());
+
+        let null_collections: ClrAgentJobRequestMessage = serde_json::from_value(json!({
+            "environmentVariables": null,
+            "variables": null,
+            "mask": null,
+            "steps": null,
+            "defaults": null,
+            "dependencies": null,
+            "fileTable": null,
+            "resources": {
+                "endpoints": null,
+                "repositories": null,
+                "containers": null
+            },
+            "debuggerTunnel": {
+                "tunnelId": null,
+                "clusterId": null,
+                "hostToken": null
+            },
+            "plan": {
+                "scopeIdentifier": "00000000-0000-0000-0000-000000000001",
+                "planId": "00000000-0000-0000-0000-000000000002",
+                "owner": {"id": 0, "name": null, "_links": null}
+            },
+            "timeline": {"id": "00000000-0000-0000-0000-000000000003"},
+            "workspace": {"clean": null}
+        }))
+        .unwrap();
+        assert!(null_collections.environment_variables.is_empty());
+        assert!(null_collections.variables.is_empty());
+        assert!(null_collections.mask_hints.is_empty());
+        assert!(null_collections.defaults.is_empty());
+        assert!(null_collections.actions_dependencies.is_empty());
+        assert!(null_collections.file_table.is_empty());
+        let resources = null_collections.resources.unwrap();
+        assert!(resources.endpoints.is_empty());
+        assert!(resources.repositories.is_empty());
+        assert!(resources.containers.is_empty());
+        assert_eq!(null_collections.debugger_tunnel.unwrap().port, 0);
+        let plan = null_collections.plan.unwrap();
+        assert_eq!(
+            plan.scope_identifier.0,
+            Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
+        );
+        assert_eq!(
+            plan.plan_id.0,
+            Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap()
+        );
+        assert_eq!(plan.version.0, 0);
+        assert_eq!(plan.owner.unwrap().id.0, 0);
+        let timeline = null_collections.timeline.unwrap();
+        assert_eq!(
+            timeline.id.0,
+            Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap()
+        );
+        assert_eq!(timeline.change_id.0, 0);
+        assert!(null_collections.workspace.unwrap().clean.is_none());
+        assert!(null_collections.steps.is_empty());
+
+        let missing_step_members: ClrAgentJobRequestMessage =
+            serde_json::from_value(json!({"steps": [{"type": "Action"}]})).unwrap();
+        let step = missing_step_members.steps[0].as_ref().unwrap();
+        assert_eq!(step.id.0, Uuid::nil());
+        assert!(step.enabled);
+
+        let nullable_collection_values: ClrAgentJobRequestMessage = serde_json::from_value(json!({
+            "variables": {"null-value": null, "value": {"value": null}},
+            "mask": [null, {}, {"type": "Variable", "value": null}],
+            "steps": [
+                null,
+                {},
+                {
+                    "type": "Action",
+                    "name": null,
+                    "displayName": null,
+                    "condition": null,
+                    "continueOnError": null,
+                    "timeoutInMinutes": null,
+                    "parallelGroupId": null,
+                    "reference": null,
+                    "displayNameToken": null,
+                    "contextName": null,
+                    "environment": null,
+                    "inputs": null
+                },
+                {
+                    "type": "BackgroundStepControl",
+                    "controlType": null,
+                    "stepIds": [null],
+                    "displayNameToken": null
+                }
+            ],
+            "environmentVariables": [null],
+            "defaults": [null],
+            "dependencies": [null],
+            "fileTable": [null],
+            "jobSidecarContainers": {"sidecar": null},
+            "resources": {
+                "endpoints": [null, {
+                    "name": null,
+                    "type": null,
+                    "owner": null,
+                    "url": null,
+                    "description": null,
+                    "authorization": {"scheme": null, "parameters": null},
+                    "data": null,
+                    "operationStatus": null,
+                    "isReady": null
+                }, {"authorization": null}],
+                "repositories": [null, {
+                    "alias": null,
+                    "endpoint": null,
+                    "properties": {}
+                }, {
+                    "endpoint": {"id": "00000000-0000-0000-0000-000000000004"},
+                    "properties": {}
+                }],
+                "containers": [null, {
+                    "alias": null,
+                    "endpoint": null,
+                    "properties": {}
+                }]
+            },
+            "actionsEnvironment": {"name": null, "url": null},
+            "plan": {
+                "planType": null,
+                "planGroup": null,
+                "artifactUri": null,
+                "artifactLocation": null,
+                "definition": null,
+                "owner": null
+            },
+            "timeline": {"location": null}
+        }))
+        .unwrap();
+        assert!(nullable_collection_values.variables["null-value"].is_none());
+        assert!(nullable_collection_values.variables["value"]
+            .as_ref()
+            .unwrap()
+            .value
+            .is_none());
+        assert_eq!(nullable_collection_values.mask_hints.len(), 3);
+        assert!(nullable_collection_values.mask_hints[0].is_none());
+        assert_eq!(nullable_collection_values.steps.len(), 4);
+        assert!(nullable_collection_values.steps[0].is_none());
+        assert!(nullable_collection_values.steps[1].is_none());
+        assert!(nullable_collection_values.steps[2].is_some());
+        assert!(nullable_collection_values.steps[3].is_some());
+        assert_eq!(nullable_collection_values.environment_variables.len(), 1);
+        assert!(nullable_collection_values.environment_variables[0].is_none());
+        assert!(nullable_collection_values.defaults[0].is_none());
+        assert!(nullable_collection_values.actions_dependencies[0].is_none());
+        assert!(nullable_collection_values.file_table[0].is_none());
+        assert!(nullable_collection_values
+            .job_sidecar_containers
+            .as_ref()
+            .unwrap()["sidecar"]
+            .is_none());
+        let resources = nullable_collection_values.resources.unwrap();
+        assert!(resources.endpoints[0].is_none());
+        assert!(resources.endpoints[1]
+            .as_ref()
+            .unwrap()
+            .authorization
+            .as_ref()
+            .unwrap()
+            .parameters
+            .is_empty());
+        assert!(resources.endpoints[1].as_ref().unwrap().is_ready);
+        assert!(resources.endpoints[1].as_ref().unwrap().data.is_none());
+        assert!(resources.endpoints[1].as_ref().unwrap().name.is_none());
+        assert!(resources.endpoints[2].as_ref().unwrap().name.is_none());
+        assert!(resources.endpoints[2]
+            .as_ref()
+            .unwrap()
+            .data
+            .as_ref()
+            .unwrap()
+            .is_empty());
+        assert!(resources.endpoints[2]
+            .as_ref()
+            .unwrap()
+            .authorization
+            .is_none());
+        assert!(resources.repositories[0].is_none());
+        assert!(resources.containers[0].is_none());
+        assert_eq!(
+            resources.repositories[2]
+                .as_ref()
+                .unwrap()
+                .endpoint
+                .as_ref()
+                .unwrap()
+                .id
+                .0,
+            Uuid::parse_str("00000000-0000-0000-0000-000000000004").unwrap()
+        );
+        assert_eq!(
+            resources.repositories[2]
+                .as_ref()
+                .unwrap()
+                .endpoint
+                .as_ref()
+                .unwrap()
+                .name,
+            ClrExpressionValueString::NullReference
+        );
+        assert!(nullable_collection_values
+            .plan
+            .unwrap()
+            .definition
+            .is_none());
+        assert!(nullable_collection_values
+            .timeline
+            .unwrap()
+            .location
+            .is_none());
+
+        for value in [
+            json!({"jobId": null}),
+            json!({"requestId": null}),
+            json!({"lockedUntil": null}),
+            json!({"enableDebugger": null}),
+            json!({"debuggerTunnel": {"port": null}}),
+            json!({"plan": {"scopeIdentifier": null}}),
+            json!({"plan": {"planId": null}}),
+            json!({"plan": {"version": null}}),
+            json!({"plan": {"owner": {"id": null}}}),
+            json!({"plan": {"definition": {"id": null}}}),
+            json!({"timeline": {"id": null}}),
+            json!({"timeline": {"changeId": null}}),
+            json!({"variables": {"secret": {"isSecret": null}}}),
+            json!({"mask": [{"type": null}]}),
+            json!({"steps": [{"type": "Action", "id": null}]}),
+            json!({"steps": [{"type": "Action", "enabled": null}]}),
+            json!({"steps": [{"type": "Action", "background": null}]}),
+            json!({"resources": {"endpoints": [{"id": null}]}}),
+            json!({"resources": {"endpoints": [{"groupScopeId": null}]}}),
+            json!({"resources": {"endpoints": [{"isShared": null}]}}),
+            json!({"resources": {"repositories": [{"endpoint": {"id": null}, "properties": {}}]}}),
+        ] {
+            let body = value.to_string();
+            assert!(
+                decode_acquire_job_success_body(
+                    200,
+                    Some(body.len() as u64),
+                    Some("application/json"),
+                    &body
+                )
+                .is_err(),
+                "explicit null must not be replaced with a non-nullable CLR value default: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn acquire_wire_resources_accept_arbitrary_property_bags_and_reject_typed_nested_mismatches() {
+        let body = json!({
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "properties": {
+                        "id": 42,
+                        "cloneUrl": "https://github.com/owner/repo.git",
+                        "opaque": {"enabled": true, "items": [null, 1, "x"]}
+                    }
+                }],
+                "containers": [{
+                    "alias": "job",
+                    "properties": {"image": "alpine", "arbitrary": [1, {"x": false}]}
+                }]
+            }
+        });
+        let decoded = decode_acquire_job_success_body(
+            200,
+            Some(body.to_string().len() as u64),
+            Some("application/json"),
+            &body.to_string(),
+        )
+        .expect("ResourceProperties contains arbitrary JToken values");
+        assert_eq!(
+            decoded.raw["resources"]["repositories"][0]["properties"]["id"],
+            42
+        );
+        assert_eq!(
+            decoded.raw["resources"]["repositories"][0]["properties"]["opaque"]["items"][0],
+            Value::Null
+        );
+
+        for invalid_nested in [
+            json!({"resources": {"endpoints": [{"id": []}]}}),
+            json!({"steps": [{"type": 4, "enabled": "not-bool"}]}),
+            json!({"steps": [{"type": 4, "reference": {"type": 1, "path": []}}]}),
+        ] {
+            assert!(
+                serde_json::from_value::<ClrAgentJobRequestMessage>(invalid_nested.clone())
+                    .is_err(),
+                "nested CLR typed members reject wrong shapes: {invalid_nested}"
+            );
+        }
+
+        assert!(serde_json::from_value::<ClrAgentJobRequestMessage>(json!({
+            "resources": {"repositories": [{"properties": null}]}
+        }))
+        .is_err());
+
+        for body in [
+            r#"{"resources":{"repositories":[{"properties":undefined}]}}"#,
+            r#"{"resources":{"repositories":[{"properties":new Foo()}]}}"#,
+            r#"{"resources":{"endpoints":[{"operationStatus":undefined}]}}"#,
+            r#"{"resources":{"endpoints":[{"operationStatus":new Foo()}]}}"#,
+        ] {
+            assert!(
+                decode_acquire_job_success_body(
+                    200,
+                    Some(body.len() as u64),
+                    Some("application/json"),
+                    body,
+                )
+                .is_err(),
+                "typed JToken root rejects non-object value: {body}"
+            );
+        }
+
+        let null_status = r#"{"resources":{"endpoints":[{"operationStatus":null}]}}"#;
+        let decoded = decode_acquire_job_success_body(
+            200,
+            Some(null_status.len() as u64),
+            Some("application/json"),
+            null_status,
+        )
+        .unwrap();
+        let message = decoded.message.unwrap().materialize_runtime().unwrap();
+        assert!(message.resources.endpoints[0].operation_status.is_none());
+    }
+
+    #[test]
+    fn context_root_case_collisions_keep_first_slot_and_last_source_value() {
+        let body = r#"{"contextData":{"root":{"t":0,"s":"first"},"Root":{"t":0,"s":"later"}}}"#;
+        let decoded = decode_acquire_job_success_body(
+            200,
+            Some(body.len() as u64),
+            Some("application/json"),
+            body,
+        )
+        .expect("the acquired CLR DTO accepts distinct exact-case roots");
+        let job = decoded
+            .message
+            .expect("the Velnor wire DTO retains ordered ContextData roots")
+            .materialize_runtime()
+            .unwrap();
+        let context = crate::runner::job_context_data(&job).unwrap();
+        let root_entries: Vec<_> = context
+            .iter()
+            .filter(|(name, _)| crate::job_message::clr_ordinal_ignore_case_eq(name, "root"))
+            .collect();
+        assert_eq!(root_entries.len(), 1);
+        assert_eq!(root_entries[0].0, "root");
+        assert_eq!(
+            root_entries[0].1,
+            velnor_model::ContextValue::String("later".to_owned())
+        );
+    }
+
+    #[test]
+    fn acquire_retry_delay_is_uniform_integer_milliseconds_in_upstream_range() {
+        let client = RunServiceClient::new("token").unwrap();
+        for _ in 0..1_000 {
+            let delay = client.acquire_retry_delay(1);
+            assert!(delay.as_millis() >= 5_000);
+            assert!(delay.as_millis() < 15_000);
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn acquire_job_retries_untyped_4xx_and_exhausts() {
         use wiremock::{matchers::method, matchers::path, Mock, MockServer, ResponseTemplate};
 
         let transport_guard = crate::test_support::github_http_transport_env().await;
@@ -10932,7 +17502,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/run/jobs/123/acquirejob"))
             .respond_with(ResponseTemplate::new(401).set_body_string("bad credentials"))
-            .expect(1)
+            .expect(5)
             .mount(&server)
             .await;
 
@@ -10947,69 +17517,19 @@ mod tests {
                 None,
             )
             .await
-            .expect_err("a 401 acquire must fail fast as a permanent error");
+            .expect_err("generic acquire failures must retry up to the local attempt bound");
 
-        assert!(!is_transient_acquire_error(&error));
+        assert!(is_transient_acquire_error(&error));
         assert!(
             error
                 .to_string()
-                .contains("permanent run-service acquire failure"),
+                .contains("transient run-service acquire failure after retries"),
             "{error:#}"
         );
-        // Wiring regression (r0-798-corr): the fail-fast outcome dates to 798
-        // (then via legacy status derivation); the boundary category on the
-        // produced error is what proves the loop now reads the taxonomy.
         assert_eq!(
             broker_error_category(&error),
-            Some(BrokerErrorCategory::Terminal)
+            Some(BrokerErrorCategory::Transient)
         );
-    }
-
-    #[test]
-    fn acquire_attempt_failure_prefers_the_boundary_category() {
-        // The boundary verdict wins over status re-derivation in both
-        // directions; the legacy derivation disagrees on both inputs, so this
-        // test fails if the loop ever reads the status again.
-        let boundary_terminal = github_api_error_categorized(
-            "acquire run-service job",
-            503,
-            "try later",
-            BrokerErrorCategory::Terminal,
-        );
-        assert!(!acquire_attempt_failure_is_transient(&boundary_terminal));
-        assert!(acquire_failure_is_transient(&boundary_terminal));
-
-        let boundary_transient = github_api_error_categorized(
-            "acquire run-service job",
-            400,
-            "bad request",
-            BrokerErrorCategory::Transient,
-        );
-        assert!(acquire_attempt_failure_is_transient(&boundary_transient));
-        assert!(!acquire_failure_is_transient(&boundary_transient));
-
-        // Unclassified errors keep the historical derivation: transport
-        // timeouts retry, local faults and deterministic refusals fail fast.
-        let timeout = anyhow::Error::new(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "request timed out",
-        ));
-        assert!(acquire_attempt_failure_is_transient(&timeout));
-        let permission = anyhow::Error::new(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "private transport directory",
-        ));
-        assert!(!acquire_attempt_failure_is_transient(&permission));
-        assert!(!acquire_attempt_failure_is_transient(&github_api_error(
-            "acquire run-service job",
-            401,
-            "bad credentials"
-        )));
-        assert!(acquire_attempt_failure_is_transient(&github_api_error(
-            "acquire run-service job",
-            503,
-            "try later"
-        )));
     }
 
     #[cfg(feature = "test-support")]
@@ -11076,7 +17596,7 @@ mod tests {
     fn acquire_job_request_matches_run_service_shape() {
         let body = serde_json::to_value(AcquireJobRequest {
             job_message_id: "request-1",
-            runner_os: "linux",
+            runner_os: "Linux",
             billing_owner_id: Some("42"),
         })
         .unwrap();
@@ -11085,7 +17605,7 @@ mod tests {
             body,
             serde_json::json!({
                 "jobMessageId": "request-1",
-                "runnerOS": "linux",
+                "runnerOS": "Linux",
                 "billingOwnerId": "42"
             })
         );

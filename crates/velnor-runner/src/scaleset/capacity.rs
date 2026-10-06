@@ -18,6 +18,8 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use velnor_control::permit_ledger::{DemandState as PermitDemandState, OwnedReleaseOutcome};
+
 /// A local lane sharing the one host-wide `N`. Mirrors C2 `PermitLane`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LedgerLane {
@@ -45,22 +47,23 @@ pub struct LedgerHolder {
     pub lane: LedgerLane,
     pub state: LedgerPermitState,
     pub generation: u64,
+    pub pid: Option<u32>,
 }
 
 /// Outcome of [`CapacityLedger::acquire`]. Mirrors C2 `AcquireOutcome`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcquireOutcome {
-    Acquired,
+    Acquired { attempt_token: String },
     AlreadyHeld,
     Full,
     StaleGeneration,
     NotConfigured,
 }
 
-/// Outcome of [`CapacityLedger::reconcile`]. Mirrors C2 `ReconcileReport`.
+/// Outcome of [`CapacityLedger::reconcile_attempts`]. Mirrors exact-token
+/// control-ledger confirmation; reconciliation never adopts a holder.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReconcileReport {
-    pub adopted: Vec<String>,
     pub marked_uncertain: Vec<String>,
     pub confirmed: Vec<String>,
 }
@@ -71,6 +74,7 @@ pub enum LedgerError {
     Storage(String),
     UnknownHolder(String),
     StaleGeneration { expected: u64, seen: u64 },
+    StaleAttempt { holder: String },
 }
 
 impl std::fmt::Display for LedgerError {
@@ -84,6 +88,9 @@ impl std::fmt::Display for LedgerError {
                 f,
                 "permit ledger generation moved from {seen} to {expected}; re-read and retry"
             ),
+            Self::StaleAttempt { holder } => {
+                write!(f, "permit attempt token no longer owns {holder:?}")
+            }
         }
     }
 }
@@ -106,6 +113,9 @@ pub trait CapacityLedger {
     fn holders(&self) -> Result<Vec<LedgerHolder>, Self::Error>;
     /// Current state of one holder's permit, if held.
     fn holder_state(&self, holder: &str) -> Result<Option<LedgerPermitState>, Self::Error>;
+    /// Observationally verify a persisted attempt token. This returns only a
+    /// boolean; callers must still pass the token to every mutation.
+    fn is_current_attempt(&self, holder: &str, attempt_token: &str) -> Result<bool, Self::Error>;
     /// Observe durable lane demand before any permit acquire attempt. The
     /// global implementation preserves `first_seen_unix` and its sequence
     /// across redelivery; lightweight ledgers may omit ordering.
@@ -124,8 +134,8 @@ pub trait CapacityLedger {
     fn cancel_demand(&mut self, _holder: &str) -> Result<bool, Self::Error> {
         Ok(false)
     }
-    /// Acquire one permit for `holder`, fenced on `generation`. Idempotent
-    /// per holder: duplicates report [`AcquireOutcome::AlreadyHeld`].
+    /// Acquire one permit for `holder`, returning an owner token only for a
+    /// fresh acquisition. Existing holders are never ownership transfers.
     fn acquire(
         &mut self,
         holder: &str,
@@ -133,35 +143,49 @@ pub trait CapacityLedger {
         state: LedgerPermitState,
         generation: u64,
     ) -> Result<AcquireOutcome, Self::Error>;
-    /// Move one held permit to a new state, fenced on `generation`.
+    /// Acquire with a token already persisted in the Scale Set acquisition
+    /// journal. An exact existing token is an idempotent stage replay;
+    /// another token is never adopted.
+    fn acquire_with_attempt_token(
+        &mut self,
+        holder: &str,
+        state: LedgerPermitState,
+        generation: u64,
+        attempt_token: &str,
+    ) -> Result<AcquireOutcome, Self::Error>;
+    /// Move one held permit only when `attempt_token` still owns it.
     fn transition(
         &mut self,
         holder: &str,
         state: LedgerPermitState,
         generation: u64,
+        attempt_token: &str,
     ) -> Result<(), Self::Error>;
-    /// Release one holder's permit. Unfenced by design; freeing capacity is
-    /// always safe. Returns whether a row was removed.
-    fn release(&mut self, holder: &str) -> Result<bool, Self::Error>;
-    /// Confirm a retry/handoff: free occupancy and put the same demand back
-    /// into the eligible queue without changing its original age.
-    fn release_to_eligible(&mut self, holder: &str) -> Result<bool, Self::Error> {
-        self.release(holder)
-    }
-    /// Confirm upstream cancellation: free occupancy and close its demand.
-    fn release_cancelled(&mut self, holder: &str) -> Result<bool, Self::Error> {
-        self.release(holder)
-    }
-    /// Keep occupancy and close demand after cleanup could not be confirmed.
-    fn retain_uncertain(&mut self, holder: &str, generation: u64) -> Result<(), Self::Error> {
-        self.transition(holder, LedgerPermitState::Uncertain, generation)
-    }
-    /// Reconcile durable occupancy against the attested live set and mark
-    /// this epoch reconciled. Never deletes: observed-but-unrecorded work
-    /// is adopted, recorded-but-unobserved work is marked uncertain.
-    fn reconcile(
+    /// Complete a durable Scale Set release stage. `AlreadyAbsent` is
+    /// returned only when the same durable demand already has `target`;
+    /// stale/newer attempts never count as completed releases.
+    fn release_staged(
         &mut self,
-        alive: &[(&str, LedgerLane, LedgerPermitState)],
+        holder: &str,
+        attempt_token: &str,
+        target: PermitDemandState,
+    ) -> Result<OwnedReleaseOutcome, Self::Error>;
+    /// Keep exact-token occupancy after cleanup could not be confirmed.
+    /// Implementations preserve an active Cleaning state and its demand; other
+    /// states become Uncertain and close only still-open demand.
+    fn retain_uncertain(
+        &mut self,
+        holder: &str,
+        generation: u64,
+        attempt_token: &str,
+    ) -> Result<(), Self::Error>;
+
+    /// Reconcile durable occupancy against exact-token observations and mark
+    /// this epoch reconciled. Missing or mismatched owners fail closed;
+    /// observations never create a permit or mint an owner token.
+    fn reconcile_attempts(
+        &mut self,
+        alive: &[(&str, LedgerLane, &str)],
     ) -> Result<ReconcileReport, Self::Error>;
 
     /// Whether a mutation error is generation fencing (re-read + retry)
@@ -182,7 +206,17 @@ struct MemLedgerState {
     max_jobs: Option<u32>,
     generation: u64,
     reconciled_generation: Option<u64>,
-    holders: HashMap<String, (LedgerLane, LedgerPermitState, u64)>,
+    holders: HashMap<String, MemPermit>,
+    demand_states: HashMap<String, PermitDemandState>,
+}
+
+#[derive(Debug, Clone)]
+struct MemPermit {
+    lane: LedgerLane,
+    state: LedgerPermitState,
+    generation: u64,
+    attempt_token: String,
+    pid: Option<u32>,
 }
 
 impl MemLedger {
@@ -214,6 +248,13 @@ impl MemLedger {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_holder_pid(&self, holder: &str, pid: Option<u32>) {
+        if let Some(permit) = self.lock().holders.get_mut(holder) {
+            permit.pid = pid;
+        }
+    }
 }
 
 impl CapacityLedger for MemLedger {
@@ -244,11 +285,12 @@ impl CapacityLedger for MemLedger {
         let mut holders: Vec<LedgerHolder> = state
             .holders
             .iter()
-            .map(|(holder, (lane, permit, generation))| LedgerHolder {
+            .map(|(holder, permit)| LedgerHolder {
                 holder: holder.clone(),
-                lane: *lane,
-                state: *permit,
-                generation: *generation,
+                lane: permit.lane,
+                state: permit.state,
+                generation: permit.generation,
+                pid: permit.pid,
             })
             .collect();
         holders.sort_by(|left, right| left.holder.cmp(&right.holder));
@@ -256,7 +298,15 @@ impl CapacityLedger for MemLedger {
     }
 
     fn holder_state(&self, holder: &str) -> Result<Option<LedgerPermitState>, Self::Error> {
-        Ok(self.lock().holders.get(holder).map(|(_, state, _)| *state))
+        Ok(self.lock().holders.get(holder).map(|permit| permit.state))
+    }
+
+    fn is_current_attempt(&self, holder: &str, attempt_token: &str) -> Result<bool, Self::Error> {
+        Ok(self
+            .lock()
+            .holders
+            .get(holder)
+            .is_some_and(|permit| permit.attempt_token == attempt_token))
     }
 
     fn acquire(
@@ -279,10 +329,73 @@ impl CapacityLedger for MemLedger {
         if u64::try_from(ledger.holders.len()).unwrap_or(u64::MAX) >= u64::from(max) {
             return Ok(AcquireOutcome::Full);
         }
+        let attempt_token = uuid::Uuid::new_v4().to_string();
+        if lane == LedgerLane::ScaleSet {
+            ledger
+                .demand_states
+                .entry(holder.to_owned())
+                .or_insert(PermitDemandState::Granted);
+        }
+        ledger.holders.insert(
+            holder.to_owned(),
+            MemPermit {
+                lane,
+                state,
+                generation,
+                attempt_token: attempt_token.clone(),
+                pid: Some(std::process::id()),
+            },
+        );
+        Ok(AcquireOutcome::Acquired { attempt_token })
+    }
+
+    fn acquire_with_attempt_token(
+        &mut self,
+        holder: &str,
+        state: LedgerPermitState,
+        generation: u64,
+        attempt_token: &str,
+    ) -> Result<AcquireOutcome, Self::Error> {
+        if attempt_token.is_empty() {
+            return Err(LedgerError::StaleAttempt {
+                holder: holder.to_owned(),
+            });
+        }
+        let mut ledger = self.lock();
+        if ledger.generation != generation {
+            return Ok(AcquireOutcome::StaleGeneration);
+        }
+        let Some(max) = ledger.max_jobs else {
+            return Ok(AcquireOutcome::NotConfigured);
+        };
+        if let Some(existing) = ledger.holders.get(holder) {
+            if existing.lane == LedgerLane::ScaleSet && existing.attempt_token == attempt_token {
+                return Ok(AcquireOutcome::Acquired {
+                    attempt_token: attempt_token.to_owned(),
+                });
+            }
+            return Ok(AcquireOutcome::AlreadyHeld);
+        }
+        if u64::try_from(ledger.holders.len()).unwrap_or(u64::MAX) >= u64::from(max) {
+            return Ok(AcquireOutcome::Full);
+        }
         ledger
-            .holders
-            .insert(holder.to_owned(), (lane, state, generation));
-        Ok(AcquireOutcome::Acquired)
+            .demand_states
+            .entry(holder.to_owned())
+            .or_insert(PermitDemandState::Granted);
+        ledger.holders.insert(
+            holder.to_owned(),
+            MemPermit {
+                lane: LedgerLane::ScaleSet,
+                state,
+                generation,
+                attempt_token: attempt_token.to_owned(),
+                pid: Some(std::process::id()),
+            },
+        );
+        Ok(AcquireOutcome::Acquired {
+            attempt_token: attempt_token.to_owned(),
+        })
     }
 
     fn transition(
@@ -290,6 +403,7 @@ impl CapacityLedger for MemLedger {
         holder: &str,
         state: LedgerPermitState,
         generation: u64,
+        attempt_token: &str,
     ) -> Result<(), Self::Error> {
         let mut ledger = self.lock();
         if ledger.generation != generation {
@@ -301,45 +415,136 @@ impl CapacityLedger for MemLedger {
         let Some(entry) = ledger.holders.get_mut(holder) else {
             return Err(LedgerError::UnknownHolder(holder.to_owned()));
         };
-        entry.1 = state;
-        entry.2 = generation;
+        if entry.attempt_token != attempt_token {
+            return Err(LedgerError::StaleAttempt {
+                holder: holder.to_owned(),
+            });
+        }
+        entry.state = state;
+        entry.generation = generation;
+        entry.pid = Some(std::process::id());
         Ok(())
     }
 
-    fn release(&mut self, holder: &str) -> Result<bool, Self::Error> {
-        Ok(self.lock().holders.remove(holder).is_some())
+    fn release_staged(
+        &mut self,
+        holder: &str,
+        attempt_token: &str,
+        target: PermitDemandState,
+    ) -> Result<OwnedReleaseOutcome, Self::Error> {
+        let mut ledger = self.lock();
+        if !matches!(
+            target,
+            PermitDemandState::Eligible
+                | PermitDemandState::Cancelled
+                | PermitDemandState::Terminal
+        ) {
+            return Ok(OwnedReleaseOutcome::StaleAttempt);
+        }
+        if let Some(permit) = ledger.holders.get(holder) {
+            if permit.lane != LedgerLane::ScaleSet || permit.attempt_token != attempt_token {
+                return Ok(OwnedReleaseOutcome::StaleAttempt);
+            }
+            if target == PermitDemandState::Eligible
+                && !matches!(
+                    ledger.demand_states.get(holder),
+                    Some(PermitDemandState::Eligible | PermitDemandState::Granted)
+                )
+            {
+                return Ok(OwnedReleaseOutcome::StaleAttempt);
+            }
+            ledger.holders.remove(holder);
+            ledger.demand_states.insert(holder.to_owned(), target);
+            return Ok(OwnedReleaseOutcome::Released);
+        }
+        if ledger.demand_states.get(holder) == Some(&target) {
+            Ok(OwnedReleaseOutcome::AlreadyAbsent)
+        } else {
+            Ok(OwnedReleaseOutcome::StaleAttempt)
+        }
     }
 
-    fn reconcile(
+    fn retain_uncertain(
         &mut self,
-        alive: &[(&str, LedgerLane, LedgerPermitState)],
+        holder: &str,
+        generation: u64,
+        attempt_token: &str,
+    ) -> Result<(), Self::Error> {
+        let mut ledger = self.lock();
+        if ledger.generation != generation {
+            return Err(LedgerError::StaleGeneration {
+                expected: ledger.generation,
+                seen: generation,
+            });
+        }
+        let Some(permit) = ledger.holders.get(holder) else {
+            return Err(LedgerError::UnknownHolder(holder.to_owned()));
+        };
+        if permit.attempt_token != attempt_token {
+            return Err(LedgerError::StaleAttempt {
+                holder: holder.to_owned(),
+            });
+        }
+        if permit.state == LedgerPermitState::Cleaning {
+            // Cleaning is an active cleanup claim. Preserve its state and
+            // served demand until cleanup confirms or the lane retries.
+            return Ok(());
+        }
+
+        if let Some(permit) = ledger.holders.get_mut(holder) {
+            permit.state = LedgerPermitState::Uncertain;
+            permit.generation = generation;
+        }
+        if matches!(
+            ledger.demand_states.get(holder),
+            Some(PermitDemandState::Eligible | PermitDemandState::Granted)
+        ) {
+            ledger
+                .demand_states
+                .insert(holder.to_owned(), PermitDemandState::Terminal);
+        }
+        Ok(())
+    }
+
+    fn reconcile_attempts(
+        &mut self,
+        alive: &[(&str, LedgerLane, &str)],
     ) -> Result<ReconcileReport, Self::Error> {
         let mut ledger = self.lock();
         let mut report = ReconcileReport::default();
         let generation = ledger.generation;
-        for (holder, lane, state) in alive {
-            if ledger.holders.contains_key(*holder) {
-                report.confirmed.push((*holder).to_owned());
-            } else {
-                ledger
-                    .holders
-                    .insert((*holder).to_owned(), (*lane, *state, generation));
-                report.adopted.push((*holder).to_owned());
+        for (holder, lane, attempt_token) in alive {
+            let Some(permit) = ledger.holders.get_mut(*holder) else {
+                return Err(LedgerError::StaleAttempt {
+                    holder: (*holder).to_owned(),
+                });
+            };
+            if permit.lane != *lane {
+                return Err(LedgerError::StaleAttempt {
+                    holder: (*holder).to_owned(),
+                });
             }
+            if attempt_token.is_empty() || permit.attempt_token != *attempt_token {
+                return Err(LedgerError::StaleAttempt {
+                    holder: (*holder).to_owned(),
+                });
+            }
+            report.confirmed.push((*holder).to_owned());
         }
         let recorded: Vec<String> = ledger.holders.keys().cloned().collect();
         for holder in &recorded {
             if alive.iter().any(|(live, _, _)| live == holder) {
                 continue;
             }
-            if let Some(entry) = ledger.holders.get_mut(holder) {
-                entry.1 = LedgerPermitState::Uncertain;
-                entry.2 = generation;
+            if let Some(entry) = ledger.holders.get_mut(holder)
+                && entry.state != LedgerPermitState::Cleaning
+            {
+                entry.state = LedgerPermitState::Uncertain;
+                entry.generation = generation;
             }
             report.marked_uncertain.push(holder.clone());
         }
         ledger.reconciled_generation = Some(generation);
-        report.adopted.sort();
         report.marked_uncertain.sort();
         report.confirmed.sort();
         Ok(report)
@@ -351,10 +556,12 @@ impl CapacityLedger for MemLedger {
 }
 
 /// Outcome of reserving one permit for a granted offer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReserveOutcome {
-    /// Fresh `reserved` permit (or an adopted redelivery of one).
-    Reserved,
+    /// Fresh `reserved` permit; only this result carries ownership.
+    Reserved { attempt_token: String },
+    /// A permit already exists. Caller has no ownership and must not proceed.
+    AlreadyHeld,
     /// Ledger full: the offer stays queued and keeps its age.
     CapacityExhausted,
     /// Ledger has no `N`: same treatment as full, louder in logs.
@@ -391,8 +598,8 @@ impl<E: std::error::Error + Send + Sync + 'static> std::error::Error for Reserve
 }
 
 /// Reserve one `reserved` permit for a granted offer (step 3), fenced on
-/// `generation`. `AlreadyHeld` adopts the redelivered reservation instead
-/// of double-spending; a stale generation is re-read and retried once.
+/// `generation`. Existing permits are returned tokenless; callers must not
+/// treat them as ownership or proceed as if adoption happened.
 /// Returns the generation the reservation landed under.
 pub fn reserve_for_offer<L: CapacityLedger>(
     ledger: &mut L,
@@ -410,17 +617,60 @@ pub fn reserve_for_offer<L: CapacityLedger>(
             .map_err(ReserveError::Ledger)
     };
     match attempt(ledger, generation)? {
-        AcquireOutcome::Acquired | AcquireOutcome::AlreadyHeld => {
-            Ok((ReserveOutcome::Reserved, generation))
+        AcquireOutcome::Acquired { attempt_token } => {
+            Ok((ReserveOutcome::Reserved { attempt_token }, generation))
         }
+        AcquireOutcome::AlreadyHeld => Ok((ReserveOutcome::AlreadyHeld, generation)),
         AcquireOutcome::Full => Ok((ReserveOutcome::CapacityExhausted, generation)),
         AcquireOutcome::NotConfigured => Ok((ReserveOutcome::NotConfigured, generation)),
         AcquireOutcome::StaleGeneration => {
             let fresh = ledger.generation().map_err(ReserveError::Ledger)?;
             match attempt(ledger, fresh)? {
-                AcquireOutcome::Acquired | AcquireOutcome::AlreadyHeld => {
-                    Ok((ReserveOutcome::Reserved, fresh))
+                AcquireOutcome::Acquired { attempt_token } => {
+                    Ok((ReserveOutcome::Reserved { attempt_token }, fresh))
                 }
+                AcquireOutcome::AlreadyHeld => Ok((ReserveOutcome::AlreadyHeld, fresh)),
+                AcquireOutcome::Full => Ok((ReserveOutcome::CapacityExhausted, fresh)),
+                AcquireOutcome::NotConfigured => Ok((ReserveOutcome::NotConfigured, fresh)),
+                AcquireOutcome::StaleGeneration => Err(ReserveError::DoubleStale { seen: fresh }),
+            }
+        }
+    }
+}
+
+/// Replay a caller-tokenized reservation from the durable Scale Set acquire
+/// journal. The owner token exists in state storage before the permit row can
+/// be committed, making both cross-database crash cuts recoverable.
+pub fn reserve_for_offer_with_token<L: CapacityLedger>(
+    ledger: &mut L,
+    holder: &str,
+    generation: u64,
+    attempt_token: &str,
+) -> Result<(ReserveOutcome, u64), ReserveError<L::Error>> {
+    let attempt = |ledger: &mut L, generation| {
+        ledger
+            .acquire_with_attempt_token(
+                holder,
+                LedgerPermitState::Reserved,
+                generation,
+                attempt_token,
+            )
+            .map_err(ReserveError::Ledger)
+    };
+    match attempt(ledger, generation)? {
+        AcquireOutcome::Acquired { attempt_token } => {
+            Ok((ReserveOutcome::Reserved { attempt_token }, generation))
+        }
+        AcquireOutcome::AlreadyHeld => Ok((ReserveOutcome::AlreadyHeld, generation)),
+        AcquireOutcome::Full => Ok((ReserveOutcome::CapacityExhausted, generation)),
+        AcquireOutcome::NotConfigured => Ok((ReserveOutcome::NotConfigured, generation)),
+        AcquireOutcome::StaleGeneration => {
+            let fresh = ledger.generation().map_err(ReserveError::Ledger)?;
+            match attempt(ledger, fresh)? {
+                AcquireOutcome::Acquired { attempt_token } => {
+                    Ok((ReserveOutcome::Reserved { attempt_token }, fresh))
+                }
+                AcquireOutcome::AlreadyHeld => Ok((ReserveOutcome::AlreadyHeld, fresh)),
                 AcquireOutcome::Full => Ok((ReserveOutcome::CapacityExhausted, fresh)),
                 AcquireOutcome::NotConfigured => Ok((ReserveOutcome::NotConfigured, fresh)),
                 AcquireOutcome::StaleGeneration => Err(ReserveError::DoubleStale { seen: fresh }),
@@ -437,15 +687,6 @@ pub fn advertise_free<L: CapacityLedger>(ledger: &L) -> u32 {
         Ok(Some(free)) => free,
         Ok(None) | Err(_) => 0,
     }
-}
-
-/// Release one holder after owned cleanup confirmed (the single release
-/// path). Unfenced by design; returns whether a row was removed.
-pub fn release_after_cleanup<L: CapacityLedger>(
-    ledger: &mut L,
-    holder: &str,
-) -> Result<bool, L::Error> {
-    ledger.release(holder)
 }
 
 #[cfg(test)]
@@ -477,23 +718,23 @@ mod tests {
     #[test]
     fn reconcile_unlocks_free_headroom() {
         let mut ledger = ledgers();
-        ledger.reconcile(&[]).unwrap();
+        ledger.reconcile_attempts(&[]).unwrap();
         assert_eq!(advertise_free(&ledger), 2);
         let generation = ledger.generation().unwrap();
         let (outcome, _) = reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
-        assert_eq!(outcome, ReserveOutcome::Reserved);
+        assert!(matches!(outcome, ReserveOutcome::Reserved { .. }));
         assert_eq!(advertise_free(&ledger), 1);
     }
 
     #[test]
     fn reserve_is_idempotent_per_holder_and_full_when_spent() {
         let mut ledger = ledgers();
-        ledger.reconcile(&[]).unwrap();
+        ledger.reconcile_attempts(&[]).unwrap();
         let generation = ledger.generation().unwrap();
         let (first, _) = reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
         let (again, _) = reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
-        assert_eq!(first, ReserveOutcome::Reserved);
-        assert_eq!(again, ReserveOutcome::Reserved);
+        assert!(matches!(first, ReserveOutcome::Reserved { .. }));
+        assert_eq!(again, ReserveOutcome::AlreadyHeld);
         assert_eq!(ledger.occupied().unwrap(), 1);
         let _ = reserve_for_offer(&mut ledger, "scaleset/7/2", generation).unwrap();
         let (full, _) = reserve_for_offer(&mut ledger, "scaleset/7/3", generation).unwrap();
@@ -501,34 +742,149 @@ mod tests {
     }
 
     #[test]
+    fn retain_uncertain_preserves_cleaning_but_terminalizes_other_exact_attempts() {
+        let mut ledger = ledgers();
+        ledger.reconcile_attempts(&[]).unwrap();
+        let generation = ledger.generation().unwrap();
+        let cleaning_holder = "scaleset/7/cleaning-retain";
+        let (reserved, _) = reserve_for_offer(&mut ledger, cleaning_holder, generation).unwrap();
+        let ReserveOutcome::Reserved {
+            attempt_token: cleaning_token,
+        } = reserved
+        else {
+            panic!("cleaning attempt was not reserved");
+        };
+        ledger
+            .transition(
+                cleaning_holder,
+                LedgerPermitState::Cleaning,
+                generation,
+                &cleaning_token,
+            )
+            .unwrap();
+        let cleaning_holders = ledger.holders().unwrap();
+        let cleaning_demand = ledger.lock().demand_states.get(cleaning_holder).copied();
+        assert_eq!(cleaning_demand, Some(PermitDemandState::Granted));
+
+        assert!(matches!(
+            ledger.retain_uncertain(
+                cleaning_holder,
+                generation.saturating_add(1),
+                &cleaning_token
+            ),
+            Err(LedgerError::StaleGeneration { .. })
+        ));
+        assert!(matches!(
+            ledger.retain_uncertain(cleaning_holder, generation, "stale-token"),
+            Err(LedgerError::StaleAttempt { .. })
+        ));
+        ledger
+            .retain_uncertain(cleaning_holder, generation, &cleaning_token)
+            .unwrap();
+        assert_eq!(ledger.holders().unwrap(), cleaning_holders);
+        assert_eq!(
+            ledger.lock().demand_states.get(cleaning_holder).copied(),
+            cleaning_demand
+        );
+
+        let uncertain_holder = "scaleset/7/uncertain-retain";
+        let (reserved, _) = reserve_for_offer(&mut ledger, uncertain_holder, generation).unwrap();
+        let ReserveOutcome::Reserved {
+            attempt_token: uncertain_token,
+        } = reserved
+        else {
+            panic!("uncertain attempt was not reserved");
+        };
+        ledger
+            .retain_uncertain(uncertain_holder, generation, &uncertain_token)
+            .unwrap();
+        assert_eq!(
+            ledger.holder_state(uncertain_holder).unwrap(),
+            Some(LedgerPermitState::Uncertain)
+        );
+        assert_eq!(
+            ledger.lock().demand_states.get(uncertain_holder).copied(),
+            Some(PermitDemandState::Terminal)
+        );
+        assert_eq!(ledger.occupied().unwrap(), 2);
+    }
+
+    #[test]
+    fn stale_attempt_cannot_release_or_transition_reacquired_holder() {
+        let mut ledger = ledgers();
+        ledger.reconcile_attempts(&[]).unwrap();
+        let generation = ledger.generation().unwrap();
+        let (first, _) = reserve_for_offer(&mut ledger, "scaleset/7/old", generation).unwrap();
+        let old_token = match first {
+            ReserveOutcome::Reserved { attempt_token } => attempt_token,
+            outcome => panic!("unexpected first reserve outcome: {outcome:?}"),
+        };
+        assert_eq!(
+            ledger
+                .release_staged("scaleset/7/old", &old_token, PermitDemandState::Eligible,)
+                .unwrap(),
+            OwnedReleaseOutcome::Released
+        );
+        let (second, _) = reserve_for_offer(&mut ledger, "scaleset/7/old", generation).unwrap();
+        let new_token = match second {
+            ReserveOutcome::Reserved { attempt_token } => attempt_token,
+            outcome => panic!("unexpected second reserve outcome: {outcome:?}"),
+        };
+        assert_ne!(old_token, new_token);
+
+        assert_eq!(
+            ledger
+                .release_staged("scaleset/7/old", &old_token, PermitDemandState::Eligible,)
+                .unwrap(),
+            OwnedReleaseOutcome::StaleAttempt
+        );
+        assert!(matches!(
+            ledger.transition(
+                "scaleset/7/old",
+                LedgerPermitState::Running,
+                generation,
+                &old_token,
+            ),
+            Err(LedgerError::StaleAttempt { .. })
+        ));
+        assert_eq!(ledger.occupied().unwrap(), 1);
+        assert_eq!(
+            ledger
+                .release_staged("scaleset/7/old", &new_token, PermitDemandState::Eligible,)
+                .unwrap(),
+            OwnedReleaseOutcome::Released
+        );
+    }
+
+    #[test]
     fn stale_generation_retries_once_on_fresh_epoch() {
         let mut ledger = ledgers();
-        ledger.reconcile(&[]).unwrap();
+        ledger.reconcile_attempts(&[]).unwrap();
         let stale = ledger.generation().unwrap();
         ledger.begin_epoch();
-        ledger.reconcile(&[]).unwrap();
+        ledger.reconcile_attempts(&[]).unwrap();
         let (outcome, landed) = reserve_for_offer(&mut ledger, "scaleset/7/9", stale).unwrap();
-        assert_eq!(outcome, ReserveOutcome::Reserved);
+        assert!(matches!(outcome, ReserveOutcome::Reserved { .. }));
         assert_eq!(landed, stale + 1);
     }
 
     #[test]
-    fn reconcile_never_deletes_and_marks_unobserved_uncertain() {
+    fn reconcile_never_deletes_and_marks_unobserved_native_uncertain() {
         let mut ledger = ledgers();
         let generation = ledger.generation().unwrap();
         ledger
             .acquire(
-                "scaleset/7/1",
-                LedgerLane::ScaleSet,
+                "native/1",
+                LedgerLane::Native,
                 LedgerPermitState::Running,
                 generation,
             )
             .unwrap();
-        let report = ledger.reconcile(&[]).unwrap();
-        assert_eq!(report.marked_uncertain, vec!["scaleset/7/1".to_owned()]);
+        let report = ledger.reconcile_attempts(&[]).unwrap();
+        assert_eq!(report.marked_uncertain, vec!["native/1".to_owned()]);
         assert_eq!(ledger.occupied().unwrap(), 1);
         assert_eq!(
-            ledger.holder_state("scaleset/7/1").unwrap(),
+            ledger.holder_state("native/1").unwrap(),
             Some(LedgerPermitState::Uncertain)
         );
     }

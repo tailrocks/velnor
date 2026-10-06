@@ -22,13 +22,14 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const WORKSPACE_PACKAGES: [&str; 10] = [
+const WORKSPACE_PACKAGES: [&str; 11] = [
     "velnor-model",
     "velnor-control",
     "velnor-client",
     "velnor-render",
     "velnorctl",
     "velnor-runner",
+    "velnor-storage-snapshot",
     "velnor-workflow",
     "velnor-bench",
     "velnor-tools",
@@ -468,8 +469,12 @@ fn crate_dependency_direction_matches_approved_graph() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         tools,
-        BTreeSet::from(["velnor-client".to_owned(), "velnor-model".to_owned()]),
-        "velnor-tools may read the typed client and shared model only"
+        BTreeSet::from([
+            "velnor-client".to_owned(),
+            "velnor-model".to_owned(),
+            "velnor-storage-snapshot".to_owned(),
+        ]),
+        "velnor-tools may read the typed client, shared model, and snapshot lib only"
     );
     for legacy in ["velnor-tools"] {
         for new_crate in ["velnor-control", "velnor-render"] {

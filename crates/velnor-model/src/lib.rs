@@ -15,6 +15,7 @@ pub mod action_reference;
 pub mod cli_meta;
 pub mod condition;
 pub mod configuration;
+pub mod context_value;
 pub mod error_envelope;
 pub mod execution;
 pub mod github;
@@ -40,6 +41,11 @@ pub use condition::{Condition, ConditionStatus, Labels, ResourceMeta};
 pub use configuration::{
     AuthReport, ConfigDrift, ConfigSource, ContextConfig, DesiredConfig, EffectiveConfig,
     InstanceOperation, PermissionState, Sourced,
+};
+pub use context_value::{
+    ordinal_ignore_case_cmp, ordinal_ignore_case_contains, ordinal_ignore_case_ends_with,
+    ordinal_ignore_case_eq, ordinal_ignore_case_starts_with, ContextValue, ContextValueError,
+    NonFinite,
 };
 pub use error_envelope::{exit_code_for_class, ExitClass, MachineErrorEnvelope};
 pub use execution::{

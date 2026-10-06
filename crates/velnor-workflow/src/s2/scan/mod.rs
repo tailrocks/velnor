@@ -19,7 +19,7 @@ mod signals;
 pub(crate) mod swift;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -59,12 +59,109 @@ pub(crate) fn scan_shape_with_precondition_phases(
     apple: &rust::AppleNativePolicy,
     precondition_phases_enabled: bool,
 ) -> Result<RepositoryShape, GeneratorError> {
-    let files = file_walk::repository_files(root, exclude)?;
+    scan_shape_with_precondition_phases_and_static_sources(
+        root,
+        providers,
+        default_branch,
+        exclude,
+        apple,
+        precondition_phases_enabled,
+        &[],
+    )
+}
+
+pub(crate) fn scan_shape_with_precondition_phases_and_static_sources(
+    root: &Path,
+    providers: &ProviderSet,
+    default_branch: &str,
+    exclude: &[String],
+    apple: &rust::AppleNativePolicy,
+    precondition_phases_enabled: bool,
+    static_sources: &[String],
+) -> Result<RepositoryShape, GeneratorError> {
+    scan_shape_with_precondition_phases_and_static_files(
+        root,
+        providers,
+        default_branch,
+        exclude,
+        apple,
+        precondition_phases_enabled,
+        static_sources,
+        &[],
+        &[],
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the scan call binds provider, platform, config, source, and output snapshots together"
+)]
+pub(crate) fn scan_shape_with_precondition_phases_and_static_files(
+    root: &Path,
+    providers: &ProviderSet,
+    default_branch: &str,
+    exclude: &[String],
+    apple: &rust::AppleNativePolicy,
+    precondition_phases_enabled: bool,
+    static_sources: &[String],
+    static_outputs: &[String],
+    generated_aliases: &[crate::s2::GeneratedAliasPath],
+) -> Result<RepositoryShape, GeneratorError> {
+    scan_shape_with_precondition_phases_and_static_files_with_owned_paths(
+        root,
+        providers,
+        default_branch,
+        exclude,
+        apple,
+        precondition_phases_enabled,
+        static_sources,
+        static_outputs,
+        generated_aliases,
+        None,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the scan call binds provider, platform, config, source, output, and ownership snapshots together"
+)]
+pub(crate) fn scan_shape_with_precondition_phases_and_static_files_with_owned_paths(
+    root: &Path,
+    providers: &ProviderSet,
+    default_branch: &str,
+    exclude: &[String],
+    apple: &rust::AppleNativePolicy,
+    precondition_phases_enabled: bool,
+    static_sources: &[String],
+    static_outputs: &[String],
+    generated_aliases: &[crate::s2::GeneratedAliasPath],
+    verified_owned_paths: Option<&BTreeSet<PathBuf>>,
+) -> Result<RepositoryShape, GeneratorError> {
+    let files = file_walk::repository_files_with_static_files_and_owned_paths(
+        root,
+        exclude,
+        static_sources,
+        static_outputs,
+        generated_aliases,
+        verified_owned_paths,
+    )?;
     let file_set: BTreeSet<String> = files.iter().cloned().collect();
+    let mut renderer_output_paths = verified_owned_paths.cloned().unwrap_or_default();
+    renderer_output_paths.extend(
+        static_outputs
+            .iter()
+            .map(|output| PathBuf::from(output.as_str())),
+    );
+    renderer_output_paths.extend(
+        generated_aliases
+            .iter()
+            .map(|alias| alias.as_path().to_owned()),
+    );
     let context = ScanContext {
         root,
         files: &files,
         file_set: &file_set,
+        renderer_output_paths,
         apple,
     };
     let mut shape = RepositoryShape {
@@ -413,6 +510,7 @@ pub(crate) struct ScanContext<'a> {
     root: &'a Path,
     files: &'a [String],
     file_set: &'a BTreeSet<String>,
+    pub(crate) renderer_output_paths: BTreeSet<PathBuf>,
     pub(crate) apple: &'a rust::AppleNativePolicy,
 }
 
@@ -464,6 +562,7 @@ pub(crate) fn unit(
         env: std::collections::BTreeMap::new(),
         mbx: None,
         prepared_tools: Vec::new(),
+        homebrew_preview: None,
     }
 }
 
@@ -592,7 +691,7 @@ impl From<RepositoryShape> for ProjectConfig {
             mise_lock_backends: BTreeMap::new(),
             mise_install_deps: crate::s2::config::MiseInstallDeps::default(),
             github_cache: crate::s2::config::CacheGithubSection::default(),
-            velnor_host_cache: crate::s2::config::CacheVelnorSection::default(),
+            host_cache: crate::s2::config::CacheHostSection::default(),
             check_profiles: Vec::new(),
             rust_pin: None,
         }
