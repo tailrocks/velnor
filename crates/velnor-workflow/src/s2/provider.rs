@@ -227,6 +227,73 @@ pub(crate) enum Platform {
     MacosArm64,
 }
 
+/// Native platform required to execute a candidate Homebrew formula. This is
+/// deliberately separate from [`Platform`]: ordinary verification keeps its
+/// existing platform universe, while Homebrew installation checks need all
+/// four supported native hosts.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum HomebrewPlatform {
+    MacosArm64,
+    MacosX64,
+    LinuxX64,
+    LinuxArm64,
+}
+
+impl HomebrewPlatform {
+    pub(crate) const ALL: [Self; 4] = [
+        Self::MacosArm64,
+        Self::MacosX64,
+        Self::LinuxX64,
+        Self::LinuxArm64,
+    ];
+
+    #[must_use]
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::MacosArm64 => "macos-arm64",
+            Self::MacosX64 => "macos-x64",
+            Self::LinuxX64 => "linux-x64",
+            Self::LinuxArm64 => "linux-arm64",
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn runner(self) -> &'static str {
+        match self {
+            Self::MacosArm64 => "macos-26",
+            Self::MacosX64 => "macos-26-intel",
+            Self::LinuxX64 => "ubuntu-24.04",
+            Self::LinuxArm64 => "ubuntu-24.04-arm",
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn runner_os(self) -> &'static str {
+        match self {
+            Self::MacosArm64 | Self::MacosX64 => "macOS",
+            Self::LinuxX64 | Self::LinuxArm64 => "Linux",
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn runner_arch(self) -> &'static str {
+        match self {
+            Self::MacosArm64 | Self::LinuxArm64 => "ARM64",
+            Self::MacosX64 | Self::LinuxX64 => "X64",
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn machine(self) -> &'static str {
+        match self {
+            Self::MacosArm64 => "arm64",
+            Self::MacosX64 | Self::LinuxX64 => "x86_64",
+            Self::LinuxArm64 => "aarch64",
+        }
+    }
+}
+
 impl Platform {
     #[must_use]
     #[allow(
@@ -497,6 +564,38 @@ pub(crate) fn is_github_owned_label(label: &str) -> bool {
     label.starts_with("ubuntu-") || label.starts_with("macos-") || label.starts_with("windows-")
 }
 
+/// A documented GitHub-hosted image label: the strict audit-side counterpart
+/// of [`is_github_owned_label`]. Scan-time selector validation stays
+/// prefix-lenient so configured labels flow through, but the policy audit
+/// fails closed: only documented images count as hosted, so an undeclared
+/// self-hosted label such as `ubuntu-private` cannot pose as hosted.
+#[must_use]
+pub(crate) fn is_documented_github_hosted_image(label: &str) -> bool {
+    matches!(
+        label,
+        "ubuntu-latest"
+            | "ubuntu-26.04"
+            | "ubuntu-26.04-arm"
+            | "ubuntu-24.04"
+            | "ubuntu-24.04-arm"
+            | "ubuntu-22.04"
+            | "ubuntu-22.04-arm"
+            | "macos-latest"
+            | "macos-latest-large"
+            | "macos-26"
+            | "macos-15-large"
+            | "macos-15"
+            | "macos-14-large"
+            | "macos-14"
+            | "macos-13-large"
+            | "macos-13"
+            | "windows-latest"
+            | "windows-2025"
+            | "windows-2022"
+            | "windows-11"
+    )
+}
+
 /// Stable plan digest over sorted unit IDs × sorted providers × exclusion
 /// declarations × command/profile/features/fixture digests.
 pub(crate) fn plan_digest(
@@ -696,6 +795,14 @@ pub(crate) fn evaluate_verdict(
             });
             continue;
         }
+        if run.platform_for(&identity.unit_id) != Some(identity.platform) {
+            failures.push(VerdictFailure::IdentityMismatch {
+                unit_id: identity.unit_id.clone(),
+                provider: identity.provider,
+                reason: "platform does not match the planned unit".to_owned(),
+            });
+            continue;
+        }
         if !expected.contains(&key) {
             // A record for a pair outside the expected set is either a claim
             // for another provider's work or an unselected unit: both fail.
@@ -783,6 +890,7 @@ pub(crate) struct RunIdentity {
     pub(crate) run_attempt: String,
     pub(crate) plan_digest: String,
     pub(crate) command_digests: BTreeMap<String, String>,
+    pub(crate) platforms: BTreeMap<String, Platform>,
 }
 
 impl RunIdentity {
@@ -795,6 +903,10 @@ impl RunIdentity {
             .get(unit_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    fn platform_for(&self, unit_id: &str) -> Option<Platform> {
+        self.platforms.get(unit_id).copied()
     }
 }
 
@@ -1018,5 +1130,22 @@ mod tests {
             false
         )
         .is_ok());
+    }
+
+    #[test]
+    fn selection_plan_digest_keeps_the_legacy_sixteen_hex_shape() {
+        let units = vec![(
+            "rust-unit".to_owned(),
+            ProviderSet::from([ProviderId::GithubHosted]),
+            "command-digest".to_owned(),
+        )];
+        let exclusions = vec![(
+            "docs".to_owned(),
+            ProviderId::Velnor,
+            ExclusionReason::GenuinelyUnaffected,
+        )];
+        let digest = plan_digest(&units, &exclusions);
+        assert_eq!(digest.len(), 16);
+        assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 }

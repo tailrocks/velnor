@@ -1,0 +1,17 @@
+# Installed launcher creates the complete index snapshot before prek reads this.
+fail_fast: true
+repos:
+  - repo: local
+    hooks:
+      - id: fmt
+        name: Rust formatting
+        language: system
+        entry: mise run fmt
+        pass_filenames: false
+        always_run: true
+      - id: clippy
+        name: Rust Clippy
+        language: system
+        entry: mise run lint
+        pass_filenames: false
+        always_run: true

@@ -30,7 +30,11 @@
 //! * An unresolved process reports [`FAIL_CLOSED`]. Trust never appears out of
 //!   nowhere.
 
+use std::path::{Path, PathBuf};
+
 use clap::Args;
+
+const FILESYSTEM_KEY_PREFIX: &str = "trust-scope-v1-";
 
 /// Boundary reported by a process that has not resolved one. Trust fails
 /// closed: no Docker socket, no privileged container options, no privileged
@@ -213,6 +217,44 @@ pub(crate) fn normalize_scope(raw: &str) -> &str {
     }
 }
 
+/// Stable filesystem component for a normalized trust scope.
+///
+/// Trust labels are operator-controlled strings. Replacing unsafe characters
+/// or truncating them is lossy: distinct scopes such as `public/forks` and
+/// `public_forks` can then share writable stores. A fixed-size cryptographic
+/// digest provides a collision-resistant filesystem namespace, including for
+/// labels longer than a filesystem component can hold.
+#[must_use]
+pub(crate) fn filesystem_key(raw: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"velnor-trust-scope-filesystem-key\0");
+    hasher.update(normalize_scope(raw).as_bytes());
+    format!("{FILESYSTEM_KEY_PREFIX}{}", hasher.finalize().to_hex())
+}
+
+/// Sibling root for path-based trust keys. Keeping it outside the cache root
+/// makes every new canonical path disjoint from the old
+/// `<cache-root>/<sanitized-scope>/<class>` grammar, even when a scope equals
+/// another scope's encoded key.
+pub(crate) fn filesystem_key_namespace(root: &Path) -> PathBuf {
+    velnor_storage_snapshot::filesystem_key_namespace(root)
+}
+
+/// Path namespace for one trust scope. `filesystem_key` remains a single
+/// component when used as a non-path identity, while filesystem consumers use
+/// this nested, versioned root.
+#[must_use]
+pub(crate) fn filesystem_key_path(root: &Path, raw: &str) -> PathBuf {
+    filesystem_key_namespace(root).join(filesystem_key(raw))
+}
+
+/// Whether a directory name is one of the complete, versioned keys emitted
+/// by [`filesystem_key`]. This validates path enumeration only; it cannot
+/// recover the original trust scope from a key.
+pub(crate) fn is_filesystem_key(value: &str) -> bool {
+    velnor_storage_snapshot::is_filesystem_key(value)
+}
+
 /// The boundary a daemon resolves from a `VELNOR_TRUST_SCOPE` value it was
 /// (or was not) given, without touching this process's cell.
 ///
@@ -336,6 +378,25 @@ mod tests {
         // Normalizing never resolves: the cell stays empty and the process
         // still reports fail-closed.
         assert_eq!(current(), FAIL_CLOSED);
+    }
+
+    #[test]
+    fn filesystem_keys_preserve_scope_distinctions_lost_by_sanitization() {
+        assert_eq!(filesystem_key(" trusted "), filesystem_key("trusted"));
+        assert_ne!(
+            filesystem_key("public/forks"),
+            filesystem_key("public_forks")
+        );
+        assert_ne!(filesystem_key("Pool-East"), filesystem_key("pool-east"));
+        assert!(is_filesystem_key(&filesystem_key("trusted")));
+        assert!(!is_filesystem_key("trusted"));
+
+        let long_prefix = "x".repeat(160);
+        assert_ne!(
+            filesystem_key(&format!("{long_prefix}a")),
+            filesystem_key(&format!("{long_prefix}b"))
+        );
+        assert_eq!(filesystem_key("   "), filesystem_key(FAIL_CLOSED));
     }
 
     #[test]

@@ -3954,6 +3954,21 @@ mod tests {
             String::from_utf8_lossy(&control.stderr)
         );
         fs::remove_file(&marker).unwrap();
+        // Drain late completions: some git versions settle fsmonitor
+        // queries asynchronously, so a control-query completion may land
+        // after the marker removal. Quiesce before asserting the check
+        // itself stays clean.
+        let drain_start = std::time::Instant::now();
+        let mut quiet_rounds = 0;
+        while quiet_rounds < 4 && drain_start.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if marker.exists() {
+                fs::remove_file(&marker).unwrap();
+                quiet_rounds = 0;
+            } else {
+                quiet_rounds += 1;
+            }
+        }
 
         let result = verify_checkout_identity(&checkout, "fixture/repo", "main", &head, true);
         assert!(

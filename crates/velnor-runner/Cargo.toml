@@ -131,6 +131,8 @@ anyhow.workspace = true
 clap.workspace = true
 libc = "0.2"
 velnor-control = { path = "../velnor-control", version = "0.1.0" }
+velnor-client = { path = "../velnor-client", version = "0.1.0" }
+velnor-storage-snapshot = { path = "../velnor-storage-snapshot", version = "0.1.0" }
 velnor-model = { path = "../velnor-model", version = "0.1.0" }
 aho-corasick = "1.1.4"
 blake3.workspace = true
@@ -145,6 +147,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 globset.workspace = true
+regex.workspace = true
 sha2.workspace = true
 tar.workspace = true
 sigstore-sign.workspace = true
@@ -167,6 +170,17 @@ opentelemetry-otlp = { workspace = true, optional = true }
 http-body-util = { version = "0.1", default-features = false, features = ["channel"] }
 hyper = { version = "1", default-features = false, features = ["server", "http1"] }
 hyper-util = { version = "0.1", default-features = false, features = ["tokio", "service", "http1"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_WindowsProgramming",
+  "Wdk_Foundation",
+  "Wdk_Storage_FileSystem",
+] }
 
 [dev-dependencies]
 rusqlite.workspace = true

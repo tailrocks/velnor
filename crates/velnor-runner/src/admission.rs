@@ -24,7 +24,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::action::{
@@ -33,9 +32,12 @@ use crate::action::{
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 use crate::manifest::{self, CapabilityViolation};
 use crate::protocol::GitHubScope;
-use velnor_model::action_reference::{
-    is_runner_local_action_reference, ActionImageReference, RepositoryActionReference,
-    SafeActionPath,
+use velnor_model::{
+    action_reference::{
+        is_runner_local_action_reference, ActionImageReference, RepositoryActionReference,
+        SafeActionPath,
+    },
+    ordinal_ignore_case_eq, ContextValue,
 };
 
 /// Maximum composite nesting depth. Matches the removed local preflight bound.
@@ -731,7 +733,7 @@ struct Walk<'a> {
     metadata_bytes: usize,
     expanded: BTreeSet<InvocationKey>,
     step_visits: usize,
-    context_data: &'a [(String, Value)],
+    context_data: &'a [(String, ContextValue)],
     deadline: Instant,
 }
 
@@ -741,7 +743,7 @@ struct Walk<'a> {
 /// checkout, cache, credential, service, or download side effect.
 pub fn admit_job(
     job: &AgentJobRequestMessage,
-    context_data: &[(String, Value)],
+    context_data: &[(String, ContextValue)],
     source: &dyn ActionMetadataSource,
 ) -> std::result::Result<AdmissionGraph, AdmissionError> {
     if !context_within_admission_budget(context_data) {
@@ -779,12 +781,11 @@ pub fn admit_job(
         ));
     }
     walk.step_visits = job.steps.len();
-    for (index, step) in job
-        .steps
-        .iter()
-        .enumerate()
-        .filter(|(_, step)| step.enabled)
-    {
+    for (index, step) in job.steps.iter().enumerate().filter_map(|(index, step)| {
+        step.as_ref()
+            .filter(|step| step.enabled)
+            .map(|step| (index, step))
+    }) {
         if step.reference_type() != Some(ActionReferenceType::Repository) {
             continue;
         }
@@ -1045,7 +1046,7 @@ fn admit_remote(
 enum LocalInputSource<'a> {
     Deferred {
         step: &'a crate::job_message::ActionStep,
-        context_data: &'a [(String, Value)],
+        context_data: &'a [(String, ContextValue)],
     },
     Resolved(&'a BTreeMap<String, String>),
 }
@@ -1252,7 +1253,8 @@ fn recurse_composite(
     // Resolve this composite's inputs (caller-provided over declared defaults)
     // so nested `${{ inputs.* }}` can be rendered before child validation.
     let composite_inputs = resolve_composite_inputs(metadata, provided_inputs);
-    let inputs_context = inputs_context(&composite_inputs, walk.context_data);
+    let inputs_context = inputs_context(&composite_inputs, walk.context_data)
+        .map_err(|error| AdmissionError::new(ancestry, "inputs", error.to_string(), Vec::new()))?;
 
     for (child_index, step) in metadata.runs.steps.iter().enumerate() {
         let Some(uses) = step.uses.as_deref() else {
@@ -1349,7 +1351,7 @@ fn reject_runtime_capability_inputs(
     ancestry: &Ancestry,
     repository: &str,
     inputs: &BTreeMap<String, String>,
-    context_data: &[(String, Value)],
+    context_data: &[(String, ContextValue)],
 ) -> Result<(), AdmissionError> {
     for (name, value) in inputs {
         if !value.contains("${{") || !manifest::action_input_is_constrained(repository, name) {
@@ -1378,7 +1380,7 @@ fn reject_runtime_capability_inputs(
 
 fn resolve_step_inputs(
     step: &crate::job_message::ActionStep,
-    context_data: &[(String, Value)],
+    context_data: &[(String, ContextValue)],
 ) -> Result<BTreeMap<String, String>> {
     crate::action::string_inputs(step)?
         .into_iter()
@@ -1406,21 +1408,22 @@ fn resolve_composite_inputs(
 
 fn inputs_context(
     inputs: &BTreeMap<String, String>,
-    base_context: &[(String, Value)],
-) -> Vec<(String, Value)> {
+    base_context: &[(String, ContextValue)],
+) -> Result<Vec<(String, ContextValue)>> {
     let mut context = base_context.to_vec();
     context.retain(|(name, _)| !name.eq_ignore_ascii_case("inputs"));
-    let object = inputs
+    let entries = inputs
         .iter()
-        .map(|(name, value)| (name.clone(), Value::String(value.clone())))
-        .collect::<serde_json::Map<_, _>>();
-    context.push(("inputs".to_string(), Value::Object(object)));
-    context
+        .map(|(name, value)| (name.clone(), ContextValue::String(value.clone())))
+        .collect();
+    let object = ContextValue::object(entries)?;
+    context.push(("inputs".to_string(), object));
+    Ok(context)
 }
 
 fn render_inputs(
     with: &BTreeMap<String, String>,
-    inputs_context: &[(String, Value)],
+    inputs_context: &[(String, ContextValue)],
 ) -> Result<BTreeMap<String, String>> {
     with.iter()
         .map(|(name, value)| {
@@ -1433,7 +1436,10 @@ fn render_inputs(
 /// contexts for the execution pass. The checked executor boundary rejects
 /// malformed, unevaluable, and over-budget templates; it never returns the
 /// unresolved source on error.
-fn render_admission_expression(value: &str, context_data: &[(String, Value)]) -> Result<String> {
+fn render_admission_expression(
+    value: &str,
+    context_data: &[(String, ContextValue)],
+) -> Result<String> {
     Ok(crate::executor::render_context_expressions_bounded(
         value,
         context_data,
@@ -1486,7 +1492,7 @@ fn split_workflow_ref(workflow_ref: &str) -> Option<(String, String, String)> {
     ))
 }
 
-fn workflow_source(context_data: &[(String, Value)]) -> Option<(String, String)> {
+fn workflow_source(context_data: &[(String, ContextValue)]) -> Option<(String, String)> {
     let sha = context_string(context_data, "github.workflow_sha")?;
     let repository = context_string(context_data, "job.workflow_repository")
         .or_else(|| context_string(context_data, "github.repository"))
@@ -1501,20 +1507,21 @@ fn workflow_source(context_data: &[(String, Value)]) -> Option<(String, String)>
     Some((repository, sha))
 }
 
-fn context_string(context_data: &[(String, Value)], path: &str) -> Option<String> {
+fn context_string(context_data: &[(String, ContextValue)], path: &str) -> Option<String> {
     let mut parts = path.split('.');
     let first = parts.next()?;
     let mut value = context_data
         .iter()
-        .find(|(name, _)| name == first)
+        .find(|(name, _)| ordinal_ignore_case_eq(name, first))
         .map(|(_, value)| value)?;
     for part in parts {
-        value = value.as_object()?.get(part)?;
+        value = value.get(part)?;
     }
     match value {
-        Value::String(value) => Some(value.clone()),
-        Value::Number(value) => Some(value.to_string()),
-        Value::Bool(value) => Some(value.to_string()),
+        ContextValue::String(value) => Some(value.clone()),
+        ContextValue::Number(value) => Some(value.to_string()),
+        ContextValue::BigInteger(value) => Some(value.clone()),
+        ContextValue::Bool(value) => Some(value.to_string()),
         _ => None,
     }
 }
@@ -1765,18 +1772,22 @@ fn validate_metadata_string_map(
     Ok(())
 }
 
-fn context_object_strings(context_data: &[(String, Value)], key: &str) -> BTreeMap<String, String> {
+fn context_object_strings(
+    context_data: &[(String, ContextValue)],
+    key: &str,
+) -> BTreeMap<String, String> {
     context_data
         .iter()
-        .find(|(name, _)| name == key)
-        .and_then(|(_, value)| value.as_object())
-        .map(|object| {
-            object
+        .find(|(name, _)| ordinal_ignore_case_eq(name, key))
+        .and_then(|(_, value)| value.entries())
+        .map(|entries| {
+            entries
                 .iter()
                 .filter_map(|(name, value)| match value {
-                    Value::String(value) => Some((name.clone(), value.clone())),
-                    Value::Number(value) => Some((name.clone(), value.to_string())),
-                    Value::Bool(value) => Some((name.clone(), value.to_string())),
+                    ContextValue::String(value) => Some((name.clone(), value.clone())),
+                    ContextValue::Number(value) => Some((name.clone(), value.to_string())),
+                    ContextValue::BigInteger(value) => Some((name.clone(), value.clone())),
+                    ContextValue::Bool(value) => Some((name.clone(), value.to_string())),
                     _ => None,
                 })
                 .collect()
@@ -1784,7 +1795,7 @@ fn context_object_strings(context_data: &[(String, Value)], key: &str) -> BTreeM
         .unwrap_or_default()
 }
 
-fn context_within_admission_budget(context_data: &[(String, Value)]) -> bool {
+fn context_within_admission_budget(context_data: &[(String, ContextValue)]) -> bool {
     let mut total = 0usize;
     let mut pending = context_data
         .iter()
@@ -1796,18 +1807,29 @@ fn context_within_admission_budget(context_data: &[(String, Value)]) -> bool {
             return false;
         }
         match value {
-            Value::String(value) => total = total.saturating_add(value.len()),
-            Value::Array(values) => {
+            ContextValue::String(value) => total = total.saturating_add(value.len()),
+            ContextValue::BigInteger(value) => total = total.saturating_add(value.len()),
+            ContextValue::Array(values) => {
                 for value in values {
                     pending.push((depth + 1, "", value));
                 }
             }
-            Value::Object(values) => {
-                for (name, value) in values {
+            ContextValue::Constructor { name, arguments } => {
+                total = total.saturating_add(name.len());
+                for argument in arguments {
+                    pending.push((depth + 1, "", argument));
+                }
+            }
+            ContextValue::Object { entries, .. } => {
+                for (name, value) in entries {
                     pending.push((depth + 1, name, value));
                 }
             }
-            Value::Null | Value::Bool(_) | Value::Number(_) => {}
+            ContextValue::Undefined
+            | ContextValue::Null
+            | ContextValue::Bool(_)
+            | ContextValue::Number(_)
+            | ContextValue::NonFinite(_) => {}
         }
         if total > MAX_ADMISSION_CONTEXT_BYTES {
             return false;
@@ -1889,6 +1911,7 @@ fn metadata_retained_bytes(metadata: &ActionMetadata) -> usize {
 )]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     /// In-memory metadata source that counts reads and never touches the
     /// network — proving admission is read-only and metadata-fetch bounded.
@@ -1986,14 +2009,107 @@ mod tests {
         })
     }
 
-    fn workflow_context() -> Vec<(String, Value)> {
+    fn workflow_context() -> Vec<(String, ContextValue)> {
         vec![(
             "github".to_string(),
-            serde_json::json!({
+            ContextValue::from_json(serde_json::json!({
                 "repository": "acme/repo",
                 "workflow_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-            }),
+            }))
+            .unwrap(),
         )]
+    }
+
+    #[test]
+    fn big_integer_admission_context_values_keep_decimal_strings() {
+        let decimal = "1234567890123456789012345678901234567890";
+        let number = ContextValue::big_integer(decimal).unwrap();
+        let github =
+            ContextValue::object(vec![("workflow_sha".to_string(), number.clone())]).unwrap();
+        let inputs = ContextValue::object(vec![("count".to_string(), number)]).unwrap();
+        let context = vec![
+            ("github".to_string(), github),
+            ("inputs".to_string(), inputs),
+        ];
+
+        assert_eq!(
+            context_string(&context, "github.workflow_sha").as_deref(),
+            Some(decimal)
+        );
+        assert_eq!(
+            context_object_strings(&context, "inputs").get("count"),
+            Some(&decimal.to_string())
+        );
+    }
+
+    #[test]
+    fn admission_context_budget_counts_big_integer_decimal_bytes() {
+        // Keep each token below JsonTextReader's 380-character BigInteger cap;
+        // string padding and repeated legal values still reach the exact limit.
+        const BIG_INTEGER_CHARS: usize = 300;
+        let value_bytes = MAX_ADMISSION_CONTEXT_BYTES - 1;
+        let big_integer = ContextValue::big_integer("9".repeat(BIG_INTEGER_CHARS)).unwrap();
+        let mut values = vec![big_integer; value_bytes / BIG_INTEGER_CHARS];
+        values.push(ContextValue::String(
+            "x".repeat(value_bytes % BIG_INTEGER_CHARS),
+        ));
+
+        let within = vec![("x".to_string(), ContextValue::Array(values.clone()))];
+        assert!(context_within_admission_budget(&within));
+
+        let mut over_values = values;
+        over_values.push(ContextValue::String("x".to_string()));
+        let over = vec![("x".to_string(), ContextValue::Array(over_values))];
+        assert!(!context_within_admission_budget(&over));
+    }
+
+    #[test]
+    fn admission_context_budget_counts_constructor_name_and_arguments() {
+        let constructor_name = "ctor";
+        let property_name = "root";
+        let argument_bytes =
+            MAX_ADMISSION_CONTEXT_BYTES - constructor_name.len() - property_name.len();
+        let within = vec![(
+            property_name.to_string(),
+            ContextValue::Constructor {
+                name: constructor_name.to_string(),
+                arguments: vec![ContextValue::String("x".repeat(argument_bytes))],
+            },
+        )];
+        assert!(context_within_admission_budget(&within));
+
+        let over = vec![(
+            property_name.to_string(),
+            ContextValue::Constructor {
+                name: constructor_name.to_string(),
+                arguments: vec![ContextValue::String("x".repeat(argument_bytes + 1))],
+            },
+        )];
+        assert!(!context_within_admission_budget(&over));
+
+        let oversized_name = vec![(
+            property_name.to_string(),
+            ContextValue::Constructor {
+                name: "n".repeat(MAX_ADMISSION_CONTEXT_BYTES),
+                arguments: vec![ContextValue::Undefined],
+            },
+        )];
+        assert!(!context_within_admission_budget(&oversized_name));
+    }
+
+    #[test]
+    fn admission_context_budget_rejects_nested_constructor_depth() {
+        let nested = (0..=65).fold(ContextValue::Undefined, |value, _| {
+            ContextValue::Constructor {
+                name: "ctor".to_string(),
+                arguments: vec![value],
+            }
+        });
+
+        assert!(!context_within_admission_budget(&[(
+            "x".to_string(),
+            nested
+        )]));
     }
 
     const CACHE_SHA: &str = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
@@ -2514,10 +2630,11 @@ runs:
     fn workflow_sha_is_required_for_local_metadata_identity() {
         let context = vec![(
             "github".to_string(),
-            serde_json::json!({
+            ContextValue::from_json(serde_json::json!({
                 "repository": "acme/repo",
                 "sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-            }),
+            }))
+            .unwrap(),
         )];
         let job = job(serde_json::json!([repo_step(
             "./.github/actions/outer",
@@ -2679,10 +2796,11 @@ runs:
     fn malformed_local_workflow_ref_rejected_before_metadata_fetch() {
         let context = vec![(
             "github".to_string(),
-            serde_json::json!({
+            ContextValue::from_json(serde_json::json!({
                 "repository": "acme/repo",
                 "workflow_sha": "refs/heads/main"
-            }),
+            }))
+            .unwrap(),
         )];
         let job = job(serde_json::json!([repo_step(
             "./.github/actions/outer",
@@ -2868,12 +2986,13 @@ runs:
     fn reusable_workflow_mutable_ref_rejected() {
         let context = vec![(
             "github".to_string(),
-            serde_json::json!({
+            ContextValue::from_json(serde_json::json!({
                 "job_workflow_ref": "jackin-project/jackin-role-action/.github/workflows/publish.yml@refs/heads/main",
                 "workflow_ref": "acme/repo/.github/workflows/ci.yml@refs/heads/main",
                 "repository": "acme/repo",
                 "workflow_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-            }),
+            }))
+            .unwrap(),
         )];
         let job = job(serde_json::json!([]));
         let source = FakeMetadataSource::new(&[]);
@@ -2892,13 +3011,14 @@ runs:
         let publish_sha = "80a1acd07257a23b441c546e6fcad12239ef7626";
         let context = vec![(
             "github".to_string(),
-            serde_json::json!({
+            ContextValue::from_json(serde_json::json!({
                 "job_workflow_ref": format!("jackin-project/jackin-role-action/.github/workflows/publish.yml@{publish_sha}"),
                 "workflow_ref": "acme/repo/.github/workflows/ci.yml@refs/heads/main",
                 "job_workflow_sha": publish_sha,
                 "repository": "acme/repo",
                 "workflow_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-            }),
+            }))
+            .unwrap(),
         )];
         let job = job(serde_json::json!([]));
         let source = FakeMetadataSource::new(&[]);
@@ -2914,12 +3034,13 @@ runs:
         let publish_sha = "80a1acd07257a23b441c546e6fcad12239ef7626";
         let context = vec![(
             "github".to_string(),
-            serde_json::json!({
+            ContextValue::from_json(serde_json::json!({
                 "job_workflow_ref": format!("jackin-project/jackin-role-action/.github/workflows/publish.yml@{publish_sha}"),
                 "job_workflow_sha": publish_sha,
                 "repository": "acme/repo",
                 "workflow_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-            }),
+            }))
+            .unwrap(),
         )];
         let source = FakeMetadataSource::new(&[]);
         let error = admit_job(&job(serde_json::json!([])), &context, &source).unwrap_err();
@@ -2932,12 +3053,13 @@ runs:
         let publish_sha = "80a1acd07257a23b441c546e6fcad12239ef7626";
         let context = vec![(
             "github".to_string(),
-            serde_json::json!({
+            ContextValue::from_json(serde_json::json!({
                 "job_workflow_ref": format!("jackin-project/jackin-role-action/.github/workflows/publish.yml@{publish_sha}"),
                 "workflow_ref": "acme/repo/.github/workflows/ci.yml@refs/heads/main",
                 "workflow_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
                 "repository": "acme/repo"
-            }),
+            }))
+            .unwrap(),
         )];
         let source = FakeMetadataSource::new(&[]);
         let error = admit_job(&job(serde_json::json!([])), &context, &source).unwrap_err();
@@ -2949,12 +3071,13 @@ runs:
     fn reusable_workflow_malformed_identity_rejected() {
         let context = vec![(
             "github".to_string(),
-            serde_json::json!({
+            ContextValue::from_json(serde_json::json!({
                 "job_workflow_ref": "not-a-workflow-ref",
                 "workflow_ref": "acme/repo/.github/workflows/ci.yml@refs/heads/main",
                 "workflow_sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
                 "repository": "acme/repo"
-            }),
+            }))
+            .unwrap(),
         )];
         let source = FakeMetadataSource::new(&[]);
         let error = admit_job(&job(serde_json::json!([])), &context, &source).unwrap_err();
@@ -3013,10 +3136,11 @@ runs:
 
         let context = vec![(
             "github".to_string(),
-            serde_json::json!({
+            ContextValue::from_json(serde_json::json!({
                 "repository": "donbeave/essential-mac",
                 "workflow_sha": "f429698900d2a9b3639d5379d91ce3c940764f4b"
-            }),
+            }))
+            .unwrap(),
         )];
         let velnor_sha = "8b8f1cbe03427227e9d04301de530b3e744110f4";
         let job = job(serde_json::json!([repo_step(

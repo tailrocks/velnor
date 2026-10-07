@@ -783,6 +783,7 @@ mod tests {
             display_name: String::new(),
             clone_url: "https://github.com/acme/repo.git".into(),
             version: Some("abc123".into()),
+            pull_request_fallback_ref: None,
             destination: destination.to_path_buf(),
             token: Some("token".into()),
             fetch_depth: Some(1),

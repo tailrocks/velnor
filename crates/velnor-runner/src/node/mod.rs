@@ -26,3 +26,23 @@ pub use controller::{run as run_controller, ControllerArgs, ControllerLifecycle}
 pub use guardian::{run as run_guardian, GuardianArgs};
 pub use job::{run as run_job, JobArgs};
 pub use slot::{run as run_slot, SlotArgs};
+
+/// Service dispatch already acquired the package guard before telemetry and
+/// role work. Passing ownership here keeps the lock alive without opening a
+/// second flock for the same process.
+pub(crate) async fn run_slot_with_package_guard(
+    args: SlotArgs,
+    package_guard: crate::release::PackageExecutionGuard,
+) -> anyhow::Result<()> {
+    slot::run_with_package_guard(args, package_guard).await
+}
+
+/// Service dispatch already acquired the package guard before telemetry and
+/// role work. Passing ownership here keeps the lock alive without opening a
+/// second flock for the same process.
+pub(crate) async fn run_job_with_package_guard(
+    args: JobArgs,
+    package_guard: crate::release::PackageExecutionGuard,
+) -> anyhow::Result<()> {
+    job::run_with_package_guard(args, package_guard).await
+}

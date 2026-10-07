@@ -39,6 +39,11 @@ the pin's own source closure, then stamps the pin and regenerates the whole
 tree in a single commit; `--check` verifies the pinned generator renders the
 tree.
 
+Pin replacement atomically preserves only Rust's portable permission state:
+Unix mode bits or the Windows read-only flag. The staged inode gets ownership,
+group, ACL, and xattr metadata from normal OS/filesystem creation rules; custom
+metadata on the old inode is not copied. Rollback restores the captured inode.
+
 During candidate-renderer bootstrap, the exact legacy D19 pin
 `e988d793937c044275e4086b00856444c60f6ab8` keeps policy workflow output at
 the established byte shape. Promoting `[generator] revision` to the newer
@@ -124,6 +129,85 @@ and release/tag ownership are re-read; missing or mixed state is rejected before
 publication mutation. Migration of an older consumer release belongs in that
 consumer's release automation and must use `pre_publish_tasks` with a durable
 recovery contract.
+
+## `package-release` — configured release lanes
+
+`[[declare]] primitive = "package-release"` keeps build commands and asset
+names in the target repository configuration. `version_format` is required and
+typed: `"channel"` is for GitHub prereleases, and `"semver"` is for GitHub
+releases. A `preview` channel must be a prerelease; `stable` must be a release.
+Other channel names are allowed with either matching type and format. Unsupported
+type/format pairs fail generation.
+
+```toml
+[[declare]]
+primitive = "package-release"
+file = "package-release.yml"
+
+[declare.args]
+channel = "stable"
+version_format = "semver"
+manifest_format = "core-v1"
+release_tag = "stable"
+github_release_type = "release"
+# release_title_prefix = "Stable"          # defaults to channel with its first letter uppercased
+```
+
+With `version_format = "semver"`, the verifier accepts only plain SemVer
+(`MAJOR.MINOR.PATCH`), with no leading zeroes, prerelease suffix, or build
+metadata. With `version_format = "channel"`, it accepts only
+`MAJOR.MINOR.PATCH-<channel>.<sequence>+<seven-lowercase-commit-hex>`; its
+channel and source-commit suffix must match the configured channel and checked
+out source. Stable immutable releases are promoted to GitHub Latest only after
+the rolling-release preflight and refresh succeed. A prerelease never becomes
+Latest. The separate rolling release stays `make_latest=false`.
+
+Stable lanes use `manifest_format = "core-v1"` and the shared consumer
+manifest has exactly six keys:
+`assets`, `schema`, `source_commit`, `source_ref`, `source_repository`, and
+`version`. Prerelease lanes require
+`manifest_format = "supporting-assets-v1"` and at least one `supporting_assets`
+entry; that format adds the exact seventh `supporting_assets` key with the same
+`{name, sha256}` entry shape. `identity.json` always has exactly
+`manifest`, `source_digest`, `source_ref`, and `source_repository`; `manifest`
+must equal `release-manifest.json`, and the other identity values must match its
+source commit, ref, and repository. These shared checks are covered by stable
+six-key and preview seven-key consumer fixtures in
+`tests/fixtures/package-release/`.
+
+Before creating the source-bound immutable release, the publisher re-verifies
+the downloaded handoff and build attestations, then checks the current Latest
+floor and live rolling-release contract. Stale versions and incompatible
+rolling manifests or asset sets fail before a candidate release is created.
+
+Declared dot-prefixed asset names are supported. The generated upload includes
+hidden files, while verification compares the exact configured file set; its
+temporary inventory lives outside the downloaded asset directory. If a live
+rolling release has a different configured asset set or manifest shape, the
+workflow fails with a migration error before changing the release. Migrate its
+live assets or generate a compatible contract before retrying. An incomplete
+or incompatible rolling draft also fails before mutation; repair or remove it
+before retrying.
+
+The generated workflow uses a workflow-level concurrency group derived
+unconditionally from the mutable `release_tag`, so channels sharing a rolling
+tag cannot publish concurrently. A distinct global publish-job lock serializes
+release mutations across tags and queues up to 100 pending jobs. GitHub cancels
+additional jobs when that queue is full; rerun any canceled release lane after
+the queue drains. Stable immutable releases are promoted to GitHub Latest only
+after the rolling-release preflight and refresh succeed. The current Latest
+floor is accepted only when its manifest and identity envelope match the
+configured schema, source repository, and source ref, its tag matches the
+manifest commit, and both files verify against the configured workflow
+attestations. Rollback snapshots the release body without trimming bytes,
+including a trailing newline. If it cannot verify restored asset bytes, it
+restores the old tag object and safe release metadata, keeps the release as a
+draft, and reports rollback incomplete.
+Both jobs use Bash on a standard GitHub-hosted Ubuntu runner:
+`ubuntu-latest`, `ubuntu-22.04`, `ubuntu-24.04`, `ubuntu-26.04`, or their
+`-arm` variants for 22.04, 24.04, and 26.04. macOS, Windows, slim Ubuntu, and
+multi-label runner selectors fail validation because publication uses Bash and
+GNU package-verification tools.
 
 ## `[renovate]` — self-hosted dependency updates
 

@@ -44,11 +44,13 @@
 //! record kinds.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -57,7 +59,7 @@ use sha2::{Digest, Sha256};
 use crate::args::{
     ReleaseActivateArgs, ReleaseArgs, ReleaseAssembleArgs, ReleaseCommand, ReleaseEmitArgs,
     ReleaseExportArgs, ReleaseRollbackArgs, ReleaseVerifyInstalledArgs, ReleaseVerifyRecordArgs,
-    INSTALLED_BINARY_PATH,
+    ACTIVE_DEPLOYED_PATH, ACTIVE_RECORD_PATH, ACTIVE_RELEASE_DIR, INSTALLED_BINARY_PATH,
 };
 
 /// Schema tags. A consumer refuses an unknown shape before trusting any field.
@@ -76,6 +78,43 @@ pub const PACKAGE_RECORD_SCHEMA: &str = "velnor.package-record/v1";
 /// release record to activate.
 pub const PACKAGE_KIND_STABLE: &str = "stable";
 pub const PACKAGE_KIND_PREVIEW: &str = "preview";
+
+/// All package lifecycle writers and executable runner roles coordinate on
+/// this one host-wide lock. Runner entrypoints hold it shared for process
+/// lifetime; pointer transitions take it exclusive before inspecting or
+/// mutating state.
+const PACKAGE_TRANSACTION_LOCK: &str = "/run/velnor/package-transaction.lock";
+const DEBIAN_PACKAGE_NAME: &str = "velnor-runner";
+
+static EXTERNAL_OUTPUT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+/// Package channels and embedded build kinds use different vocabularies:
+/// a tagged `release` build emits a `stable` package, while a `preview`
+/// build emits a `preview` package. Keep that conversion at one boundary.
+#[derive(Clone, Copy)]
+enum PackageKind {
+    Stable,
+    Preview,
+}
+
+impl PackageKind {
+    fn from_identity(identity: &EmbeddedIdentity) -> Option<Self> {
+        if identity.source_sha == "development" {
+            return None;
+        }
+        match identity.kind.as_str() {
+            "release" => Some(Self::Stable),
+            "preview" => Some(Self::Preview),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => PACKAGE_KIND_STABLE,
+            Self::Preview => PACKAGE_KIND_PREVIEW,
+        }
+    }
+}
 
 /// Canonical source repository the release chain is anchored to.
 pub const SOURCE_REPOSITORY: &str = "tailrocks/velnor";
@@ -106,7 +145,7 @@ pub fn embedded() -> EmbeddedIdentity {
         source_sha: env!("VELNOR_SOURCE_SHA").to_string(),
         tag: env!("VELNOR_SOURCE_TAG").to_string(),
         kind: env!("VELNOR_BUILD_KIND").to_string(),
-        crate_version: env!("CARGO_PKG_VERSION").to_string(),
+        crate_version: env!("VELNOR_BUILD_VERSION").to_string(),
     }
 }
 
@@ -376,7 +415,8 @@ pub struct PackageRecord {
 pub struct PackageBuildIdentity {
     pub repository: String,
     /// [`PACKAGE_KIND_STABLE`] or [`PACKAGE_KIND_PREVIEW`]. Emission refuses a
-    /// record whose kind is not the emitting binary's own embedded build kind.
+    /// record whose channel does not match the emitting binary's build kind:
+    /// `release` builds emit `stable` packages; `preview` builds emit previews.
     pub kind: String,
     pub commit: SourceSha,
     pub crate_version: String,
@@ -1020,6 +1060,64 @@ pub fn verify_installed(
     Ok(())
 }
 
+/// Require the package manager's installed version to name the same tuple as
+/// the release record. Binary digests alone cannot distinguish two Debian
+/// packages that carry identical runner bytes but publish different preview
+/// versions.
+fn verify_installed_package_version(
+    record: &ActiveRecord,
+    installed_package_version: &str,
+) -> Result<()> {
+    if installed_package_version != record.package_version() {
+        bail!("installed Debian package version does not match release record");
+    }
+    Ok(())
+}
+
+fn installed_debian_package_version() -> Result<String> {
+    let output = Command::new("dpkg-query")
+        .args([
+            "--show",
+            "--showformat=${Status}\\t${Version}",
+            DEBIAN_PACKAGE_NAME,
+        ])
+        .output()
+        .context("query installed velnor-runner Debian package version")?;
+    if !output.status.success() {
+        bail!("dpkg-query could not read the installed velnor-runner package version");
+    }
+    let output = String::from_utf8(output.stdout)
+        .context("dpkg-query returned a non-UTF-8 package identity")?;
+    parse_installed_debian_package_version(&output)
+}
+
+fn parse_installed_debian_package_version(output: &str) -> Result<String> {
+    // `dpkg-query` may append its regular per-package line terminator even
+    // when the custom format omits one.
+    let output = output.strip_suffix('\n').unwrap_or(output);
+    let (status, version) = output
+        .split_once('\t')
+        .context("dpkg-query returned an incomplete package identity")?;
+    let mut status_fields = status.split_whitespace();
+    let (Some(_wanted), Some(error), Some(current), None) = (
+        status_fields.next(),
+        status_fields.next(),
+        status_fields.next(),
+        status_fields.next(),
+    ) else {
+        bail!("dpkg-query returned an invalid package status");
+    };
+    if error != "ok"
+        || current != "installed"
+        || version.is_empty()
+        || version.contains('\n')
+        || version.contains('\r')
+    {
+        bail!("velnor-runner is not fully installed or has no Debian package version");
+    }
+    Ok(version.to_owned())
+}
+
 /// Prove that an APT [`PublicationRecord`] promotes exactly this source record:
 /// its `source_record_sha256` points AT the record digest (wrapper→record edge),
 /// its versions agree, and its previous pointer is a *different* release. This is
@@ -1381,8 +1479,8 @@ pub struct PackageRecordEmission<'a> {
     pub binary: &'a Path,
 }
 
-/// Emit a deb's own package record. The record's `kind` must be the emitting
-/// binary's own embedded build kind: a preview record only ever comes from a
+/// Emit a deb's own package record. Its channel must correspond to the emitting
+/// binary's build kind: a preview record only ever comes from a
 /// binary bound to the exact preview commit (`VELNOR_PREVIEW_SOURCE_SHA`), a
 /// stable package record only from a tagged `release-build` binary. A
 /// development binary emits nothing, so no package record can be produced from
@@ -1397,17 +1495,15 @@ pub fn emit_package_record(emission: PackageRecordEmission<'_>) -> Result<()> {
     // build is deliberately not a release build), but never from a development
     // build, whose bytes name no source at all. This is strictly weaker than
     // [`EmbeddedIdentity::is_development`] only in allowing kind=preview.
-    if identity.source_sha == "development"
-        || (identity.kind != "release" && identity.kind != PACKAGE_KIND_PREVIEW)
-    {
+    let Some(package_kind) = PackageKind::from_identity(identity) else {
         bail!(
             "refusing to emit a package record from a development build \
              (source={}, kind={}); build with --features release-build",
             identity.source_sha,
             identity.kind
         );
-    }
-    if record.build.kind != identity.kind {
+    };
+    if record.build.kind != package_kind.as_str() {
         bail!(
             "package record kind {} does not match this binary's embedded build kind {}",
             record.build.kind,
@@ -1460,6 +1556,201 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// A pinned output directory and leaf name. External release outputs may use
+/// symlinked parent paths, but the opened directory is held through both the
+/// alias check and dirfd-relative atomic writes so a later symlink swap cannot
+/// redirect output into the live store.
+#[derive(Debug)]
+struct ExternalOutputTarget {
+    directory: fs::File,
+    file_name: OsString,
+}
+
+impl ExternalOutputTarget {
+    fn open(path: &Path, live_store_root: &Path) -> Result<Self> {
+        let file_name = path
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .context("release output path has no file name")?
+            .to_os_string();
+        let requested_parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let canonical_parent = fs::canonicalize(requested_parent).with_context(|| {
+            format!(
+                "resolve release output directory {}",
+                requested_parent.display()
+            )
+        })?;
+
+        let canonical_live_store = match fs::canonicalize(live_store_root) {
+            Ok(path) => Some(path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("resolve live release store {}", live_store_root.display())
+                });
+            }
+        };
+        if let Some(root) = &canonical_live_store
+            && canonical_parent.starts_with(root)
+        {
+            bail!(
+                "release output {} resolves inside live release store {}",
+                path.display(),
+                root.display()
+            );
+        }
+
+        let directory =
+            open_absolute_directory_no_follow(&canonical_parent).with_context(|| {
+                format!(
+                    "pin release output directory {}",
+                    canonical_parent.display()
+                )
+            })?;
+        Ok(Self {
+            directory,
+            file_name,
+        })
+    }
+
+    fn write(&self, bytes: &[u8]) -> Result<()> {
+        write_atomic_at(&self.directory, &self.file_name, bytes)
+    }
+
+    fn write_named(&self, file_name: &std::ffi::OsStr, bytes: &[u8]) -> Result<()> {
+        write_atomic_at(&self.directory, file_name, bytes)
+    }
+}
+
+fn open_absolute_directory_no_follow(path: &Path) -> Result<fs::File> {
+    use std::path::Component;
+
+    if !path.is_absolute() {
+        bail!(
+            "release output directory is not absolute: {}",
+            path.display()
+        );
+    }
+    let root = rustix::fs::openat(
+        rustix::fs::CWD,
+        Path::new("/"),
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(std::io::Error::from)
+    .context("open filesystem root for release output")?;
+    let mut current: fs::File = root.into();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => {
+                let child = rustix::fs::openat(
+                    &current,
+                    Path::new(name),
+                    rustix::fs::OFlags::RDONLY
+                        | rustix::fs::OFlags::DIRECTORY
+                        | rustix::fs::OFlags::NOFOLLOW
+                        | rustix::fs::OFlags::CLOEXEC,
+                    rustix::fs::Mode::empty(),
+                )
+                .map_err(std::io::Error::from)
+                .with_context(|| {
+                    format!("open release output directory component {}", path.display())
+                })?;
+                current = child.into();
+            }
+            Component::ParentDir | Component::Prefix(_) => {
+                bail!(
+                    "release output directory is not normalized: {}",
+                    path.display()
+                );
+            }
+        }
+    }
+    Ok(current)
+}
+
+fn write_atomic_at(directory: &fs::File, file_name: &std::ffi::OsStr, bytes: &[u8]) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    if file_name.as_bytes().is_empty() || file_name.as_bytes().contains(&b'/') {
+        bail!("release output file name is not a single path component");
+    }
+
+    let (temporary_name, mut temporary_file) = loop {
+        let id = EXTERNAL_OUTPUT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let name = OsString::from(format!(
+            ".velnor-release-output-{}-{id}.tmp",
+            std::process::id()
+        ));
+        match rustix::fs::openat(
+            directory,
+            Path::new(&name),
+            rustix::fs::OFlags::WRONLY
+                | rustix::fs::OFlags::CREATE
+                | rustix::fs::OFlags::EXCL
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::from_raw_mode(0o666),
+        ) {
+            Ok(file) => break (name, fs::File::from(file)),
+            Err(rustix::io::Errno::EXIST) => continue,
+            Err(error) => {
+                return Err(std::io::Error::from(error))
+                    .with_context(|| "create temporary release output in pinned directory");
+            }
+        }
+    };
+
+    let temporary_path = Path::new(&temporary_name);
+    let write_result = (|| -> Result<()> {
+        temporary_file.write_all(bytes)?;
+        temporary_file.sync_all()?;
+        rustix::fs::renameat(directory, temporary_path, directory, Path::new(file_name))
+            .map_err(std::io::Error::from)
+            .context("atomically publish release output in pinned directory")?;
+        let _ = directory.sync_all();
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = rustix::fs::unlinkat(directory, temporary_path, rustix::fs::AtFlags::empty());
+    }
+    write_result
+}
+
+fn write_external_output_pair(
+    path: &Path,
+    bytes: &[u8],
+    checksum: &[u8],
+    live_store_root: &Path,
+) -> Result<()> {
+    let checksum_path = path.with_extension("json.sha256");
+    let checksum_name = checksum_path
+        .file_name()
+        .context("release output checksum path has no file name")?;
+    let target = ExternalOutputTarget::open(path, live_store_root)?;
+    if target.file_name == checksum_name {
+        bail!("release output and checksum paths collide");
+    }
+    target.write(bytes)?;
+    target.write_named(checksum_name, checksum)?;
+    Ok(())
+}
+
+fn live_release_store_root() -> Result<PathBuf> {
+    Path::new(ACTIVE_RECORD_PATH)
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .context("active release record path has no store root")
+}
+
 /// Compute a file's SHA-256 without slurping it whole.
 pub fn sha256_file(path: &Path) -> Result<Sha256Hex> {
     let mut file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
@@ -1473,6 +1764,124 @@ pub fn sha256_file(path: &Path) -> Result<Sha256Hex> {
         hasher.update(&buffer[..read]);
     }
     Ok(Sha256Hex(hex_lower(&hasher.finalize())))
+}
+
+/// Proof that the caller owns the host-wide exclusive package transaction
+/// lock. Pointer mutation methods require this guard, so a release transition
+/// cannot accidentally bypass serialization with the long-running services.
+#[derive(Debug)]
+pub(crate) struct PackageTransactionLock {
+    _file: fs::File,
+}
+
+impl PackageTransactionLock {
+    fn exclusive_at(path: &Path) -> Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .with_context(|| format!("open package transaction lock {}", path.display()))?;
+        if !file.metadata()?.is_file() {
+            bail!(
+                "package transaction lock {} is not a regular file",
+                path.display()
+            );
+        }
+        match rustix::fs::flock(
+            &file,
+            rustix::fs::FlockOperation::NonBlockingLockExclusive,
+        ) {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(rustix::io::Errno::WOULDBLOCK) => bail!(
+                "package transaction lock {} is busy; stop and drain Velnor services or wait for another package transaction before changing live package state",
+                path.display()
+            ),
+            Err(error) => Err(anyhow::Error::new(error).context(format!(
+                "acquire exclusive package transaction lock {}",
+                path.display()
+            ))),
+        }
+    }
+}
+
+/// Shared package lock and active-tuple proof for packaged runner entrypoints.
+/// Keep this guard alive for the full operation. Systemd role units dispatch
+/// directly so this process-owned lock is the single ownership boundary.
+#[must_use = "hold this guard for the full packaged operation"]
+pub struct PackageExecutionGuard {
+    _shared_lock: Option<fs::File>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PackageExecutionBinary {
+    Runner,
+    OperatorCli,
+}
+
+/// Acquire the package lock and prove the installed tuple before a direct
+/// velnorctl execution path. Exact development builds return a no-op guard.
+pub fn package_execution_guard() -> Result<PackageExecutionGuard> {
+    package_execution_guard_for_binary(PackageExecutionBinary::OperatorCli)
+}
+
+/// Acquire the package lock and prove the installed tuple before a
+/// systemd-dispatched `velnor-runner` role runs. Role units carry no outer
+/// flock: this process-lifetime guard is the single ownership boundary, and
+/// the tuple proof runs inside it so verification and exec cannot straddle
+/// a package transaction. Exact development builds return a no-op guard.
+pub fn package_runner_execution_guard() -> Result<PackageExecutionGuard> {
+    package_execution_guard_for_binary(PackageExecutionBinary::Runner)
+}
+
+fn package_execution_guard_for_binary(
+    binary: PackageExecutionBinary,
+) -> Result<PackageExecutionGuard> {
+    let identity = embedded();
+    package_execution_guard_for(&identity, Path::new(PACKAGE_TRANSACTION_LOCK), || {
+        verify_installed_for_service(binary)
+    })
+}
+
+fn package_execution_guard_for(
+    identity: &EmbeddedIdentity,
+    lock_path: &Path,
+    verify: impl FnOnce() -> Result<()>,
+) -> Result<PackageExecutionGuard> {
+    if !service_identity_requires_installed_tuple(identity)? {
+        return Ok(PackageExecutionGuard { _shared_lock: None });
+    }
+
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(lock_path)
+        .with_context(|| format!("open package transaction lock {}", lock_path.display()))?;
+    if !file.metadata()?.is_file() {
+        bail!(
+            "package transaction lock {} is not a regular file",
+            lock_path.display()
+        );
+    }
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockShared)
+        .map_err(std::io::Error::from)
+        .with_context(|| {
+            format!(
+                "acquire shared package transaction lock {}",
+                lock_path.display()
+            )
+        })?;
+
+    let guard = PackageExecutionGuard {
+        _shared_lock: Some(file),
+    };
+    verify()?;
+    Ok(guard)
 }
 
 /// The transactional pointer set under a release directory:
@@ -1494,6 +1903,7 @@ impl ReleaseStore {
     pub fn deployed_path(&self, key: &str) -> PathBuf {
         self.root.join("records").join(key).join("deployed.json")
     }
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn read_record(&self, key: &str) -> Result<ActiveRecord> {
         let path = self.record_path(key);
         let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
@@ -1516,7 +1926,11 @@ impl ReleaseStore {
     /// Persist an immutable record + sidecar checksum. Refuses to overwrite an
     /// existing record whose bytes differ (no clobber); an exact re-write is a
     /// no-op success.
-    pub fn store_record(&self, record: &ActiveRecord) -> Result<Sha256Hex> {
+    pub(crate) fn store_record(
+        &self,
+        record: &ActiveRecord,
+        _transaction_lock: &PackageTransactionLock,
+    ) -> Result<Sha256Hex> {
         let key = record.store_key();
         validate_store_key(key)?;
         let bytes = record.to_canonical_json();
@@ -1550,9 +1964,17 @@ impl ReleaseStore {
     }
 
     /// Atomically make `key` active, demoting the current active key to
-    /// `previous`. The record for `key` must already be stored.
-    pub fn activate(&self, record: &ActiveRecord, deployed: &DeployedIdentity) -> Result<()> {
+    /// `previous`. The record for `key` must already be stored, and the caller
+    /// must hold the exclusive package transaction lock.
+    pub(crate) fn activate(
+        &self,
+        record: &ActiveRecord,
+        deployed: &DeployedIdentity,
+        transaction_lock: &PackageTransactionLock,
+        installed_package_version: &str,
+    ) -> Result<()> {
         let key = record.store_key();
+        verify_installed_package_version(record, installed_package_version)?;
         verify_installed(
             deployed,
             record,
@@ -1560,7 +1982,7 @@ impl ReleaseStore {
             &deployed.binary_sha256,
         )
         .map_err(anyhow::Error::from)?;
-        self.store_record(record)?;
+        self.store_record(record, transaction_lock)?;
         let deployed_bytes = serde_json::to_vec_pretty(deployed)?;
         let deployed_path = self.deployed_path(key);
         if deployed_path.exists() {
@@ -1580,14 +2002,58 @@ impl ReleaseStore {
     }
 
     /// Restore the previous coherent tag as active. Requires a recorded previous
-    /// tuple whose record is still present.
-    pub fn rollback(&self) -> Result<String> {
+    /// tuple whose record is still present and the exclusive package transaction
+    /// lock.
+    pub(crate) fn rollback(
+        &self,
+        _transaction_lock: &PackageTransactionLock,
+        installed_binary: &Path,
+        installed_package_version: &str,
+        verify_before_mutation: impl FnOnce(&ActiveRecord) -> Result<()>,
+    ) -> Result<String> {
         let previous = self
             .previous_tag()?
             .context("no previous tag recorded — cannot roll back")?;
-        if !self.record_path(&previous).exists() || !self.deployed_path(&previous).exists() {
-            bail!("cannot roll back to {previous}: its record is missing");
+        let record_path = self.record_path(&previous);
+        let record_bytes = fs::read(&record_path)
+            .with_context(|| format!("read rollback record {}", record_path.display()))?;
+        let record = ActiveRecord::parse(&record_bytes)
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("parse rollback record {}", record_path.display()))?;
+        if record.to_canonical_json().as_bytes() != record_bytes {
+            bail!("rollback record for {previous} is not canonical");
         }
+        record.verify().map_err(anyhow::Error::from)?;
+        verify_installed_package_version(&record, installed_package_version)?;
+        if record.store_key() != previous {
+            bail!("rollback record key disagrees with its directory");
+        }
+        if matches!(&record, ActiveRecord::Package(package) if package.build.kind != PACKAGE_KIND_PREVIEW)
+        {
+            bail!("a stable package record cannot be a rollback target");
+        }
+
+        let deployed_path = self.deployed_path(&previous);
+        let deployed_bytes = fs::read(&deployed_path).with_context(|| {
+            format!(
+                "read rollback deployed identity {}",
+                deployed_path.display()
+            )
+        })?;
+        let deployed: DeployedIdentity =
+            serde_json::from_slice(&deployed_bytes).with_context(|| {
+                format!(
+                    "parse rollback deployed identity {}",
+                    deployed_path.display()
+                )
+            })?;
+        let host = Arch::host().context("unsupported host architecture")?;
+        let installed = sha256_file(installed_binary)?;
+        verify_installed(&deployed, &record, host, &installed)
+            .map_err(anyhow::Error::from)
+            .context("refusing rollback to an incoherent installed tuple")?;
+        verify_before_mutation(&record)?;
+
         if let Some(current) = self.active_tag()? {
             write_atomic_symlink(&self.previous_path(), &current)?;
         }
@@ -1724,6 +2190,10 @@ fn is_safe_path_component(value: &str) -> bool {
 }
 
 fn emit_command(args: ReleaseEmitArgs) -> Result<()> {
+    emit_command_with_lock_path(args, Path::new(PACKAGE_TRANSACTION_LOCK))
+}
+
+fn emit_command_with_lock_path(args: ReleaseEmitArgs, lock_path: &Path) -> Result<()> {
     let record = read_active_record_file(&args.record)?;
     let identity = embedded();
     match &record {
@@ -1743,16 +2213,26 @@ fn emit_command(args: ReleaseEmitArgs) -> Result<()> {
     let canonical = record.to_canonical_json();
     let digest = Sha256Hex::of_bytes(canonical.as_bytes());
     if let Some(out) = &args.out {
-        write_atomic(out, canonical.as_bytes())?;
-        write_atomic(
-            &out.with_extension("json.sha256"),
+        write_external_output_pair(
+            out,
+            canonical.as_bytes(),
             format!("{digest}\n").as_bytes(),
+            &live_release_store_root()?,
         )?;
     } else {
-        ReleaseStore::new(&args.out_dir).store_record(&record)?;
+        store_live_record_with_lock_path(&ReleaseStore::new(&args.out_dir), &record, lock_path)?;
     }
     println!("{digest}");
     Ok(())
+}
+
+fn store_live_record_with_lock_path(
+    store: &ReleaseStore,
+    record: &ActiveRecord,
+    lock_path: &Path,
+) -> Result<Sha256Hex> {
+    let transaction_lock = PackageTransactionLock::exclusive_at(lock_path)?;
+    store.store_record(record, &transaction_lock)
 }
 
 fn assemble_command(args: ReleaseAssembleArgs) -> Result<()> {
@@ -1814,10 +2294,11 @@ fn assemble_command(args: ReleaseAssembleArgs) -> Result<()> {
     let canonical = record.to_canonical_json();
     let digest = Sha256Hex::of_bytes(canonical.as_bytes());
     if let Some(out) = &args.out {
-        write_atomic(out, canonical.as_bytes())?;
-        write_atomic(
-            &out.with_extension("json.sha256"),
+        write_external_output_pair(
+            out,
+            canonical.as_bytes(),
             format!("{digest}\n").as_bytes(),
+            &live_release_store_root()?,
         )?;
     }
     println!("{digest}");
@@ -1966,19 +2447,174 @@ fn verify_package_record_command(
 }
 
 fn verify_installed_command(args: ReleaseVerifyInstalledArgs) -> Result<()> {
+    let installed_package_version = installed_debian_package_version()?;
+    verify_installed_command_with_package_version(args, &installed_package_version)
+}
+
+fn verify_installed_command_with_package_version(
+    args: ReleaseVerifyInstalledArgs,
+    installed_package_version: &str,
+) -> Result<()> {
+    let record = verify_installed_args(&args)?;
+    verify_installed_package_version(&record, installed_package_version)?;
+    println!("installed velnor-runner is coherent with the active release record");
+    Ok(())
+}
+
+fn verify_installed_args(args: &ReleaseVerifyInstalledArgs) -> Result<ActiveRecord> {
     let record = read_active_record_file(&args.record)?;
     let deployed_bytes = fs::read(&args.deployed)
         .with_context(|| format!("read deployed identity {}", args.deployed.display()))?;
     let deployed: DeployedIdentity = serde_json::from_slice(&deployed_bytes)
         .with_context(|| format!("parse deployed identity {}", args.deployed.display()))?;
-    let host = match args.arch {
+    let host = match &args.arch {
         Some(arch) => arch.parse()?,
         None => Arch::host().context("unsupported host architecture")?,
     };
     let installed = sha256_file(&args.binary)?;
     verify_installed(&deployed, &record, host, &installed).map_err(anyhow::Error::from)?;
-    println!("installed velnor-runner is coherent with the active release record");
+    Ok(record)
+}
+
+/// Verify the installed tuple for a packaged runner role. Development builds
+/// remain directly runnable without a package store; release and preview builds
+/// must prove the active record, deployed identity, and installed binary agree.
+fn verify_installed_for_service(binary: PackageExecutionBinary) -> Result<()> {
+    let identity = embedded();
+    if !service_identity_requires_installed_tuple(&identity)? {
+        return Ok(());
+    }
+
+    let args = ReleaseVerifyInstalledArgs {
+        record: PathBuf::from(ACTIVE_RECORD_PATH),
+        deployed: PathBuf::from(ACTIVE_DEPLOYED_PATH),
+        binary: PathBuf::from(INSTALLED_BINARY_PATH),
+        arch: None,
+    };
+    let record = verify_installed_args(&args)?;
+    let installed_package_version = installed_debian_package_version()?;
+    verify_installed_package_version(&record, &installed_package_version)?;
+    verify_active_record_key(&record)?;
+    verify_embedded_identity_matches_record(
+        &identity,
+        &record,
+        crate::manifest::MANIFEST_VERSION,
+        Sha256Hex::of_bytes(crate::manifest::to_json_document()?.as_bytes()),
+    )?;
+    verify_running_executable_image(&record, binary)?;
     Ok(())
+}
+
+fn verify_active_record_key(record: &ActiveRecord) -> Result<()> {
+    let active_link = Path::new(ACTIVE_RELEASE_DIR).join("active");
+    verify_active_record_key_at(&active_link, record)
+}
+
+fn verify_active_record_key_at(active_link: &Path, record: &ActiveRecord) -> Result<()> {
+    let active_target = fs::read_link(active_link)
+        .with_context(|| format!("read active release pointer {}", active_link.display()))?;
+    let expected_target = Path::new("records").join(record.store_key());
+    if active_target != expected_target {
+        bail!(
+            "active release pointer target {} does not match record key {}",
+            active_target.display(),
+            expected_target.display(),
+        );
+    }
+    Ok(())
+}
+
+fn verify_embedded_identity_matches_record(
+    identity: &EmbeddedIdentity,
+    record: &ActiveRecord,
+    manifest_version: u32,
+    manifest_sha256: Sha256Hex,
+) -> Result<()> {
+    let (kind, tag) = match record {
+        ActiveRecord::Release(record) => ("release", record.build.tag.as_str()),
+        ActiveRecord::Package(record) if record.build.kind == PACKAGE_KIND_PREVIEW => {
+            (PACKAGE_KIND_PREVIEW, "preview")
+        }
+        ActiveRecord::Package(_) => {
+            bail!("a stable package record cannot be the active runner identity")
+        }
+    };
+    if identity.kind != kind {
+        bail!(
+            "running build kind {} does not match active record kind {kind}",
+            identity.kind
+        );
+    }
+    if identity.source_sha != record.source_commit().as_str() {
+        bail!("running source commit does not match the active record");
+    }
+    if identity.tag != tag {
+        bail!("running source tag does not match the active record");
+    }
+    if identity.crate_version != record.crate_version() {
+        bail!("running crate version does not match the active record");
+    }
+    if manifest_version != record.manifest_version() {
+        bail!("running manifest version does not match the active record");
+    }
+    if &manifest_sha256 != record.manifest_sha256() {
+        bail!("running compiled manifest does not match the active record");
+    }
+    Ok(())
+}
+
+/// Hash the mapped runner image without trusting its executable name.
+/// `/proc/self/exe` identifies the inode actually running even if the pathname
+/// was changed or unlinked after exec. The package record does not carry a
+/// separate velnorctl digest, so ctl paths bind their embedded identity and
+/// compiled manifest above and skip this runner-only byte comparison.
+#[cfg(target_os = "linux")]
+fn verify_running_executable_image(
+    record: &ActiveRecord,
+    binary: PackageExecutionBinary,
+) -> Result<()> {
+    verify_running_executable_image_at(record, binary, Path::new("/proc/self/exe"))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn verify_running_executable_image_at(
+    record: &ActiveRecord,
+    binary: PackageExecutionBinary,
+    executable: &Path,
+) -> Result<()> {
+    if let PackageExecutionBinary::Runner = binary {
+        verify_runner_binary_path(record, executable)?;
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn verify_runner_binary_path(record: &ActiveRecord, executable: &Path) -> Result<()> {
+    let host = Arch::host().context("unsupported host architecture")?;
+    let expected = record
+        .binary_sha256(host)
+        .context("active record has no runner binary for this host")?;
+    let running = sha256_file(executable)?;
+    if &running != expected {
+        bail!("running velnor-runner image does not match the active record");
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn verify_running_executable_image(
+    _record: &ActiveRecord,
+    _binary: PackageExecutionBinary,
+) -> Result<()> {
+    Ok(())
+}
+
+fn service_identity_requires_installed_tuple(identity: &EmbeddedIdentity) -> Result<bool> {
+    match (identity.kind.as_str(), identity.source_sha.as_str()) {
+        ("development", "development") => Ok(false),
+        ("release" | "preview", source_sha) if source_sha != "development" => Ok(true),
+        (kind, _) => bail!("unsupported embedded runner build identity kind={kind:?}"),
+    }
 }
 
 fn docker_output(args: &[&str]) -> Result<Vec<u8>> {
@@ -2048,6 +2684,31 @@ fn verify_and_tag_release_image(record: &ReleaseRecord) -> Result<()> {
 }
 
 fn activate_command(args: ReleaseActivateArgs) -> Result<()> {
+    activate_command_with_lock_path(args, Path::new(PACKAGE_TRANSACTION_LOCK))
+}
+
+fn activate_command_with_lock_path(args: ReleaseActivateArgs, lock_path: &Path) -> Result<()> {
+    let transaction_lock = PackageTransactionLock::exclusive_at(lock_path)?;
+    activate_command_with_lock(args, &transaction_lock)
+}
+
+fn activate_command_with_lock(
+    args: ReleaseActivateArgs,
+    transaction_lock: &PackageTransactionLock,
+) -> Result<()> {
+    let installed_package_version = installed_debian_package_version()?;
+    activate_command_with_lock_and_package_version(
+        args,
+        transaction_lock,
+        &installed_package_version,
+    )
+}
+
+fn activate_command_with_lock_and_package_version(
+    args: ReleaseActivateArgs,
+    transaction_lock: &PackageTransactionLock,
+    installed_package_version: &str,
+) -> Result<()> {
     let record = read_active_record_file(&args.record)?;
     record.verify().map_err(anyhow::Error::from)?;
     let host = Arch::host().context("unsupported host architecture")?;
@@ -2081,6 +2742,7 @@ fn activate_command(args: ReleaseActivateArgs) -> Result<()> {
             package.architecture.binary_sha256.clone()
         }
     };
+    verify_installed_package_version(&record, installed_package_version)?;
     let installed_binary = Path::new(INSTALLED_BINARY_PATH);
     let binary_sha256 = sha256_file(installed_binary)?;
     if binary_sha256 != expected_binary {
@@ -2108,25 +2770,84 @@ fn activate_command(args: ReleaseActivateArgs) -> Result<()> {
     verify_installed(&deployed, &record, host, &deployed.binary_sha256)
         .map_err(anyhow::Error::from)?;
     let store = ReleaseStore::new(&args.dir);
-    store.activate(&record, &deployed)?;
+    store.activate(
+        &record,
+        &deployed,
+        transaction_lock,
+        installed_package_version,
+    )?;
     println!("activated {}", record.label());
     Ok(())
 }
 
 fn rollback_command(args: ReleaseRollbackArgs) -> Result<()> {
+    rollback_command_with_lock_path(args, Path::new(PACKAGE_TRANSACTION_LOCK))
+}
+
+fn rollback_command_with_lock_path(args: ReleaseRollbackArgs, lock_path: &Path) -> Result<()> {
+    let transaction_lock = PackageTransactionLock::exclusive_at(lock_path)?;
+    rollback_command_with_lock(args, &transaction_lock)
+}
+
+#[cfg(test)]
+fn rollback_command_with_lock_path_and_binary(
+    args: ReleaseRollbackArgs,
+    lock_path: &Path,
+    installed_binary: &Path,
+    installed_package_version: &str,
+) -> Result<()> {
+    let transaction_lock = PackageTransactionLock::exclusive_at(lock_path)?;
+    rollback_command_with_lock_and_package_version(
+        args,
+        &transaction_lock,
+        installed_binary,
+        installed_package_version,
+    )
+}
+
+fn rollback_command_with_lock(
+    args: ReleaseRollbackArgs,
+    transaction_lock: &PackageTransactionLock,
+) -> Result<()> {
+    rollback_command_with_lock_and_binary(args, transaction_lock, Path::new(INSTALLED_BINARY_PATH))
+}
+
+fn rollback_command_with_lock_and_binary(
+    args: ReleaseRollbackArgs,
+    transaction_lock: &PackageTransactionLock,
+    installed_binary: &Path,
+) -> Result<()> {
+    let installed_package_version = installed_debian_package_version()?;
+    rollback_command_with_lock_and_package_version(
+        args,
+        transaction_lock,
+        installed_binary,
+        &installed_package_version,
+    )
+}
+
+fn rollback_command_with_lock_and_package_version(
+    args: ReleaseRollbackArgs,
+    transaction_lock: &PackageTransactionLock,
+    installed_binary: &Path,
+    installed_package_version: &str,
+) -> Result<()> {
     let store = ReleaseStore::new(&args.dir);
-    let previous = store
-        .previous_tag()?
-        .context("no previous release is available")?;
-    let record = store.read_record(&previous)?;
     // A rollback changes both halves of the runtime tuple while the fleet is
-    // drained: first make the exact prior image locally runnable, then switch
-    // the filesystem pointer. Any verification failure leaves active unchanged.
-    // A preview package tuple has no image to restore.
-    if let ActiveRecord::Release(release) = &record {
-        verify_and_tag_release_image(release)?;
-    }
-    let restored = store.rollback()?;
+    // drained: verify the stored record, deployed identity and currently
+    // installed runner against the prospective tuple; restore its image; then
+    // switch pointers. Any verification failure leaves active unchanged.
+    let restored = store.rollback(
+        transaction_lock,
+        installed_binary,
+        installed_package_version,
+        |record| {
+            if let ActiveRecord::Release(release) = record {
+                verify_and_tag_release_image(release)?;
+            }
+            Ok(())
+        },
+    )?;
     println!("rolled back to {restored}");
     Ok(())
 }

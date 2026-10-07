@@ -6,6 +6,8 @@
 //! field is invalid (August 24 class: registration without repo access).
 
 use anyhow::{bail, Context, Result};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use sha2::{Digest, Sha256};
 use std::process::Child;
 use std::{
     collections::BTreeSet,
@@ -138,6 +140,615 @@ pub fn pid_is_alive(pid: u32) -> bool {
     result == 0
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobWorkerProcessProof {
+    /// PID, executable, slot identity, generation, and launch nonce all match.
+    Current,
+    /// This is the same slot worker, but its launch nonce has been superseded.
+    StaleSameWorker,
+    /// PID is dead or belongs to a different command/slot/generation.
+    OtherProcess,
+    /// Process exists but its identity cannot be read reliably.
+    Unknown,
+}
+
+/// Stable identity material for an owned-process marker. PID is included by
+/// the marker caller; this value binds it to process start plus executable
+/// file identity so a recycled PID cannot inherit the prior ownership record.
+#[must_use]
+pub fn process_instance_identity(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let proc = format!("/proc/{pid}");
+        let start_before = linux_process_start_time(pid)?;
+        let executable_before = std::fs::read_link(format!("{proc}/exe")).ok()?;
+        let metadata = std::fs::metadata(format!("{proc}/exe")).ok()?;
+        let start_after = linux_process_start_time(pid)?;
+        let executable_after = std::fs::read_link(format!("{proc}/exe")).ok()?;
+        if start_before != start_after || executable_before != executable_after {
+            return None;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let path_hash = process_executable_path_hash(&executable_before);
+            Some(format!(
+                "linux:{start_before}:{}:{}:{path_hash}",
+                metadata.dev(),
+                metadata.ino()
+            ))
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let start_before = macos_process_start_time(pid)?;
+        let executable = macos_process_executable_path(pid)?;
+        let metadata = std::fs::metadata(&executable).ok()?;
+        let start_after = macos_process_start_time(pid)?;
+        let executable_after = macos_process_executable_path(pid)?;
+        if start_before != start_after || executable != executable_after {
+            return None;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let path_hash = process_executable_path_hash(&executable);
+            Some(format!(
+                "macos:{}:{}:{}:{}:{path_hash}",
+                start_before.0,
+                start_before.1,
+                metadata.dev(),
+                metadata.ino()
+            ))
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn process_executable_path_hash(path: &Path) -> String {
+    let digest = Sha256::digest(path.to_string_lossy().as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Prove persisted job-worker ownership against the exact current launch
+/// nonce. A live unrelated PID is never adopted after controller restart.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn job_worker_process_proof(
+    pid: u32,
+    state_dir: &Path,
+    job_id: &str,
+    slot_id: &SlotId,
+    generation: Generation,
+    scope: &str,
+    launch_nonce: Option<&str>,
+) -> JobWorkerProcessProof {
+    match process_presence(pid) {
+        Some(false) => return JobWorkerProcessProof::OtherProcess,
+        None => return JobWorkerProcessProof::Unknown,
+        Some(true) => {}
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let proc = format!("/proc/{pid}");
+        let Some(start_before) = linux_process_start_time(pid) else {
+            return process_proof_after_unreadable_pid(pid);
+        };
+        let executable_before = match std::fs::read_link(format!("{proc}/exe")) {
+            Ok(path) => path,
+            Err(_) => return process_proof_after_unreadable_pid(pid),
+        };
+        let Some(executable_name) = executable_before.file_name().and_then(|name| name.to_str())
+        else {
+            return JobWorkerProcessProof::Unknown;
+        };
+        // A package update can unlink the old executable while its worker is
+        // still draining; Linux appends this marker to /proc/<pid>/exe.
+        let executable_name = executable_name
+            .strip_suffix(" (deleted)")
+            .unwrap_or(executable_name);
+        if !slot_service_executable_name(executable_name) {
+            return JobWorkerProcessProof::OtherProcess;
+        }
+        let cmdline = match std::fs::read(format!("{proc}/cmdline")) {
+            Ok(cmdline) => cmdline,
+            Err(_) => return process_proof_after_unreadable_pid(pid),
+        };
+        let Some(start_after) = linux_process_start_time(pid) else {
+            return process_proof_after_unreadable_pid(pid);
+        };
+        let executable_after = match std::fs::read_link(format!("{proc}/exe")) {
+            Ok(path) => path,
+            Err(_) => return process_proof_after_unreadable_pid(pid),
+        };
+        let cmdline_after = match std::fs::read(format!("{proc}/cmdline")) {
+            Ok(cmdline) => cmdline,
+            Err(_) => return process_proof_after_unreadable_pid(pid),
+        };
+        if start_before != start_after
+            || executable_before != executable_after
+            || cmdline != cmdline_after
+        {
+            return JobWorkerProcessProof::Unknown;
+        }
+        let mut argv = vec![executable_name.to_owned()];
+        argv.extend(
+            cmdline
+                .split(|byte| *byte == 0)
+                .filter(|argument| !argument.is_empty())
+                .skip(1)
+                .map(|argument| String::from_utf8_lossy(argument).into_owned()),
+        );
+        classify_job_worker_argv(
+            &argv,
+            state_dir,
+            job_id,
+            slot_id,
+            generation,
+            scope,
+            launch_nonce,
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        macos_job_worker_process_proof(
+            pid,
+            state_dir,
+            job_id,
+            slot_id,
+            generation,
+            scope,
+            launch_nonce,
+        )
+    }
+
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+    {
+        let _ = (state_dir, job_id, slot_id, generation, scope, launch_nonce);
+        // Do not infer ownership from `ps`'s lossy, space-joined command text.
+        JobWorkerProcessProof::Unknown
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (state_dir, job_id, slot_id, generation, scope, launch_nonce);
+        JobWorkerProcessProof::Unknown
+    }
+}
+
+/// One process-table enumeration shared by every worker-ownership scan in a
+/// reconcile cycle. Enumerating (a `ps` fork on macOS, a /proc walk on
+/// Linux) once per cycle instead of once per slot keeps idle supervision
+/// bounded; each scan only re-proves processes whose cached argv already
+/// matches the wanted worker identity.
+#[derive(Debug, Default)]
+pub struct WorkerProcessEnumeration {
+    entries: Vec<(u32, Option<Vec<String>>)>,
+}
+
+/// Enumerate slot-service processes once: pid plus observed argv (`None`
+/// when argv was unreadable at enumeration time, which still gets a fresh
+/// proof attempt per scan so unreadable processes fail closed as before).
+pub fn enumerate_worker_processes() -> anyhow::Result<WorkerProcessEnumeration> {
+    let mut entries = Vec::new();
+
+    #[cfg(target_os = "linux")]
+    {
+        for entry in std::fs::read_dir("/proc").context("enumerate process table")? {
+            let entry = entry.context("read process-table entry")?;
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let proc = entry.path();
+            let Ok(executable) = std::fs::read_link(proc.join("exe")) else {
+                continue;
+            };
+            let Some(executable_name) = executable.file_name().and_then(|name| name.to_str())
+            else {
+                continue;
+            };
+            let executable_name = executable_name
+                .strip_suffix(" (deleted)")
+                .unwrap_or(executable_name);
+            if !slot_service_executable_name(executable_name) {
+                continue;
+            }
+            let Ok(cmdline) = std::fs::read(proc.join("cmdline")) else {
+                continue;
+            };
+            let mut argv = vec![executable_name.to_owned()];
+            argv.extend(
+                cmdline
+                    .split(|byte| *byte == 0)
+                    .filter(|argument| !argument.is_empty())
+                    .skip(1)
+                    .map(|argument| String::from_utf8_lossy(argument).into_owned()),
+            );
+            entries.push((pid, Some(argv)));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("ps")
+            .args(["-axo", "pid=,comm="])
+            .output()
+            .context("enumerate macOS process table")?;
+        if !output.status.success() {
+            anyhow::bail!("macOS process enumeration failed with {}", output.status);
+        }
+        let text =
+            std::str::from_utf8(&output.stdout).context("decode macOS process enumeration")?;
+        for line in text.lines() {
+            let mut fields = line.split_whitespace();
+            let Some(pid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+                continue;
+            };
+            let Some(command) = fields.next() else {
+                continue;
+            };
+            let executable_name = Path::new(command)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(command);
+            if !slot_service_executable_name(executable_name) {
+                continue;
+            }
+            entries.push((pid, macos_process_argv(pid)));
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = &mut entries;
+        anyhow::bail!("cannot recover an unmarked worker on this platform")
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Ok(WorkerProcessEnumeration { entries })
+}
+
+/// Find an already-launched waiter/job worker using a shared enumeration.
+/// The cached argv prefilters candidates (the Linux scan's established
+/// pattern); only argv-matching or argv-unreadable processes get the full
+/// fresh proof, so a steady cycle with no workers costs no per-process
+/// syscalls per slot.
+#[allow(clippy::too_many_arguments)]
+pub fn discover_cached_worker_processes(
+    enumeration: &WorkerProcessEnumeration,
+    state_dir: &Path,
+    job_id: &str,
+    slot_id: &SlotId,
+    generation: Generation,
+    scope: &str,
+    launch_nonce: Option<&str>,
+) -> Vec<(u32, JobWorkerProcessProof)> {
+    let mut found = Vec::new();
+    for (pid, argv) in &enumeration.entries {
+        if let Some(argv) = argv
+            && classify_job_worker_argv(argv, state_dir, job_id, slot_id, generation, scope, None)
+                == JobWorkerProcessProof::OtherProcess
+        {
+            continue;
+        }
+        let proof = job_worker_process_proof(
+            *pid,
+            state_dir,
+            job_id,
+            slot_id,
+            generation,
+            scope,
+            launch_nonce,
+        );
+        if proof != JobWorkerProcessProof::OtherProcess {
+            found.push((*pid, proof));
+        }
+    }
+    found
+}
+
+/// Find an already-launched waiter/job worker by its complete command identity.
+/// This recovers the spawn-to-marker crash window: the controller writes the
+/// marker after `Command::spawn`, while the worker also publishes it at entry.
+/// A matching live child is adopted; an unprovable process identity fails
+/// closed instead of issuing a replacement launch nonce.
+#[allow(clippy::too_many_arguments)]
+pub fn discover_job_worker_processes(
+    state_dir: &Path,
+    job_id: &str,
+    slot_id: &SlotId,
+    generation: Generation,
+    scope: &str,
+    launch_nonce: Option<&str>,
+) -> anyhow::Result<Vec<(u32, JobWorkerProcessProof)>> {
+    let enumeration = enumerate_worker_processes()?;
+    Ok(discover_cached_worker_processes(
+        &enumeration,
+        state_dir,
+        job_id,
+        slot_id,
+        generation,
+        scope,
+        launch_nonce,
+    ))
+}
+
+fn classify_job_worker_argv(
+    argv: &[String],
+    state_dir: &Path,
+    job_id: &str,
+    slot_id: &SlotId,
+    generation: Generation,
+    scope: &str,
+    launch_nonce: Option<&str>,
+) -> JobWorkerProcessProof {
+    if argv
+        .first()
+        .is_none_or(|executable| !argv_executable_is_slot_service(executable))
+    {
+        return JobWorkerProcessProof::OtherProcess;
+    }
+    let Some((_, slot_index)) = slot_id.0.rsplit_once('-') else {
+        return JobWorkerProcessProof::OtherProcess;
+    };
+    if slot_index.parse::<usize>().is_err() {
+        return JobWorkerProcessProof::OtherProcess;
+    }
+    let base = [
+        "job".to_owned(),
+        "--state-dir".to_owned(),
+        state_dir.to_string_lossy().into_owned(),
+        "--job-id".to_owned(),
+        job_id.to_owned(),
+        "--generation".to_owned(),
+        generation.0.to_string(),
+        "--slot-index".to_owned(),
+        slot_index.to_owned(),
+        "--slot-id".to_owned(),
+        slot_id.0.clone(),
+    ];
+    if argv.get(1..=base.len()) != Some(base.as_slice()) {
+        return JobWorkerProcessProof::OtherProcess;
+    }
+    let tail = &argv[base.len() + 1..];
+    match tail {
+        [launch_flag, actual_nonce, scope_flag, actual_scope]
+            if launch_flag == "--pressure-launch-nonce"
+                && scope_flag == "--scope"
+                && actual_scope == scope =>
+        {
+            if launch_nonce.is_some_and(|expected_nonce| expected_nonce == actual_nonce.as_str()) {
+                JobWorkerProcessProof::Current
+            } else {
+                JobWorkerProcessProof::StaleSameWorker
+            }
+        }
+        [scope_flag, actual_scope] if scope_flag == "--scope" && actual_scope == scope => {
+            JobWorkerProcessProof::StaleSameWorker
+        }
+        // The ownership prefix proves this is the same slot/job incarnation.
+        // Unknown or newly-added trailing flags must remain a barrier instead
+        // of allowing a second worker to overlap it.
+        _ => JobWorkerProcessProof::StaleSameWorker,
+    }
+}
+
+fn argv_executable_is_slot_service(executable: &str) -> bool {
+    Path::new(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(slot_service_executable_name)
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn macos_job_worker_process_proof(
+    pid: u32,
+    state_dir: &Path,
+    job_id: &str,
+    slot_id: &SlotId,
+    generation: Generation,
+    scope: &str,
+    launch_nonce: Option<&str>,
+) -> JobWorkerProcessProof {
+    let Some(start_before) = macos_process_start_time(pid) else {
+        return process_proof_after_unreadable_pid(pid);
+    };
+    let executable = match macos_process_executable(pid) {
+        Some(executable) => executable,
+        None => return process_proof_after_unreadable_pid(pid),
+    };
+    if !slot_service_executable_name(&executable) {
+        return JobWorkerProcessProof::OtherProcess;
+    }
+    let argv = match macos_process_argv(pid) {
+        Some(argv) => argv,
+        None => return process_proof_after_unreadable_pid(pid),
+    };
+    let Some(start_after) = macos_process_start_time(pid) else {
+        return process_proof_after_unreadable_pid(pid);
+    };
+    let executable_after = match macos_process_executable(pid) {
+        Some(executable) => executable,
+        None => return process_proof_after_unreadable_pid(pid),
+    };
+    let argv_after = match macos_process_argv(pid) {
+        Some(argv) => argv,
+        None => return process_proof_after_unreadable_pid(pid),
+    };
+    if start_before != start_after || executable != executable_after || argv != argv_after {
+        return JobWorkerProcessProof::Unknown;
+    }
+    classify_job_worker_argv(
+        &argv,
+        state_dir,
+        job_id,
+        slot_id,
+        generation,
+        scope,
+        launch_nonce,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_start_time(pid: u32) -> Option<(u64, u64)> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    // SAFETY: proc_pidinfo writes at most the provided proc_bsdinfo-sized
+    // buffer; the PID and flavor follow the kernel API contract.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int,
+        )
+    };
+    if read != std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int {
+        return None;
+    }
+    // SAFETY: the exact-size read above initialized the full structure.
+    let info = unsafe { info.assume_init() };
+    (info.pbi_pid == pid).then_some((info.pbi_start_tvsec, info.pbi_start_tvusec))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_executable(pid: u32) -> Option<String> {
+    macos_process_executable_path(pid)?
+        .file_name()?
+        .to_str()
+        .map(str::to_owned)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_executable_path(pid: u32) -> Option<PathBuf> {
+    let mut path = [0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: proc_pidpath writes at most the provided fixed-size buffer.
+    let length = unsafe {
+        libc::proc_pidpath(
+            pid as libc::c_int,
+            path.as_mut_ptr().cast(),
+            path.len() as u32,
+        )
+    };
+    let path = path.get(..usize::try_from(length).ok()?)?;
+    let path = path.strip_suffix(&[0]).unwrap_or(path);
+    let path = std::str::from_utf8(path).ok()?;
+    Some(PathBuf::from(path))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_argv(pid: u32) -> Option<Vec<String>> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
+    let mut length = 0_usize;
+    // SAFETY: a null output pointer requests the KERN_PROCARGS2 buffer size.
+    let size_result = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            std::ptr::null_mut(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if size_result != 0 || length < std::mem::size_of::<libc::c_int>() || length > 1_048_576 {
+        return None;
+    }
+    let mut bytes = vec![0_u8; length];
+    // SAFETY: `bytes` is writable for `length` bytes and `mib` is a valid
+    // KERN_PROCARGS2 query. The kernel reports how many bytes it wrote.
+    let read_result = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            bytes.as_mut_ptr().cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if read_result != 0 || length > bytes.len() {
+        return None;
+    }
+    bytes.truncate(length);
+    let argc_bytes: [u8; std::mem::size_of::<libc::c_int>()] = bytes
+        .get(..std::mem::size_of::<libc::c_int>())?
+        .try_into()
+        .ok()?;
+    let argc = libc::c_int::from_ne_bytes(argc_bytes);
+    if !(1..=4096).contains(&argc) {
+        return None;
+    }
+    let mut remaining = bytes.get(std::mem::size_of::<libc::c_int>()..)?;
+    let executable_end = remaining.iter().position(|byte| *byte == 0)?;
+    remaining = remaining.get(executable_end + 1..)?;
+    while remaining.first() == Some(&0) {
+        remaining = remaining.get(1..)?;
+    }
+    let mut argv = Vec::with_capacity(argc as usize);
+    for _ in 0..argc {
+        let argument_end = remaining.iter().position(|byte| *byte == 0)?;
+        let argument = std::str::from_utf8(remaining.get(..argument_end)?).ok()?;
+        argv.push(argument.to_owned());
+        remaining = remaining.get(argument_end + 1..)?;
+    }
+    Some(argv)
+}
+
+fn process_proof_after_unreadable_pid(pid: u32) -> JobWorkerProcessProof {
+    match process_presence(pid) {
+        Some(false) => JobWorkerProcessProof::OtherProcess,
+        Some(true) | None => JobWorkerProcessProof::Unknown,
+    }
+}
+
+#[cfg(unix)]
+fn process_presence(pid: u32) -> Option<bool> {
+    if pid == 0 {
+        return Some(false);
+    }
+    // SAFETY: signal 0 only checks process existence and sends no signal.
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if result == 0 {
+        return Some(true);
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::ESRCH) => Some(false),
+        Some(libc::EPERM) => Some(true),
+        _ => None,
+    }
+}
+
+#[cfg(not(unix))]
+fn process_presence(_pid: u32) -> Option<bool> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields = stat
+        .rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    fields.get(19)?.parse().ok()
+}
+
 /// Verify that a persisted PID is the slot actor Velnor launched, not merely
 /// an unrelated process that reused the number after a controller restart.
 /// Linux exposes the child argv through procfs. Other Unix targets use the
@@ -245,7 +856,6 @@ fn unix_slot_process_matches_command_line(
 /// control-plane binary that implements the same `slot`/`job` surface.
 /// Restricting the liveness check to `velnor-runner` made every heartbeat
 /// look stale when launchd had to exec an allowed `velnor-host` identity.
-#[cfg(any(target_os = "linux", test))]
 fn slot_service_executable_name(name: &str) -> bool {
     name == "velnor-runner"
         || name == "velnorctl"
@@ -1367,6 +1977,88 @@ mod tests {
             ));
             assert!(!command_line_names_slot_service("sleep 30"));
         }
+    }
+
+    #[test]
+    fn job_worker_proof_requires_exact_identity_and_current_nonce() {
+        let state_dir = Path::new("/tmp/velnor-state");
+        let slot_id = SlotId("velnor-2".to_owned());
+        assert_eq!(
+            job_worker_process_proof(
+                std::process::id(),
+                state_dir,
+                "job-17",
+                &slot_id,
+                Generation(4),
+                "velnor",
+                Some("nonce-current"),
+            ),
+            JobWorkerProcessProof::OtherProcess,
+            "a live reused PID with a different command is not an owner"
+        );
+        let mut argv = vec![
+            "velnor-runner".to_owned(),
+            "job".to_owned(),
+            "--state-dir".to_owned(),
+            state_dir.display().to_string(),
+            "--job-id".to_owned(),
+            "job-17".to_owned(),
+            "--generation".to_owned(),
+            "4".to_owned(),
+            "--slot-index".to_owned(),
+            "2".to_owned(),
+            "--slot-id".to_owned(),
+            slot_id.0.clone(),
+            "--pressure-launch-nonce".to_owned(),
+            "nonce-current".to_owned(),
+            "--scope".to_owned(),
+            "velnor".to_owned(),
+        ];
+        let classify = |argv: &[String], nonce| {
+            classify_job_worker_argv(
+                argv,
+                state_dir,
+                "job-17",
+                &slot_id,
+                Generation(4),
+                "velnor",
+                nonce,
+            )
+        };
+
+        assert_eq!(
+            classify(&argv, Some("nonce-current")),
+            JobWorkerProcessProof::Current
+        );
+        argv[0] = "/usr/local/bin/velnor-runner".to_owned();
+        assert_eq!(
+            classify(&argv, Some("nonce-current")),
+            JobWorkerProcessProof::Current,
+            "macOS argv[0] may be an absolute executable path"
+        );
+        argv[0] = "velnor-runner".to_owned();
+        assert_eq!(
+            classify(&argv, Some("nonce-replaced")),
+            JobWorkerProcessProof::StaleSameWorker
+        );
+
+        argv[7] = "5".to_owned();
+        assert_eq!(
+            classify(&argv, Some("nonce-current")),
+            JobWorkerProcessProof::OtherProcess
+        );
+        argv[7] = "4".to_owned();
+        argv[5] = "another-job".to_owned();
+        assert_eq!(
+            classify(&argv, Some("nonce-current")),
+            JobWorkerProcessProof::OtherProcess
+        );
+        argv[5] = "job-17".to_owned();
+        argv[0] = "sleep".to_owned();
+        assert_eq!(
+            classify(&argv, Some("nonce-current")),
+            JobWorkerProcessProof::OtherProcess
+        );
     }
 
     #[test]

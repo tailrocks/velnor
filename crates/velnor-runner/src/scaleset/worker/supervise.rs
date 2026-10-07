@@ -585,10 +585,28 @@ pub(crate) fn teardown_owned_resources(
     runner: &mut dyn WorkerRunner,
     identity: &WorkerIdentity,
 ) -> Vec<String> {
+    teardown_owned_resources_with(runner, identity, remove_container)
+}
+
+/// Same removal sequence with raw name-based `rm`. The lane drives teardown
+/// under its worker record and permit attempt, where the cleanup call
+/// contract allows no inspect round trips.
+pub(crate) fn teardown_owned_resources_by_name(
+    runner: &mut dyn WorkerRunner,
+    identity: &WorkerIdentity,
+) -> Vec<String> {
+    teardown_owned_resources_with(runner, identity, remove_container_by_name)
+}
+
+fn teardown_owned_resources_with(
+    runner: &mut dyn WorkerRunner,
+    identity: &WorkerIdentity,
+    mut remove: impl FnMut(&mut dyn WorkerRunner, &str, &mut Vec<String>),
+) -> Vec<String> {
     let mut failures = Vec::new();
-    remove_container(runner, &identity.runner_container(), &mut failures);
+    remove(runner, &identity.runner_container(), &mut failures);
     stop_container(runner, &identity.dind_container(), &mut failures);
-    remove_container(runner, &identity.dind_container(), &mut failures);
+    remove(runner, &identity.dind_container(), &mut failures);
     remove_network(runner, &identity.network(), &mut failures);
     remove_volume(runner, &identity.workspace_volume(), &mut failures);
     remove_volume(runner, &identity.dind_data_volume(), &mut failures);
@@ -629,6 +647,79 @@ fn stop_container(runner: &mut dyn WorkerRunner, container: &str, failures: &mut
 }
 
 fn remove_container(runner: &mut dyn WorkerRunner, container: &str, failures: &mut Vec<String>) {
+    // Lean resolve-then-remove: exactly one inspect plus one `rm`, deleting
+    // by immutable ID. The full typed client would add settle/quarantine
+    // probes the teardown call contract forbids; fencing here comes from the
+    // lane's worker record and permit attempt instead.
+    let id = match resolve_container_id(runner, container) {
+        Ok(Some(id)) => id,
+        Ok(None) => return,
+        Err(error) => {
+            failures.push(format!("remove {container}: {error:#}"));
+            return;
+        }
+    };
+    match runner.run(
+        "docker",
+        &crate::docker::client::container_remove_args(&id, true, false),
+    ) {
+        Ok(output) if output.code == 0 => {}
+        Ok(output) if crate::docker::client::daemon_reports_missing(&output.stderr) => {}
+        Ok(output) => failures.push(format!(
+            "remove {container} exited {}: {}",
+            output.code,
+            output.stderr.trim()
+        )),
+        Err(error) => failures.push(format!("remove {container}: {error:#}")),
+    }
+}
+
+/// Resolve one container name to its immutable full ID: exactly one 64-hex
+/// line. Missing containers resolve to `None`; anything else is a failure.
+fn resolve_container_id(
+    runner: &mut dyn WorkerRunner,
+    container: &str,
+) -> anyhow::Result<Option<String>> {
+    if container.len() == 64 && container.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(Some(container.to_string()));
+    }
+    let output = runner.run(
+        "docker",
+        &crate::docker::client::container_id_args(container),
+    )?;
+    if output.code != 0 {
+        if crate::docker::client::daemon_reports_missing(&output.stderr) {
+            return Ok(None);
+        }
+        anyhow::bail!(
+            "docker inspect exited {}: {}",
+            output.code,
+            output.stderr.trim()
+        );
+    }
+    let ids = output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    match ids.as_slice() {
+        [id] if id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) => {
+            Ok(Some((*id).to_string()))
+        }
+        _ => anyhow::bail!("Docker inspect did not return one immutable full container ID"),
+    }
+}
+
+/// Raw `rm` by deterministic worker name. The lane-owned teardown path holds
+/// the worker record, the permit attempt, and verified ownership labels, and
+/// its call contract forbids the inspect round trips that immutable-ID
+/// resolution needs; removal by exact ID stays on the standalone typed path.
+fn remove_container_by_name(
+    runner: &mut dyn WorkerRunner,
+    container: &str,
+    failures: &mut Vec<String>,
+) {
     match runner.run(
         "docker",
         &crate::docker::client::container_remove_args(container, true, false),
@@ -780,7 +871,7 @@ impl Supervision {
     }
 
     pub(crate) fn teardown_owned_resources(&self, runner: &mut dyn WorkerRunner) -> Vec<String> {
-        teardown_owned_resources(runner, &self.identity)
+        teardown_owned_resources_by_name(runner, &self.identity)
     }
 
     pub(crate) fn state_dir_exists(&self) -> Result<bool> {
@@ -1134,15 +1225,19 @@ mod tests {
     #[test]
     fn cleanup_exports_before_first_deletion_in_order() {
         let state = temp_state("order");
+        let runner_id = "1".repeat(64);
+        let dind_id = "2".repeat(64);
         let mut runner = ScriptRunner::scripted(vec![
             ScriptRunner::ok("runner\n"),  // stop runner
             ScriptRunner::ok("LOGS-R\n"),  // logs runner
             ScriptRunner::ok("LOGS-D\n"),  // logs dind
             ScriptRunner::ok("[{}]\n"),    // inspect runner
             ScriptRunner::ok("[{}]\n"),    // inspect dind
-            ScriptRunner::ok("runner\n"),  // rm runner
+            ScriptRunner::ok(&runner_id),  // resolve runner ID under rm gate
+            ScriptRunner::ok("runner\n"),  // rm runner by exact ID
             ScriptRunner::ok("dind\n"),    // stop dind
-            ScriptRunner::ok("dind\n"),    // rm dind
+            ScriptRunner::ok(&dind_id),    // resolve dind ID under rm gate
+            ScriptRunner::ok("dind\n"),    // rm dind by exact ID
             ScriptRunner::ok("net\n"),     // rm network
             ScriptRunner::ok("work\n"),    // rm workspace volume
             ScriptRunner::ok("dindata\n"), // rm dind data volume
@@ -1151,18 +1246,24 @@ mod tests {
         assert!(report.confirmed(), "{report:?}");
         let verbs: Vec<String> = runner.seen.iter().map(|argv| argv.join(" ")).collect();
         let position = |needle: &str| verbs.iter().position(|v| v.contains(needle)).unwrap();
-        // Order: stop runner < logs < rm runner < stop dind < rm dind < network < volumes.
+        // Order: stop runner < logs < resolve/rm runner < stop dind < resolve/rm dind < network < volumes.
         assert!(position("stop -t 30 -- velnor-scaleset-runner") < position("logs --"));
-        assert!(position("logs --") < position("rm --force -- velnor-scaleset-runner"));
-        assert!(
-            position("rm --force -- velnor-scaleset-runner")
-                < position("stop -t 30 -- velnor-scaleset-dind")
-        );
-        assert!(
-            position("stop -t 30 -- velnor-scaleset-dind")
-                < position("rm --force -- velnor-scaleset-dind")
-        );
-        assert!(position("rm --force -- velnor-scaleset-dind") < position("network rm"));
+        let remove_runner = format!("rm --force -- {runner_id}");
+        let remove_dind = format!("rm --force -- {dind_id}");
+        assert!(position("logs --") < position(&remove_runner));
+        assert!(position(&remove_runner) < position("stop -t 30 -- velnor-scaleset-dind"));
+        assert!(position("stop -t 30 -- velnor-scaleset-dind") < position(&remove_dind));
+        assert!(position(&remove_dind) < position("network rm"));
+        let runner_container = identity().runner_container();
+        let dind_container = identity().dind_container();
+        assert!(runner.seen.iter().any(|args| {
+            args.first().is_some_and(|arg| arg == "inspect")
+                && args.last().is_some_and(|arg| arg == &runner_container)
+        }));
+        assert!(runner.seen.iter().any(|args| {
+            args.first().is_some_and(|arg| arg == "inspect")
+                && args.last().is_some_and(|arg| arg == &dind_container)
+        }));
         assert!(position("network rm") < position("volume rm"));
         // Evidence landed on disk.
         assert_eq!(
@@ -1174,6 +1275,42 @@ mod tests {
             "LOGS-D\n"
         );
         std::fs::remove_dir_all(&state).unwrap();
+    }
+
+    #[test]
+    fn teardown_reports_remove_failure_and_sends_only_one_exact_id_delete() {
+        let runner_id = "3".repeat(64);
+        let dind_id = "4".repeat(64);
+        let mut runner = ScriptRunner::scripted(vec![
+            ScriptRunner::ok(&runner_id),
+            ScriptRunner::fail(1, "remove refused"),
+            ScriptRunner::ok("dind\n"),
+            ScriptRunner::ok(&dind_id),
+            ScriptRunner::ok("dind\n"),
+            ScriptRunner::ok("net\n"),
+            ScriptRunner::ok("work\n"),
+            ScriptRunner::ok("dindata\n"),
+        ]);
+
+        let failures = teardown_owned_resources(&mut runner, &identity());
+
+        assert!(failures
+            .iter()
+            .any(|failure| failure.contains("remove refused")));
+        let deletes = runner
+            .seen
+            .iter()
+            .filter(|args| args.first().is_some_and(|arg| arg == "rm"))
+            .collect::<Vec<_>>();
+        assert_eq!(deletes.len(), 2, "{:?}", runner.seen);
+        assert_eq!(
+            deletes[0].last().map(String::as_str),
+            Some(runner_id.as_str())
+        );
+        assert_eq!(
+            deletes[1].last().map(String::as_str),
+            Some(dind_id.as_str())
+        );
     }
 
     #[test]

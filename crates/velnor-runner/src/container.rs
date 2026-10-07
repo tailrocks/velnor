@@ -6,6 +6,8 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use anyhow::Context;
+
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
@@ -16,6 +18,7 @@ use crate::docker_argv::{DockerArgv, DockerCommand, FlagSink, ImageReference};
 pub use crate::docker_argv::PreparedDockerArgs;
 
 const NODE_ACTION_BASE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const EPHEMERAL_TOOL_STORE_DIRS: [&str; 3] = ["cargo-bin", "mise-installs", "mise-binaries"];
 const JOB_NOFILE_LIMIT: &str = "65536:65536";
 const JOB_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
 const JOB_WORKFLOW_CLI: &str = "/usr/local/bin/velnor-workflow";
@@ -34,6 +37,10 @@ pub(crate) const JOB_CONTAINER_PID1: &str = "mkdir -p /__t/_velnor && touch /__t
 /// Name of the host-relative sentinel that ends PID 1. The host path is in a
 /// private sibling directory, never beneath the job's RW temp mount.
 pub(crate) const JOB_DONE_SENTINEL: &str = "job.done";
+
+fn job_docker_socket_mount_allowed(mount_requested: bool, host_os: &str) -> bool {
+    mount_requested && host_os == "linux"
+}
 
 /// Daemon-owned runner identity. Dropped from step env by exact match in
 /// `append_step_env` and re-asserted after it on every exec/run path, so a
@@ -92,23 +99,110 @@ const QUOTA_FLAGS: [&str; 12] = [
     "--pids-limit",
 ];
 
-fn is_quota_flag(option: &str) -> bool {
-    let name = option.split_once('=').map_or(option, |(name, _)| name);
-    QUOTA_FLAGS.contains(&name)
+pub(crate) fn has_attached_memory_limit_value(option: &str) -> bool {
+    short_cluster_flag_has_attached_value(option, 'm') == Some(true)
 }
 
-fn append_options_without_quota(command: &mut impl FlagSink, options: &[String]) {
+pub(crate) fn is_quota_flag(option: &str) -> bool {
+    let name = option.split_once('=').map_or(option, |(name, _)| name);
+    short_cluster_flag_has_attached_value(option, 'm').is_some() || QUOTA_FLAGS.contains(&name)
+}
+
+/// Outer job and service containers are created by the host daemon, outside
+/// the per-job Docker lease. User-supplied mount options therefore cannot be
+/// allowed here: bind mounts can expose the host socket, named volumes can
+/// use a host-backed driver, and volumes-from can inherit another container's
+/// socket. Runner-owned mounts are emitted separately after this filter.
+fn is_forbidden_host_mount_option(option: &str) -> bool {
+    let name = option.split_once('=').map_or(option, |(name, _)| name);
+    let name = name.to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "-v" | "--volume"
+            | "--mount"
+            | "--volumes-from"
+            | "--volume-driver"
+            | "--volume-opt"
+            | "--use-api-socket"
+    ) || short_cluster_volume_value(option).is_some()
+}
+
+/// Docker's pflag parser lets boolean shorthand flags cluster. A value-taking
+/// shorthand consumes the rest of the token, so a `v` after `w`, `e`, `m`, or
+/// another value-taking flag is payload, not a volume flag.
+fn short_cluster_volume_value(option: &str) -> Option<bool> {
+    short_cluster_flag_has_attached_value(option, 'v')
+}
+
+/// Find a value-taking shorthand after any leading boolean flags. The
+/// returned bool says whether its value is attached to this token.
+fn short_cluster_flag_has_attached_value(option: &str, target: char) -> Option<bool> {
+    let (flags, has_equals_value) = option
+        .split_once('=')
+        .map_or((option, false), |(flags, _)| (flags, true));
+    let cluster = flags
+        .strip_prefix('-')
+        .filter(|cluster| !cluster.starts_with('-'))?;
+
+    for (index, flag) in cluster.char_indices() {
+        if flag == target {
+            let attached_value = has_equals_value || index + flag.len_utf8() < cluster.len();
+            return Some(attached_value);
+        }
+        // These Docker run shorthand options are booleans and may precede
+        // another shorthand in the same token. Every other shorthand takes a
+        // value, which consumes the remainder of the token.
+        if !matches!(flag, 'd' | 'i' | 'P' | 'q' | 't') {
+            return None;
+        }
+    }
+    None
+}
+
+fn short_volume_flag_has_attached_value(option: &str) -> bool {
+    short_cluster_volume_value(option).unwrap_or(false)
+}
+
+/// Strip unsupported resource ceilings and host-daemon mount escape routes,
+/// preserving other workflow options byte-for-byte.
+fn append_safe_container_options(command: &mut impl FlagSink, options: &[String]) {
     let mut index = 0;
     while index < options.len() {
         let option = &options[index];
         if is_quota_flag(option) {
             index += 1;
-            // `--flag value` form: skip the value too. `--flag=value` and a
-            // bare flag carry nothing further.
             if !option.contains('=')
+                && !has_attached_memory_limit_value(option)
                 && options
                     .get(index)
                     .is_some_and(|value| !value.starts_with('-'))
+            {
+                index += 1;
+            }
+            continue;
+        }
+        if is_forbidden_host_mount_option(option) {
+            let name = option
+                .split_once('=')
+                .map_or(option.as_str(), |(name, _)| name);
+            let api_socket_flag = name.eq_ignore_ascii_case("--use-api-socket");
+            let attached_volume_value = short_volume_flag_has_attached_value(option);
+            index += 1;
+            // Boolean `--use-api-socket` normally carries its value in
+            // `=true`; accept and remove a separated boolean defensively.
+            if !option.contains('=')
+                && !api_socket_flag
+                && !attached_volume_value
+                && options
+                    .get(index)
+                    .is_some_and(|value| !value.starts_with('-'))
+            {
+                index += 1;
+            }
+            if api_socket_flag
+                && options.get(index).is_some_and(|value| {
+                    value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false")
+                })
             {
                 index += 1;
             }
@@ -122,6 +216,10 @@ fn append_options_without_quota(command: &mut impl FlagSink, options: &[String])
 #[derive(Debug, Clone)]
 pub struct JobContainerSpec {
     pub name: String,
+    /// Stable identity for this container generation, copied with the spec
+    /// into teardown. The done marker's host mount source is generation scoped
+    /// so an old teardown cannot stop a replacement container.
+    pub(crate) completion_generation: uuid::Uuid,
     pub image: String,
     pub network: String,
     pub workspace_host: PathBuf,
@@ -142,8 +240,8 @@ pub struct JobContainerSpec {
     /// and on single-slot hosts.
     pub slot_store_key: Option<String>,
     pub env: Vec<(String, String)>,
-    /// Admitted workflow `container.options`. Quota flags never survive to
-    /// emission: job containers run unbounded.
+    /// Admitted workflow `container.options`. Quota flags and host-daemon
+    /// mount options never survive emission.
     pub options: Vec<String>,
     pub services: Vec<ServiceContainerSpec>,
     pub node_action_image: String,
@@ -156,6 +254,11 @@ pub struct JobContainerSpec {
     pub docker_host_work_dir: Option<PathBuf>,
     pub verify_bind_mounts: bool,
     pub daemon_id: String,
+    /// Canonical repository key derived from GitHub server origin and numeric
+    /// repository ID. Missing identity keeps repository-scoped stores local.
+    pub repository_store_key: Option<String>,
+    /// GitHub repository display name from immutable runner job context. This
+    /// is for presentation only; persistent namespaces use repository_store_key.
     pub repository: Option<String>,
     /// The job's admitted scope (the pool ceiling narrowed by the job's
     /// trust class), normalized once at admission. This is the one spelling
@@ -197,24 +300,42 @@ impl JobContainerSpec {
     /// from `trusted` by copy before the container started
     /// ([`crate::storage::seed_cargo_store`]); its writes persist in `pr`
     /// and are shared by every slot on the host.
-    fn cargo_store_mount_operands(&self) -> Vec<String> {
-        let store = cargo_store_host(&self.temp_host, self.store_trust_scope.as_str());
-        CARGO_STORE_SUBTREES
+    fn cargo_store_mount_operands(&self) -> io::Result<Vec<String>> {
+        let store = cache_path_io(cargo_store_host(
+            &self.temp_host,
+            self.store_trust_scope.as_str(),
+        ))?;
+        Ok(CARGO_STORE_SUBTREES
             .iter()
             .map(|(subpath, target)| self.mount_arg(&store.join(subpath), target))
-            .collect()
+            .collect())
     }
 
     /// Append admitted workflow container options. Quota flags are stripped
     /// unconditionally: the container runs unbounded and no option spelling
     /// may reintroduce a ceiling at emission.
     fn append_container_options(&self, command: &mut DockerCommand) {
-        append_options_without_quota(command, &self.options);
+        append_safe_container_options(command, &self.options);
     }
 
     fn append_rust_acceleration(&self, command: &mut DockerCommand) -> io::Result<()> {
-        if let Some(host) = &self.mbx_store_host {
-            command.pair("-v", self.mount_arg(host, MBX_CONTAINER_STORE));
+        if self.mbx_store_host.is_some() {
+            // Bind only this slot's leaves. Mounting the shared store root
+            // would expose `slots/` and `targets/slots/` to guest writes, so
+            // one slot could replace another slot's future mount source.
+            // Job-private fallback stores live under the already-mounted temp
+            // tree; use the container's writable image layer rather than
+            // publishing that mutable host path a second time.
+            if let Some([cache_host, target_host]) = self.mbx_store_mount_paths() {
+                command.pair(
+                    "-v",
+                    self.mount_arg(&cache_host, &self.mbx_cache_container_dir()),
+                );
+                command.pair(
+                    "-v",
+                    self.mount_arg(&target_host, &self.mbx_target_container_dir()),
+                );
+            }
             let cache_dir = self.mbx_cache_container_dir();
             let target_root = self.mbx_target_container_dir();
             command.envs([
@@ -271,6 +392,10 @@ impl JobContainerSpec {
     /// The job image is not a valid OCI reference, or an env file backing the
     /// job environment could not be created.
     pub fn start_args(&self) -> io::Result<PreparedDockerArgs> {
+        self.start_args_for_host_os(std::env::consts::OS)
+    }
+
+    fn start_args_for_host_os(&self, host_os: &str) -> io::Result<PreparedDockerArgs> {
         self.validate_docker_host_path_mapping()?;
         let image = self.image_reference()?;
         self.prepare_job_done_mount()?;
@@ -318,7 +443,7 @@ impl JobContainerSpec {
             // jobs do not download Chromium and FFmpeg on every fresh container.
             "-v".into(),
             self.mount_arg(
-                &self.playwright_browser_store_host(),
+                &self.playwright_browser_store_host()?,
                 "/github/home/.cache/ms-playwright",
             ),
             // Package-manager download caches are not workspace output. Persist
@@ -326,14 +451,14 @@ impl JobContainerSpec {
             // without hitting the hosted actions cache from self-hosted runners.
             "-v".into(),
             self.mount_arg(
-                &self.bun_install_cache_store_host(),
+                &self.bun_install_cache_store_host()?,
                 "/github/home/.bun/install/cache",
             ),
             "-v".into(),
-            self.mount_arg(&self.npm_cache_store_host(), "/github/home/.npm"),
+            self.mount_arg(&self.npm_cache_store_host()?, "/github/home/.npm"),
             "-v".into(),
             self.mount_arg(
-                &self.terraform_plugin_cache_store_host(),
+                &self.terraform_plugin_cache_store_host()?,
                 "/github/home/.terraform.d/plugin-cache",
             ),
         ]);
@@ -342,7 +467,7 @@ impl JobContainerSpec {
         // job home. Separate containers can otherwise race while creating
         // `.cargo-ok` in the same extracted crate (Cargo's package-cache
         // lock does not serialize that mutation across container jobs).
-        for operand in self.cargo_store_mount_operands() {
+        for operand in self.cargo_store_mount_operands()? {
             args.flags(["-v".into(), operand]);
         }
         args.flags([
@@ -352,7 +477,7 @@ impl JobContainerSpec {
             // execute files directly from those caches.
             "-v".into(),
             self.mount_arg(
-                &self.cargo_executable_store_host(),
+                &self.cargo_executable_store_host()?,
                 "/github/home/.cargo/bin",
             ),
             // Host-persistent mise tool store: installed tools are executable
@@ -362,16 +487,20 @@ impl JobContainerSpec {
             // mutation races while keeping later jobs on that slot warm. The
             // download-only cache remains daemon-shared.
             "-v".into(),
-            self.mount_arg(&self.mise_executable_store_host(), "/opt/mise/installs"),
+            self.mount_arg(&self.mise_executable_store_host()?, "/opt/mise/installs"),
             // Persistent per-version mise BINARY store (Plan 008 Step 2). Scoped
             // by trust/repository like `installs`; the setup script publishes a
             // verified `<os-arch>/<exact-version>/mise` here so a fresh job
             // reuses it. `/opt/mise/bin` stays the read-only baked bootstrap.
             "-v".into(),
-            self.mount_arg(&self.mise_binary_store_host(), "/opt/velnor/mise-binaries"),
+            self.mount_arg(&self.mise_binary_store_host()?, "/opt/velnor/mise-binaries"),
             "-v".into(),
             self.mount_arg(
-                &mise_store_host(&self.temp_host, self.store_trust_scope.as_str()).join("cache"),
+                &cache_path_io(mise_store_host(
+                    &self.temp_host,
+                    self.store_trust_scope.as_str(),
+                ))?
+                .join("cache"),
                 "/opt/mise/cache",
             ),
             "-v".into(),
@@ -425,7 +554,7 @@ impl JobContainerSpec {
         // Bun fetches 127.0.0.1). Keep loopback behavior lane-identical.
         args.flags(["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"]);
 
-        self.append_docker_socket_mount(args)?;
+        self.append_docker_socket_mount_for_host_os(args, host_os)?;
         self.append_docker_cli_mounts(args);
         self.append_packaged_workflow_cli_mounts(args)?;
 
@@ -459,9 +588,13 @@ impl JobContainerSpec {
     /// # Errors
     /// The job image is not a valid OCI reference.
     pub fn seed_mise_store_args(&self) -> io::Result<Vec<String>> {
+        self.prepare_job_done_mount()?;
         self.validate_docker_host_path_mapping()?;
         let image = self.image_reference()?;
-        let store = mise_store_host(&self.temp_host, self.store_trust_scope.as_str());
+        let store = cache_path_io(mise_store_host(
+            &self.temp_host,
+            self.store_trust_scope.as_str(),
+        ))?;
         let mut args = DockerArgv::new(["run"]);
         args.flags([
             "--rm".to_owned(),
@@ -478,7 +611,7 @@ impl JobContainerSpec {
         args.flags([
             "-v".to_owned(),
             self.mount_arg(
-                &self.mise_executable_store_host(),
+                &self.mise_executable_store_host()?,
                 "/__velnor_seed/installs",
             ),
             "-v".to_owned(),
@@ -684,6 +817,7 @@ impl JobContainerSpec {
         node_image: &str,
         entrypoint_container_path: &str,
     ) -> io::Result<PreparedDockerArgs> {
+        self.prepare_job_done_mount()?;
         self.validate_docker_host_path_mapping()?;
         let image = ImageReference::parse(node_image)?;
         let mut command = DockerCommand::new(self.env_dir(), ["run"]);
@@ -709,7 +843,7 @@ impl JobContainerSpec {
             format!("{}:ro", self.mount_arg(&self.actions_host, "/__a")),
             self.mount_arg(&self.tools_host, "/__tool"),
         ];
-        mounts.extend(self.node_action_path_mounts(path_prepend, &mounts));
+        mounts.extend(self.node_action_path_mounts(path_prepend, &mounts)?);
         for mount in mounts {
             args.flag("-v");
             args.flag(mount);
@@ -744,81 +878,74 @@ impl JobContainerSpec {
         Ok(prepared)
     }
 
-    /// Bind mounts that make job-container PATH directories resolvable inside
-    /// the Node action sidecar.
+    /// Bind mounts for trusted runner-managed PATH stores used by Node actions.
     ///
-    /// actions/runner executes node actions — main and post — on the runner
-    /// host, so every PATH entry an earlier step recorded is inherently
-    /// visible to them. Velnor runs those actions in a sidecar that sees only
-    /// what this argv mounts, so an entry recorded inside the job container
-    /// named a directory that does not exist there: a post step failed with
-    /// `Unable to locate executable file: cargo` while every main step of the
-    /// same job resolved it. Each entry is therefore projected at the same
-    /// absolute path it has in the job container, from the daemon-host
-    /// directory that backs that container path in `start_args`; any other
-    /// absolute entry binds the host path of the same name (Docker creates a
-    /// missing host directory, exactly as it does for the job's own mounts).
-    /// Entries the sidecar already sees through one of `existing_mounts` are
-    /// dropped, so a PATH entry can never shadow the runner-owned /__w, /__t
-    /// and /github views, and identical host paths are mounted once.
+    /// GITHUB_PATH is job-controlled input. Treating each absolute entry as a
+    /// daemon-host bind source lets a job request `/`, `/etc`, or `/var/run`.
+    /// Store descendants are untrusted too: resolving a source such as
+    /// `<store>/node/.../bin` follows a job-created symlink before Docker
+    /// starts. Only mount the known store roots at their fixed container
+    /// prefixes. That preserves PATH lookup while making descendant symlinks
+    /// resolve inside the sidecar filesystem instead of on the daemon host.
+    /// Paths already visible through runner-owned mounts need no extra bind;
+    /// arbitrary paths never become host bind sources.
     fn node_action_path_mounts(
         &self,
         path_prepend: &[String],
         existing_mounts: &[String],
-    ) -> Vec<String> {
-        let mut hosts: Vec<String> = existing_mounts
-            .iter()
-            .map(|mount| mount_host(mount).to_owned())
-            .collect();
+    ) -> io::Result<Vec<String>> {
         let mut mounts = Vec::new();
         for entry in path_prepend {
-            let Some(source) = self.node_action_path_source(entry, existing_mounts) else {
+            let Some((source, container_root)) =
+                self.node_action_path_mapping(entry, existing_mounts)?
+            else {
                 continue;
             };
-            let mount = self.mount_arg(&source, entry);
-            let host = mount_host(&mount).to_owned();
-            if hosts.contains(&host) {
+            let mount = self.mount_arg(&source, container_root);
+            if mounts.contains(&mount)
+                || existing_mounts.iter().any(|existing| {
+                    mount_host(existing) == mount_host(&mount)
+                        && mount_container(existing) == container_root
+                })
+            {
                 continue;
             }
-            hosts.push(host);
             mounts.push(mount);
         }
-        mounts
+        Ok(mounts)
     }
 
-    /// Daemon-host directory that backs a job-container PATH entry, or `None`
-    /// when the sidecar already sees that container path.
-    fn node_action_path_source(&self, entry: &str, existing_mounts: &[String]) -> Option<PathBuf> {
+    /// Trusted daemon-host store root and fixed container prefix for an entry,
+    /// or `None` when the entry is already visible or is not runner-managed.
+    fn node_action_path_mapping(
+        &self,
+        entry: &str,
+        existing_mounts: &[String],
+    ) -> io::Result<Option<(PathBuf, &'static str)>> {
         let entry = entry.trim();
         // Not a usable mount destination: the base PATH entries are already
         // spelled out below, and `:`, `..` or a relative form would corrupt
-        // the `-v` argument rather than describe a job-container directory.
+        // path matching rather than describe one job-container directory.
         if entry.is_empty()
             || !entry.starts_with('/')
             || entry.contains(':')
             || entry.split('/').any(|component| component == "..")
             || NODE_ACTION_BASE_PATH.split(':').any(|base| base == entry)
         {
-            return None;
+            return Ok(None);
         }
-        // Container paths whose daemon-host backing directory `start_args`
-        // mounts at that same container path. The mise adapter records tool
-        // bin directories inside these stores, and no directory of that name
-        // exists on the daemon host: only the store holds the installed tools.
+        // These roots are mounted into the job container by `start_args` and
+        // are the only job-controlled PATH locations that get host mappings.
+        // Mount roots, never descendants: a descendant may be a symlink into
+        // an unrelated daemon-host directory.
         let store_backed: [(&str, PathStoreResolver); 3] = [
             ("/opt/mise/installs", Self::mise_executable_store_host),
             ("/opt/velnor/mise-binaries", Self::mise_binary_store_host),
             ("/github/home/.cargo/bin", Self::cargo_executable_store_host),
         ];
         for (container_prefix, store) in store_backed {
-            if let Some(rest) = entry.strip_prefix(container_prefix) {
-                let rest = rest.strip_prefix('/').unwrap_or(rest);
-                let source = store(self);
-                return Some(if rest.is_empty() {
-                    source
-                } else {
-                    source.join(rest)
-                });
+            if container_path_under(entry, container_prefix) {
+                return Ok(Some((store(self)?, container_prefix)));
             }
         }
         // Already visible through a mount above. Those views are load-bearing:
@@ -828,9 +955,9 @@ impl JobContainerSpec {
             .iter()
             .any(|mount| container_path_under(entry, mount_container(mount)))
         {
-            return None;
+            return Ok(None);
         }
-        Some(PathBuf::from(entry))
+        Ok(None)
     }
 
     /// `docker build` for a Dockerfile action.
@@ -935,32 +1062,56 @@ impl JobContainerSpec {
     }
 
     pub fn remove_container_args(&self) -> Vec<String> {
+        self.remove_container_args_for(&self.name)
+    }
+
+    pub fn remove_container_args_for(&self, target: &str) -> Vec<String> {
         let mut args = DockerArgv::new(["rm"]);
         args.flag("--force");
-        args.operands().operand(self.name.clone()).into_argv()
+        args.operands().operand(target).into_argv()
     }
 
     pub fn remove_network_args(&self) -> Vec<String> {
+        self.remove_network_args_for(&self.network)
+    }
+
+    pub fn remove_network_args_for(&self, target: &str) -> Vec<String> {
         DockerArgv::new(["network", "rm"])
             .operands()
-            .operand(self.network.clone())
+            .operand(target)
             .into_argv()
     }
 
     pub fn disconnect_network_args(&self) -> Vec<String> {
+        self.disconnect_network_args_for(&self.network, &self.name)
+    }
+
+    pub fn disconnect_network_args_for(
+        &self,
+        network_target: &str,
+        container_target: &str,
+    ) -> Vec<String> {
         let mut args = DockerArgv::new(["network", "disconnect"]);
         args.flag("--force");
         args.operands()
-            .operand(self.network.clone())
-            .operand(self.name.clone())
+            .operand(network_target)
+            .operand(container_target)
             .into_argv()
     }
 
     pub fn connect_network_args(&self) -> Vec<String> {
+        self.connect_network_args_for(&self.network, &self.name)
+    }
+
+    pub fn connect_network_args_for(
+        &self,
+        network_target: &str,
+        container_target: &str,
+    ) -> Vec<String> {
         DockerArgv::new(["network", "connect"])
             .operands()
-            .operand(self.network.clone())
-            .operand(self.name.clone())
+            .operand(network_target)
+            .operand(container_target)
             .into_argv()
     }
 
@@ -1013,59 +1164,69 @@ impl JobContainerSpec {
             return Ok(());
         }
 
+        let cargo_store = cache_path_io(cargo_store_host(
+            &self.temp_host,
+            self.store_trust_scope.as_str(),
+        ))?;
+        let mise_store = cache_path_io(mise_store_host(
+            &self.temp_host,
+            self.store_trust_scope.as_str(),
+        ))?;
         let paths = [
             ("workspace", self.workspace_host.clone()),
             ("temp", self.temp_host.clone()),
+            ("completion control", self.job_done_host_dir()),
             ("home", self.home_host.clone()),
             ("actions", self.actions_host.clone()),
             ("tools", self.tools_host.clone()),
             ("workflow", workflow_host(&self.temp_host)),
-            ("Playwright store", self.playwright_browser_store_host()),
-            ("Bun install cache", self.bun_install_cache_store_host()),
-            ("npm cache", self.npm_cache_store_host()),
+            ("Playwright store", self.playwright_browser_store_host()?),
+            ("Bun install cache", self.bun_install_cache_store_host()?),
+            ("npm cache", self.npm_cache_store_host()?),
             (
                 "OpenTofu plugin cache",
-                self.terraform_plugin_cache_store_host(),
+                self.terraform_plugin_cache_store_host()?,
             ),
+            ("Cargo registry cache", cargo_store.join("registry/cache")),
+            ("Cargo registry index", cargo_store.join("registry/index")),
+            ("Cargo git database", cargo_store.join("git/db")),
             (
-                "Cargo registry cache",
-                cargo_store_host(&self.temp_host, self.store_trust_scope.as_str())
-                    .join("registry/cache"),
+                "Cargo executable store",
+                self.cargo_executable_store_host()?,
             ),
-            (
-                "Cargo registry index",
-                cargo_store_host(&self.temp_host, self.store_trust_scope.as_str())
-                    .join("registry/index"),
-            ),
-            (
-                "Cargo git database",
-                cargo_store_host(&self.temp_host, self.store_trust_scope.as_str()).join("git/db"),
-            ),
-            ("Cargo executable store", self.cargo_executable_store_host()),
-            ("mise executable store", self.mise_executable_store_host()),
-            ("mise binary store", self.mise_binary_store_host()),
-            (
-                "mise cache",
-                mise_store_host(&self.temp_host, self.store_trust_scope.as_str()).join("cache"),
-            ),
+            ("mise executable store", self.mise_executable_store_host()?),
+            ("mise binary store", self.mise_binary_store_host()?),
+            ("mise cache", mise_store.join("cache")),
         ];
         for (label, path) in paths {
             self.docker_host_path_checked(&path, label)?;
         }
-        if let Some(path) = &self.mbx_store_host {
-            self.docker_host_path_checked(path, "MBX store")?;
+        if let Some([slot_cache, slot_target]) = self.mbx_store_mount_paths() {
+            for (label, path) in [("MBX cache", slot_cache), ("MBX targets", slot_target)] {
+                self.docker_host_path_checked(&path, label)?;
+            }
         }
         if let Some(path) = &self.sccache_store_host {
             self.docker_host_path_checked(path, "sccache store")?;
         }
         // This also rejects a lease path shortened outside the mapped work
         // root; the host listener and daemon mount must refer to one socket.
-        self.docker_lease_paths()?;
+        if Self::guest_can_connect_host_bound_unix_lease() && self.mount_docker_socket {
+            self.docker_lease_paths()?;
+        }
         Ok(())
     }
 
     fn append_docker_socket_mount(&self, args: &mut impl FlagSink) -> io::Result<()> {
-        if !self.mount_docker_socket {
+        self.append_docker_socket_mount_for_host_os(args, std::env::consts::OS)
+    }
+
+    fn append_docker_socket_mount_for_host_os(
+        &self,
+        args: &mut impl FlagSink,
+        host_os: &str,
+    ) -> io::Result<()> {
+        if !job_docker_socket_mount_allowed(self.mount_docker_socket, host_os) {
             return Ok(());
         }
         let daemon_visible = self.guest_docker_socket_bind_source()?;
@@ -1076,28 +1237,24 @@ impl JobContainerSpec {
         Ok(())
     }
 
-    /// Unix socket the Linux job container should see as `/var/run/docker.sock`.
+    /// Whether the job VM can connect to a host-bound Unix lease socket.
     ///
-    /// On a native Linux host that is the per-job lease proxy. On macOS the
-    /// runner binds that proxy on a host path the OrbStack/Docker Desktop VM
-    /// can *see* as a socket inode, but `connect()` is `ECONNREFUSED`
-    /// (virtiofs). The daemon's own socket is special-cased and connectable.
-    /// A TCP lease proxy is the root fix; until then trusted macOS jobs
-    /// mount the resolved host socket.
+    /// macOS VM shares expose the socket inode but reject `connect()` with
+    /// `ECONNREFUSED`; passing the daemon's raw socket would bypass the lease
+    /// guard. Until a VM-reachable per-job proxy exists, macOS jobs get no host
+    /// Docker socket.
     pub(crate) fn guest_can_connect_host_bound_unix_lease() -> bool {
-        !cfg!(target_os = "macos")
+        job_docker_socket_mount_allowed(true, std::env::consts::OS)
     }
 
     fn guest_docker_socket_bind_source(&self) -> io::Result<PathBuf> {
         if Self::guest_can_connect_host_bound_unix_lease() {
             return Ok(self.docker_lease_paths()?.daemon_visible);
         }
-        let endpoint = crate::docker::engine::resolve_docker_endpoint().map_err(|error| {
-            io::Error::other(format!(
-                "resolve host Docker socket for macOS job mount: {error}"
-            ))
-        })?;
-        Ok(endpoint.socket.canonicalize().unwrap_or(endpoint.socket))
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "job Docker socket is unavailable: this host cannot connect to the per-job Unix lease proxy",
+        ))
     }
 
     fn append_docker_cli_mounts(&self, args: &mut impl FlagSink) {
@@ -1152,58 +1309,56 @@ impl JobContainerSpec {
     }
 
     fn repository_store_key(&self) -> Option<String> {
-        self.repository
-            .as_deref()
-            .or_else(|| {
-                self.env
-                    .iter()
-                    .find(|(name, _)| name == "GITHUB_REPOSITORY")
-                    .map(|(_, value)| value.as_str())
-            })
-            .filter(|value| !value.is_empty())
-            .map(sanitize_store_key)
+        self.repository_store_key.clone()
     }
 
-    fn cargo_executable_store_host(&self) -> PathBuf {
-        self.repository_store_key().map_or_else(
-            || {
+    /// Per-job tool-store fallback lives below the runner-owned completion
+    /// directory, a generation-scoped sibling of guest-writable temp. The
+    /// job sees the parent only through the read-only `/__velnor` mount; each
+    /// tool store is separately mounted read-write at its runtime prefix.
+    fn ephemeral_tool_store_host(&self, leaf: &str) -> PathBuf {
+        self.job_done_host_dir().join("ephemeral").join(leaf)
+    }
+
+    fn cargo_executable_store_host(&self) -> io::Result<PathBuf> {
+        match self.repository_store_key() {
+            None => {
                 eprintln!(
                     "forensics.lifecycle: persistent cargo bin store refused: missing github.repository"
                 );
-                self.temp_host.join("_velnor/ephemeral/cargo-bin")
-            },
-            |repository| {
-                cargo_executable_store_host(
-                    &self.temp_host,
-                    self.store_trust_scope.as_str(),
-                    &repository,
-                )
-            },
-        )
-    }
-
-    pub(crate) fn mise_executable_store_host(&self) -> PathBuf {
-        match (self.repository_store_key(), self.slot_store_key.as_deref()) {
-            (Some(repository), Some(slot)) => mise_executable_store_host(
+                Ok(self.ephemeral_tool_store_host("cargo-bin"))
+            }
+            Some(repository_key) => cache_path_io(cargo_executable_store_host(
                 &self.temp_host,
                 self.store_trust_scope.as_str(),
-                &repository,
-            )
+                &repository_key,
+            )),
+        }
+    }
+
+    pub(crate) fn mise_executable_store_host(&self) -> io::Result<PathBuf> {
+        match (self.repository_store_key(), self.slot_store_key.as_deref()) {
+            (Some(repository_key), Some(slot)) => Ok(cache_path_io(mise_executable_store_host(
+                &self.temp_host,
+                self.store_trust_scope.as_str(),
+                &repository_key,
+            ))?
             .join("slots")
-            .join(slot),
+            .join(slot)),
             _ => {
                 eprintln!(
                     "forensics.lifecycle: persistent mise install store refused: missing github.repository or runner slot identity"
                 );
-                self.temp_host.join("_velnor/ephemeral/mise-installs")
+                Ok(self.ephemeral_tool_store_host("mise-installs"))
             }
         }
     }
 
-    /// Container-side mbx cache dir: a per-slot subdir of the shared mount.
+    /// Container-side mbx cache dir: a per-slot subdir of the MBX namespace.
     ///
-    /// Every job container mounts the same host store at `/var/cache/mbx`, and
-    /// mbx takes its registrar flock(EX) then a per-hash lease flock(EX) with
+    /// Persistent jobs mount only their own host slot roots; `slots/` and
+    /// `targets/slots/` parents are not exposed to the guest. MBX takes its
+    /// registrar flock(EX) then a per-hash lease flock(EX) with
     /// no timeouts. Every container runs mbx as the same pid, so all of them
     /// serialize on one `registrar.lock` while the holder blocks on the shared
     /// lease file — an observed cross-container ABBA deadlock (1 holder + N
@@ -1211,10 +1366,10 @@ impl JobContainerSpec {
     /// gets a disjoint `slots/slot-N` subdir — the same `slots/<slot>`
     /// precedent as the mise installs mount — which relocates mbx's registrar,
     /// leases, and checkouts (`MBX_CACHE_DIR` → `cache_dir` →
-    /// `cache_dir/incremental`). The mount itself is unchanged, so the store
-    /// root stays shared and each slot's cache stays warm across its own jobs.
-    /// Without a slot identity (standalone `run`) the subdir isolates per
-    /// job name instead of falling back to the shared root.
+    /// `cache_dir/incremental`). The host parent stays outside the mount, so
+    /// jobs cannot redirect later bind mounts by changing shared path entries.
+    /// Without a slot identity (standalone `run`) the container-local subdir
+    /// isolates per job name.
     pub(crate) fn mbx_cache_container_dir(&self) -> String {
         crate::mbx_store::slot_cache_dir(Path::new(MBX_CONTAINER_STORE), &self.mbx_slot_key())
             .to_string_lossy()
@@ -1227,6 +1382,21 @@ impl JobContainerSpec {
         self.mbx_store_host
             .as_ref()
             .map(|store| crate::mbx_store::slot_cache_dir(store, &self.mbx_slot_key()))
+    }
+
+    /// Host paths actually exposed to a persistent container. An ephemeral
+    /// fallback below `/__t` stays inside that mount and is not rebound into
+    /// the MBX namespace.
+    pub(crate) fn mbx_store_mount_paths(&self) -> Option<[PathBuf; 2]> {
+        let store = self.mbx_store_host.as_deref()?;
+        if self.mbx_store_is_job_ephemeral(store) {
+            return None;
+        }
+        Some([self.mbx_cache_store_host()?, self.mbx_target_store_host()?])
+    }
+
+    fn mbx_store_is_job_ephemeral(&self, store: &Path) -> bool {
+        store.starts_with(&self.temp_host)
     }
 
     /// Container-side managed-target root: a per-slot subdir of the shared
@@ -1258,7 +1428,10 @@ impl JobContainerSpec {
         self.temp_host
             .parent()
             .unwrap_or_else(|| Path::new("."))
-            .join(format!(".{temp_name}-velnor-control"))
+            .join(format!(
+                ".{temp_name}-velnor-control-{}",
+                self.completion_generation.simple()
+            ))
     }
 
     /// Ensure Docker receives an existing, private directory for the
@@ -1307,12 +1480,55 @@ impl JobContainerSpec {
             }
             fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
         }
+        // Fallback compiler stores must not live below temp: the guest gets
+        // that directory read-write and can replace a mount source root with
+        // a symlink before a Node sidecar starts. Create the roots beneath
+        // this generation-scoped, runner-owned directory instead. Explicit
+        // create_dir + symlink_metadata refuses a preexisting link at either
+        // level and pins each pathname outside the guest-writable mount.
+        let ephemeral_root = dir.join("ephemeral");
+        prepare_runner_owned_child_directory(&ephemeral_root)?;
+        for leaf in EPHEMERAL_TOOL_STORE_DIRS {
+            prepare_runner_owned_child_directory(&ephemeral_root.join(leaf))?;
+        }
         Ok(())
     }
 
     /// Host path of the sentinel that ends the container's PID 1 supervisor.
     pub(crate) fn job_done_host_path(&self) -> PathBuf {
         self.job_done_host_dir().join(JOB_DONE_SENTINEL)
+    }
+
+    /// Remove this generation's private control mount after Docker confirms
+    /// the container is gone. A different generation has a different source
+    /// directory, so late teardown cannot affect its PID 1 marker.
+    pub(crate) fn remove_job_done_mount(&self) -> io::Result<()> {
+        let dir = self.job_done_host_dir();
+        let metadata = match fs::symlink_metadata(&dir) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if !metadata.file_type().is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "completion control path is not a directory: {}",
+                    dir.display()
+                ),
+            ));
+        }
+        #[cfg(unix)]
+        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o022 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "completion control directory is not runner-owned: {}",
+                    dir.display()
+                ),
+            ));
+        }
+        fs::remove_dir_all(dir)
     }
 
     fn mbx_slot_key(&self) -> String {
@@ -1328,37 +1544,35 @@ impl JobContainerSpec {
     /// Persistent per-version mise binary store for this job's trust/repository
     /// scope. Without a repository identity the store stays job-ephemeral, so
     /// persistence is never granted to an unidentified job.
-    pub(crate) fn mise_binary_store_host(&self) -> PathBuf {
-        self.repository_store_key().map_or_else(
-            || {
+    pub(crate) fn mise_binary_store_host(&self) -> io::Result<PathBuf> {
+        match self.repository_store_key() {
+            None => {
                 eprintln!(
                     "forensics.lifecycle: persistent mise binary store refused: missing github.repository"
                 );
-                self.temp_host.join("_velnor/ephemeral/mise-binaries")
-            },
-            |repository| {
-                mise_binary_store_host(
-                    &self.temp_host,
-                    self.store_trust_scope.as_str(),
-                    &repository,
-                )
-            },
-        )
+                Ok(self.ephemeral_tool_store_host("mise-binaries"))
+            }
+            Some(repository_key) => cache_path_io(mise_binary_store_host(
+                &self.temp_host,
+                self.store_trust_scope.as_str(),
+                &repository_key,
+            )),
+        }
     }
 
-    fn playwright_browser_store_host(&self) -> PathBuf {
+    fn playwright_browser_store_host(&self) -> io::Result<PathBuf> {
         self.repository_scoped_home_cache_store_host("playwright", ".cache/ms-playwright")
     }
 
-    fn bun_install_cache_store_host(&self) -> PathBuf {
+    fn bun_install_cache_store_host(&self) -> io::Result<PathBuf> {
         self.repository_scoped_home_cache_store_host("bun-install-cache", ".bun/install/cache")
     }
 
-    fn npm_cache_store_host(&self) -> PathBuf {
+    fn npm_cache_store_host(&self) -> io::Result<PathBuf> {
         self.repository_scoped_home_cache_store_host("npm", ".npm")
     }
 
-    fn terraform_plugin_cache_store_host(&self) -> PathBuf {
+    fn terraform_plugin_cache_store_host(&self) -> io::Result<PathBuf> {
         self.repository_scoped_home_cache_store_host(
             "terraform-plugin-cache",
             ".terraform.d/plugin-cache",
@@ -1369,18 +1583,16 @@ impl JobContainerSpec {
         &self,
         store_leaf: &str,
         home_relative: &str,
-    ) -> PathBuf {
-        self.repository_store_key().map_or_else(
-            || self.home_host.join(home_relative),
-            |repository| {
-                repository_scoped_home_cache_store_host(
-                    &self.temp_host,
-                    self.store_trust_scope.as_str(),
-                    &repository,
-                    store_leaf,
-                )
-            },
-        )
+    ) -> io::Result<PathBuf> {
+        match self.repository_store_key() {
+            None => Ok(self.home_host.join(home_relative)),
+            Some(repository_key) => cache_path_io(repository_scoped_home_cache_store_host(
+                &self.temp_host,
+                self.store_trust_scope.as_str(),
+                &repository_key,
+                store_leaf,
+            )),
+        }
     }
 
     fn docker_host_path(&self, host_path: &Path) -> PathBuf {
@@ -1544,7 +1756,7 @@ impl ServiceContainerSpec {
         // Quota flags never reach `docker run`, however they arrived
         // (admission already filtered workflow options; this is the
         // emission backstop, same as the job container).
-        append_options_without_quota(args, &self.options);
+        append_safe_container_options(args, &self.options);
         args.pair("--cgroup-parent", crate::docker_lease::JOB_CGROUP_PARENT);
         // Runner-owned network policy must win over any network-shaped token
         // present in the expanded service options. Docker uses the final
@@ -1556,26 +1768,46 @@ impl ServiceContainerSpec {
     }
 
     pub fn remove_args(&self) -> Vec<String> {
+        self.remove_args_for(&self.name)
+    }
+
+    pub fn remove_args_for(&self, target: &str) -> Vec<String> {
         let mut args = DockerArgv::new(["rm"]);
         args.flag("--force");
-        args.operands().operand(self.name.clone()).into_argv()
+        args.operands().operand(target).into_argv()
     }
 
     pub fn disconnect_network_args(&self) -> Vec<String> {
+        self.disconnect_network_args_for(&self.network, &self.name)
+    }
+
+    pub fn disconnect_network_args_for(
+        &self,
+        network_target: &str,
+        container_target: &str,
+    ) -> Vec<String> {
         let mut args = DockerArgv::new(["network", "disconnect"]);
         args.flag("--force");
         args.operands()
-            .operand(self.network.clone())
-            .operand(self.name.clone())
+            .operand(network_target)
+            .operand(container_target)
             .into_argv()
     }
 
     pub fn connect_network_args(&self) -> Vec<String> {
+        self.connect_network_args_for(&self.network, &self.name)
+    }
+
+    pub fn connect_network_args_for(
+        &self,
+        network_target: &str,
+        container_target: &str,
+    ) -> Vec<String> {
         let mut args = DockerArgv::new(["network", "connect"]);
         args.pair("--alias", self.network_alias.clone());
         args.operands()
-            .operand(self.network.clone())
-            .operand(self.name.clone())
+            .operand(network_target)
+            .operand(container_target)
             .into_argv()
     }
 }
@@ -1616,7 +1848,7 @@ fn mount(host: &Path, container: &str) -> String {
 }
 
 /// Daemon-host store directory resolver for one job container.
-type PathStoreResolver = fn(&JobContainerSpec) -> PathBuf;
+type PathStoreResolver = fn(&JobContainerSpec) -> io::Result<PathBuf>;
 
 /// Host side of a rendered `-v host:container[:ro]` argument. Host paths on
 /// Linux cannot contain `:`, so the first field is authoritative.
@@ -1653,16 +1885,7 @@ fn workflow_host(temp_host: &Path) -> PathBuf {
 /// Compilers' caches (sccache) and the actions-cache store are safe to share
 /// across slots of one daemon (same repo trust domain).
 pub(crate) fn daemon_shared_root(root: PathBuf) -> PathBuf {
-    let is_slot_dir = root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|name| name.strip_prefix("slot-"))
-        .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()));
-    if is_slot_dir {
-        root.parent().map(Path::to_path_buf).unwrap_or(root)
-    } else {
-        root
-    }
+    velnor_storage_snapshot::daemon_shared_work_root(root)
 }
 
 /// The daemon-shared Cargo store subtrees and their container mount points.
@@ -1683,14 +1906,10 @@ pub(crate) const CARGO_STORE_SUBTREES: [(&str, &str); 3] = [
 ///
 /// `trust_scope` is the scope in effect for the caller (the job's admitted
 /// scope on the execution path). It selects the canonical namespace; the
-/// legacy root carries no trust segment.
-pub(crate) fn cargo_store_host(temp_host: &Path, trust_scope: &str) -> PathBuf {
-    crate::storage::cache_class_path(
-        &daemon_store_root(temp_host),
-        trust_scope,
-        "cargo",
-        "_velnor_cargo",
-    )
+/// selected cache root carries no slot-specific component.
+pub(crate) fn cargo_store_host(temp_host: &Path, trust_scope: &str) -> anyhow::Result<PathBuf> {
+    crate::storage::cache_class_path_for_job_temp(temp_host, trust_scope, "cargo")
+        .with_context(|| format!("resolve Cargo store for job temp {}", temp_host.display()))
 }
 
 /// Remove Cargo git checkouts whose same-named bare repository is absent.
@@ -1731,55 +1950,55 @@ pub(crate) fn repair_cargo_git_store(cargo_store: &Path) -> io::Result<usize> {
 /// Host-persistent cargo executable store, scoped by trust + repository.
 ///
 /// `trust_scope` is the scope in effect for the caller (the job's admitted
-/// scope on the execution path): the namespace below the root in the legacy
-/// layout, the root namespace in the canonical layout.
+/// scope on the execution path): it selects the canonical namespace below
+/// the selected cache root.
 pub(crate) fn cargo_executable_store_host(
     temp_host: &Path,
     trust_scope: &str,
-    repository: &str,
-) -> PathBuf {
-    crate::storage::child_with_legacy_trust(
-        cargo_store_host(temp_host, trust_scope),
-        "bin",
-        trust_scope,
-    )
-    .join(sanitize_store_key(repository))
+    repository_key: &str,
+) -> anyhow::Result<PathBuf> {
+    Ok(cargo_store_host(temp_host, trust_scope)?
+        .join("bin")
+        .join(sanitize_store_key(repository_key)))
 }
 
 /// Host-persistent mise tool store (installs + cache subdirs are mounted).
 ///
 /// `trust_scope` is the scope in effect for the caller (the job's admitted
 /// scope on the execution path). It selects the canonical namespace; the
-/// legacy root carries no trust segment.
-pub(crate) fn mise_store_host(temp_host: &Path, trust_scope: &str) -> PathBuf {
-    crate::storage::cache_class_path(
-        &daemon_store_root(temp_host),
-        trust_scope,
-        "mise",
-        "_velnor_mise",
-    )
+/// selected cache root carries no slot-specific component.
+pub(crate) fn mise_store_host(temp_host: &Path, trust_scope: &str) -> anyhow::Result<PathBuf> {
+    crate::storage::cache_class_path_for_job_temp(temp_host, trust_scope, "mise")
+        .with_context(|| format!("resolve mise store for job temp {}", temp_host.display()))
 }
 
-pub(crate) fn git_mirror_store_host(temp_host: &Path, trust_scope: &str) -> PathBuf {
-    crate::git_mirror::store_root(&daemon_store_root(temp_host), trust_scope)
+pub(crate) fn git_mirror_store_host(
+    temp_host: &Path,
+    trust_scope: &str,
+    repository_key: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    match repository_key {
+        Some(repository_key) => {
+            crate::git_mirror::store_root_for_repository(trust_scope, repository_key)
+                .with_context(|| format!("resolve Git mirror for job temp {}", temp_host.display()))
+        }
+        None => Ok(temp_host.join("_velnor/ephemeral/git-mirrors")),
+    }
 }
 
 /// Host-persistent mise executable store, scoped by trust + repository.
 ///
 /// `trust_scope` is the scope in effect for the caller (the job's admitted
-/// scope on the execution path): the namespace below the root in the legacy
-/// layout, the root namespace in the canonical layout.
+/// scope on the execution path): it selects the canonical namespace below
+/// the selected cache root.
 pub(crate) fn mise_executable_store_host(
     temp_host: &Path,
     trust_scope: &str,
-    repository: &str,
-) -> PathBuf {
-    crate::storage::child_with_legacy_trust(
-        mise_store_host(temp_host, trust_scope),
-        "installs",
-        trust_scope,
-    )
-    .join(sanitize_store_key(repository))
+    repository_key: &str,
+) -> anyhow::Result<PathBuf> {
+    Ok(mise_store_host(temp_host, trust_scope)?
+        .join("installs")
+        .join(sanitize_store_key(repository_key)))
 }
 
 /// Host-persistent per-version mise BINARY store, scoped by trust + repository.
@@ -1792,54 +2011,56 @@ pub(crate) fn mise_executable_store_host(
 pub(crate) fn mise_binary_store_host(
     temp_host: &Path,
     trust_scope: &str,
-    repository: &str,
-) -> PathBuf {
-    crate::storage::child_with_legacy_trust(
-        mise_store_host(temp_host, trust_scope),
-        "binaries",
-        trust_scope,
-    )
-    .join(sanitize_store_key(repository))
+    repository_key: &str,
+) -> anyhow::Result<PathBuf> {
+    Ok(mise_store_host(temp_host, trust_scope)?
+        .join("binaries")
+        .join(sanitize_store_key(repository_key)))
 }
 
 /// Host-persistent Playwright browser downloads, scoped by trust + repository.
 ///
 /// `trust_scope` is the scope in effect for the caller (the job's admitted
-/// scope on the execution path): the namespace below the root in the legacy
-/// layout, the root namespace in the canonical layout.
+/// scope on the execution path): it selects the canonical namespace below
+/// the selected cache root.
 pub(crate) fn playwright_browser_store_host(
     temp_host: &Path,
     trust_scope: &str,
-    repository: &str,
-) -> PathBuf {
-    repository_scoped_home_cache_store_host(temp_host, trust_scope, repository, "playwright")
+    repository_key: &str,
+) -> anyhow::Result<PathBuf> {
+    repository_scoped_home_cache_store_host(temp_host, trust_scope, repository_key, "playwright")
 }
 
 pub(crate) fn bun_install_cache_store_host(
     temp_host: &Path,
     trust_scope: &str,
-    repository: &str,
-) -> PathBuf {
-    repository_scoped_home_cache_store_host(temp_host, trust_scope, repository, "bun-install-cache")
+    repository_key: &str,
+) -> anyhow::Result<PathBuf> {
+    repository_scoped_home_cache_store_host(
+        temp_host,
+        trust_scope,
+        repository_key,
+        "bun-install-cache",
+    )
 }
 
 pub(crate) fn npm_cache_store_host(
     temp_host: &Path,
     trust_scope: &str,
-    repository: &str,
-) -> PathBuf {
-    repository_scoped_home_cache_store_host(temp_host, trust_scope, repository, "npm")
+    repository_key: &str,
+) -> anyhow::Result<PathBuf> {
+    repository_scoped_home_cache_store_host(temp_host, trust_scope, repository_key, "npm")
 }
 
 pub(crate) fn terraform_plugin_cache_store_host(
     temp_host: &Path,
     trust_scope: &str,
-    repository: &str,
-) -> PathBuf {
+    repository_key: &str,
+) -> anyhow::Result<PathBuf> {
     repository_scoped_home_cache_store_host(
         temp_host,
         trust_scope,
-        repository,
+        repository_key,
         "terraform-plugin-cache",
     )
 }
@@ -1847,18 +2068,56 @@ pub(crate) fn terraform_plugin_cache_store_host(
 fn repository_scoped_home_cache_store_host(
     temp_host: &Path,
     trust_scope: &str,
-    repository: &str,
+    repository_key: &str,
     store_leaf: &str,
-) -> PathBuf {
-    let root = crate::storage::cache_class_path(
-        &daemon_store_root(temp_host),
-        trust_scope,
-        "caches",
-        "_velnor_caches",
-    );
-    crate::storage::append_legacy_trust(root, trust_scope)
-        .join(sanitize_store_key(repository))
-        .join(store_leaf)
+) -> anyhow::Result<PathBuf> {
+    crate::storage::cache_class_path_for_job_temp(temp_host, trust_scope, "caches")
+        .map(|root| {
+            root.join(sanitize_store_key(repository_key))
+                .join(store_leaf)
+        })
+        .with_context(|| {
+            format!(
+                "resolve {store_leaf} cache for job temp {}",
+                temp_host.display()
+            )
+        })
+}
+
+fn cache_path_io<T>(result: anyhow::Result<T>) -> io::Result<T> {
+    result.map_err(|error| io::Error::other(error.to_string()))
+}
+
+/// Create one direct child of a previously validated runner-owned directory.
+/// Its parent cannot be changed by the guest, and `symlink_metadata` rejects
+/// an existing symlink instead of accepting the directory it points at.
+fn prepare_runner_owned_child_directory(path: &Path) -> io::Result<()> {
+    match fs::create_dir(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "runner-owned tool-store path is not a directory: {}",
+                path.display()
+            ),
+        ));
+    }
+    #[cfg(unix)]
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "runner-owned tool-store directory has a different owner: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Resolve the daemon-shared store root from a job temp dir
@@ -1997,6 +2256,14 @@ mod tests {
         args.contains(&format!("{}:ro", mount(host, container)))
     }
 
+    #[test]
+    fn macos_withholds_host_docker_socket_until_lease_proxy_is_reachable() {
+        assert!(!job_docker_socket_mount_allowed(true, "macos"));
+        assert!(!job_docker_socket_mount_allowed(true, "windows"));
+        assert!(!job_docker_socket_mount_allowed(false, "linux"));
+        assert!(job_docker_socket_mount_allowed(true, "linux"));
+    }
+
     /// Every `-v host:container[:ro]` argument of a rendered command.
     fn mount_args(prepared: &PreparedDockerArgs) -> Vec<String> {
         rendered(prepared)
@@ -2012,6 +2279,7 @@ mod tests {
         let job = work.join("job-1");
         JobContainerSpec {
             name: "velnor-job-1".into(),
+            completion_generation: uuid::Uuid::new_v4(),
             image: "ubuntu:24.04".into(),
             network: "velnor-net-1".into(),
             workspace_host: job.join("workspace"),
@@ -2031,9 +2299,13 @@ mod tests {
             docker_host_work_dir: None,
             verify_bind_mounts: false,
             daemon_id: "test-daemon".into(),
-            repository: Some("acme/repo".into()),
+            repository: None,
+            repository_store_key: crate::store_catalog::repository_store_key(
+                "https://github.com",
+                "42",
+            ),
             store_trust_scope: "trusted".to_owned(),
-            mbx_store_host: Some(work.join("_velnor_mbx/trusted")),
+            mbx_store_host: Some(work.join("test-cache/mbx")),
             sccache_store_host: None,
         }
     }
@@ -2047,11 +2319,9 @@ mod tests {
         let mut job = spec();
         job.store_trust_scope = crate::trust_scope::PR_STORE_SCOPE.to_owned();
         let args = rendered(&job.start_args().unwrap());
-        // The test work root has no `VELNOR_STORAGE_ROOT`, so the paths are
-        // the legacy layout's; the scope selects the store root exactly as
-        // it does for every other trust-scoped store in this spec.
-        let pr_store = cargo_store_host(&job.temp_host, crate::trust_scope::PR_STORE_SCOPE);
-        let trusted_store = cargo_store_host(&job.temp_host, crate::trust_scope::TRUSTED);
+        let pr_store =
+            cargo_store_host(&job.temp_host, crate::trust_scope::PR_STORE_SCOPE).unwrap();
+        let trusted_store = cargo_store_host(&job.temp_host, crate::trust_scope::TRUSTED).unwrap();
         let cargo_mounts = mount_args(&job.start_args().unwrap())
             .into_iter()
             .filter(|mount| mount.contains("/.cargo/"))
@@ -2147,7 +2417,23 @@ mod tests {
         let mbx_store = job.mbx_store_host.clone().unwrap();
         let prepared = job.start_args().unwrap();
         let args = rendered(&prepared);
-        assert!(args.contains(&format!("{}:/var/cache/mbx", mbx_store.display())));
+        assert!(has_mount(
+            &args,
+            &job.mbx_cache_store_host().unwrap(),
+            "/var/cache/mbx/slots/slot-1"
+        ));
+        assert!(has_mount(
+            &args,
+            &job.mbx_target_store_host().unwrap(),
+            "/var/cache/mbx/targets/slots/slot-1"
+        ));
+        assert!(!args.contains(&format!("{}:/var/cache/mbx", mbx_store.display())));
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.starts_with(&format!("{}:", mbx_store.display()))),
+            "shared host parent must never be bind-mounted: {args:?}"
+        );
         assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx/slots/slot-1".into()));
         assert!(args.contains(&"MBX_TARGET_ROOT=/var/cache/mbx/targets/slots/slot-1".into()));
         assert!(args.contains(&"CARGO_TARGET_DIR=/var/cache/mbx/targets/slots/slot-1".into()));
@@ -2160,6 +2446,51 @@ mod tests {
         assert!(!args
             .iter()
             .any(|arg| arg.to_ascii_lowercase().contains("sccache")));
+
+        let node_action = rendered(
+            &job.prepare_run_node_action_args("/__w", &[], &[], &[], "node:24", "/__a/action.js")
+                .unwrap(),
+        );
+        assert!(has_mount(
+            &node_action,
+            &job.mbx_cache_store_host().unwrap(),
+            "/var/cache/mbx/slots/slot-1"
+        ));
+        assert!(has_mount(
+            &node_action,
+            &job.mbx_target_store_host().unwrap(),
+            "/var/cache/mbx/targets/slots/slot-1"
+        ));
+        assert!(
+            !node_action
+                .iter()
+                .any(|arg| arg.starts_with(&format!("{}:", mbx_store.display()))),
+            "node action must not mount the shared MBX parent: {node_action:?}"
+        );
+    }
+
+    #[test]
+    fn ephemeral_mbx_store_stays_container_local() {
+        let mut job = slotted_spec("mbx-ephemeral-boundary");
+        let ephemeral_store = job.temp_host.join("_velnor/ephemeral/mbx/job-1");
+        job.mbx_store_host = Some(ephemeral_store.clone());
+        let prepared = job.start_args().unwrap();
+        let args = rendered(&prepared);
+
+        for host in [
+            ephemeral_store.clone(),
+            job.mbx_cache_store_host().unwrap(),
+            job.mbx_target_store_host().unwrap(),
+        ] {
+            assert!(
+                !args
+                    .iter()
+                    .any(|arg| arg.starts_with(&format!("{}:", host.display()))),
+                "job temp must not expose an ephemeral MBX source path: {args:?}"
+            );
+        }
+        assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx/slots/slot-1".into()));
+        assert!(args.contains(&"CARGO_TARGET_DIR=/var/cache/mbx/targets/slots/slot-1".into()));
     }
 
     #[test]
@@ -2192,6 +2523,11 @@ mod tests {
             "-m".into(),
             "1g".into(),
             "-m=2g".into(),
+            "-m1g".into(),
+            "-im".into(),
+            "3g".into(),
+            "-im1g".into(),
+            "-itm1g".into(),
             "--cpu-quota".into(),
             "50000".into(),
             "--cpuset-cpus".into(),
@@ -2228,9 +2564,15 @@ mod tests {
         assert!(
             !args
                 .iter()
-                .any(|arg| matches!(arg.as_str(), "0-1" | "512" | "1g" | "2g")),
+                .any(|arg| matches!(arg.as_str(), "0-1" | "512" | "1g" | "2g" | "3g")),
             "quota values must be stripped with their flags: {args:?}"
         );
+        for memory_flag in ["-m", "-m=2g", "-m1g", "-im", "-im1g", "-itm1g"] {
+            assert!(
+                !args.iter().any(|arg| arg == memory_flag),
+                "memory ceiling must be stripped in every shorthand form: {args:?}"
+            );
+        }
         assert!(
             args.windows(2)
                 .any(|pair| pair[0] == "--label" && pair[1] == "workflow"),
@@ -2272,9 +2614,21 @@ mod tests {
                 "{flag}=1 must be stripped"
             );
         }
+        assert!(is_quota_flag("-m1g"), "attached -m value must be stripped");
         // `--shm-size` is deliberately not a ceiling (see `QUOTA_FLAGS`).
         assert!(!is_quota_flag("--shm-size"));
         assert!(!is_quota_flag("--shm-size=256m"));
+    }
+
+    #[test]
+    fn attached_clustered_memory_flag_does_not_consume_following_token() {
+        let mut command = DockerArgv::new(["run"]);
+        append_safe_container_options(&mut command, &["-im1g".into(), "preserved-token".into()]);
+
+        assert_eq!(
+            command.operands().into_argv(),
+            ["run", "preserved-token", "--"]
+        );
     }
 
     /// No disguised resource partition is injected into the build
@@ -2312,7 +2666,8 @@ mod tests {
     fn explicit_sccache_is_mutually_exclusive_with_mbx() {
         let mut job = spec();
         job.mbx_store_host = None;
-        let sccache_store = job.temp_host.join("_velnor_sccache/trusted");
+        let shared_root = daemon_store_root(&job.temp_host);
+        let sccache_store = shared_root.join("test-cache/sccache");
         job.sccache_store_host = Some(sccache_store.clone());
         let prepared = job.start_args().unwrap();
         let args = rendered(&prepared);
@@ -2440,30 +2795,27 @@ mod tests {
     #[test]
     fn executable_tool_store_hosts_are_scoped_by_trust_and_repo() {
         let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
+        let cargo =
+            crate::storage::cache_class_path_for_job_temp(temp, "trusted", "cargo").unwrap();
+        let mise = crate::storage::cache_class_path_for_job_temp(temp, "trusted", "mise").unwrap();
 
         assert_eq!(
-            cargo_executable_store_host(temp, "trusted", "ChainArgos/java-monorepo"),
-            PathBuf::from(
-                "/var/lib/velnor/work/_velnor_cargo/bin/trusted/ChainArgos_java-monorepo"
-            )
+            cargo_executable_store_host(temp, "trusted", "ChainArgos/java-monorepo").unwrap(),
+            cargo.join("bin").join("ChainArgos_java-monorepo")
         );
         assert_eq!(
-            mise_executable_store_host(temp, "trusted", "ChainArgos/java-monorepo"),
-            PathBuf::from(
-                "/var/lib/velnor/work/_velnor_mise/installs/trusted/ChainArgos_java-monorepo"
-            )
+            mise_executable_store_host(temp, "trusted", "ChainArgos/java-monorepo").unwrap(),
+            mise.join("installs").join("ChainArgos_java-monorepo")
         );
         // Plan 008: the persistent mise binary store is a distinct `binaries`
         // subdir under the same trust/repository boundary as `installs`.
         assert_eq!(
-            mise_binary_store_host(temp, "trusted", "ChainArgos/java-monorepo"),
-            PathBuf::from(
-                "/var/lib/velnor/work/_velnor_mise/binaries/trusted/ChainArgos_java-monorepo"
-            )
+            mise_binary_store_host(temp, "trusted", "ChainArgos/java-monorepo").unwrap(),
+            mise.join("binaries").join("ChainArgos_java-monorepo")
         );
         assert_ne!(
-            mise_binary_store_host(temp, "trusted", "ChainArgos/java-monorepo"),
-            mise_executable_store_host(temp, "trusted", "ChainArgos/java-monorepo"),
+            mise_binary_store_host(temp, "trusted", "ChainArgos/java-monorepo").unwrap(),
+            mise_executable_store_host(temp, "trusted", "ChainArgos/java-monorepo").unwrap(),
         );
     }
 
@@ -2472,12 +2824,12 @@ mod tests {
         let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
 
         assert_ne!(
-            cargo_executable_store_host(temp, "trusted", "org/one"),
-            cargo_executable_store_host(temp, "trusted", "org/two")
+            cargo_executable_store_host(temp, "trusted", "org/one").unwrap(),
+            cargo_executable_store_host(temp, "trusted", "org/two").unwrap()
         );
         assert_ne!(
-            mise_executable_store_host(temp, "trusted", "org/one"),
-            mise_executable_store_host(temp, "trusted", "org/two")
+            mise_executable_store_host(temp, "trusted", "org/one").unwrap(),
+            mise_executable_store_host(temp, "trusted", "org/two").unwrap()
         );
     }
 
@@ -2486,16 +2838,24 @@ mod tests {
         let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
 
         assert_eq!(
-            cargo_store_host(temp, "trusted").join("registry/cache"),
-            PathBuf::from("/var/lib/velnor/work/_velnor_cargo/registry/cache")
+            cargo_store_host(temp, "trusted")
+                .unwrap()
+                .join("registry/cache"),
+            crate::storage::cache_class_path_for_job_temp(temp, "trusted", "cargo")
+                .unwrap()
+                .join("registry/cache")
         );
         assert_eq!(
-            cargo_store_host(temp, "trusted").join("git/db"),
-            PathBuf::from("/var/lib/velnor/work/_velnor_cargo/git/db")
+            cargo_store_host(temp, "trusted").unwrap().join("git/db"),
+            crate::storage::cache_class_path_for_job_temp(temp, "trusted", "cargo")
+                .unwrap()
+                .join("git/db")
         );
         assert_eq!(
-            mise_store_host(temp, "trusted").join("cache"),
-            PathBuf::from("/var/lib/velnor/work/_velnor_mise/cache")
+            mise_store_host(temp, "trusted").unwrap().join("cache"),
+            crate::storage::cache_class_path_for_job_temp(temp, "trusted", "mise")
+                .unwrap()
+                .join("cache")
         );
     }
 
@@ -2517,61 +2877,70 @@ mod tests {
         assert!(has_mount(&args, &job.temp_host, "/tmp"));
         assert!(has_mount(
             &args,
-            job.mbx_store_host.as_ref().unwrap(),
-            "/var/cache/mbx"
+            &job.mbx_cache_store_host().unwrap(),
+            "/var/cache/mbx/slots/slot-1"
+        ));
+        assert!(has_mount(
+            &args,
+            &job.mbx_target_store_host().unwrap(),
+            "/var/cache/mbx/targets/slots/slot-1"
         ));
         assert!(has_mount(&args, &job.home_host, "/github/home"));
         assert!(has_mount(
             &args,
-            &job.playwright_browser_store_host(),
+            &job.playwright_browser_store_host().unwrap(),
             "/github/home/.cache/ms-playwright"
         ));
         assert!(has_mount(
             &args,
-            &job.bun_install_cache_store_host(),
+            &job.bun_install_cache_store_host().unwrap(),
             "/github/home/.bun/install/cache"
         ));
         assert!(has_mount(
             &args,
-            &job.npm_cache_store_host(),
+            &job.npm_cache_store_host().unwrap(),
             "/github/home/.npm"
         ));
         assert!(has_mount(
             &args,
-            &job.terraform_plugin_cache_store_host(),
+            &job.terraform_plugin_cache_store_host().unwrap(),
             "/github/home/.terraform.d/plugin-cache"
         ));
         assert!(has_mount(
             &args,
-            &job.cargo_executable_store_host(),
+            &job.cargo_executable_store_host().unwrap(),
             "/github/home/.cargo/bin"
         ));
         assert!(has_mount(
             &args,
-            &job.mise_executable_store_host(),
+            &job.mise_executable_store_host().unwrap(),
             "/opt/mise/installs"
         ));
         assert!(has_mount(
             &args,
-            &job.mise_binary_store_host(),
+            &job.mise_binary_store_host().unwrap(),
             "/opt/velnor/mise-binaries"
         ));
         assert!(!args.iter().any(|arg| arg.ends_with(":/root/.rustup")));
         assert!(has_mount(
             &args,
             &cargo_store_host(&job.temp_host, job.store_trust_scope.as_str())
+                .unwrap()
                 .join("registry/cache"),
             "/github/home/.cargo/registry/cache"
         ));
         assert!(has_mount(
             &args,
             &cargo_store_host(&job.temp_host, job.store_trust_scope.as_str())
+                .unwrap()
                 .join("registry/index"),
             "/github/home/.cargo/registry/index"
         ));
         assert!(has_mount(
             &args,
-            &cargo_store_host(&job.temp_host, job.store_trust_scope.as_str()).join("git/db"),
+            &cargo_store_host(&job.temp_host, job.store_trust_scope.as_str())
+                .unwrap()
+                .join("git/db"),
             "/github/home/.cargo/git/db"
         ));
         assert!(!args
@@ -2582,7 +2951,9 @@ mod tests {
             .any(|arg| arg.ends_with(":/github/home/.cargo/git/checkouts")));
         assert!(has_mount(
             &args,
-            &mise_store_host(&job.temp_host, job.store_trust_scope.as_str()).join("cache"),
+            &mise_store_host(&job.temp_host, job.store_trust_scope.as_str())
+                .unwrap()
+                .join("cache"),
             "/opt/mise/cache"
         ));
         assert!(has_mount(
@@ -2645,10 +3016,10 @@ mod tests {
             );
         } else {
             assert!(
-                args.iter()
-                    .any(|arg| arg.ends_with(".sock:/var/run/docker.sock")
-                        && !arg.contains("vdl-")),
-                "macOS guest Docker must mount the resolved host socket, got {args:?}"
+                !args
+                    .iter()
+                    .any(|arg| arg.ends_with(":/var/run/docker.sock")),
+                "macOS guest Docker must not receive the raw engine socket, got {args:?}"
             );
         }
         // PID 1 supervises the console tail and exits only on the private
@@ -2677,6 +3048,44 @@ mod tests {
             !JOB_CONTAINER_PID1.contains("exit 2"),
             "tail death must not kill in-flight docker exec"
         );
+    }
+
+    #[test]
+    fn completion_mount_source_is_unique_per_container_generation() {
+        let first = spec();
+        let mut replacement = first.clone();
+        replacement.completion_generation = uuid::Uuid::new_v4();
+
+        assert_ne!(first.job_done_host_dir(), replacement.job_done_host_dir());
+        assert_ne!(first.job_done_host_path(), replacement.job_done_host_path());
+        assert!(JOB_CONTAINER_PID1.contains("/__velnor/job.done"));
+
+        let first_args = rendered(&first.start_args().unwrap());
+        let replacement_args = rendered(&replacement.start_args().unwrap());
+        assert!(has_read_only_mount(
+            &first_args,
+            &first.job_done_host_dir(),
+            "/__velnor"
+        ));
+        assert!(has_read_only_mount(
+            &replacement_args,
+            &replacement.job_done_host_dir(),
+            "/__velnor"
+        ));
+    }
+
+    #[test]
+    fn macos_rendered_job_start_withholds_raw_host_docker_socket() {
+        let job = spec();
+        let args = rendered(&job.start_args_for_host_os("macos").unwrap());
+
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.ends_with(":/var/run/docker.sock")),
+            "macOS guest must not receive the host Docker API socket: {args:?}"
+        );
+        fs::remove_dir_all(job.temp_host.parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -2714,11 +3123,15 @@ mod tests {
         other_slot.temp_host = "/var/lib/velnor/work/slot-4/job-c/temp".into();
         other_slot.slot_store_key = Some(slot_store_key(4));
 
-        let expected = PathBuf::from(
-            "/var/lib/velnor/work/_velnor_mise/installs/trusted/acme_repo/slots/slot-3",
-        );
-        assert_eq!(first.mise_executable_store_host(), expected);
-        assert_eq!(same_slot.mise_executable_store_host(), expected);
+        let repo_key = first.repository_store_key().unwrap();
+        let expected =
+            crate::storage::cache_class_path_for_job_temp(&first.temp_host, "trusted", "mise")
+                .unwrap()
+                .join("installs")
+                .join(&repo_key)
+                .join("slots/slot-3");
+        assert_eq!(first.mise_executable_store_host().unwrap(), expected);
+        assert_eq!(same_slot.mise_executable_store_host().unwrap(), expected);
         // Materializing the command writes an env file, so root this half of
         // the assertion in a real directory and derive the expectation.
         let root = container_test_temp("mise-slot");
@@ -2727,18 +3140,20 @@ mod tests {
         warm.slot_store_key = Some(slot_store_key(3));
         let expected_mount = format!(
             "{}:/opt/mise/installs",
-            warm.mise_executable_store_host().display()
+            warm.mise_executable_store_host().unwrap().display()
         );
         assert!(rendered(&warm.start_args().unwrap()).contains(&expected_mount));
         assert_eq!(
-            other_slot.mise_executable_store_host(),
-            PathBuf::from(
-                "/var/lib/velnor/work/_velnor_mise/installs/trusted/acme_repo/slots/slot-4"
-            )
+            other_slot.mise_executable_store_host().unwrap(),
+            crate::storage::cache_class_path_for_job_temp(&other_slot.temp_host, "trusted", "mise")
+                .unwrap()
+                .join("installs")
+                .join(&repo_key)
+                .join("slots/slot-4")
         );
         assert_ne!(
-            first.mise_executable_store_host(),
-            other_slot.mise_executable_store_host()
+            first.mise_executable_store_host().unwrap(),
+            other_slot.mise_executable_store_host().unwrap()
         );
     }
 
@@ -2762,6 +3177,7 @@ mod tests {
 
         assert!(default_layout
             .mise_executable_store_host()
+            .unwrap()
             .ends_with("slots/slot-2"));
         assert_eq!(
             default_layout.mbx_cache_container_dir(),
@@ -2769,6 +3185,7 @@ mod tests {
         );
         assert!(single_slot
             .mise_executable_store_host()
+            .unwrap()
             .ends_with("slots/slot-1"));
         assert_eq!(
             single_slot.mbx_cache_container_dir(),
@@ -2781,8 +3198,8 @@ mod tests {
         unowned.temp_host = "/var/lib/velnor/work/slot-3/job-c/temp".into();
         unowned.slot_store_key = None;
         assert_eq!(
-            unowned.mise_executable_store_host(),
-            unowned.temp_host.join("_velnor/ephemeral/mise-installs")
+            unowned.mise_executable_store_host().unwrap(),
+            unowned.job_done_host_dir().join("ephemeral/mise-installs")
         );
         assert_eq!(
             unowned.mbx_cache_container_dir(),
@@ -2817,8 +3234,8 @@ mod tests {
             "/var/cache/mbx/slots/slot-4"
         );
 
-        // Mount/env consistency: the shared mount is unchanged, and each env
-        // value names the mounted subdir the host pre-creates for that slot.
+        // Mount/env consistency: each per-slot directory is mounted directly
+        // at the path named by the authoritative environment.
         // (Each fixture owns its temp root, so expectations derive per spec.)
         for (job, slot) in [
             (&first, "slot-3"),
@@ -2830,6 +3247,10 @@ mod tests {
                 job.mbx_cache_store_host().unwrap(),
                 store.join("slots").join(slot)
             );
+            assert_eq!(
+                job.mbx_target_store_host().unwrap(),
+                store.join("targets").join("slots").join(slot)
+            );
         }
 
         // Materializing the command writes an env file, so root the argv half
@@ -2837,7 +3258,17 @@ mod tests {
         let job = slotted_spec("mbx-slot-argv");
         let store = job.mbx_store_host.clone().unwrap();
         let args = rendered(&job.start_args().unwrap());
-        assert!(args.contains(&format!("{}:/var/cache/mbx", store.display())));
+        assert!(has_mount(
+            &args,
+            &job.mbx_cache_store_host().unwrap(),
+            "/var/cache/mbx/slots/slot-1"
+        ));
+        assert!(has_mount(
+            &args,
+            &job.mbx_target_store_host().unwrap(),
+            "/var/cache/mbx/targets/slots/slot-1"
+        ));
+        assert!(!args.contains(&format!("{}:/var/cache/mbx", store.display())));
         assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx/slots/slot-1".into()));
         assert!(args.contains(&"MBX_TARGET_ROOT=/var/cache/mbx/targets/slots/slot-1".into()));
         assert!(args.contains(&"CARGO_TARGET_DIR=/var/cache/mbx/targets/slots/slot-1".into()));
@@ -3085,7 +3516,7 @@ mod tests {
         spec.home_host = root.join("runner/work/job-1/home");
         spec.actions_host = root.join("runner/work/job-1/actions");
         spec.tools_host = root.join("runner/work/job-1/tools");
-        spec.mbx_store_host = Some(root.join("runner/work/_velnor_mbx/trusted"));
+        spec.mbx_store_host = Some(root.join("runner/work/test-cache/mbx"));
         spec.docker_host_work_dir = Some("/daemon/work".into());
 
         let prepared = spec.start_args().unwrap();
@@ -3095,7 +3526,14 @@ mod tests {
         assert!(args.contains(&"/daemon/work/job-1/temp:/__t".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp:/daemon/work/job-1/temp".into()));
         assert!(args.contains(&"/daemon/work/job-1/workspace:/daemon/work/job-1/workspace".into()));
-        assert!(args.contains(&"/daemon/work/_velnor_mbx/trusted:/var/cache/mbx".into()));
+        let expected_mbx_cache_mount =
+            "/daemon/work/test-cache/mbx/slots/velnor-job-1:/var/cache/mbx/slots/velnor-job-1"
+                .to_owned();
+        let expected_mbx_target_mount =
+            "/daemon/work/test-cache/mbx/targets/slots/velnor-job-1:/var/cache/mbx/targets/slots/velnor-job-1"
+                .to_owned();
+        assert!(args.contains(&expected_mbx_cache_mount));
+        assert!(args.contains(&expected_mbx_target_mount));
         assert!(args.contains(&"/daemon/work/job-1/home:/github/home".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp/_github_workflow:/github/workflow".into()));
         assert!(args.contains(&"/daemon/work/job-1/actions:/__a:ro".into()));
@@ -3115,10 +3553,10 @@ mod tests {
             );
         } else {
             assert!(
-                args.iter()
-                    .any(|arg| arg.ends_with(".sock:/var/run/docker.sock")
-                        && !arg.contains("vdl-")),
-                "macOS guest Docker must mount the resolved host socket, got {args:?}"
+                !args
+                    .iter()
+                    .any(|arg| arg.ends_with(":/var/run/docker.sock")),
+                "macOS guest Docker must not receive the raw engine socket, got {args:?}"
             );
         }
     }
@@ -3129,7 +3567,7 @@ mod tests {
         let mut spec = spec();
         spec.workspace_host = root.join("runner/work/slot-1/job-1/workspace");
         spec.temp_host = root.join("runner/work/slot-1/job-1/temp");
-        spec.mbx_store_host = Some(root.join("runner/work/_velnor_mbx/trusted"));
+        spec.mbx_store_host = Some(root.join("runner/work/test-cache/mbx"));
         spec.docker_host_work_dir = Some("/daemon/work".into());
 
         assert_eq!(
@@ -3138,7 +3576,7 @@ mod tests {
         );
         assert_eq!(
             spec.docker_host_path(spec.mbx_store_host.as_ref().unwrap()),
-            PathBuf::from("/daemon/work/_velnor_mbx/trusted")
+            PathBuf::from("/daemon/work/test-cache/mbx")
         );
         assert_eq!(
             spec.docker_lease_paths().unwrap().daemon_visible.parent(),
@@ -3663,8 +4101,13 @@ mod tests {
         assert!(has_mount(&args, &spec.temp_host, "/tmp"));
         assert!(has_mount(
             &args,
-            spec.mbx_store_host.as_ref().unwrap(),
-            "/var/cache/mbx"
+            &spec.mbx_cache_store_host().unwrap(),
+            &spec.mbx_cache_container_dir()
+        ));
+        assert!(has_mount(
+            &args,
+            &spec.mbx_target_store_host().unwrap(),
+            &spec.mbx_target_container_dir()
         ));
         assert!(has_mount(&args, &spec.temp_host, "/github/runner_temp"));
         assert!(has_mount(&args, &spec.temp_host, "/github/file_commands"));
@@ -3733,16 +4176,15 @@ mod tests {
         spec
     }
 
-    /// PATH entries name job-container directories, so the sidecar gets a bind
-    /// mount for each at the very same absolute path: a post step resolving
-    /// `cargo` through a PATH dir must not depend on that dir existing only in
-    /// the job container.
+    /// Runner-managed PATH stores are mounted by root at their stable prefixes,
+    /// so post steps resolve tools without turning GITHUB_PATH descendants into
+    /// daemon-host bind sources.
     #[test]
-    fn node_action_path_entries_are_mounted_at_the_same_container_path() {
+    fn node_action_path_entries_mount_only_runner_managed_store_roots() {
         let spec = slotted_spec("node-path-mounts");
-        let mise_installs = spec.mise_executable_store_host();
-        let mise_binaries = spec.mise_binary_store_host();
-        let cargo_bin = spec.cargo_executable_store_host();
+        let mise_installs = spec.mise_executable_store_host().unwrap();
+        let mise_binaries = spec.mise_binary_store_host().unwrap();
+        let cargo_bin = spec.cargo_executable_store_host().unwrap();
         let prepared = spec
             .prepare_run_node_action_args(
                 "/__w",
@@ -3760,20 +4202,18 @@ mod tests {
             .unwrap();
         let args = rendered(&prepared);
 
+        assert!(has_mount(&args, &mise_installs, "/opt/mise/installs"));
         assert!(has_mount(
             &args,
-            &mise_installs.join("node/22.18.0/bin"),
-            "/opt/mise/installs/node/22.18.0/bin"
-        ));
-        assert!(has_mount(
-            &args,
-            &mise_binaries.join("linux-x64/25.6.0"),
-            "/opt/velnor/mise-binaries/linux-x64/25.6.0"
+            &mise_binaries,
+            "/opt/velnor/mise-binaries"
         ));
         // Nested store mount: /github/home alone does not carry the cargo bin
         // store, and it must not be swallowed by the broader /github/home view.
         assert!(has_mount(&args, &cargo_bin, "/github/home/.cargo/bin"));
-        assert!(has_mount(
+        // Arbitrary host paths from GITHUB_PATH are kept in PATH but are not
+        // promoted to daemon-host bind sources.
+        assert!(!has_mount(
             &args,
             Path::new("/root/.cargo/bin"),
             "/root/.cargo/bin"
@@ -3805,18 +4245,157 @@ mod tests {
             args.iter()
                 .filter(|arg| **arg == mount(Path::new("/root/.cargo/bin"), "/root/.cargo/bin"))
                 .count(),
-            1
+            0
         );
         assert_eq!(
             args.iter()
                 .filter(|arg| **arg
                     == mount(
-                        &spec.mise_executable_store_host().join("node/22.18.0/bin"),
-                        "/opt/mise/installs/node/22.18.0/bin"
+                        &spec.mise_executable_store_host().unwrap(),
+                        "/opt/mise/installs"
                     ))
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn node_action_untrusted_absolute_paths_never_become_host_mounts() {
+        let spec = slotted_spec("node-path-untrusted-hosts");
+        let path_prepend = ["/".into(), "/var/run".into(), "/etc".into()];
+        let prepared = spec
+            .prepare_run_node_action_args(
+                "/__w",
+                &[],
+                &[],
+                &path_prepend,
+                "node:20-bookworm",
+                "/__a/action/dist/index.js",
+            )
+            .unwrap();
+        let args = rendered(&prepared);
+        let mounts = mount_args(&prepared);
+
+        for path in ["/", "/var/run", "/etc"] {
+            assert!(
+                !mounts.iter().any(|mount| mount_host(mount) == path),
+                "untrusted PATH entry became a host source: {mounts:?}"
+            );
+            assert!(
+                !mounts.iter().any(|mount| mount_container(mount) == path),
+                "untrusted PATH entry became a container mount target: {mounts:?}"
+            );
+        }
+        assert!(args.iter().any(|arg| arg == "PATH=/:/var/run:/etc:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn node_action_store_descendant_symlink_cannot_redirect_host_mount_source() {
+        use std::os::unix::fs::symlink;
+
+        let spec = slotted_spec("node-path-store-symlink");
+        let store = spec.mise_executable_store_host().unwrap();
+        let path = store.join("node/22.18.0/bin");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        symlink("/var/run", &path).unwrap();
+
+        let prepared = spec
+            .prepare_run_node_action_args(
+                "/__w",
+                &[],
+                &[],
+                &["/opt/mise/installs/node/22.18.0/bin".into()],
+                "node:20-bookworm",
+                "/__a/action/dist/index.js",
+            )
+            .unwrap();
+        let mounts = mount_args(&prepared);
+
+        assert!(mounts.contains(&mount(&store, "/opt/mise/installs")));
+        assert!(!mounts.contains(&mount(&path, "/opt/mise/installs/node/22.18.0/bin")));
+        assert!(
+            mounts
+                .iter()
+                .all(|mount| !mount.starts_with(&format!("{}:", path.display()))),
+            "descendant symlink path escaped into a bind source: {mounts:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn node_action_ephemeral_store_root_replacement_cannot_redirect_host_mount() {
+        use std::os::unix::fs::symlink;
+
+        let mut spec = slotted_spec("node-path-ephemeral-root-symlink");
+        spec.repository_store_key = None;
+        spec.slot_store_key = None;
+        let guest_writable_ephemeral = spec.temp_host.join("_velnor/ephemeral");
+        fs::create_dir_all(&guest_writable_ephemeral).unwrap();
+        let replaced_roots = ["cargo-bin", "mise-installs", "mise-binaries"]
+            .map(|leaf| guest_writable_ephemeral.join(leaf));
+        for path in &replaced_roots {
+            symlink("/var/run", path).unwrap();
+        }
+
+        let job_args = rendered(&spec.start_args().unwrap());
+        assert!(has_read_only_mount(
+            &job_args,
+            &spec.job_done_host_dir(),
+            "/__velnor"
+        ));
+
+        let stores = [
+            (
+                spec.cargo_executable_store_host().unwrap(),
+                "/github/home/.cargo/bin",
+                "/github/home/.cargo/bin/rustup",
+            ),
+            (
+                spec.mise_executable_store_host().unwrap(),
+                "/opt/mise/installs",
+                "/opt/mise/installs/node/22.18.0/bin",
+            ),
+            (
+                spec.mise_binary_store_host().unwrap(),
+                "/opt/velnor/mise-binaries",
+                "/opt/velnor/mise-binaries/linux-x64/25.6.0",
+            ),
+        ];
+        let prepared = spec
+            .prepare_run_node_action_args(
+                "/__w",
+                &[],
+                &[],
+                &stores
+                    .iter()
+                    .map(|(_, _, path)| (*path).to_owned())
+                    .collect::<Vec<_>>(),
+                "node:20-bookworm",
+                "/__a/action/dist/index.js",
+            )
+            .unwrap();
+        let mounts = mount_args(&prepared);
+
+        for (store, container_root, _) in &stores {
+            assert!(store.starts_with(spec.job_done_host_dir()));
+            assert!(!store.starts_with(&spec.temp_host));
+            assert!(fs::symlink_metadata(store).unwrap().file_type().is_dir());
+            assert!(mounts.contains(&mount(store, container_root)));
+        }
+        for replaced in &replaced_roots {
+            assert!(fs::symlink_metadata(replaced)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            let replaced_text = replaced.to_string_lossy();
+            assert!(
+                mounts
+                    .iter()
+                    .all(|mount| mount_host(mount) != replaced_text.as_ref()),
+                "guest-replaced ephemeral root became a mount source: {mounts:?}"
+            );
+        }
     }
 
     /// A PATH entry landing on /__w, /__t or /github is already visible, and
@@ -3915,12 +4494,14 @@ mod tests {
                 );
             }
         }
-        // A PATH entry outside the runner-owned views still gets its mount.
-        assert!(has_mount(
+        // An arbitrary PATH entry is preserved in PATH but cannot request a
+        // bind of its same-named daemon-host directory.
+        assert!(!has_mount(
             &args,
             Path::new("/usr/local/tools/bin"),
             "/usr/local/tools/bin"
         ));
+        assert!(args.iter().any(|arg| arg == "PATH=/__w:/__w/repo/target/debug:/__w/repo-sibling/bin:/__t:/tmp/velnor:/github/workspace/bin:/github/workflow:/github/home:/__a:/__tool:/usr/local/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"));
     }
 
     #[test]
@@ -3944,23 +4525,31 @@ mod tests {
             .map(|entry| mount_container(&entry).to_owned())
             .collect();
         containers.sort_unstable();
-        assert_eq!(
-            containers,
-            [
-                "/__a",
-                "/__t",
-                "/__tool",
-                "/__w",
-                "/github/file_commands",
-                "/github/home",
-                "/github/runner_temp",
-                "/github/workflow",
-                "/github/workspace",
-                "/tmp",
-                "/var/cache/mbx",
-                "/var/run/docker.sock",
-            ]
-        );
+        // Slot-leaf mbx mounts keep one slot from seeing another slot's
+        // future mount source; the engine socket only exists on Linux hosts.
+        let linux_socket: &[&str] = if cfg!(target_os = "linux") {
+            &["/var/run/docker.sock"]
+        } else {
+            &[]
+        };
+        let expected: Vec<&str> = [
+            "/__a",
+            "/__t",
+            "/__tool",
+            "/__w",
+            "/github/file_commands",
+            "/github/home",
+            "/github/runner_temp",
+            "/github/workflow",
+            "/github/workspace",
+            "/tmp",
+            "/var/cache/mbx/slots/slot-1",
+            "/var/cache/mbx/targets/slots/slot-1",
+        ]
+        .into_iter()
+        .chain(linux_socket.iter().copied())
+        .collect();
+        assert_eq!(containers, expected);
     }
 
     /// Main and post node actions are prepared by the same call with the same
@@ -3970,7 +4559,7 @@ mod tests {
         let spec = slotted_spec("node-path-post");
         let path_prepend = [
             "/opt/mise/installs/node/22.18.0/bin".to_owned(),
-            "/root/.cargo/bin".to_owned(),
+            "/github/home/.cargo/bin".to_owned(),
         ];
         let main = spec
             .prepare_run_node_action_args(
@@ -3996,7 +4585,7 @@ mod tests {
             mount_args(prepared)
                 .into_iter()
                 .filter(|entry| {
-                    ["/opt/mise/installs", "/root/.cargo"]
+                    ["/opt/mise/installs", "/github/home/.cargo/bin"]
                         .iter()
                         .any(|prefix| mount_container(entry).starts_with(prefix))
                 })
@@ -4028,13 +4617,13 @@ mod tests {
             .unwrap();
         let args = rendered(&prepared);
 
-        // Only the plain absolute entry mounts; unusable entries are skipped
+        // No store-backed entry, no mount: unusable entries are skipped
         // while the recorded PATH itself stays verbatim.
         assert_eq!(
             args.iter()
                 .filter(|arg| **arg == mount(Path::new("/opt/mise/bin"), "/opt/mise/bin"))
                 .count(),
-            1
+            0
         );
         assert!(args.contains(&"PATH=:bin/tools:/opt/mise/shims/../..:/usr/local/bin:/opt/mise/bin:/opt/mise/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into()));
     }
@@ -4172,8 +4761,13 @@ mod tests {
         assert!(has_mount(&args, &spec.temp_host, "/tmp"));
         assert!(has_mount(
             &args,
-            spec.mbx_store_host.as_ref().unwrap(),
-            "/var/cache/mbx"
+            &spec.mbx_cache_store_host().unwrap(),
+            &spec.mbx_cache_container_dir()
+        ));
+        assert!(has_mount(
+            &args,
+            &spec.mbx_target_store_host().unwrap(),
+            &spec.mbx_target_container_dir()
         ));
         assert!(has_mount(&args, &spec.temp_host, "/github/runner_temp"));
         assert!(has_mount(&args, &spec.temp_host, "/github/file_commands"));
@@ -4277,6 +4871,77 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_builders_use_supplied_immutable_targets() {
+        let job = spec();
+        assert_eq!(
+            job.remove_container_args_for("immutable-container-id"),
+            vec!["rm", "--force", "--", "immutable-container-id"]
+        );
+        assert_eq!(
+            job.remove_network_args_for("immutable-network-id"),
+            vec!["network", "rm", "--", "immutable-network-id"]
+        );
+        assert_eq!(
+            job.disconnect_network_args_for("immutable-network-id", "immutable-container-id"),
+            vec![
+                "network",
+                "disconnect",
+                "--force",
+                "--",
+                "immutable-network-id",
+                "immutable-container-id"
+            ]
+        );
+        assert_eq!(
+            job.connect_network_args_for("immutable-network-id", "immutable-container-id"),
+            vec![
+                "network",
+                "connect",
+                "--",
+                "immutable-network-id",
+                "immutable-container-id"
+            ]
+        );
+
+        let service = ServiceContainerSpec {
+            name: "velnor-service-postgres".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: "velnor-net-1".into(),
+            env: Vec::new(),
+            ports: Vec::new(),
+            options: Vec::new(),
+        };
+        assert_eq!(
+            service.remove_args_for("immutable-service-id"),
+            vec!["rm", "--force", "--", "immutable-service-id"]
+        );
+        assert_eq!(
+            service.disconnect_network_args_for("immutable-network-id", "immutable-service-id"),
+            vec![
+                "network",
+                "disconnect",
+                "--force",
+                "--",
+                "immutable-network-id",
+                "immutable-service-id"
+            ]
+        );
+        assert_eq!(
+            service.connect_network_args_for("immutable-network-id", "immutable-service-id"),
+            vec![
+                "network",
+                "connect",
+                "--alias",
+                "postgres",
+                "--",
+                "immutable-network-id",
+                "immutable-service-id"
+            ]
+        );
+    }
+
+    #[test]
     fn service_runner_network_overrides_expanded_options() {
         let service = ServiceContainerSpec {
             name: "velnor-service-postgres".into(),
@@ -4313,6 +4978,184 @@ mod tests {
             .filter(|pair| pair[0] == "--network")
             .collect::<Vec<_>>();
         assert_eq!(network_pairs.last().unwrap()[1], "velnor-net-1");
+    }
+
+    #[test]
+    fn job_options_drop_all_user_mount_routes_but_keep_other_options() {
+        let mut job = spec();
+        job.options = vec![
+            "--privileged".into(),
+            "--label".into(),
+            "keep=yes".into(),
+            "-v".into(),
+            "/var/run/docker.sock:/host-engine".into(),
+            "-iv".into(),
+            "/host/job-cluster".into(),
+            "-itv=/host/job-equals".into(),
+            "-dv".into(),
+            "/host/job-detached".into(),
+            "-v=/tmp/repeated:/repeated".into(),
+            "--volume".into(),
+            "/tmp/paired:/user-volume-pair".into(),
+            "--volume=/tmp/ordinary:/user-volume".into(),
+            "--VOLUME=/tmp/case-variant:/case-variant".into(),
+            "--mount".into(),
+            "type=bind,src=/run,dst=/host-run".into(),
+            "--mount=type=volume,src=untrusted,dst=/host-volume,volume-driver=local,volume-opt=device=/var/run".into(),
+            "--volumes-from".into(),
+            "old-container".into(),
+            "--volume-driver".into(),
+            "local".into(),
+            "--volume-opt".into(),
+            "device=/".into(),
+            "--volume-opt=device=/var/run".into(),
+            "--use-api-socket=true".into(),
+            "--use-api-socket".into(),
+            "false".into(),
+            "--read-only".into(),
+            "-it".into(),
+            "-w/opt/velnor".into(),
+            "-eFOO=value".into(),
+            "-m1g".into(),
+            "-im".into(),
+            "4g".into(),
+            "-im1g".into(),
+            "-itm1g".into(),
+            "-p8080:80".into(),
+        ];
+
+        let args = rendered(&job.start_args().unwrap());
+        assert!(args.iter().any(|arg| arg == "--privileged"));
+        assert!(args.windows(2).any(|pair| pair == ["--label", "keep=yes"]));
+        assert!(args.iter().any(|arg| arg == "--read-only"));
+        for preserved in ["-w/opt/velnor", "-eFOO=value", "-p8080:80", "-it"] {
+            assert!(
+                args.iter().any(|arg| arg == preserved),
+                "{preserved}: {args:?}"
+            );
+        }
+        let workspace_mount = mount(&job.workspace_host, "/__w");
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-v" && pair[1] == workspace_mount));
+        for rejected in [
+            "/host-engine",
+            "/host/job-cluster",
+            "/host/job-equals",
+            "/host/job-detached",
+            "/user-volume",
+            "/user-volume-pair",
+            "/host-run",
+            "/host-volume",
+            "/case-volume",
+            "old-container",
+            "old-container-2",
+            "--volume-opt",
+            "--use-api-socket=true",
+            "false",
+            "-m1g",
+            "-im",
+            "4g",
+            "-im1g",
+            "-itm1g",
+        ] {
+            assert!(
+                !args.iter().any(|arg| arg.contains(rejected)),
+                "{rejected}: {args:?}"
+            );
+        }
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "--volume-driver" || arg == "--use-api-socket"));
+        assert!(args.iter().any(|arg| arg == "-it"));
+    }
+
+    #[test]
+    fn service_options_drop_all_user_mount_routes_but_keep_other_options() {
+        let service = ServiceContainerSpec {
+            name: "velnor-service-postgres".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: "velnor-net-1".into(),
+            env: Vec::new(),
+            ports: Vec::new(),
+            options: vec![
+                "--label".into(),
+                "keep=yes".into(),
+                "-iv".into(),
+                "/host/service-cluster".into(),
+                "-itv=/host/service-equals".into(),
+                "-dv/host/service-attached".into(),
+                "--volume=/var/run/docker.sock:/host-engine".into(),
+                "--mount".into(),
+                "type=bind,source=/,target=/host-root".into(),
+                "--MOUNT=type=volume,source=untrusted,target=/case-volume".into(),
+                "--mount=type=volume,source=untrusted,target=/host-volume,volume-driver=local,volume-opt=device=/".into(),
+                "--volumes-from=old-container".into(),
+                "--VOLUMES-FROM=old-container-2".into(),
+                "--volume-driver=local".into(),
+                "--volume-opt=device=/var/run".into(),
+                "--use-api-socket".into(),
+                "--read-only".into(),
+                "-it".into(),
+                "-w/opt/velnor".into(),
+                "-eFOO=value".into(),
+                "-m1g".into(),
+                "-im".into(),
+                "5g".into(),
+                "-im1g".into(),
+                "-itm1g".into(),
+                "-p8080:80".into(),
+            ],
+        };
+
+        let args = rendered(&service.start_args(&service_env_dir()).unwrap());
+        assert!(args.windows(2).any(|pair| pair == ["--label", "keep=yes"]));
+        assert!(args.iter().any(|arg| arg == "--read-only"));
+        for preserved in ["-w/opt/velnor", "-eFOO=value", "-p8080:80", "-it"] {
+            assert!(
+                args.iter().any(|arg| arg == preserved),
+                "{preserved}: {args:?}"
+            );
+        }
+        for rejected in [
+            "-v",
+            "--volume",
+            "--mount",
+            "--volumes-from",
+            "--volume-driver",
+            "--volume-opt",
+            "--use-api-socket",
+            "-m1g",
+            "-im",
+            "5g",
+            "-im1g",
+            "-itm1g",
+        ] {
+            assert!(
+                !args
+                    .iter()
+                    .any(|arg| arg == rejected || arg.starts_with(&format!("{rejected}="))),
+                "{rejected}: {args:?}"
+            );
+        }
+        for rejected in [
+            "/host-engine",
+            "/host-root",
+            "/host-volume",
+            "/case-volume",
+            "/host/service-cluster",
+            "/host/service-equals",
+            "/host/service-attached",
+            "old-container",
+            "old-container-2",
+        ] {
+            assert!(
+                !args.iter().any(|arg| arg.contains(rejected)),
+                "{rejected}: {args:?}"
+            );
+        }
+        assert!(args.iter().any(|arg| arg == "-it"));
     }
 
     #[test]

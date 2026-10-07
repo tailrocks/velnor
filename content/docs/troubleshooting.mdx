@@ -111,7 +111,7 @@ stale slot health, disk pressure, or insufficient configured capacity.
 Healthy: the job plan is normalized, actions are admitted, workspace paths and
 credentials are prepared, and checkout begins.
 
-Inspect job events, local logs, and GitHub checkout-step output. Unknown
+Inspect job events, runner forensic files, and GitHub checkout-step output. Unknown
 `uses:` forms, unsupported JavaScript/Docker/composite metadata, invalid refs,
 unsafe paths, missing checkout credentials, or LFS requirements can fail here.
 
@@ -125,10 +125,13 @@ cleanup reports failure.
 Healthy: the selected backend completes `preflight → reserve → prepare → start
 → execute/cancel → collect → teardown` with no fallback.
 
-Inspect `status --json` for backend/executor readiness, `get jobs`, local logs,
-and GitHub step logs. Docker requires the host Docker socket and the verified
-host boundary. MicroVM requires KVM, verified artifacts, jailer, and vsock; it
-rejects the Docker socket. Unknown backend values fail closed.
+Inspect `status --json` for backend/executor readiness, `get jobs`, the daemon
+journal, runner forensic files, and GitHub step logs. Docker requires the host Docker socket and the verified
+host boundary. On macOS, Velnor uses the Docker daemon for runner-owned
+containers but withholds the raw socket from job containers; in-job Docker API
+clients have no endpoint until a VM-reachable per-job lease proxy exists.
+MicroVM requires KVM, verified artifacts, jailer, and vsock; it rejects the
+Docker socket. Unknown backend values fail closed.
 
 Backend start/preflight errors are infrastructure failures. A step exit status
 is workload failure. Cancellation is a separate terminal path. Firecracker
@@ -138,20 +141,19 @@ the jailer process group. If a job remains stuck, inspect guest-cancel and
 jailer cleanup evidence; a cancellation request alone is not proof of
 reported completion.
 
-## 8. Native logs, timeline, and live status
+## 8. Native events, timeline, and live status
 
-Healthy: local events/logs advance and GitHub receives masked live lines,
+Healthy: local events advance and GitHub receives masked live lines,
 timeline updates, and uploaded logs as applicable.
 
-Inspect `velnorctl events`, `logs SUBJECT`, `telemetry`, `daemon.log`, and the
-GitHub job's live log/timeline. Local log records are bounded (16,384 records or
-16 MiB); event watches retain 4,096 items; cursors expire. Resnapshot when a
-cursor expires. Forensic and trace writers are best effort.
+Inspect `velnorctl events`, `telemetry`, the daemon journal, and the GitHub
+job's live log/timeline. Event watches retain 4,096 items and cursors expire;
+resnapshot when a cursor expires. The production control API's local log
+endpoint is unsupported and `velnorctl logs` returns 501; use GitHub logs for
+job output. Forensic and trace writers are best effort.
 
 If local execution advances but GitHub's view does not, this is a publishing
-or connectivity problem. If GitHub has logs but local logs are empty after a
-restart, projection rehydration is a known limitation. CLI `logs --step` and
-`--failed` currently do not narrow output.
+or connectivity problem.
 
 ## 9. Native artifacts and cache
 
@@ -167,11 +169,19 @@ artifact fallback does not prove that GitHub received the artifact.
 For Rust failures on the Docker backend, run `mbx doctor` in the job and check
 that `/var/cache/mbx` is writable. Managed targets are under
 `/var/cache/mbx/targets`; the packaged host path is
-`/var/cache/velnor/v1/TRUST_CLASS/compiler/mbx/REPOSITORY_ID`. Confirm the
-repository ID and `untrusted`, `trusted`, or `release` partition before
-comparing jobs — a node whose trust scope changed reads a different partition
-and looks cold once. Cargo registry and Git source caches are separate, so a
-warm registry does not imply a warm Mr Boxington store.
+`/var/cache/velnor/v1__trust_scope_v1/trust-scope-v1-<digest>/compiler/mbx/REPOSITORY_ID`.
+The digest represents the effective scope, such as `untrusted`, `trusted`,
+`release`, `pr`, or a configured custom scope for trusted jobs. Confirm scope
+and repository ID before comparing jobs. The keyed layout does not migrate,
+reuse, or read old raw-scope paths under `v1`. The guarded Debian
+`storage purge-legacy` step removes supported roots only for configured
+instances; undiscoverable custom roots, roots for deconfigured instances, and
+unsupported layouts may remain outside current cache reports and GC while
+consuming disk.
+Cargo registry and Git download stores are trust-scoped but not
+repository-scoped, while Mr Boxington is repository-scoped and has per-slot
+cache and target subtrees. A warm registry does not imply a warm Mr Boxington
+store.
 
 If the build looks under-parallelized, jobs run unbounded and no compiler
 partition is imposed, but lane capacity can still be lower than the shared
@@ -219,9 +229,10 @@ slots continue when possible.
 
 On native-lane drain, idle slots exit at a poll boundary and native jobs are
 allowed to finish subject to service-stop limits. Controller restart is not
-itself proof that slot workers stopped. Query/log projections may be empty
-after recreation even while durable events remain; use those durable events
-plus GitHub state to reconstruct what happened.
+itself proof that slot workers stopped. Query resources reload from SQLite;
+the production local-log projection is unsupported and returns HTTP 501. Use
+durable events, runner forensic files, and GitHub state to reconstruct what
+happened.
 
 ## Native quick distinction table
 
@@ -229,8 +240,8 @@ plus GitHub state to reconstruct what happened.
 | --- | --- | --- |
 | GitHub queued; no Velnor delivery | Configuration/eligibility | workflow labels, policy, runners, health |
 | Delivery event; no acquired job | Acquisition | broker/run logs, job events |
-| Acquired; no backend start | Admission/capacity/preparation | admission telemetry, reservations, logs |
+| Acquired; no backend start | Admission/capacity/preparation | admission telemetry, reservations, runner forensic files |
 | Backend started; step fails | Execution | backend and step logs |
-| Local logs advance; GitHub stale | Publishing/reporting | Results/timeline logs, outbox, GitHub view |
+| Local execution advances; GitHub stale | Publishing/reporting | Results/timeline logs, outbox, GitHub view |
 | Completion local; GitHub pending | Result acknowledgement | completion events and outbox |
-| Empty views after restart | Projection durability limit | durable events, journal, GitHub state |
+| `velnorctl logs` returns HTTP 501 | Local log API unsupported | GitHub job logs, daemon journal, runner forensic files |

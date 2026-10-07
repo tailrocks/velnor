@@ -18,7 +18,7 @@ use std::os::unix::fs::OpenOptionsExt;
 /// Bound both durable writes and recovery reads so a hostile or corrupted
 /// outbox cannot consume unbounded disk or heap.
 pub const MAX_COMPLETION_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
-const MAX_OWNED_PID_BYTES: usize = 64;
+const MAX_OWNED_PID_BYTES: usize = 512;
 
 const QUARANTINE_ENTRY_NAME: &str = "outbox-entry";
 const QUARANTINE_PREFIX: &str = ".outbox-remove-";
@@ -94,7 +94,10 @@ pub fn write_owned_pid(
             .write(true)
             .create_new(true)
             .open(&temporary)?;
-        file.write_all(pid.to_string().as_bytes())?;
+        let process_identity = crate::node::prove::process_instance_identity(pid)
+            .unwrap_or_else(|| "unknown".to_owned());
+        writeln!(file, "{pid}")?;
+        writeln!(file, "{process_identity}")?;
         file.sync_all()?;
         std::fs::rename(&temporary, &owned)?;
         #[cfg(unix)]
@@ -110,6 +113,26 @@ pub fn write_owned_pid(
 /// Read a pid previously stored in the ownership marker.
 #[must_use]
 pub fn read_owned_pid(state_dir: &Path, isolation_id: &str, generation: u64) -> Option<u32> {
+    read_owned_marker(state_dir, isolation_id, generation).map(|(pid, _)| pid)
+}
+
+/// Read the process start/executable identity captured with the PID marker.
+/// A missing identity is accepted only as a legacy/unprovable marker; callers
+/// must then re-prove the live command and rewrite the marker before adoption.
+#[must_use]
+pub fn read_owned_process_identity(
+    state_dir: &Path,
+    isolation_id: &str,
+    generation: u64,
+) -> Option<String> {
+    read_owned_marker(state_dir, isolation_id, generation).and_then(|(_, identity)| identity)
+}
+
+fn read_owned_marker(
+    state_dir: &Path,
+    isolation_id: &str,
+    generation: u64,
+) -> Option<(u32, Option<String>)> {
     assert_safe_id(isolation_id).ok()?;
     let path = owned_path(state_dir, isolation_id, generation);
     let mut options = OpenOptions::new();
@@ -124,7 +147,14 @@ pub fn read_owned_pid(state_dir: &Path, isolation_id: &str, generation: u64) -> 
     if contents.len() > MAX_OWNED_PID_BYTES {
         return None;
     }
-    contents.trim().parse().ok()
+    let mut lines = contents.lines();
+    let pid = lines.next()?.trim().parse().ok()?;
+    let identity = lines
+        .next()
+        .map(str::trim)
+        .filter(|identity| !identity.is_empty() && *identity != "unknown")
+        .map(str::to_owned);
+    Some((pid, identity))
 }
 
 /// Atomically publish the completion payload before transport or journal intent.
@@ -808,9 +838,22 @@ mod tests {
     fn write_owned_pid_publishes_exact_contents() {
         let dir = tmp("pid");
         write_owned_pid(&dir, "job-1", 1, 42).unwrap();
+        let contents = std::fs::read_to_string(owned_path(&dir, "job-1", 1)).unwrap();
+        assert_eq!(contents.lines().next(), Some("42"));
+        assert_eq!(read_owned_pid(&dir, "job-1", 1), Some(42));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn owned_pid_marker_binds_live_process_start_and_executable() {
+        let dir = tmp("pid-identity");
+        let pid = std::process::id();
+        write_owned_pid(&dir, "job-1", 1, pid).unwrap();
+        assert_eq!(read_owned_pid(&dir, "job-1", 1), Some(pid));
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         assert_eq!(
-            std::fs::read_to_string(owned_path(&dir, "job-1", 1)).unwrap(),
-            "42"
+            read_owned_process_identity(&dir, "job-1", 1),
+            crate::node::prove::process_instance_identity(pid)
         );
         std::fs::remove_dir_all(dir).ok();
     }

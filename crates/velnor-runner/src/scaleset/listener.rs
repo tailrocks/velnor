@@ -377,8 +377,8 @@ impl<S: LoopSession, L: CapacityLedger, W: WorkerLane> Listener<S, L, W> {
             .ledger_generation()
             .map_err(ListenerError::Ledger)?;
         if self.reconciled_generation != Some(generation) {
-            let (ledger, demand, batches, _lane) = self.processor.parts_mut();
-            startup(ledger, demand, batches, set, &self.metrics)
+            let (ledger, demand, batches, lane) = self.processor.parts_mut();
+            startup(ledger, demand, batches, set, &self.metrics, lane)
                 .map_err(ListenerError::Reconcile)?;
             self.reconciled_generation = Some(generation);
         }
@@ -682,6 +682,7 @@ mod tests {
         fn note_assigned(
             &mut self,
             _assigned: &velnor_model::ScaleSetJobAssigned,
+            _attempt_token: &str,
         ) -> Result<(), Self::Error> {
             Ok(())
         }
@@ -689,6 +690,7 @@ mod tests {
         fn note_started(
             &mut self,
             _started: &velnor_model::ScaleSetJobStarted,
+            _attempt_token: &str,
         ) -> Result<(), Self::Error> {
             Ok(())
         }
@@ -696,6 +698,7 @@ mod tests {
         fn note_terminal(
             &mut self,
             _completed: &velnor_model::ScaleSetJobCompleted,
+            _attempt_token: &str,
         ) -> Result<(), Self::Error> {
             Ok(())
         }

@@ -32,8 +32,11 @@ VELNOR_NAME=velnor
 VELNOR_LABELS=self-hosted,velnor,velnor-target-mvp
 VELNOR_SLOTS=2
 VELNOR_CAPABILITY_VALIDATION=strict
-# Optional Scale Set lane; unset keeps this service native-only.
+# Optional Scale Set config. Native-only uses it to attest Scale Set permits
+# during shared-ledger startup reconciliation; config alone starts no lane.
 # VELNOR_SCALE_SET_CONFIG=/etc/velnor/scaleset.toml
+# Explicitly enable the Scale Set lane alongside native slots:
+# VELNOR_HOST_MODE=both
 # Optional explicit host-wide capacity settings.
 # Use the same values and ledger path in every daemon scope environment file.
 # VELNOR_MAX_JOBS=16
@@ -81,7 +84,8 @@ missing or invalid selection is an error.
 | `VELNOR_SLOTS` | Concurrent native daemon slots |
 | `VELNOR_MAX_JOBS` | Host-wide permit limit shared by Native and Scale Set; an explicit positive value configures `N` |
 | `VELNOR_PERMIT_LEDGER` | Optional path to the single host-wide permit ledger; every daemon scope must resolve the same file |
-| `VELNOR_SCALE_SET_CONFIG` | Optional Scale Set TOML path; unset disables the Scale Set lane |
+| `VELNOR_HOST_MODE` | Host execution topology: `native-only` (default), `scale-set-only`, or `both` |
+| `VELNOR_SCALE_SET_CONFIG` | Optional Scale Set TOML path; used for permit attestation in native-only mode and required when starting Scale Set |
 | `VELNOR_QUEUE_WAIT_SECS` | Maximum wait for an unassigned slot |
 | `VELNOR_CAPACITY_WAIT_SECS` | Maximum wait for disk/capacity reservation |
 | `VELNOR_CAPABILITY_VALIDATION` | Must be `strict` |
@@ -96,15 +100,20 @@ Fresh package installation leaves fleet services disabled and stopped. Package
 upgrades require fleet units stopped before unpacking and leave them stopped;
 existing systemd enablement is preserved. When enabled,
 `velnor-daemon.service` and `velnor-daemon@NAME.service` load their environment
-files but do not set `VELNOR_SCALE_SET_CONFIG` themselves. The Scale Set lane
-is therefore disabled by default; the daemon runs native slots only. To enable
-it, set `VELNOR_SCALE_SET_CONFIG` in the service's environment file
+files but do not set `VELNOR_HOST_MODE` or `VELNOR_SCALE_SET_CONFIG`
+themselves. `VELNOR_HOST_MODE` selects active lanes; unset keeps the daemon
+native-only. A native-only daemon may still load `VELNOR_SCALE_SET_CONFIG` to
+attest Scale Set permit holders owned by sibling daemons during shared-ledger
+startup reconciliation. To start the Scale Set lane, set
+`VELNOR_HOST_MODE=scale-set-only` or `VELNOR_HOST_MODE=both`, and set
+`VELNOR_SCALE_SET_CONFIG` in the service's environment file
 (`/etc/velnor/velnor.env` for the default service, or
-`/etc/velnor/NAME.env` for a named service) to a Scale Set TOML file. When
-enabled, the adapter runs beside native slots and uses the same host-wide
-`VELNOR_MAX_JOBS` permit limit and ledger. The Scale Set TOML has no per-lane
-ledger setting; all daemon scopes must resolve the same `VELNOR_PERMIT_LEDGER`
-path and use the same explicit `VELNOR_MAX_JOBS` value if set.
+`/etc/velnor/NAME.env` for a named service) to a Scale Set TOML file. In
+`both` mode the adapter runs beside native slots; in `scale-set-only` mode it
+runs alone. All enabled lanes use the same host-wide `VELNOR_MAX_JOBS` permit
+limit and ledger. The Scale Set TOML has no per-lane ledger setting; all daemon
+scopes must resolve the same `VELNOR_PERMIT_LEDGER` path and use the same
+explicit `VELNOR_MAX_JOBS` value if set.
 
 Fatal Scale Set startup errors in registration reconciliation, adoption-state
 setup, or session creation reach the supervised daemon loop, which retries the
@@ -219,10 +228,12 @@ available. There is no backend fallback.
 - `VELNOR_SLOTS` controls native runner slots, not Scale Set capacity or GitHub scheduling.
 - Native jobs use the explicitly selected Docker or microVM backend. Scale Set jobs use the official runner image and its private per-worker DinD daemon.
 - MicroVM supports a narrower action and cache surface than Docker.
-- In production, query, log, and storage projections fail closed with
+- In production, query resources reload from SQLite when queried, including
+  after service reopen. Log and storage projections fail closed with
   `Unsupported` / HTTP 501 until durable adapters are wired. The in-memory
   test service may still return successful empty projections after reopening;
-  that behavior is test-only and is not a production recovery guarantee.
+  that behavior is test-only and does not describe production query/log/storage
+  behavior.
 - Control/admin mutation routes, diagnostics bundles, and storage maintenance
   operations are currently unavailable to operators.
 - No APT signing-key bootstrap URL or APT repository setup metadata is included

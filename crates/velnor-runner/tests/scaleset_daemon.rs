@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use velnor_control::permit_ledger::{PermitLane, PermitLedger, PermitState};
+use velnor_control::permit_ledger::{AcquireAttemptOutcome, PermitLane, PermitLedger, PermitState};
 use velnor_runner::scaleset::worker::{
     HomogeneousProfile, OwnershipId, PinnedImage, ToolContentAttestation, ToolContentExpectation,
     ToolContentHook, WorkerIdentity, WorkerOutput, WorkerRunner,
@@ -190,7 +190,7 @@ fn group_json() -> serde_json::Value {
     })
 }
 
-fn set_json(id: i32, labels: &[&str]) -> serde_json::Value {
+fn set_json_with_policy(id: i32, labels: &[&str], disable_update: bool) -> serde_json::Value {
     serde_json::json!({
         "id": id,
         "name": SET_NAME,
@@ -199,9 +199,29 @@ fn set_json(id: i32, labels: &[&str]) -> serde_json::Value {
         "labels": labels.iter().map(|name| {
             serde_json::json!({ "type": "User", "name": name })
         }).collect::<Vec<_>>(),
-        "RunnerSetting": { "disableUpdate": false },
+        "RunnerSetting": { "disableUpdate": disable_update },
         "createdOn": "2026-09-17T00:00:00Z",
     })
+}
+
+fn set_json(id: i32, labels: &[&str]) -> serde_json::Value {
+    set_json_with_policy(id, labels, true)
+}
+
+fn set_json_without_group_identity_with_policy(
+    id: i32,
+    labels: &[&str],
+    disable_update: bool,
+) -> serde_json::Value {
+    let mut set = set_json_with_policy(id, labels, disable_update);
+    let object = set.as_object_mut().unwrap();
+    object.remove("runnerGroupId");
+    object.remove("runnerGroupName");
+    set
+}
+
+fn set_json_without_group_identity(id: i32, labels: &[&str]) -> serde_json::Value {
+    set_json_without_group_identity_with_policy(id, labels, true)
 }
 
 /// Group-by-name lookup (the trailing-slash-tolerant path form).
@@ -223,7 +243,12 @@ async fn mount_set_get_or_create(server: &MockServer) {
         .respond_with(move |_: &Request| {
             if seen.swap(true, Ordering::SeqCst) {
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "count": 1, "value": [set_json(SCALE_SET_ID, &["velnor", "linux"])]
+                    "count": 1,
+                    "value": [set_json_with_policy(
+                        SCALE_SET_ID,
+                        &["velnor", "linux"],
+                        true,
+                    )]
                 }))
             } else {
                 ResponseTemplate::new(200)
@@ -254,15 +279,21 @@ async fn mount_set_adopt_with_drift(server: &MockServer) {
     Mock::given(method("GET"))
         .and(path(format!("{sets}/{SCALE_SET_ID}", sets = sets_path())))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(set_json(SCALE_SET_ID, &["velnor", "stale-label"])),
+            ResponseTemplate::new(200).set_body_json(set_json_with_policy(
+                SCALE_SET_ID,
+                &["velnor", "stale-label"],
+                false,
+            )),
         )
         .mount(server)
         .await;
     Mock::given(method("PATCH"))
         .and(path(format!("{sets}/{SCALE_SET_ID}", sets = sets_path())))
         .respond_with(
-            ResponseTemplate::new(200).set_body_json(set_json(SCALE_SET_ID, &["velnor", "linux"])),
+            ResponseTemplate::new(200).set_body_json(set_json_without_group_identity(
+                SCALE_SET_ID,
+                &["velnor", "linux"],
+            )),
         )
         .mount(server)
         .await;
@@ -684,8 +715,11 @@ impl WorkerRunner for FakeDocker {
                 let name = target_name(args);
                 match engine.containers.get(&name) {
                     Some(entry) => Ok(ok(&format!("{}\n", entry.id))),
-                    // Missing reads as empty stdout (adoption: create).
-                    None => Ok(ok("")),
+                    // Real `docker inspect` exits 1 with "No such container"
+                    // for absent names; exit 0 with empty stdout means a
+                    // confused daemon, which recovery treats as fail-closed.
+                    // Create paths key on empty stdout either way.
+                    None => Ok(missing("container", &name)),
                 }
             }
             "logs" => {
@@ -852,7 +886,8 @@ fn configure_ledger(path: &std::path::Path, max_jobs: u32) {
     let mut ledger = PermitLedger::open(path).unwrap();
     ledger.set_max_jobs(max_jobs).unwrap();
     ledger.begin_epoch().unwrap();
-    ledger.reconcile(&[]).unwrap();
+    assert_eq!(ledger.occupied().unwrap(), 0);
+    ledger.reconcile_attempts(&[]).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -892,6 +927,162 @@ async fn registration_get_or_create_then_reconciles_labels() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registration_pinned_group_id_rejects_omitted_group_identity() {
+    let server = MockServer::start().await;
+    let client = test_client(&server).await;
+    Mock::given(method("GET"))
+        .and(path(format!("{sets}/{SCALE_SET_ID}", sets = sets_path())))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(set_json_without_group_identity(
+                SCALE_SET_ID,
+                &["velnor", "linux"],
+            )),
+        )
+        .mount(&server)
+        .await;
+    let plan = RegistrationPlan {
+        group_id: Some(GROUP_ID),
+        group_name: Some("stale-name-hint".to_owned()),
+        set_id: Some(SCALE_SET_ID),
+        set_name: None,
+        labels: vec!["velnor".to_owned(), "linux".to_owned()],
+    };
+    let error = velnor_runner::scaleset::reconcile_registration(&client, &plan)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("omitted runner group ID"),
+        "unscoped adoption must prove its group: {error:#}"
+    );
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.method == wiremock::http::Method::PATCH)
+            .count(),
+        0,
+        "the ignored name hint must not trigger a rename PATCH"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registration_group_lookup_requires_valid_bound_identity() {
+    let cases = [
+        (
+            serde_json::json!({
+                "count": 1,
+                "value": [{ "id": 0, "name": GROUP_NAME }]
+            }),
+            "non-positive ID",
+        ),
+        (
+            serde_json::json!({
+                "count": 1,
+                "value": [{ "id": GROUP_ID, "name": "" }]
+            }),
+            "empty name",
+        ),
+        (
+            serde_json::json!({
+                "count": 1,
+                "value": [{ "id": GROUP_ID, "name": "different-group" }]
+            }),
+            "not the requested name",
+        ),
+    ];
+    for (body, expected) in cases {
+        let server = MockServer::start().await;
+        let client = test_client(&server).await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/_apis/runtime/runnergroups/?"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        let plan = RegistrationPlan {
+            group_id: None,
+            group_name: Some(GROUP_NAME.to_owned()),
+            set_id: None,
+            set_name: Some(SET_NAME.to_owned()),
+            labels: vec!["velnor".to_owned()],
+        };
+        let error = velnor_runner::scaleset::reconcile_registration(&client, &plan)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains(expected),
+            "group identity error should contain {expected:?}: {error:#}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scale_set_client_group_lookup_uses_first_value_when_count_is_one() {
+    let server = MockServer::start().await;
+    let client = test_client(&server).await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"/_apis/runtime/runnergroups/?"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 1,
+            "value": [
+                { "id": GROUP_ID, "name": GROUP_NAME },
+                { "id": GROUP_ID + 1, "name": "other-group" }
+            ],
+        })))
+        .mount(&server)
+        .await;
+
+    let group = client.get_runner_group_by_name(GROUP_NAME).await.unwrap();
+    assert_eq!(group.id, GROUP_ID);
+    assert_eq!(group.name, GROUP_NAME);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scale_set_client_set_lookup_uses_first_value_when_count_is_one() {
+    let server = MockServer::start().await;
+    let client = test_client(&server).await;
+    Mock::given(method("GET"))
+        .and(path(sets_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 1,
+            "value": [
+                set_json(SCALE_SET_ID, &["velnor"]),
+                set_json(SCALE_SET_ID + 1, &["velnor"]),
+            ],
+        })))
+        .mount(&server)
+        .await;
+
+    let set = client
+        .get_runner_scale_set(GROUP_ID, SET_NAME)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(set.id, SCALE_SET_ID);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scale_set_client_set_lookup_returns_none_when_count_is_zero() {
+    let server = MockServer::start().await;
+    let client = test_client(&server).await;
+    Mock::given(method("GET"))
+        .and(path(sets_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 0,
+            "value": [set_json(SCALE_SET_ID, &["velnor"])],
+        })))
+        .mount(&server)
+        .await;
+
+    assert!(client
+        .get_runner_scale_set(GROUP_ID, SET_NAME)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn registration_adopt_by_id_patches_drifted_labels() {
     let server = MockServer::start().await;
     let client = test_client(&server).await;
@@ -899,8 +1090,8 @@ async fn registration_adopt_by_id_patches_drifted_labels() {
     mount_set_adopt_with_drift(&server).await;
 
     let plan = RegistrationPlan {
-        group_id: Some(GROUP_ID),
-        group_name: None,
+        group_id: None,
+        group_name: Some(GROUP_NAME.to_owned()),
         set_id: Some(SCALE_SET_ID),
         set_name: None,
         labels: vec!["velnor".to_owned(), "linux".to_owned()],
@@ -913,6 +1104,8 @@ async fn registration_adopt_by_id_patches_drifted_labels() {
         reconciled.labels_updated,
         "drifted live labels must be patched back"
     );
+    assert_eq!(reconciled.set.runner_group_id, GROUP_ID);
+    assert_eq!(reconciled.set.runner_group_name, GROUP_NAME);
     // The PATCH carried the desired label set.
     let patches: Vec<_> = server
         .received_requests()
@@ -932,7 +1125,165 @@ async fn registration_adopt_by_id_patches_drifted_labels() {
         .collect();
     assert_eq!(patches.len(), 1);
     assert_eq!(patches[0], vec!["velnor".to_owned(), "linux".to_owned()]);
+    let patch_request = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|request| request.method == wiremock::http::Method::PATCH)
+        .unwrap();
+    let patch_body: serde_json::Value = serde_json::from_slice(&patch_request.body).unwrap();
+    assert_eq!(patch_body["runnerGroupId"], serde_json::json!(GROUP_ID));
+    assert_eq!(patch_body["runnerGroupName"], serde_json::json!(GROUP_NAME));
     assert_eq!(set_delete_calls(&server).await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registration_pinned_group_id_patch_omits_stale_name_hint() {
+    let server = MockServer::start().await;
+    let client = test_client(&server).await;
+    Mock::given(method("GET"))
+        .and(path(format!("{sets}/{SCALE_SET_ID}", sets = sets_path())))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(set_json_with_policy(
+                SCALE_SET_ID,
+                &["velnor", "stale-label"],
+                false,
+            )),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path(format!("{sets}/{SCALE_SET_ID}", sets = sets_path())))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(set_json_without_group_identity(
+                SCALE_SET_ID,
+                &["velnor", "linux"],
+            )),
+        )
+        .mount(&server)
+        .await;
+
+    let plan = RegistrationPlan {
+        group_id: Some(GROUP_ID),
+        group_name: Some("stale-name-hint".to_owned()),
+        set_id: Some(SCALE_SET_ID),
+        set_name: None,
+        labels: vec!["velnor".to_owned(), "linux".to_owned()],
+    };
+    let reconciled = velnor_runner::scaleset::reconcile_registration(&client, &plan)
+        .await
+        .unwrap();
+    assert_eq!(reconciled.set.runner_group_id, GROUP_ID);
+    assert!(reconciled.set.runner_group_name.is_empty());
+
+    let patch_request = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|request| request.method == wiremock::http::Method::PATCH)
+        .unwrap();
+    let patch_body: serde_json::Value = serde_json::from_slice(&patch_request.body).unwrap();
+    assert_eq!(patch_body["runnerGroupId"], serde_json::json!(GROUP_ID));
+    assert!(patch_body.get("runnerGroupName").is_none());
+    assert!(!String::from_utf8_lossy(&patch_request.body).contains("stale-name-hint"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registration_name_lookup_rejects_final_group_name_drift() {
+    let server = MockServer::start().await;
+    let client = test_client(&server).await;
+    mount_group_lookup(&server).await;
+    let mut response = set_json(SCALE_SET_ID, &["velnor"]);
+    response["runnerGroupName"] = serde_json::json!("different-group");
+    Mock::given(method("GET"))
+        .and(path(sets_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 1,
+            "value": [response],
+        })))
+        .mount(&server)
+        .await;
+
+    let plan = RegistrationPlan {
+        group_id: None,
+        group_name: Some(GROUP_NAME.to_owned()),
+        set_id: None,
+        set_name: Some(SET_NAME.to_owned()),
+        labels: vec!["velnor".to_owned()],
+    };
+    let error = velnor_runner::scaleset::reconcile_registration(&client, &plan)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("group name"),
+        "final group name must remain bound to the resolved group: {error:#}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registration_name_lookup_accepts_omitted_final_group_identity() {
+    let server = MockServer::start().await;
+    let client = test_client(&server).await;
+    mount_group_lookup(&server).await;
+    Mock::given(method("GET"))
+        .and(path(sets_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 1,
+            "value": [set_json_without_group_identity(SCALE_SET_ID, &["velnor"])],
+        })))
+        .mount(&server)
+        .await;
+
+    let plan = RegistrationPlan {
+        group_id: None,
+        group_name: Some(GROUP_NAME.to_owned()),
+        set_id: None,
+        set_name: Some(SET_NAME.to_owned()),
+        labels: vec!["velnor".to_owned()],
+    };
+    let reconciled = velnor_runner::scaleset::reconcile_registration(&client, &plan)
+        .await
+        .unwrap();
+    assert_eq!(reconciled.group_id, GROUP_ID);
+    assert_eq!(reconciled.group_name, GROUP_NAME);
+    assert_eq!(reconciled.set.runner_group_id, GROUP_ID);
+    assert_eq!(reconciled.set.runner_group_name, GROUP_NAME);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registration_adopt_by_id_rejects_final_set_name_drift() {
+    let server = MockServer::start().await;
+    let client = test_client(&server).await;
+    let initial = set_json_with_policy(SCALE_SET_ID, &["velnor"], false);
+    Mock::given(method("GET"))
+        .and(path(format!("{sets}/{SCALE_SET_ID}", sets = sets_path())))
+        .respond_with(ResponseTemplate::new(200).set_body_json(initial))
+        .mount(&server)
+        .await;
+    let mut patched = set_json(SCALE_SET_ID, &["velnor"]);
+    patched["name"] = serde_json::json!("renamed-set");
+    Mock::given(method("PATCH"))
+        .and(path(format!("{sets}/{SCALE_SET_ID}", sets = sets_path())))
+        .respond_with(ResponseTemplate::new(200).set_body_json(patched))
+        .mount(&server)
+        .await;
+
+    let plan = RegistrationPlan {
+        group_id: Some(GROUP_ID),
+        group_name: None,
+        set_id: Some(SCALE_SET_ID),
+        set_name: None,
+        labels: vec!["velnor".to_owned()],
+    };
+    let error = velnor_runner::scaleset::reconcile_registration(&client, &plan)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("configured name"),
+        "final set name must remain bound across PATCH: {error:#}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -978,7 +1329,12 @@ async fn registration_create_race_adopts_instead_of_failing() {
         .respond_with(move |_: &Request| {
             if seen.swap(true, Ordering::SeqCst) {
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "count": 1, "value": [set_json(SCALE_SET_ID, &["velnor", "linux"])]
+                    "count": 1,
+                    "value": [set_json_with_policy(
+                        SCALE_SET_ID,
+                        &["velnor", "linux"],
+                        false,
+                    )]
                 }))
             } else {
                 ResponseTemplate::new(200)
@@ -992,6 +1348,14 @@ async fn registration_create_race_adopts_instead_of_failing() {
         .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
             "typeName": "RunnerExistsError", "message": "already exists"
         })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path(format!("{sets}/{SCALE_SET_ID}", sets = sets_path())))
+        .and(body_string_contains("\"disableUpdate\":true"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(set_json(SCALE_SET_ID, &["velnor", "linux"])),
+        )
         .mount(&server)
         .await;
 
@@ -1009,6 +1373,18 @@ async fn registration_create_race_adopts_instead_of_failing() {
     assert!(
         !reconciled.created,
         "the race winner's set is adopted, not re-created"
+    );
+    assert!(reconciled.set.runner_setting.disable_update);
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.method == wiremock::http::Method::PATCH)
+            .count(),
+        1,
+        "name adoption should patch the returned set ID when policy drifts"
     );
     assert_eq!(set_delete_calls(&server).await, 0);
 }
@@ -1812,17 +2188,19 @@ async fn capacity_shares_one_ledger_across_lanes() {
     // A native acquisition occupies the only permit.
     let mut raw = PermitLedger::open(&ledger_path).unwrap();
     let generation = raw.generation().unwrap();
-    assert_eq!(
-        raw.acquire(
+    let native_attempt_token = match raw
+        .acquire_attempt(
             "native/broker-9",
             PermitLane::Native,
             PermitState::Running,
             generation,
             Some(std::process::id()),
         )
-        .unwrap(),
-        velnor_control::permit_ledger::AcquireOutcome::Acquired
-    );
+        .unwrap()
+    {
+        AcquireAttemptOutcome::Acquired { attempt_token } => attempt_token,
+        outcome => panic!("expected native permit, got {outcome:?}"),
+    };
     drop(raw);
 
     let session = MessageSessionClient::create(&client, SCALE_SET_ID, OWNER)
@@ -1907,7 +2285,7 @@ async fn capacity_shares_one_ledger_across_lanes() {
     // unified holder and provisions exactly one pair.
     PermitLedger::open(&ledger_path)
         .unwrap()
-        .release("native/broker-9")
+        .release_owned("native/broker-9", &native_attempt_token)
         .unwrap();
     let outcome = listener.run_once().await.unwrap();
     assert_eq!(outcome.acquired, vec![REQUEST_ID]);

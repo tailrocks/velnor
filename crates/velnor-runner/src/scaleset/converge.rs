@@ -43,27 +43,31 @@ pub trait WorkerLane {
     fn note_assigned(
         &mut self,
         assigned: &velnor_model::ScaleSetJobAssigned,
+        attempt_token: &str,
     ) -> Result<(), Self::Error>;
 
     /// Observe `JobStarted` for tracked work (idempotent replay).
     fn note_started(
         &mut self,
         started: &velnor_model::ScaleSetJobStarted,
+        attempt_token: &str,
     ) -> Result<(), Self::Error>;
 
     /// Drive the worker for `request_id` toward terminal (diagnostic
     /// export + owned cleanup scheduled). The permit stays with the
     /// worker until cleanup confirms; the lane releases it via
-    /// [`release_after_cleanup`][rac] afterwards, or retains it
-    /// `uncertain` when cleanup fails.
-    ///
-    /// [rac]: crate::scaleset::capacity::release_after_cleanup
-    fn note_terminal(&mut self, completed: &ScaleSetJobCompleted) -> Result<(), Self::Error>;
+    /// a durable attempt-release stage afterwards, or retains it `uncertain`
+    /// when cleanup fails.
+    fn note_terminal(
+        &mut self,
+        completed: &ScaleSetJobCompleted,
+        attempt_token: &str,
+    ) -> Result<(), Self::Error>;
 
     /// Finish cancellation after an uncertain acquire was later confirmed
     /// acquired. No second wire message is required because the completion
     /// was already durably recorded as `canceled_pending`.
-    fn note_canceled(&mut self, _request_id: i64) -> Result<(), Self::Error> {
+    fn note_canceled(&mut self, _request_id: i64, _attempt_token: &str) -> Result<(), Self::Error> {
         Ok(())
     }
 
@@ -83,6 +87,17 @@ pub trait WorkerLane {
     /// terminal-handler-owns-cleanup design.
     fn owns_terminal_cleanup(&self, _request_id: i64) -> Result<bool, Self::Error> {
         Ok(true)
+    }
+
+    /// Whether the lane explicitly released `request_id`'s worker while
+    /// its demand row stays open: locally detected death drove cleanup
+    /// and freed the permit, but no GitHub observation has converged the
+    /// demand yet. Reconcile tolerates the resulting
+    /// open-demand-without-permit instead of failing closed; the pending
+    /// completion converges the demand when it arrives. Defaults to
+    /// false: lanes that track no workers never produce this state.
+    fn worker_released_pending_observation(&self, _request_id: i64) -> Result<bool, Self::Error> {
+        Ok(false)
     }
 }
 
@@ -105,6 +120,7 @@ pub async fn ensure_provision_intent<W: WorkerLane>(
     attempt: u32,
     images: &ProvisionImages,
     generation: u64,
+    attempt_token: &str,
     metrics: &crate::scaleset::metrics::Metrics,
 ) -> Result<ProvisionIntent> {
     let name = runner_name(scale_set_id, request_id);
@@ -116,6 +132,7 @@ pub async fn ensure_provision_intent<W: WorkerLane>(
         &name,
         &images.runner_digest,
         &images.dind_digest,
+        attempt_token,
         generation,
     )?;
     metrics.inc_provision_intents();
@@ -223,6 +240,7 @@ mod tests {
         fn note_assigned(
             &mut self,
             _assigned: &velnor_model::ScaleSetJobAssigned,
+            _attempt_token: &str,
         ) -> Result<(), Self::Error> {
             Ok(())
         }
@@ -230,11 +248,16 @@ mod tests {
         fn note_started(
             &mut self,
             _started: &velnor_model::ScaleSetJobStarted,
+            _attempt_token: &str,
         ) -> Result<(), Self::Error> {
             Ok(())
         }
 
-        fn note_terminal(&mut self, completed: &ScaleSetJobCompleted) -> Result<(), Self::Error> {
+        fn note_terminal(
+            &mut self,
+            completed: &ScaleSetJobCompleted,
+            _attempt_token: &str,
+        ) -> Result<(), Self::Error> {
             self.terminals.push(completed.base.runner_request_id);
             Ok(())
         }
@@ -265,18 +288,36 @@ mod tests {
         let mut intents = ProvisionIntentStore::open(&path).unwrap();
         let mut lane = StubLane::default();
         let metrics = crate::scaleset::metrics::Metrics::new();
-        let intent =
-            ensure_provision_intent(&mut intents, &mut lane, 7, 4242, 0, &images(), 2, &metrics)
-                .await
-                .unwrap();
+        let intent = ensure_provision_intent(
+            &mut intents,
+            &mut lane,
+            7,
+            4242,
+            0,
+            &images(),
+            2,
+            "test-attempt",
+            &metrics,
+        )
+        .await
+        .unwrap();
         assert_eq!(intent.runner_name, "velnor-7-4242");
         assert_eq!(lane.provisioned, vec!["prov-op-7-4242-0".to_owned()]);
         assert_eq!(metrics.snapshot().provision_intents, 1);
         // Retry adopts the same row.
-        let again =
-            ensure_provision_intent(&mut intents, &mut lane, 7, 4242, 0, &images(), 2, &metrics)
-                .await
-                .unwrap();
+        let again = ensure_provision_intent(
+            &mut intents,
+            &mut lane,
+            7,
+            4242,
+            0,
+            &images(),
+            2,
+            "test-attempt",
+            &metrics,
+        )
+        .await
+        .unwrap();
         assert_eq!(again, intent);
     }
 

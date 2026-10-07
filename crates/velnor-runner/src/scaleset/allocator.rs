@@ -22,16 +22,17 @@
 //! * `mark_uncertain_and_disarm` when cleanup itself fails: the visible
 //!   reservation stays occupied until recovery converges it.
 //!
-//! Scale-set holders record no pid (`None`): workers are containers, not
-//! host processes, so pid liveness can neither adopt nor sweep them.
-//! Crash recovery for this lane is reconcile-by-holder, never pid-based.
+//! Fresh Scale Set acquisitions record the daemon pid as recovery evidence;
+//! the pid alone never authorizes adoption. Recovery must also prove exact
+//! worker/container ownership before rotating the attempt token.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use velnor_control::permit_ledger::{
-    deferred_wait, AcquireOutcome, LedgerError, PermitLane, PermitLedger, PermitState,
-    ReconcileReport, DEFERRED_WAIT_BUDGET,
+    deferred_wait, AcquireAttemptOutcome, DemandState as PermitDemandState, LedgerError,
+    OwnedReleaseOutcome, PermitLane, PermitLedger, PermitState, ReconcileReport,
+    DEFERRED_WAIT_BUDGET,
 };
 
 /// Scale-set lane allocator over the shared host-wide ledger.
@@ -63,12 +64,12 @@ impl ScaleSetAllocator {
 
     /// Acquire one permit for `holder`.
     ///
-    /// * `Ok(Some(guard))` — granted (or duplicate delivery onto an
-    ///   existing hold, in which case the guard owns nothing and its drop
-    ///   releases nothing).
+    /// * `Ok(Some(guard))` — freshly granted with an attempt token owned by
+    ///   the guard.
     /// * `Ok(None)` — ledger full, or older demand never yielded within
     ///   the wait budget; the offer stays queued with its age.
-    /// * `Err` — storage failure or unconfigured ledger.
+    /// * `Err` — storage/configuration failure, or a duplicate delivery
+    ///   that requires proof-bearing recovery before it may proceed.
     pub fn acquire(&self, holder: &str) -> Result<Option<ScaleSetPermitGuard>, AllocatorError> {
         let mut ledger = PermitLedger::open(&self.ledger_path).map_err(AllocatorError::Storage)?;
         let observed = velnor_control::permit_ledger::unix_now();
@@ -83,33 +84,36 @@ impl ScaleSetAllocator {
         loop {
             let generation = ledger.generation().map_err(AllocatorError::Storage)?;
             match ledger
-                .acquire(
+                .acquire_attempt(
                     holder,
                     PermitLane::ScaleSet,
                     PermitState::Acquiring,
                     generation,
-                    None,
+                    Some(std::process::id()),
                 )
                 .map_err(AllocatorError::Storage)?
             {
-                AcquireOutcome::Acquired => {
-                    return Ok(Some(ScaleSetPermitGuard::owned(&self.ledger_path, holder)));
-                }
-                // Duplicate delivery holds once: the attempt proceeds on
-                // the existing row and releases nothing. (No pid adoption:
-                // scale-set holders are requests, not processes; holder
-                // liveness is the worker record's job.)
-                AcquireOutcome::AlreadyHeld => {
-                    return Ok(Some(ScaleSetPermitGuard::unowned(
+                AcquireAttemptOutcome::Acquired { attempt_token } => {
+                    return Ok(Some(ScaleSetPermitGuard::owned(
                         &self.ledger_path,
                         holder,
+                        attempt_token,
                     )));
                 }
-                AcquireOutcome::Full | AcquireOutcome::Closed => {
+                // Existing rows do not prove that this delivery owns the
+                // attempt. Redelivery recovery must first prove the old
+                // attempt is gone, then rotate ownership through the
+                // explicit adoption path.
+                AcquireAttemptOutcome::AlreadyHeld => {
+                    return Err(AllocatorError::AlreadyHeld {
+                        holder: holder.to_owned(),
+                    });
+                }
+                AcquireAttemptOutcome::Full | AcquireAttemptOutcome::Closed => {
                     park_departed(&mut ledger, holder);
                     return Ok(None);
                 }
-                AcquireOutcome::Deferred => {
+                AcquireAttemptOutcome::Deferred => {
                     if std::time::Instant::now() >= deadline {
                         park_departed(&mut ledger, holder);
                         return Ok(None);
@@ -117,13 +121,13 @@ impl ScaleSetAllocator {
                     std::thread::sleep(deferred_wait(deferred_attempts));
                     deferred_attempts = deferred_attempts.saturating_add(1);
                 }
-                AcquireOutcome::StaleGeneration => {
+                AcquireAttemptOutcome::StaleGeneration => {
                     if std::time::Instant::now() >= deadline {
                         park_departed(&mut ledger, holder);
                         return Ok(None);
                     }
                 }
-                AcquireOutcome::NotConfigured => return Err(AllocatorError::NotConfigured),
+                AcquireAttemptOutcome::NotConfigured => return Err(AllocatorError::NotConfigured),
             }
         }
     }
@@ -151,43 +155,71 @@ impl ScaleSetAllocator {
     }
 }
 
-/// Daemon-startup reconcile over BOTH lanes' attested live sets, then
-/// sweep dead native attempts.
+/// Daemon-startup reconcile over BOTH lanes' attested live sets.
 ///
-/// * `scaleset_alive`: `(holder, state)` attested from the worker
-///   registry (recorded workers that are not terminally cleaned).
-/// * `native_alive`: holders attested from native in-flight markers
-///   (C2's startup passes these; empty until the native wiring lands).
-/// * `is_alive`: host pid liveness probe for the sweep. Only dead
-///   unprotected uncertain NATIVE rows are swept; scale-set rows are
-///   never swept (no pid) and never deleted here.
+/// * `scaleset_alive`: `(holder, attempt_token)` attested from the
+///   durable demand/worker records.
+/// * `native_alive`: `(holder, attempt_token)` attested from native markers.
 ///
-/// Post-merge this is the one startup call both lanes share: a single
-/// [`PermitLedger::reconcile`] attests both lanes at once (two separate
-/// reconciles would mark the other lane's live rows uncertain).
+/// This is the one startup call both lanes share: one exact-token
+/// [`PermitLedger::reconcile_attempts`] attests both lanes atomically.
 pub fn startup_reconcile(
     ledger_path: &Path,
-    scaleset_alive: &[(&str, PermitState)],
-    native_alive: &[&str],
-    is_alive: &dyn Fn(u32) -> bool,
-) -> Result<(ReconcileReport, Vec<String>), LedgerError> {
+    scaleset_alive: &[(&str, &str)],
+    native_alive: &[(&str, &str)],
+) -> Result<ReconcileReport, LedgerError> {
+    startup_reconcile_with_staged(ledger_path, scaleset_alive, native_alive, &[], &[], &[])
+}
+
+/// Startup reconcile with durable Scale Set recovery stages. Rotation tuples
+/// are `(holder, previous_token, target_token)`, release tuples are
+/// `(holder, token, demand_state)`, and acquire tuples are `(holder, token)`.
+/// Staged holders are omitted from the ordinary exact-live set and validated
+/// atomically by the matching recovery record.
+pub fn startup_reconcile_with_staged(
+    ledger_path: &Path,
+    scaleset_alive: &[(&str, &str)],
+    native_alive: &[(&str, &str)],
+    scaleset_staged: &[(&str, Option<&str>, &str)],
+    scaleset_releases: &[(&str, &str, PermitDemandState)],
+    scaleset_acquires: &[(&str, &str)],
+) -> Result<ReconcileReport, LedgerError> {
     let mut ledger = PermitLedger::open(ledger_path)?;
-    let mut attested: Vec<(&str, PermitLane, PermitState)> = scaleset_alive
+    let staged_holders: BTreeSet<&str> = scaleset_staged
         .iter()
-        .map(|(holder, state)| (*holder, PermitLane::ScaleSet, *state))
+        .map(|(holder, _, _)| *holder)
+        .chain(scaleset_releases.iter().map(|(holder, _, _)| *holder))
+        .chain(scaleset_acquires.iter().map(|(holder, _)| *holder))
+        .collect();
+    let mut attested: Vec<(&str, PermitLane, &str)> = scaleset_alive
+        .iter()
+        .filter(|(holder, _)| !staged_holders.contains(holder))
+        .map(|(holder, attempt_token)| (*holder, PermitLane::ScaleSet, *attempt_token))
         .collect();
     attested.extend(
         native_alive
             .iter()
-            .map(|holder| (*holder, PermitLane::Native, PermitState::Running)),
+            .map(|(holder, attempt_token)| (*holder, PermitLane::Native, *attempt_token)),
     );
-    let report = ledger.reconcile(&attested)?;
-    let protected: BTreeSet<String> = attested
+    let staged: Vec<(&str, PermitLane, Option<&str>, &str)> = scaleset_staged
         .iter()
-        .map(|(holder, _, _)| (*holder).to_string())
+        .map(|(holder, previous, target)| (*holder, PermitLane::ScaleSet, *previous, *target))
         .collect();
-    let swept = ledger.sweep_dead_uncertain(is_alive, &protected)?;
-    Ok((report, swept))
+    let staged_releases: Vec<(&str, PermitLane, &str, PermitDemandState)> = scaleset_releases
+        .iter()
+        .map(|(holder, token, state)| (*holder, PermitLane::ScaleSet, *token, *state))
+        .collect();
+    let staged_acquisitions: Vec<(&str, PermitLane, &str)> = scaleset_acquires
+        .iter()
+        .map(|(holder, token)| (*holder, PermitLane::ScaleSet, *token))
+        .collect();
+    let report = ledger.reconcile_attempts_with_staged_acquisitions(
+        &attested,
+        &staged,
+        &staged_releases,
+        &staged_acquisitions,
+    )?;
+    Ok(report)
 }
 
 /// One scale-set acquisition's held permit. Releases on drop unless
@@ -196,9 +228,8 @@ pub fn startup_reconcile(
 pub struct ScaleSetPermitGuard {
     ledger_path: PathBuf,
     holder: String,
-    /// False when this attempt never spent a permit (duplicate delivery
-    /// onto an existing hold): drop does nothing.
-    owns_permit: bool,
+    attempt_token: String,
+    drop_target: PermitDemandState,
     disarmed: bool,
 }
 
@@ -208,20 +239,17 @@ impl ScaleSetPermitGuard {
         &self.holder
     }
 
-    fn owned(ledger_path: &Path, holder: &str) -> Self {
-        Self {
-            ledger_path: ledger_path.to_path_buf(),
-            holder: holder.to_string(),
-            owns_permit: true,
-            disarmed: false,
-        }
+    #[must_use]
+    pub fn attempt_token(&self) -> &str {
+        &self.attempt_token
     }
 
-    fn unowned(ledger_path: &Path, holder: &str) -> Self {
+    fn owned(ledger_path: &Path, holder: &str, attempt_token: String) -> Self {
         Self {
             ledger_path: ledger_path.to_path_buf(),
             holder: holder.to_string(),
-            owns_permit: false,
+            attempt_token,
+            drop_target: PermitDemandState::Eligible,
             disarmed: false,
         }
     }
@@ -229,13 +257,15 @@ impl ScaleSetPermitGuard {
     /// Best-effort state transition; occupancy never depended on the
     /// state spelling, so failures warn loudly and continue.
     fn transition_best_effort(&self, state: PermitState) {
-        if !self.owns_permit {
-            return;
-        }
         match PermitLedger::open(&self.ledger_path) {
             Ok(mut ledger) => match ledger.generation() {
                 Ok(generation) => {
-                    if let Err(error) = ledger.transition(&self.holder, state, generation) {
+                    if let Err(error) = ledger.transition_owned(
+                        &self.holder,
+                        state,
+                        generation,
+                        &self.attempt_token,
+                    ) {
                         eprintln!(
                             "Warning: scale-set permit transition to {state:?} failed for {}: {error}",
                             self.holder
@@ -266,17 +296,23 @@ impl ScaleSetPermitGuard {
 
     /// Terminal success: owned cleanup is confirmed, free the permit.
     /// Best-effort with a loud warning: a failed release converges via
-    /// the next reconcile (uncertain) and holder-based recovery.
-    pub fn release(mut self) {
-        self.disarmed = true;
-        if !self.owns_permit {
-            return;
-        }
-        if let Err(error) = release_permit(&self.ledger_path, &self.holder) {
-            eprintln!(
-                "Warning: permit ledger release failed for {}: {error}",
-                self.holder
-            );
+    /// the next reconcile (uncertain) and proof-bearing recovery.
+    pub fn release(mut self) -> Result<(), LedgerError> {
+        self.drop_target = PermitDemandState::Terminal;
+        match release_permit_target(
+            &self.ledger_path,
+            &self.holder,
+            &self.attempt_token,
+            PermitDemandState::Terminal,
+        )? {
+            OwnedReleaseOutcome::Released | OwnedReleaseOutcome::AlreadyAbsent => {
+                self.disarmed = true;
+                Ok(())
+            }
+            OwnedReleaseOutcome::StaleAttempt => {
+                self.disarmed = true;
+                Err(LedgerError::StaleAttempt(self.holder.clone()))
+            }
         }
     }
 
@@ -285,13 +321,12 @@ impl ScaleSetPermitGuard {
     /// once the residue is actually gone.
     pub fn mark_uncertain_and_disarm(mut self) {
         self.disarmed = true;
-        if !self.owns_permit {
-            return;
-        }
         match PermitLedger::open(&self.ledger_path) {
             Ok(mut ledger) => match ledger.generation() {
                 Ok(generation) => {
-                    if let Err(error) = ledger.retain_uncertain(&self.holder, generation) {
+                    if let Err(error) =
+                        ledger.retain_uncertain_owned(&self.holder, generation, &self.attempt_token)
+                    {
                         eprintln!(
                             "Warning: uncertain scale-set permit retention failed for {}: {error}",
                             self.holder
@@ -313,17 +348,27 @@ impl ScaleSetPermitGuard {
 
 impl Drop for ScaleSetPermitGuard {
     fn drop(&mut self) {
-        if self.disarmed || !self.owns_permit {
+        if self.disarmed {
             return;
         }
         // Every non-terminal return makes this demand regrantable with its
         // original age. The permit and demand transition share one
         // transaction. Callers retain uncertain holds after cleanup fails.
-        if let Err(error) = release_permit_to_eligible(&self.ledger_path, &self.holder) {
-            eprintln!(
+        match release_permit_target(
+            &self.ledger_path,
+            &self.holder,
+            &self.attempt_token,
+            self.drop_target,
+        ) {
+            Ok(OwnedReleaseOutcome::Released | OwnedReleaseOutcome::AlreadyAbsent) => {}
+            Ok(OwnedReleaseOutcome::StaleAttempt) => eprintln!(
+                "Warning: permit release refused a stale attempt for {}",
+                self.holder
+            ),
+            Err(error) => eprintln!(
                 "Warning: permit ledger release failed for {}: {error}",
                 self.holder
-            );
+            ),
         }
     }
 }
@@ -338,25 +383,44 @@ fn park_departed(ledger: &mut PermitLedger, holder: &str) {
     }
 }
 
-fn release_permit(ledger_path: &Path, holder: &str) -> Result<bool, LedgerError> {
+fn release_permit_target(
+    ledger_path: &Path,
+    holder: &str,
+    attempt_token: &str,
+    target: PermitDemandState,
+) -> Result<OwnedReleaseOutcome, LedgerError> {
+    // A release must never fabricate the ledger it cannot find: creating a
+    // fresh empty ledger over an outage would mask the outage (later opens
+    // would see blank capacity instead of failing) and strand the durable
+    // attempt evidence elsewhere. Only the daemon's authoritative open may
+    // create; a release against a missing ledger fails without side effects.
+    if !ledger_path.is_file() {
+        return Err(LedgerError::Storage(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+            Some(format!(
+                "permit ledger missing for release of {holder}: {}",
+                ledger_path.display()
+            )),
+        )));
+    }
     let mut ledger = PermitLedger::open(ledger_path)?;
-    ledger.release(holder)
-}
-
-fn release_permit_to_eligible(ledger_path: &Path, holder: &str) -> Result<bool, LedgerError> {
-    let mut ledger = PermitLedger::open(ledger_path)?;
-    ledger.release_to_eligible(holder)
+    ledger.release_scaleset_staged_owned(holder, attempt_token, target)
 }
 
 /// Release one holder's permit from outside the acquiring attempt
 /// (worker recovery converging a crashed attempt after it completes and
 /// cleans the job). Best-effort: whatever is missed converges via the
 /// next reconcile.
-pub fn release_permit_best_effort(ledger_path: &Path, holder: &str) {
-    match release_permit(ledger_path, holder) {
-        Ok(true) => {}
-        Ok(false) => {
-            eprintln!("permit ledger: holder {holder} already released; nothing to converge");
+pub fn release_permit_best_effort(ledger_path: &Path, holder: &str, attempt_token: &str) {
+    match release_permit_target(
+        ledger_path,
+        holder,
+        attempt_token,
+        PermitDemandState::Terminal,
+    ) {
+        Ok(OwnedReleaseOutcome::Released | OwnedReleaseOutcome::AlreadyAbsent) => {}
+        Ok(OwnedReleaseOutcome::StaleAttempt) => {
+            eprintln!("permit ledger: holder {holder} belongs to a different attempt");
         }
         Err(error) => {
             eprintln!("Warning: permit ledger release failed for {holder}: {error}");
@@ -369,6 +433,12 @@ pub fn release_permit_best_effort(ledger_path: &Path, holder: &str) {
 #[derive(Debug)]
 pub enum AllocatorError {
     Storage(LedgerError),
+    /// A duplicate delivery found a permit owned by another attempt. The
+    /// caller must prove recovery before adopting it; this path never
+    /// fabricates ownership from the holder name alone.
+    AlreadyHeld {
+        holder: String,
+    },
     /// No `max_jobs` was ever configured: the daemon never opened the
     /// ledger. Acquiring without an authority would spend uncapped.
     NotConfigured,
@@ -378,6 +448,10 @@ impl std::fmt::Display for AllocatorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Storage(error) => write!(f, "{error}"),
+            Self::AlreadyHeld { holder } => write!(
+                f,
+                "scale-set permit for {holder:?} is already held; recovery adoption proof required"
+            ),
             Self::NotConfigured => write!(
                 f,
                 "no max_jobs configured; start the daemon before scale-set acquisition"
@@ -401,6 +475,7 @@ impl std::error::Error for AllocatorError {}
 mod tests {
     use super::*;
     use crate::scaleset::intents::permit_holder;
+    use velnor_control::permit_ledger::AcquireAttemptOutcome;
 
     fn temp_ledger_path(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -419,7 +494,7 @@ mod tests {
         let mut ledger = PermitLedger::open(path).unwrap();
         ledger.set_max_jobs(max_jobs).unwrap();
         ledger.begin_epoch().unwrap();
-        ledger.reconcile(&[]).unwrap();
+        ledger.reconcile_attempts(&[]).unwrap();
     }
 
     #[test]
@@ -441,8 +516,35 @@ mod tests {
         assert_eq!(allocator.occupied().unwrap(), 1);
         guard.transition_provisioning();
         guard.transition_running();
-        guard.release();
+        guard.release().unwrap();
         assert_eq!(allocator.occupied().unwrap(), 0);
+    }
+
+    #[test]
+    fn failed_release_retains_exact_attempt_for_redelivery() {
+        let path = temp_ledger_path("release-error");
+        configure(&path, 1);
+        let allocator = ScaleSetAllocator::open(&path);
+        let holder = permit_holder(7, 4243);
+        let guard = allocator.acquire(&holder).unwrap().expect("grants");
+        let attempt_token = guard.attempt_token().to_owned();
+        let directory = path.parent().unwrap().to_path_buf();
+        let moved_directory = directory.with_extension("offline");
+
+        // Simulate the ledger becoming unavailable after acquisition. The
+        // explicit release and Drop retry both fail; neither may clear the
+        // only durable attempt evidence.
+        std::fs::rename(&directory, &moved_directory).unwrap();
+        assert!(guard.release().is_err());
+        std::fs::rename(&moved_directory, &directory).unwrap();
+
+        let ledger = PermitLedger::open(&path).unwrap();
+        assert!(ledger.is_current_attempt(&holder, &attempt_token).unwrap());
+        assert!(matches!(
+            allocator.acquire(&holder),
+            Err(AllocatorError::AlreadyHeld { .. })
+        ));
+        assert_eq!(allocator.occupied().unwrap(), 1);
     }
 
     #[test]
@@ -460,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_delivery_holds_once_and_releases_nothing() {
+    fn duplicate_delivery_fails_closed_without_releasing_owner() {
         let path = temp_ledger_path("dup");
         configure(&path, 2);
         let allocator = ScaleSetAllocator::open(&path);
@@ -469,12 +571,10 @@ mod tests {
             .acquire(&permit_holder(7, 4242))
             .unwrap()
             .expect("grants");
-        let duplicate = allocator
-            .acquire(&permit_holder(7, 4242))
-            .unwrap()
-            .expect("duplicate proceeds");
-        assert_eq!(allocator.occupied().unwrap(), 1);
-        drop(duplicate);
+        assert!(matches!(
+            allocator.acquire(&permit_holder(7, 4242)),
+            Err(AllocatorError::AlreadyHeld { .. })
+        ));
         assert_eq!(allocator.occupied().unwrap(), 1);
         drop(guard);
         assert_eq!(allocator.occupied().unwrap(), 0);
@@ -503,9 +603,7 @@ mod tests {
         // Epoch began but reconcile has not run: do not advertise.
         assert_eq!(allocator.advertised_free().unwrap(), None);
 
-        let (report, swept) = startup_reconcile(&path, &[], &[], &|_| true).unwrap();
-        assert!(report.adopted.is_empty());
-        assert!(swept.is_empty());
+        let _report = startup_reconcile(&path, &[], &[]).unwrap();
         assert_eq!(allocator.advertised_free().unwrap(), Some(4));
 
         let _guard = allocator
@@ -525,6 +623,7 @@ mod tests {
             .acquire(&permit_holder(7, 4242))
             .unwrap()
             .expect("grants");
+        let attempt_token = guard.attempt_token().to_owned();
         guard.mark_uncertain_and_disarm();
         // Still occupied: the reservation is visible, not freed.
         assert_eq!(allocator.occupied().unwrap(), 1);
@@ -534,7 +633,7 @@ mod tests {
             Some(PermitState::Uncertain)
         );
         // Recovery converges it once the residue is gone.
-        release_permit_best_effort(&path, &permit_holder(7, 4242));
+        release_permit_best_effort(&path, &permit_holder(7, 4242), &attempt_token);
         assert_eq!(allocator.occupied().unwrap(), 0);
     }
 
@@ -556,15 +655,15 @@ mod tests {
         assert!(allocator.acquire(&permit_holder(9, 3)).unwrap().is_none());
         // Confirm terminal cleanup for set 7/request 1. Drop would return
         // that older demand to Eligible, so it would correctly win again.
-        a.release();
+        a.release().unwrap();
         // The terminal demand no longer blocks set 9 from the freed slot.
         let c = allocator
             .acquire(&permit_holder(9, 3))
             .unwrap()
             .expect("freed permit is spendable by the other set");
         assert_eq!(allocator.occupied().unwrap(), 2);
-        c.release();
-        b.release();
+        c.release().unwrap();
+        b.release().unwrap();
         assert_eq!(allocator.occupied().unwrap(), 0);
     }
 
@@ -577,35 +676,35 @@ mod tests {
             .acquire(&permit_holder(7, 4242))
             .unwrap()
             .expect("grants");
+        let set_attempt_token = _guard.attempt_token().to_owned();
         // A native row from the sibling lane (mocked via the ledger API).
         let mut ledger = PermitLedger::open(&path).unwrap();
         let generation = ledger.generation().unwrap();
-        assert_eq!(
-            ledger
-                .acquire(
-                    "native/req-1",
-                    PermitLane::Native,
-                    PermitState::Running,
-                    generation,
-                    None
-                )
-                .unwrap(),
-            AcquireOutcome::Acquired
-        );
+        let native_attempt_token = match ledger
+            .acquire_attempt(
+                "native/req-1",
+                PermitLane::Native,
+                PermitState::Running,
+                generation,
+                Some(std::process::id()),
+            )
+            .unwrap()
+        {
+            AcquireAttemptOutcome::Acquired { attempt_token } => attempt_token,
+            outcome => panic!("unexpected native permit outcome: {outcome:?}"),
+        };
 
         // New epoch (daemon restart), then ONE reconcile attesting both.
         let mut ledger = PermitLedger::open(&path).unwrap();
         ledger.begin_epoch().unwrap();
-        let (report, swept) = startup_reconcile(
+        let report = startup_reconcile(
             &path,
-            &[("scaleset/7/4242", PermitState::Running)],
-            &["native/req-1"],
-            &|_| true,
+            &[("scaleset/7/4242", set_attempt_token.as_str())],
+            &[("native/req-1", native_attempt_token.as_str())],
         )
         .unwrap();
         assert!(report.marked_uncertain.is_empty(), "{report:?}");
         assert_eq!(report.confirmed.len(), 2);
-        assert!(swept.is_empty());
         assert_eq!(allocator.advertised_free().unwrap(), Some(2));
     }
 }

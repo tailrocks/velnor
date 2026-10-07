@@ -70,11 +70,29 @@ fn debian_preinst_requires_whole_host_drain() {
     assert!(preinst.contains(
         "[ \"$(systemctl show --property=ActiveState --value velnor-guardian.service 2>/dev/null || true)\" = inactive ]"
     ));
+    // Enumerate every loaded unit of each relevant type, then classify Velnor
+    // units and any other service that can invoke the packaged runner.
     assert!(preinst.contains(
-        "systemctl list-units --type=service --all --no-legend --plain 'velnor*.service'"
+        "systemctl list-units --all --type=service --no-legend --no-pager --plain --full"
+    ));
+    assert!(preinst.contains(
+        "services_raw=$(systemctl list-units --all --type=service --no-legend --no-pager --plain --full 2>/dev/null) || {\n    active_units=unknown\n    return 1\n  }"
     ));
     assert!(preinst
-        .contains("systemctl list-units --type=timer --all --no-legend --plain 'velnor*.timer'"));
+        .contains("systemctl list-units --all --type=timer --no-legend --no-pager --plain --full"));
+    assert!(preinst.contains(
+        "timers_raw=$(systemctl list-units --all --type=timer --no-legend --no-pager --plain --full 2>/dev/null) || {\n    active_units=unknown\n    return 1\n  }"
+    ));
+    assert!(
+        preinst.contains("systemctl list-unit-files --type=service --no-legend --no-pager --full")
+    );
+    assert!(preinst.contains("systemctl list-units --all --type=\"$activation_kind\""));
+    assert!(preinst.contains("service_invokes_packaged_runner \"$unit\""));
+    assert!(preinst.contains("velnor*)"));
+    // Malformed manager rows must also fail closed.
+    assert!(preinst.contains(
+        "END { if (malformed) exit 1 }\n  ') || {\n    active_units=unknown\n    return 1\n  }"
+    ));
     assert!(preinst.contains("all_velnor_units_drained"));
     assert!(preinst.contains("guardian_inactive"));
     assert!(!preinst.contains("VELNOR_DRAINED_UNITS"));
@@ -87,6 +105,7 @@ fn debian_preinst_requires_whole_host_drain() {
 fn maintainer_lock_proof_rejects_marker_and_shared_lock_spoofs() {
     use std::{
         fs,
+        os::unix::fs::PermissionsExt,
         process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -106,15 +125,82 @@ fn maintainer_lock_proof_rejects_marker_and_shared_lock_spoofs() {
     fs::create_dir_all(&root).unwrap();
     let lock = root.join("package-transaction.lock");
     let script = root.join("preinst");
+    let systemd_dir = root.join("systemd");
+    let mock_bin = root.join("mock-bin");
+    let dbus_config = root.join("system.conf");
+    let systemctl_log = root.join("systemctl.log");
+    let busctl_log = root.join("busctl.log");
+    fs::create_dir_all(&systemd_dir).unwrap();
+    fs::create_dir_all(&mock_bin).unwrap();
+    fs::write(&dbus_config, "<busconfig>\n</busconfig>\n").unwrap();
+    let systemctl = mock_bin.join("systemctl");
+    fs::write(
+        &systemctl,
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "${SYSTEMCTL_LOG:-/dev/null}"
+case "$*" in
+  'show --property=Version --value') printf '256.1\n' ;;
+  'show --property=ActiveState --value dbus.service') printf 'active\n' ;;
+  'show --property=NeedDaemonReload --value dbus.service') printf 'no\n' ;;
+  'show --property=ExecStart --value dbus.service') printf '{ path=/usr/bin/dbus-daemon ; argv[]=/usr/bin/dbus-daemon --config-file=%s --nofork --nopidfile --systemd-activation --syslog ; ignore_errors=no ; start_time=[] ; stop_time=[] ; pid=1 ; code=(exited) ; status=0 }\n' "$DBUS_CONFIG" ;;
+  'list-units --all --type=service --no-legend --no-pager --plain --full') exit 0 ;;
+  'list-units --all --type=timer --no-legend --no-pager --plain --full') exit 0 ;;
+  'list-units --all --type=socket --no-legend --no-pager --plain --full') exit 0 ;;
+  'list-units --all --type=path --no-legend --no-pager --plain --full') exit 0 ;;
+  'list-unit-files --type=service --no-legend --no-pager --full') exit 0 ;;
+  'list-jobs --no-legend --no-pager --full') printf 'No jobs running.\n' ;;
+  'show --property=LoadState --value velnor-guardian.service') printf 'not-found\n' ;;
+  *) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+    let busctl = mock_bin.join("busctl");
+    fs::write(
+        &busctl,
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "${BUSCTL_LOG:-/dev/null}"
+case "$*" in
+  '--system call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetNameOwner s org.freedesktop.systemd1') printf 's ":1.42"\n' ;;
+  '--system call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig') exit 0 ;;
+  '--system call org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager ListJobs') printf 'a(usssoo) 0\n' ;;
+  *) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&busctl, fs::Permissions::from_mode(0o755)).unwrap();
+    // The live-process scan must not observe sibling tests: the node suites
+    // spawn the real velnor-runner binary, which the packaged scan would
+    // (correctly, in production) refuse. Redirect the exe scan at a fixture
+    // proc root; /proc/locks stays real so the lock proofs are genuine.
+    let fake_proc = root.join("fake-proc");
+    fs::create_dir_all(&fake_proc).unwrap();
     let script_source = include_str!("../../debian/preinst")
         .replace(
             "PACKAGE_TRANSACTION_LOCK=/run/velnor/package-transaction.lock",
             &format!("PACKAGE_TRANSACTION_LOCK={}", lock.display()),
         )
         .replace(
-            "if [ -d /run/systemd/system ]; then",
-            "if [ -d /__velnor-lock-test-no-systemd ]; then",
+            "[ -d /run/systemd/system ]",
+            &format!("[ -d {} ]", systemd_dir.display()),
+        )
+        .replace(
+            "for executable_link in /proc/[0-9]*/exe",
+            &format!("for executable_link in {}/[0-9]*/exe", fake_proc.display()),
+        )
+        .replace(
+            "[ \"$executable_link\" != \"/proc/$$/exe\" ]",
+            &format!(
+                "[ \"$executable_link\" != \"{}/$$/exe\" ]",
+                fake_proc.display()
+            ),
         );
+    assert!(
+        !script_source.contains("/proc/[0-9]*/exe"),
+        "live-process scan redirect must apply to the packaged script"
+    );
     fs::write(&script, script_source).unwrap();
 
     let marker_spoof = Command::new("sh")
@@ -139,6 +225,10 @@ fn maintainer_lock_proof_rejects_marker_and_shared_lock_spoofs() {
             .arg(&lock)
             .arg(&script)
             .arg(mode)
+            .env("PATH", format!("{}:/usr/bin:/bin", mock_bin.display()))
+            .env("DBUS_CONFIG", &dbus_config)
+            .env("SYSTEMCTL_LOG", &systemctl_log)
+            .env("BUSCTL_LOG", &busctl_log)
             .output()
             .unwrap()
     };
@@ -148,6 +238,25 @@ fn maintainer_lock_proof_rejects_marker_and_shared_lock_spoofs() {
         "a shared package lock must fail: {}",
         String::from_utf8_lossy(&shared_spoof.stderr)
     );
+    // Positive control: a synthetic live runner in the fixture proc root
+    // must still refuse the install.
+    let spoof_pid = fake_proc.join("424242");
+    fs::create_dir_all(&spoof_pid).unwrap();
+    let spoof_exe_target = root.join("velnor-runner");
+    fs::write(&spoof_exe_target, b"spoof").unwrap();
+    std::os::unix::fs::symlink(&spoof_exe_target, spoof_pid.join("exe")).unwrap();
+    let live_spoof = run_wrapped("exclusive");
+    assert!(
+        !live_spoof.status.success(),
+        "a live packaged runner must refuse the install: {}",
+        String::from_utf8_lossy(&live_spoof.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&live_spoof.stderr).contains("live-velnor-runner-process"),
+        "refusal must name the live process: {}",
+        String::from_utf8_lossy(&live_spoof.stderr)
+    );
+    fs::remove_dir_all(&spoof_pid).unwrap();
     let exclusive_wrapper = run_wrapped("exclusive");
     assert!(
         exclusive_wrapper.status.success(),
@@ -155,13 +264,44 @@ fn maintainer_lock_proof_rejects_marker_and_shared_lock_spoofs() {
         String::from_utf8_lossy(&exclusive_wrapper.stderr)
     );
 
+    let systemctl_calls = fs::read_to_string(&systemctl_log).unwrap();
+    for expected_call in [
+        "show --property=Version --value",
+        "show --property=ActiveState --value dbus.service",
+        "show --property=NeedDaemonReload --value dbus.service",
+        "show --property=ExecStart --value dbus.service",
+        "list-units --all --type=service --no-legend --no-pager --plain --full",
+        "list-units --all --type=timer --no-legend --no-pager --plain --full",
+        "list-units --all --type=socket --no-legend --no-pager --plain --full",
+        "list-units --all --type=path --no-legend --no-pager --plain --full",
+        "list-unit-files --type=service --no-legend --no-pager --full",
+        "list-jobs --no-legend --no-pager --full",
+        "show --property=LoadState --value velnor-guardian.service",
+    ] {
+        assert!(
+            systemctl_calls.lines().any(|call| call == expected_call),
+            "preinst did not query systemctl with `{expected_call}`; calls were:\n{systemctl_calls}"
+        );
+    }
+    let busctl_calls = fs::read_to_string(&busctl_log).unwrap();
+    for expected_call in [
+        "--system call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetNameOwner s org.freedesktop.systemd1",
+        "--system call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig",
+        "--system call org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager ListJobs",
+    ] {
+        assert!(
+            busctl_calls.lines().any(|call| call == expected_call),
+            "preinst did not query busctl with `{expected_call}`; calls were:\n{busctl_calls}"
+        );
+    }
+
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn shipped_velnor_services_hold_shared_package_lock_across_exec() {
+fn runner_service_roles_acquire_their_lock_in_process() {
     let debian_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("debian");
-    let expected = "/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock";
+    let runner_roles = ["daemon", "guardian", "controller", "slot"];
     let mut service_count = 0;
 
     for entry in std::fs::read_dir(&debian_dir).unwrap() {
@@ -171,18 +311,126 @@ fn shipped_velnor_services_hold_shared_package_lock_across_exec() {
         }
         service_count += 1;
         let unit = std::fs::read_to_string(entry.path()).unwrap();
-        for line in unit.lines().filter(|line| line.starts_with("ExecStart")) {
-            assert!(
-                line.contains(expected),
-                "{} has an unguarded Velnor command: {line}",
-                entry.path().display()
-            );
+        let exec_starts = unit
+            .lines()
+            .filter(|line| line.starts_with("ExecStart="))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            exec_starts.len(),
+            1,
+            "{} must have one ExecStart",
+            entry.path().display()
+        );
+        for line in exec_starts {
+            if line.contains("/usr/bin/velnor-runner ") {
+                let role = line
+                    .split("/usr/bin/velnor-runner ")
+                    .nth(1)
+                    .and_then(|command| command.split_whitespace().next())
+                    .unwrap_or_default();
+                assert!(
+                    runner_roles.contains(&role),
+                    "unexpected runner role: {line}"
+                );
+                assert!(
+                    !line.contains("/usr/bin/flock"),
+                    "{role} must acquire exactly one in-process package guard: {line}"
+                );
+            } else {
+                assert!(
+                    line.contains(
+                        "/usr/bin/flock --shared --no-fork /run/velnor/package-transaction.lock"
+                    ),
+                    "{} has an unguarded Velnor command: {line}",
+                    entry.path().display()
+                );
+            }
         }
     }
 
     assert_eq!(
-        service_count, 8,
+        service_count, 7,
         "all shipped Velnor service units must be audited"
+    );
+
+    let service_source = include_str!("../service.rs");
+    assert!(service_source.contains("runner_role_requires_package_guard"));
+    assert!(service_source.contains("Some(crate::release::package_runner_execution_guard()?)"));
+    let node_slot_source = include_str!("../node/slot.rs");
+    let node_job_source = include_str!("../node/job.rs");
+    assert_eq!(
+        node_slot_source
+            .matches("crate::release::package_execution_guard()?")
+            .count()
+            + node_job_source
+                .matches("crate::release::package_execution_guard()?")
+                .count(),
+        2,
+        "direct ctl slot/job commands must each acquire one package guard"
+    );
+
+    for (name, unit, role) in [
+        (
+            "daemon",
+            include_str!("../../debian/velnor-daemon.service"),
+            "daemon",
+        ),
+        (
+            "daemon instance",
+            include_str!("../../debian/velnor-daemon@.service"),
+            "daemon",
+        ),
+        (
+            "controller",
+            include_str!("../../debian/velnor-controller@.service"),
+            "controller",
+        ),
+        (
+            "guardian",
+            include_str!("../../debian/velnor-guardian.service"),
+            "guardian",
+        ),
+        (
+            "slot",
+            include_str!("../../debian/velnor-slot@.service"),
+            "slot",
+        ),
+    ] {
+        let exec_start = unit
+            .lines()
+            .find_map(|line| line.strip_prefix("ExecStart="))
+            .unwrap_or_else(|| panic!("{name} unit has no ExecStart"));
+        assert!(
+            !exec_start.contains("/usr/bin/flock"),
+            "{name} must not stack an outer flock on its in-process package guard"
+        );
+        assert!(
+            exec_start.contains(&format!("/usr/bin/velnor-runner {role}")),
+            "{name} no longer dispatches the guarded runner role: {exec_start}"
+        );
+        assert!(
+            !unit.lines().any(|line| line.starts_with("ExecStartPre=")),
+            "{name} must verify inside its process-lifetime guard"
+        );
+        assert!(
+            !unit.contains("release verify-installed"),
+            "{name} must not split tuple verification from service exec"
+        );
+    }
+    let service_source = include_str!("../service.rs");
+    let entrypoint = service_source
+        .split("pub async fn execute()")
+        .nth(1)
+        .expect("service execute entrypoint");
+    let verification = entrypoint
+        .find("package_runner_execution_guard()")
+        .expect("service execute must acquire and verify its package guard");
+    let dispatch = entrypoint
+        .find("match cli.command")
+        .expect("service dispatch");
+    assert!(
+        verification < dispatch,
+        "the common runner entrypoint must guard package identity before dispatch"
     );
 }
 
@@ -310,7 +558,6 @@ fn runner_units_do_not_own_the_shared_runtime_directory() {
             "guardian",
             include_str!("../../debian/velnor-guardian.service"),
         ),
-        ("job", include_str!("../../debian/velnor-job@.service")),
         ("slot", include_str!("../../debian/velnor-slot@.service")),
     ] {
         assert!(
@@ -408,6 +655,17 @@ fn deployed_for(record: &ReleaseRecord, host: Arch) -> DeployedIdentity {
         oci_image_digest: Some(record.oci_index_digest.clone()),
         record_sha256: record.digest(),
     }
+}
+
+fn write_fixture_runner_binary(record: &ActiveRecord, path: &Path) {
+    let host = Arch::host().unwrap();
+    let bytes = format!("bin-{}", host.as_str());
+    assert_eq!(
+        record.binary_sha256(host),
+        Some(&Sha256Hex::of_bytes(bytes.as_bytes())),
+        "fixture bytes must match the tuple's host runner digest"
+    );
+    std::fs::write(path, bytes).unwrap();
 }
 
 // --- newtype parsing -------------------------------------------------------
@@ -1639,6 +1897,12 @@ impl Drop for TempDir {
     }
 }
 
+fn transaction_lock_for(dir: &TempDir) -> PackageTransactionLock {
+    let path = dir.path().join("package-transaction.lock");
+    std::fs::write(&path, b"").unwrap();
+    PackageTransactionLock::exclusive_at(&path).unwrap()
+}
+
 #[test]
 fn write_atomic_writes_exact_bytes() {
     let dir = TempDir::new("atomic");
@@ -1651,9 +1915,75 @@ fn write_atomic_writes_exact_bytes() {
 }
 
 #[test]
+fn explicit_release_outputs_refuse_live_store_and_symlink_aliases() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new("external-release-output");
+    let live_store = dir.path().join("live/release");
+    let active = live_store.join("active");
+    std::fs::create_dir_all(&active).unwrap();
+    let active_record = active.join("record.json");
+    std::fs::write(&active_record, b"active-record").unwrap();
+
+    let direct_error = write_external_output_pair(
+        &active_record,
+        b"replacement",
+        b"replacement checksum",
+        &live_store,
+    )
+    .unwrap_err();
+    assert!(direct_error
+        .to_string()
+        .contains("inside live release store"));
+
+    let alias = dir.path().join("external-alias");
+    symlink(&active, &alias).unwrap();
+    let alias_record = alias.join("record.json");
+    let alias_error = write_external_output_pair(
+        &alias_record,
+        b"replacement",
+        b"replacement checksum",
+        &live_store,
+    )
+    .unwrap_err();
+    assert!(alias_error
+        .to_string()
+        .contains("inside live release store"));
+    assert_eq!(std::fs::read(&active_record).unwrap(), b"active-record");
+    assert!(!active.join("record.json.sha256").exists());
+}
+
+#[test]
+fn pinned_external_output_directory_survives_parent_symlink_swap() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new("external-release-output-swap");
+    let live_store = dir.path().join("live/release");
+    let active = live_store.join("active");
+    let external = dir.path().join("external");
+    std::fs::create_dir_all(&active).unwrap();
+    std::fs::create_dir_all(&external).unwrap();
+    let alias = dir.path().join("output-parent");
+    symlink(&external, &alias).unwrap();
+    let output = alias.join("record.json");
+
+    let target = ExternalOutputTarget::open(&output, &live_store).unwrap();
+    std::fs::remove_file(&alias).unwrap();
+    symlink(&active, &alias).unwrap();
+    target.write(b"external-record").unwrap();
+
+    assert_eq!(
+        std::fs::read(external.join("record.json")).unwrap(),
+        b"external-record"
+    );
+    assert!(!active.join("record.json").exists());
+}
+
+#[test]
 fn store_activate_and_rollback_restore_exact_tuple() {
     let dir = TempDir::new("store");
     let store = ReleaseStore::new(dir.path());
+    let transaction_lock = transaction_lock_for(&dir);
 
     let mut v120 = valid_record();
     v120.build.tag = "v0.1.120".into();
@@ -1668,10 +1998,20 @@ fn store_activate_and_rollback_restore_exact_tuple() {
     let deployed121 = deployed_for(&v121, host);
 
     store
-        .activate(&ActiveRecord::Release(v120.clone()), &deployed120)
+        .activate(
+            &ActiveRecord::Release(v120.clone()),
+            &deployed120,
+            &transaction_lock,
+            &v120.build.debian_version,
+        )
         .unwrap();
     store
-        .activate(&ActiveRecord::Release(v121.clone()), &deployed121)
+        .activate(
+            &ActiveRecord::Release(v121.clone()),
+            &deployed121,
+            &transaction_lock,
+            &v121.build.debian_version,
+        )
         .unwrap();
 
     assert_eq!(store.active_tag().unwrap().as_deref(), Some("v0.1.121"));
@@ -1682,18 +2022,516 @@ fn store_activate_and_rollback_restore_exact_tuple() {
     );
     assert!(dir.path().join("active/deployed.json").is_file());
 
-    let restored = store.rollback().unwrap();
+    let installed_binary = dir.path().join("velnor-runner");
+    write_fixture_runner_binary(&ActiveRecord::Release(v120.clone()), &installed_binary);
+    let restored = store
+        .rollback(
+            &transaction_lock,
+            &installed_binary,
+            &v120.build.debian_version,
+            |_| Ok(()),
+        )
+        .unwrap();
     assert_eq!(restored, "v0.1.120");
     assert_eq!(store.active_tag().unwrap().as_deref(), Some("v0.1.120"));
+}
+
+#[test]
+fn rollback_refuses_corrupt_previous_deployed_identity_before_pointer_mutation() {
+    let dir = TempDir::new("rollback-corrupt-deployed");
+    let store = ReleaseStore::new(dir.path());
+    let transaction_lock = transaction_lock_for(&dir);
+    let host = Arch::host().unwrap();
+    let mut older = package_record_for(PACKAGE_KIND_PREVIEW, host);
+    older.build.crate_version = "0.1.120".into();
+    older.build.debian_version = preview_debian_version("0.1.120");
+    let newer = package_record_for(PACKAGE_KIND_PREVIEW, host);
+
+    store
+        .activate(
+            &ActiveRecord::Package(older.clone()),
+            &deployed_for_package(&older),
+            &transaction_lock,
+            &older.build.debian_version,
+        )
+        .unwrap();
+    store
+        .activate(
+            &ActiveRecord::Package(newer.clone()),
+            &deployed_for_package(&newer),
+            &transaction_lock,
+            &newer.build.debian_version,
+        )
+        .unwrap();
+    let installed_binary = dir.path().join("velnor-runner");
+    write_fixture_runner_binary(&ActiveRecord::Package(older.clone()), &installed_binary);
+
+    let mut corrupt = deployed_for_package(&older);
+    corrupt.record_sha256 = digest_of("wrong-prior-record");
+    std::fs::write(
+        store.deployed_path(&older.build.debian_version),
+        serde_json::to_vec_pretty(&corrupt).unwrap(),
+    )
+    .unwrap();
+
+    assert!(store
+        .rollback(
+            &transaction_lock,
+            &installed_binary,
+            &older.build.debian_version,
+            |_| Ok(()),
+        )
+        .is_err());
+    assert_eq!(
+        store.active_tag().unwrap().as_deref(),
+        Some(newer.build.debian_version.as_str())
+    );
+    assert_eq!(
+        store.previous_tag().unwrap().as_deref(),
+        Some(older.build.debian_version.as_str())
+    );
+}
+
+#[test]
+fn rollback_refuses_noncanonical_previous_record_before_pointer_mutation() {
+    let dir = TempDir::new("rollback-noncanonical-record");
+    let store = ReleaseStore::new(dir.path());
+    let transaction_lock = transaction_lock_for(&dir);
+    let host = Arch::host().unwrap();
+    let mut older = package_record_for(PACKAGE_KIND_PREVIEW, host);
+    older.build.crate_version = "0.1.120".into();
+    older.build.debian_version = preview_debian_version("0.1.120");
+    let newer = package_record_for(PACKAGE_KIND_PREVIEW, host);
+
+    store
+        .activate(
+            &ActiveRecord::Package(older.clone()),
+            &deployed_for_package(&older),
+            &transaction_lock,
+            &older.build.debian_version,
+        )
+        .unwrap();
+    store
+        .activate(
+            &ActiveRecord::Package(newer.clone()),
+            &deployed_for_package(&newer),
+            &transaction_lock,
+            &newer.build.debian_version,
+        )
+        .unwrap();
+    let installed_binary = dir.path().join("velnor-runner");
+    write_fixture_runner_binary(&ActiveRecord::Package(older.clone()), &installed_binary);
+
+    let record_path = store.record_path(&older.build.debian_version);
+    let mut noncanonical = older.to_canonical_json().into_bytes();
+    noncanonical.push(b' ');
+    std::fs::write(record_path, noncanonical).unwrap();
+
+    assert!(store
+        .rollback(
+            &transaction_lock,
+            &installed_binary,
+            &older.build.debian_version,
+            |_| Ok(()),
+        )
+        .is_err());
+    assert_eq!(
+        store.active_tag().unwrap().as_deref(),
+        Some(newer.build.debian_version.as_str())
+    );
+    assert_eq!(
+        store.previous_tag().unwrap().as_deref(),
+        Some(older.build.debian_version.as_str())
+    );
+}
+
+#[test]
+fn rollback_refuses_installed_runner_that_matches_only_the_new_tuple() {
+    let dir = TempDir::new("rollback-current-runner");
+    let store = ReleaseStore::new(dir.path());
+    let transaction_lock = transaction_lock_for(&dir);
+    let host = Arch::host().unwrap();
+    let mut older = package_record_for(PACKAGE_KIND_PREVIEW, host);
+    older.build.crate_version = "0.1.120".into();
+    older.build.debian_version = preview_debian_version("0.1.120");
+    older.architecture.binary_sha256 = Sha256Hex::of_bytes(b"old-runner-bytes");
+    let mut newer = package_record_for(PACKAGE_KIND_PREVIEW, host);
+    newer.architecture.binary_sha256 = Sha256Hex::of_bytes(b"new-runner-bytes");
+
+    store
+        .activate(
+            &ActiveRecord::Package(older.clone()),
+            &deployed_for_package(&older),
+            &transaction_lock,
+            &older.build.debian_version,
+        )
+        .unwrap();
+    store
+        .activate(
+            &ActiveRecord::Package(newer.clone()),
+            &deployed_for_package(&newer),
+            &transaction_lock,
+            &newer.build.debian_version,
+        )
+        .unwrap();
+    let installed_binary = dir.path().join("velnor-runner");
+    std::fs::write(&installed_binary, b"new-runner-bytes").unwrap();
+
+    assert!(store
+        .rollback(
+            &transaction_lock,
+            &installed_binary,
+            &older.build.debian_version,
+            |_| Ok(()),
+        )
+        .is_err());
+    assert_eq!(
+        store.active_tag().unwrap().as_deref(),
+        Some(newer.build.debian_version.as_str())
+    );
+    assert_eq!(
+        store.previous_tag().unwrap().as_deref(),
+        Some(older.build.debian_version.as_str())
+    );
+}
+
+#[test]
+fn activation_and_rollback_wait_for_service_process_locks() {
+    let dir = TempDir::new("transition-lock");
+    let lock_path = dir.path().join("package-transaction.lock");
+    let store_path = dir.path().join("store");
+    let store = ReleaseStore::new(&store_path);
+    let transaction_lock = transaction_lock_for(&dir);
+    let host = Arch::host().unwrap();
+    let installed_binary = dir.path().join("velnor-runner");
+
+    let mut older = package_record_for(PACKAGE_KIND_PREVIEW, host);
+    older.build.crate_version = "0.1.120".into();
+    older.build.debian_version = preview_debian_version("0.1.120");
+    let newer = package_record_for(PACKAGE_KIND_PREVIEW, host);
+    let newer_key = newer.build.debian_version.clone();
+    store
+        .activate(
+            &ActiveRecord::Package(older.clone()),
+            &deployed_for_package(&older),
+            &transaction_lock,
+            &older.build.debian_version,
+        )
+        .unwrap();
+    store
+        .activate(
+            &ActiveRecord::Package(newer.clone()),
+            &deployed_for_package(&newer),
+            &transaction_lock,
+            &newer.build.debian_version,
+        )
+        .unwrap();
+    write_fixture_runner_binary(&ActiveRecord::Package(older.clone()), &installed_binary);
+    drop(transaction_lock);
+
+    let mut candidate = package_record_for(PACKAGE_KIND_PREVIEW, host);
+    candidate.build.crate_version = "0.1.122".into();
+    candidate.build.debian_version = preview_debian_version("0.1.122");
+    candidate.verify().unwrap();
+    let candidate_path = dir.path().join("candidate.json");
+    std::fs::write(&candidate_path, candidate.to_canonical_json()).unwrap();
+
+    let service_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    rustix::fs::flock(&service_lock, rustix::fs::FlockOperation::LockShared).unwrap();
+
+    for error in [
+        activate_command_with_lock_path(
+            ReleaseActivateArgs {
+                dir: store_path.clone(),
+                record: candidate_path,
+            },
+            &lock_path,
+        )
+        .unwrap_err(),
+        rollback_command_with_lock_path_and_binary(
+            ReleaseRollbackArgs {
+                dir: store_path.clone(),
+            },
+            &lock_path,
+            &installed_binary,
+            &older.build.debian_version,
+        )
+        .unwrap_err(),
+    ] {
+        assert!(error.to_string().contains("package transaction lock"));
+        assert!(error.to_string().contains("is busy"));
+        assert_eq!(
+            store.active_tag().unwrap().as_deref(),
+            Some(newer_key.as_str())
+        );
+    }
+
+    drop(service_lock);
+    rollback_command_with_lock_path_and_binary(
+        ReleaseRollbackArgs { dir: store_path },
+        &lock_path,
+        &installed_binary,
+        &older.build.debian_version,
+    )
+    .unwrap();
+    assert_eq!(
+        store.active_tag().unwrap().as_deref(),
+        Some("0.1.120~preview.25+8d49319")
+    );
+}
+
+#[test]
+fn service_identity_gate_skips_development_but_verifies_preview_packages() {
+    let identity = |kind: &str, source_sha: &str| EmbeddedIdentity {
+        source_sha: source_sha.to_owned(),
+        tag: "test".into(),
+        kind: kind.to_owned(),
+        crate_version: "0.1.277".into(),
+    };
+
+    assert!(
+        !service_identity_requires_installed_tuple(&identity("development", "development"))
+            .unwrap()
+    );
+    let source_sha = "a".repeat(40);
+    assert!(service_identity_requires_installed_tuple(&identity("release", &source_sha)).unwrap());
+    assert!(service_identity_requires_installed_tuple(&identity("preview", &source_sha)).unwrap());
+    assert!(
+        service_identity_requires_installed_tuple(&identity("development", &source_sha)).is_err()
+    );
+    assert!(service_identity_requires_installed_tuple(&identity("unknown", &source_sha)).is_err());
+}
+
+#[test]
+fn service_identity_must_match_active_record_and_compiled_manifest() {
+    let release = ActiveRecord::Release(valid_record());
+    let release_record = match &release {
+        ActiveRecord::Release(record) => record,
+        ActiveRecord::Package(_) => unreachable!(),
+    };
+    let identity = EmbeddedIdentity {
+        source_sha: release_record.build.commit.to_string(),
+        tag: release_record.build.tag.clone(),
+        kind: "release".into(),
+        crate_version: release_record.build.crate_version.clone(),
+    };
+    let manifest_hash = release.manifest_sha256().clone();
+    verify_embedded_identity_matches_record(
+        &identity,
+        &release,
+        release.manifest_version(),
+        manifest_hash.clone(),
+    )
+    .unwrap();
+
+    for stale_identity in [
+        EmbeddedIdentity {
+            source_sha: source_sha("other").to_string(),
+            ..identity.clone()
+        },
+        EmbeddedIdentity {
+            tag: "v0.1.120".into(),
+            ..identity.clone()
+        },
+        EmbeddedIdentity {
+            kind: "preview".into(),
+            ..identity.clone()
+        },
+        EmbeddedIdentity {
+            crate_version: "0.1.120".into(),
+            ..identity.clone()
+        },
+    ] {
+        assert!(verify_embedded_identity_matches_record(
+            &stale_identity,
+            &release,
+            release.manifest_version(),
+            manifest_hash.clone(),
+        )
+        .is_err());
+    }
+    assert!(verify_embedded_identity_matches_record(
+        &identity,
+        &release,
+        release.manifest_version().saturating_add(1),
+        manifest_hash.clone(),
+    )
+    .is_err());
+    assert!(verify_embedded_identity_matches_record(
+        &identity,
+        &release,
+        release.manifest_version(),
+        digest_of("different-manifest"),
+    )
+    .is_err());
+
+    let preview = ActiveRecord::Package(package_record_for(PACKAGE_KIND_PREVIEW, Arch::Amd64));
+    let preview_record = match &preview {
+        ActiveRecord::Package(record) => record,
+        ActiveRecord::Release(_) => unreachable!(),
+    };
+    let preview_identity = EmbeddedIdentity {
+        source_sha: preview_record.build.commit.to_string(),
+        tag: "preview".into(),
+        kind: PACKAGE_KIND_PREVIEW.into(),
+        crate_version: preview_record.build.crate_version.clone(),
+    };
+    verify_embedded_identity_matches_record(
+        &preview_identity,
+        &preview,
+        preview.manifest_version(),
+        preview.manifest_sha256().clone(),
+    )
+    .unwrap();
+    assert!(verify_embedded_identity_matches_record(
+        &EmbeddedIdentity {
+            tag: "stale-preview".into(),
+            ..preview_identity.clone()
+        },
+        &preview,
+        preview.manifest_version(),
+        preview.manifest_sha256().clone(),
+    )
+    .is_err());
+
+    let stable_package =
+        ActiveRecord::Package(package_record_for(PACKAGE_KIND_STABLE, Arch::Amd64));
+    assert!(verify_embedded_identity_matches_record(
+        &EmbeddedIdentity {
+            kind: PACKAGE_KIND_STABLE.into(),
+            ..preview_identity
+        },
+        &stable_package,
+        stable_package.manifest_version(),
+        stable_package.manifest_sha256().clone(),
+    )
+    .is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn service_verifier_binds_active_pointer_to_record_store_key() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new("active-record-key");
+    let record = ActiveRecord::Package(package_record_for(PACKAGE_KIND_PREVIEW, Arch::Amd64));
+    let active = dir.path().join("active");
+    let expected = Path::new("records").join(record.store_key());
+    symlink(&expected, &active).unwrap();
+    verify_active_record_key_at(&active, &record).unwrap();
+
+    std::fs::remove_file(&active).unwrap();
+    symlink(Path::new("records/wrong-key"), &active).unwrap();
+    assert!(verify_active_record_key_at(&active, &record).is_err());
+}
+
+#[test]
+fn running_runner_image_must_match_active_record_bytes() {
+    let dir = TempDir::new("running-runner-image");
+    let mut package = package_record_for(PACKAGE_KIND_PREVIEW, Arch::host().unwrap());
+    package.architecture.binary_sha256 = Sha256Hex::of_bytes(b"mapped-runner");
+    let record = ActiveRecord::Package(package);
+    let executable = dir.path().join("renamed-worker");
+    std::fs::write(&executable, b"mapped-runner").unwrap();
+    verify_running_executable_image_at(&record, PackageExecutionBinary::Runner, &executable)
+        .unwrap();
+
+    std::fs::write(&executable, b"stale-mapped-runner").unwrap();
+    assert!(verify_running_executable_image_at(
+        &record,
+        PackageExecutionBinary::Runner,
+        &executable,
+    )
+    .is_err());
+}
+
+#[test]
+fn packaged_execution_guard_verifies_under_shared_lock() {
+    use std::cell::Cell;
+
+    let dir = TempDir::new("execution-guard");
+    let lock_path = dir.path().join("package-transaction.lock");
+    std::fs::write(&lock_path, b"").unwrap();
+    let source_sha = "a".repeat(40);
+    let identity = EmbeddedIdentity {
+        source_sha,
+        tag: "test".into(),
+        kind: "preview".into(),
+        crate_version: "0.1.277".into(),
+    };
+    let verified = Cell::new(false);
+
+    let guard = package_execution_guard_for(&identity, &lock_path, || {
+        let writer = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        assert!(matches!(
+            rustix::fs::flock(
+                &writer,
+                rustix::fs::FlockOperation::NonBlockingLockExclusive
+            ),
+            Err(rustix::io::Errno::WOULDBLOCK)
+        ));
+        verified.set(true);
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        verified.get(),
+        "tuple verification must run after lock acquire"
+    );
+
+    let writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    assert!(matches!(
+        rustix::fs::flock(
+            &writer,
+            rustix::fs::FlockOperation::NonBlockingLockExclusive
+        ),
+        Err(rustix::io::Errno::WOULDBLOCK)
+    ));
+    drop(guard);
+    rustix::fs::flock(
+        &writer,
+        rustix::fs::FlockOperation::NonBlockingLockExclusive,
+    )
+    .unwrap();
+}
+
+#[test]
+fn development_execution_guard_does_not_open_package_lock_or_verify() {
+    let dir = TempDir::new("execution-guard-dev");
+    let missing_lock = dir.path().join("missing-package-transaction.lock");
+    let identity = EmbeddedIdentity {
+        source_sha: "development".into(),
+        tag: "development".into(),
+        kind: "development".into(),
+        crate_version: "0.1.277".into(),
+    };
+
+    let _guard = package_execution_guard_for(&identity, &missing_lock, || {
+        anyhow::bail!("development guard must skip tuple verification")
+    })
+    .unwrap();
+    assert!(!missing_lock.exists());
 }
 
 #[test]
 fn store_record_refuses_to_clobber_divergent_bytes() {
     let dir = TempDir::new("clobber");
     let store = ReleaseStore::new(dir.path());
+    let transaction_lock = transaction_lock_for(&dir);
     let record = valid_record();
     store
-        .store_record(&ActiveRecord::Release(record.clone()))
+        .store_record(&ActiveRecord::Release(record.clone()), &transaction_lock)
         .unwrap();
 
     // Same tag, different content -> must not overwrite.
@@ -1704,25 +2542,67 @@ fn store_record_refuses_to_clobber_divergent_bytes() {
         tampered.oci_index_digest
     );
     let err = store
-        .store_record(&ActiveRecord::Release(tampered))
+        .store_record(&ActiveRecord::Release(tampered), &transaction_lock)
         .unwrap_err();
     assert!(err.to_string().contains("refusing to clobber"));
 
     // Exact re-store of identical bytes is an idempotent success.
     store
-        .store_record(&ActiveRecord::Release(record.clone()))
+        .store_record(&ActiveRecord::Release(record.clone()), &transaction_lock)
         .unwrap();
+}
+
+#[test]
+fn live_store_record_emission_serializes_on_package_lock() {
+    let dir = TempDir::new("emit-live-lock");
+    let lock_path = dir.path().join("package-transaction.lock");
+    std::fs::write(&lock_path, b"").unwrap();
+    let store = ReleaseStore::new(dir.path().join("store"));
+    let record = ActiveRecord::Release(valid_record());
+    let key = record.store_key();
+    let record_path = store.record_path(key);
+    let checksum_path = store
+        .root
+        .join("records")
+        .join(format!("{key}.json.sha256"));
+
+    let service_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    rustix::fs::flock(&service_lock, rustix::fs::FlockOperation::LockShared).unwrap();
+
+    let error = store_live_record_with_lock_path(&store, &record, &lock_path).unwrap_err();
+    assert!(error.to_string().contains("package transaction lock"));
+    assert!(error.to_string().contains("is busy"));
+    assert!(!record_path.exists());
+    assert!(!checksum_path.exists());
+
+    drop(service_lock);
+    let digest = store_live_record_with_lock_path(&store, &record, &lock_path).unwrap();
+    assert_eq!(store.read_record(key).unwrap(), record);
+    assert_eq!(
+        std::fs::read_to_string(checksum_path).unwrap(),
+        format!("{digest}  {key}.json\n")
+    );
 }
 
 #[test]
 fn activate_requires_a_stored_record() {
     let dir = TempDir::new("noactivate");
     let store = ReleaseStore::new(dir.path());
+    let transaction_lock = transaction_lock_for(&dir);
     let record = valid_record();
     let mut deployed = deployed_for(&record, Arch::host().unwrap());
     deployed.record_sha256 = digest_of("wrong-record");
     assert!(store
-        .activate(&ActiveRecord::Release(record.clone()), &deployed)
+        .activate(
+            &ActiveRecord::Release(record.clone()),
+            &deployed,
+            &transaction_lock,
+            &record.build.debian_version,
+        )
         .is_err());
 }
 
@@ -1730,7 +2610,15 @@ fn activate_requires_a_stored_record() {
 fn rollback_requires_a_previous_tuple() {
     let dir = TempDir::new("norollback");
     let store = ReleaseStore::new(dir.path());
-    assert!(store.rollback().is_err());
+    let transaction_lock = transaction_lock_for(&dir);
+    assert!(store
+        .rollback(
+            &transaction_lock,
+            Path::new("/missing/runner"),
+            "0.1.121",
+            |_| Ok(()),
+        )
+        .is_err());
 }
 
 // --- sha256_file over fixed bytes ------------------------------------------
@@ -1802,6 +2690,134 @@ fn preview_and_stable_package_records_verify() {
     assert_eq!(
         package_record_for(PACKAGE_KIND_STABLE, Arch::Arm64).verify(),
         Ok(())
+    );
+}
+
+#[test]
+fn installed_package_version_query_requires_a_fully_installed_deb() {
+    assert_eq!(
+        parse_installed_debian_package_version(
+            "install ok installed\t0.1.121~preview.25+8d49319\n"
+        )
+        .unwrap(),
+        "0.1.121~preview.25+8d49319"
+    );
+    assert_eq!(
+        parse_installed_debian_package_version("hold ok installed\t0.1.121").unwrap(),
+        "0.1.121"
+    );
+    assert!(
+        parse_installed_debian_package_version("install reinstreq installed\t0.1.121").is_err()
+    );
+    assert!(parse_installed_debian_package_version(
+        "install ok half-configured\t0.1.121~preview.25+8d49319"
+    )
+    .is_err());
+    assert!(parse_installed_debian_package_version("install ok installed\t").is_err());
+}
+
+#[test]
+fn activation_binds_same_preview_bytes_to_the_installed_package_version() {
+    let dir = TempDir::new("activate-preview-package-version");
+    let store = ReleaseStore::new(dir.path());
+    let transaction_lock = transaction_lock_for(&dir);
+    let host = Arch::host().unwrap();
+    let installed = package_record_for(PACKAGE_KIND_PREVIEW, host);
+    let mut candidate = installed.clone();
+    candidate.build.debian_version = "0.1.121~preview.26+8d49319".into();
+
+    assert_eq!(installed.verify(), Ok(()));
+    assert_eq!(candidate.verify(), Ok(()));
+    assert_eq!(installed.build.commit, candidate.build.commit);
+    assert_eq!(
+        installed.architecture.binary_sha256,
+        candidate.architecture.binary_sha256
+    );
+    assert_ne!(installed.digest(), candidate.digest());
+
+    let installed_record = ActiveRecord::Package(installed.clone());
+    store
+        .activate(
+            &installed_record,
+            &deployed_for_package(&installed),
+            &transaction_lock,
+            &installed.build.debian_version,
+        )
+        .unwrap();
+
+    let error = store
+        .activate(
+            &ActiveRecord::Package(candidate.clone()),
+            &deployed_for_package(&candidate),
+            &transaction_lock,
+            &installed.build.debian_version,
+        )
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("installed Debian package version does not match"));
+    assert_eq!(
+        store.active_tag().unwrap().as_deref(),
+        Some(installed.build.debian_version.as_str())
+    );
+    assert_eq!(store.previous_tag().unwrap(), None);
+}
+
+#[test]
+fn rollback_requires_reinstalling_the_older_preview_package_version() {
+    let dir = TempDir::new("rollback-preview-package-version");
+    let store = ReleaseStore::new(dir.path());
+    let transaction_lock = transaction_lock_for(&dir);
+    let host = Arch::host().unwrap();
+    let mut older = package_record_for(PACKAGE_KIND_PREVIEW, host);
+    older.build.debian_version = "0.1.121~preview.25+8d49319".into();
+    let mut newer = older.clone();
+    newer.build.debian_version = "0.1.121~preview.26+8d49319".into();
+    assert_eq!(older.verify(), Ok(()));
+    assert_eq!(newer.verify(), Ok(()));
+    assert_eq!(older.build.commit, newer.build.commit);
+    assert_eq!(
+        older.architecture.binary_sha256,
+        newer.architecture.binary_sha256
+    );
+
+    store
+        .activate(
+            &ActiveRecord::Package(older.clone()),
+            &deployed_for_package(&older),
+            &transaction_lock,
+            &older.build.debian_version,
+        )
+        .unwrap();
+    store
+        .activate(
+            &ActiveRecord::Package(newer.clone()),
+            &deployed_for_package(&newer),
+            &transaction_lock,
+            &newer.build.debian_version,
+        )
+        .unwrap();
+    let installed_binary = dir.path().join("velnor-runner");
+    write_fixture_runner_binary(&ActiveRecord::Package(older.clone()), &installed_binary);
+
+    let error = store
+        .rollback(
+            &transaction_lock,
+            &installed_binary,
+            &newer.build.debian_version,
+            |_| Ok(()),
+        )
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("installed Debian package version does not match"));
+    assert_eq!(
+        store.active_tag().unwrap().as_deref(),
+        Some(newer.build.debian_version.as_str())
+    );
+    assert_eq!(
+        store.previous_tag().unwrap().as_deref(),
+        Some(older.build.debian_version.as_str())
     );
 }
 
@@ -2026,6 +3042,76 @@ fn emit_package_record_accepts_a_matching_preview_identity() {
     verify_package_record_bytes(bytes.as_bytes(), &Sha256Hex::of_bytes(bytes.as_bytes())).unwrap();
 }
 
+#[test]
+fn emit_package_record_maps_build_kinds_to_package_channels() {
+    let dir = TempDir::new("emit-pkg-channels");
+    let binary = dir.path().join("velnor-runner");
+    std::fs::write(&binary, b"exact-runner-bytes").unwrap();
+    for arch in REQUIRED_ARCHES {
+        for (build_kind, package_kind, tag) in [
+            ("release", PACKAGE_KIND_STABLE, "v0.1.121"),
+            ("preview", PACKAGE_KIND_PREVIEW, "preview"),
+        ] {
+            let identity = EmbeddedIdentity {
+                source_sha: source_sha("commit-seed").as_str().to_string(),
+                tag: tag.into(),
+                kind: build_kind.into(),
+                crate_version: "0.1.121".into(),
+            };
+            for record_kind in [PACKAGE_KIND_STABLE, PACKAGE_KIND_PREVIEW] {
+                let mut record = package_record_for(record_kind, arch);
+                record.architecture.binary_sha256 = Sha256Hex::of_bytes(b"exact-runner-bytes");
+                let result = emit_package_record(PackageRecordEmission {
+                    identity: &identity,
+                    record: &record,
+                    binary: &binary,
+                });
+                if record_kind == package_kind {
+                    result.unwrap();
+                } else {
+                    assert!(result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("does not match this binary's embedded build kind"));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn emit_package_record_rejects_unshippable_build_identities() {
+    let dir = TempDir::new("emit-pkg-unshippable");
+    let binary = dir.path().join("velnor-runner");
+    std::fs::write(&binary, b"exact-runner-bytes").unwrap();
+    for record_kind in [PACKAGE_KIND_STABLE, PACKAGE_KIND_PREVIEW] {
+        let mut record = package_record_for(record_kind, Arch::Amd64);
+        record.architecture.binary_sha256 = Sha256Hex::of_bytes(b"exact-runner-bytes");
+        for (build_kind, source) in [
+            ("development", record.build.commit.as_str()),
+            ("stable", record.build.commit.as_str()),
+            ("unknown", record.build.commit.as_str()),
+            ("release", "development"),
+            ("preview", "development"),
+        ] {
+            let identity = EmbeddedIdentity {
+                source_sha: source.into(),
+                tag: "v0.1.121".into(),
+                kind: build_kind.into(),
+                crate_version: record.build.crate_version.clone(),
+            };
+            assert!(emit_package_record(PackageRecordEmission {
+                identity: &identity,
+                record: &record,
+                binary: &binary,
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("refusing to emit a package record"));
+        }
+    }
+}
+
 /// A record is only ever staged against the bytes it names, from a binary whose
 /// own embedded identity agrees with it.
 #[test]
@@ -2069,7 +3155,7 @@ fn emit_package_record_rejects_every_binding_drift() {
 
     // Kind mismatch: a preview record cannot come from a release-build binary.
     let mut stable_identity = matching.clone();
-    stable_identity.kind = PACKAGE_KIND_STABLE.into();
+    stable_identity.kind = "release".into();
     assert!(emission(&stable_identity, &record)
         .unwrap_err()
         .to_string()
@@ -2185,23 +3271,46 @@ fn verify_installed_command_reads_a_preview_package_tuple() {
     std::fs::write(&deployed_path, serde_json::to_vec(&deployed).unwrap()).unwrap();
     std::fs::write(&binary_path, b"installed-bytes").unwrap();
 
-    verify_installed_command(ReleaseVerifyInstalledArgs {
-        record: record_path,
-        deployed: deployed_path,
-        binary: binary_path,
-        arch: None,
-    })
+    verify_installed_command_with_package_version(
+        ReleaseVerifyInstalledArgs {
+            record: record_path,
+            deployed: deployed_path,
+            binary: binary_path,
+            arch: None,
+        },
+        &record.build.debian_version,
+    )
     .unwrap();
+
+    let mut other_published_version = record.clone();
+    other_published_version.build.debian_version = "0.1.121~preview.26+8d49319".into();
+    assert_eq!(other_published_version.verify(), Ok(()));
+    let version_error = verify_installed_command_with_package_version(
+        ReleaseVerifyInstalledArgs {
+            record: dir.path().join("record.json"),
+            deployed: dir.path().join("deployed.json"),
+            binary: dir.path().join("velnor-runner"),
+            arch: None,
+        },
+        &other_published_version.build.debian_version,
+    )
+    .unwrap_err();
+    assert!(version_error
+        .to_string()
+        .contains("installed Debian package version does not match"));
 
     // And an installed binary that disagrees fails closed.
     let tampered = dir.path().join("tampered");
     std::fs::write(&tampered, b"tampered-bytes").unwrap();
-    assert!(verify_installed_command(ReleaseVerifyInstalledArgs {
-        record: dir.path().join("record.json"),
-        deployed: dir.path().join("deployed.json"),
-        binary: tampered,
-        arch: None,
-    })
+    assert!(verify_installed_command_with_package_version(
+        ReleaseVerifyInstalledArgs {
+            record: dir.path().join("record.json"),
+            deployed: dir.path().join("deployed.json"),
+            binary: tampered,
+            arch: None,
+        },
+        &record.build.debian_version,
+    )
     .is_err());
 }
 
@@ -2209,6 +3318,7 @@ fn verify_installed_command_reads_a_preview_package_tuple() {
 fn store_activates_and_rolls_back_preview_package_tuples() {
     let dir = TempDir::new("store-preview");
     let store = ReleaseStore::new(dir.path());
+    let transaction_lock = transaction_lock_for(&dir);
     let host = Arch::host().unwrap();
 
     let mut older = package_record_for(PACKAGE_KIND_PREVIEW, host);
@@ -2221,10 +3331,20 @@ fn store_activates_and_rolls_back_preview_package_tuples() {
     let new_record = ActiveRecord::Package(newer.clone());
 
     store
-        .activate(&old_record, &deployed_for_package(&older))
+        .activate(
+            &old_record,
+            &deployed_for_package(&older),
+            &transaction_lock,
+            &older.build.debian_version,
+        )
         .unwrap();
     store
-        .activate(&new_record, &deployed_for_package(&newer))
+        .activate(
+            &new_record,
+            &deployed_for_package(&newer),
+            &transaction_lock,
+            &newer.build.debian_version,
+        )
         .unwrap();
 
     assert_eq!(
@@ -2248,7 +3368,16 @@ fn store_activates_and_rolls_back_preview_package_tuples() {
         new_record
     );
 
-    let restored = store.rollback().unwrap();
+    let installed_binary = dir.path().join("velnor-runner");
+    write_fixture_runner_binary(&old_record, &installed_binary);
+    let restored = store
+        .rollback(
+            &transaction_lock,
+            &installed_binary,
+            &older.build.debian_version,
+            |_| Ok(()),
+        )
+        .unwrap();
     assert_eq!(restored, older.build.debian_version);
     assert_eq!(
         store.read_record(restored.as_str()).unwrap(),
@@ -2262,17 +3391,19 @@ fn store_activates_and_rolls_back_preview_package_tuples() {
 #[test]
 fn activate_command_refuses_a_stable_package_record() {
     let dir = TempDir::new("activate-stable-package");
+    let record = package_record_for(PACKAGE_KIND_STABLE, Arch::host().unwrap());
     let record_path = dir.path().join("record.json");
-    std::fs::write(
-        &record_path,
-        package_record_for(PACKAGE_KIND_STABLE, Arch::host().unwrap()).to_canonical_json(),
-    )
-    .unwrap();
+    std::fs::write(&record_path, record.to_canonical_json()).unwrap();
 
-    let error = activate_command(ReleaseActivateArgs {
-        dir: dir.path().join("store"),
-        record: record_path,
-    })
+    let transaction_lock = transaction_lock_for(&dir);
+    let error = activate_command_with_lock_and_package_version(
+        ReleaseActivateArgs {
+            dir: dir.path().join("store"),
+            record: record_path,
+        },
+        &transaction_lock,
+        &record.build.debian_version,
+    )
     .unwrap_err();
     assert!(error
         .to_string()
@@ -2286,17 +3417,19 @@ fn activate_command_refuses_a_package_for_another_host_architecture() {
         Arch::Amd64 => Arch::Arm64,
         Arch::Arm64 => Arch::Amd64,
     };
+    let record = package_record_for(PACKAGE_KIND_PREVIEW, other);
     let record_path = dir.path().join("record.json");
-    std::fs::write(
-        &record_path,
-        package_record_for(PACKAGE_KIND_PREVIEW, other).to_canonical_json(),
-    )
-    .unwrap();
+    std::fs::write(&record_path, record.to_canonical_json()).unwrap();
 
-    let error = activate_command(ReleaseActivateArgs {
-        dir: dir.path().join("store"),
-        record: record_path,
-    })
+    let transaction_lock = transaction_lock_for(&dir);
+    let error = activate_command_with_lock_and_package_version(
+        ReleaseActivateArgs {
+            dir: dir.path().join("store"),
+            record: record_path,
+        },
+        &transaction_lock,
+        &record.build.debian_version,
+    )
     .unwrap_err();
     assert!(error.to_string().contains("but this host is"));
 }

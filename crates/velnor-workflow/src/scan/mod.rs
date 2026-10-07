@@ -18,7 +18,7 @@ mod signals;
 mod swift;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -31,13 +31,47 @@ use crate::{
 ///
 /// # Errors
 /// Returns filesystem errors with the affected path.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn scan_shape(
     root: &Path,
     runners: RunnerMode,
     default_branch: &str,
     exclude: &[String],
 ) -> Result<RepositoryShape, GeneratorError> {
-    let files = file_walk::repository_files(root, exclude)?;
+    scan_shape_with_static_files_and_owned_paths(
+        root,
+        runners,
+        default_branch,
+        exclude,
+        &[],
+        &[],
+        &[],
+        None,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the scan call binds runners, config, source, output, and ownership snapshots together"
+)]
+pub(crate) fn scan_shape_with_static_files_and_owned_paths(
+    root: &Path,
+    runners: RunnerMode,
+    default_branch: &str,
+    exclude: &[String],
+    static_sources: &[String],
+    static_outputs: &[String],
+    generated_aliases: &[crate::s2::GeneratedAliasPath],
+    verified_owned_paths: Option<&BTreeSet<PathBuf>>,
+) -> Result<RepositoryShape, GeneratorError> {
+    let files = file_walk::repository_files_with_static_files_and_owned_paths(
+        root,
+        exclude,
+        static_sources,
+        static_outputs,
+        generated_aliases,
+        verified_owned_paths,
+    )?;
     let file_set: BTreeSet<String> = files.iter().cloned().collect();
     let context = ScanContext {
         root,
@@ -258,7 +292,7 @@ impl From<RepositoryShape> for ProjectConfig {
             mise_lock_backends: BTreeMap::new(),
             mise_install_deps: crate::s2::MiseInstallDeps::default(),
             github_cache: crate::config::CacheGithubSection::default(),
-            velnor_host_cache: crate::config::CacheVelnorSection::default(),
+            host_cache: crate::config::CacheHostSection::default(),
             check_profiles: Vec::new(),
         }
     }

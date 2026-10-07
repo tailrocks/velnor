@@ -91,6 +91,13 @@ docker/bake-action                   docker/setup-qemu-action
 hadolint/hadolint-action             sigstore/cosign-installer
 ```
 
+For the pinned v7.4.0 `docker/build-push-action` reference, Velnor uses its
+native `DockerBuildPush` adapter. It runs the build operation but not the
+action's post callback. The Native lane therefore does not export or upload
+`.dockerbuild` build-history artifacts, add the action's Build summary, or
+clean up the action's own temporary directory. This is not full v7.4.0 action
+parity.
+
 `velnor-workflow` generates the workflow files and local reusable-workflow calls
 in the repository. Velnor does not fetch a workflow provider at runtime. The
 remaining fetched action surfaces use pinned commit SHAs and closed input
@@ -167,10 +174,11 @@ Scale Set official runner handles those job steps through its own Actions
 session.
 
 Checkout resolves repository, ref, destination, depth, tags, clean behavior,
-LFS, and credential persistence. A mirror may be refreshed first; direct
-checkout is the fallback. LFS downloads require credentials. Temporary Git
-credentials are scoped to the checkout host and removed during cleanup;
-cleanup failure is reported in local diagnostics.
+LFS, and credential persistence. When a mirror store is configured, Velnor
+prepares and uses that mirror; mirror-preparation failure fails checkout.
+Direct checkout is used only when no mirror store is configured. LFS downloads
+require credentials. Temporary Git credentials are scoped to the checkout host
+and removed during cleanup; cleanup failure is reported in local diagnostics.
 
 `actions/cache` restores from the declared cache root and saves through its
 save operation. Unknown or unsafe paths fail closed. Cache keys include the
@@ -220,11 +228,23 @@ fails preflight.
 ### Docker
 
 Docker requires the host Docker socket and a working systemd/cgroup-v2
-boundary. The job container owns the job environment; service containers,
-Docker actions, Buildx, and testcontainers operate inside the trusted host
-boundary. Cancellation signals containers; it does not remove them. Removal is
-teardown's job, and teardown also reclaims services, networks, and BuildKit
-resources.
+boundary. On supported Linux hosts, the job container owns its environment;
+service containers, Docker actions, Buildx, and testcontainers operate inside
+the trusted host boundary. On macOS, Velnor withholds the host socket from job
+containers until a VM-reachable lease proxy exists, so in-job Docker API
+clients have no endpoint. Cancellation signals containers; it does not remove
+them. Teardown removes services and networks. The managed Buildx post action
+releases the builder claim with `cleanup: false` and leaves the daemon running,
+even after the final claim. If cancellation skips that post action, teardown
+releases the claim and stops the daemon when it was the final holder. The
+builder and state volume remain for horizon cleanup.
+
+User-supplied outer job/service container options cannot add volume-backed or
+host-path mounts or Docker API socket access. Velnor removes `-v`/`--volume`,
+`--mount`, `--volumes-from`, `--volume-driver`, `--volume-opt`, and
+`--use-api-socket` options before launch; runner-owned workspace, cache, tool,
+and eligible Linux host-socket mounts are constructed separately. Other
+options still follow the trust-path filter.
 
 #### Dual-lane cache transport
 
@@ -240,7 +260,7 @@ are lane-agnostic; transport, budget, and retention differ.
   GitHub lane                          Velnor lane
   ───────────                          ───────────
   Transport: actions/cache API         Transport: host bind mounts
-  Budget: 8 GiB (internal class table) Budget: 50 GiB caches class + mbx
+  Budget: 8 GiB (internal class table) Budget: per-class stores + MBX/slot
   Platform cap: 10 GB (7-day LRU)       Platform cap: host disk + slot GC
   mbx: backend github, objects         mbx: backend local, per-slot store
   PR: restore-only (no trusted save)   PR: host store writes (trust-scoped)
@@ -327,8 +347,9 @@ plain Cargo.
 #### Warm workspaces on the non-mbx paths
 
 The sccache and plain-Cargo opt-out paths check out into a stable workspace
-that persists across jobs on the same slot, namespaced by trust scope and
-repository (`<slot>/stable-workspaces/<scope>/<repository-id>/workspace`).
+that persists across jobs on the same slot, namespaced by admitted trust scope
+and repository:
+`<slot>/stable-workspaces__trust_scope_v1/<trust-scope-v1-digest>/<repository-id>/workspace`.
 Consecutive jobs for the same repository re-check out over it instead of
 into a fresh directory, and `clean` keeps the top-level `target/` while
 still removing every other untracked file — so a warm same-SHA rebuild
@@ -339,10 +360,12 @@ from a store. The mbx default path is unaffected and keeps the ephemeral
 per-job workspace, since mbx manages its own targets.
 
 Each slot's stable tree is capped at 30 GiB (the same allowance as mbx's
-managed targets); when a new repository scope arrives over budget, the
-least-recently-used idle scopes are evicted. A job without a repository id,
-or any stable-allocation failure, falls back to an ephemeral workspace with
-a forensics line — warmth is an optimization and never fails a build.
+managed targets), enforced at allocation and after each job. Least-recently-used
+idle scopes are evicted; if the scope being allocated alone exceeds the
+budget, its tree is cleared and the job starts cold. A job without a
+repository id, or any stable-allocation failure, falls back to an ephemeral
+workspace with a forensics line — warmth is an optimization and never fails a
+build.
 
 The floor this sets: a warm same-SHA rebuild on a warm slot is a fresh
 check (sub-second). Anything that misses the fingerprints — a new SHA, a
@@ -442,8 +465,12 @@ A target that survives `SIGKILL` is recorded as a survivor with its name and
 logged; there is no further escalation.
 
 **Cancellation signals; it does not remove.** No ladder level runs `docker rm`.
-Container removal, network removal, and BuildKit reclamation belong to
-teardown, which runs after collection whether or not the job was cancelled.
+Container and network removal belong to teardown, which runs after collection
+whether or not the job was cancelled. The managed Buildx post action releases
+the job's claim with `cleanup: false` and leaves the daemon running. If
+cancellation skips the post, teardown releases the claim and stops the daemon
+when it was the final holder. Both paths preserve the builder and state volume
+for horizon cleanup.
 
 The live native path registers host process groups, job and service
 containers, and Docker-action sidecars with the cancellation token. For

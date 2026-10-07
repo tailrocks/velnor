@@ -6513,6 +6513,7 @@ cp "$record" "$out"
             env: std::collections::BTreeMap::new(),
             mbx: None,
             prepared_tools: Vec::new(),
+            homebrew_preview: None,
         }
     }
 
@@ -6729,7 +6730,7 @@ cp "$record" "$out"
             mise_lock_backends: BTreeMap::new(),
             mise_install_deps: crate::s2::config::MiseInstallDeps::default(),
             github_cache: crate::s2::config::CacheGithubSection::default(),
-            velnor_host_cache: crate::s2::config::CacheVelnorSection::default(),
+            host_cache: crate::s2::config::CacheHostSection::default(),
         }
     }
 

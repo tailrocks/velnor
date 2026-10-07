@@ -146,24 +146,6 @@ pub(crate) fn user_state_dir(
     Ok(PathBuf::from(home).join(".local").join("state"))
 }
 
-pub(crate) fn user_cache_dir(
-    xdg_cache_home: Option<std::ffi::OsString>,
-    home: Option<std::ffi::OsString>,
-) -> Result<PathBuf> {
-    if let Some(xdg) = nonempty_path(xdg_cache_home) {
-        return Ok(xdg);
-    }
-    let home = home.context("HOME is not set; pass --config-dir")?;
-    if cfg!(target_os = "macos") {
-        return Ok(PathBuf::from(home).join("Library/Caches"));
-    }
-    Ok(PathBuf::from(home).join(".cache"))
-}
-
-pub(crate) fn user_runtime_dir(xdg_runtime_dir: Option<std::ffi::OsString>) -> PathBuf {
-    nonempty_path(xdg_runtime_dir).unwrap_or_else(|| std::env::temp_dir().join("velnor-run"))
-}
-
 fn nonempty_path(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
     value.filter(|value| !value.is_empty()).map(PathBuf::from)
 }
