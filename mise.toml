@@ -7,7 +7,7 @@ actionlint = "1.7.12"
 # install dependency, and the Rust toolchain is provisioned by rustup.
 cargo-binstall = "1.22.0"
 "aqua:EmbarkStudios/cargo-deny" = "0.20.2"
-"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.143"
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.148"
 "aqua:rust-cross/cargo-zigbuild" = "0.23.3"
 zig = "0.16.0"
 
@@ -243,17 +243,17 @@ cat "$digest_output"
 # Each task reference finishes before the next starts. Sibling dependencies do
 # not establish formatting/lint/test order.
 run = [
-  { task = "fmt" },
-  { task = "lint" },
-  { task = "test" },
-  { task = "test-production-topology" },
-  { task = "test-release-feature-boundary" },
-  { task = "test-release-boundary-script" },
-  { task = "test-hooks" },
-  { task = "actionlint" },
-  { task = "audit-ci" },
-  { task = "deny" },
-  { task = "pin-integrity" },
+  "fmt",
+  "lint",
+  "test",
+  "test-production-topology",
+  "test-release-feature-boundary",
+  "test-release-boundary-script",
+  "test-hooks",
+  "actionlint",
+  "audit-ci",
+  "deny",
+  "pin-integrity",
 ]
 
 [tasks.ci]

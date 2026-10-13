@@ -2516,14 +2516,13 @@ fn is_body_option(token: &str, curl: bool) -> bool {
                 | "--data-raw"
                 | "--data-binary"
                 | "--data-urlencode"
-                | "-f"
                 | "--form"
                 | "--form-string"
                 | "--json"
                 | "-t"
                 | "--upload-file"
         ) || (token.starts_with("-d") && token.len() > 2)
-            || (token.starts_with("-f") && token.len() > 2)
+            || (token.starts_with("-F") && token.len() > 1)
             || (token.starts_with("-t") && token.len() > 2)
     } else {
         matches!(token, "-f" | "-F" | "--field" | "--raw-field" | "--input")
@@ -2531,6 +2530,15 @@ fn is_body_option(token: &str, curl: bool) -> bool {
             || token.starts_with("--raw-field")
             || token.starts_with("--input")
     }
+}
+
+#[test]
+fn curl_fail_short_flag_is_not_a_form_body_option() {
+    assert!(!is_body_option("-f", true));
+    assert!(!is_body_option("-fsSL", true));
+    assert!(is_body_option("-F", true));
+    assert!(is_body_option("--form", true));
+    assert!(is_body_option("-f", false));
 }
 
 fn markdown_heading_level(line: &str) -> Option<usize> {
