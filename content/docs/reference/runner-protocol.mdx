@@ -13,6 +13,15 @@ Velnor follows the protocol shapes and sequencing established by the upstream
 protocol authority. This document describes Velnor's adapter behavior and its
 intentional limits; it is not a promise of complete upstream equivalence.
 
+## Upstream reference
+
+The Native protocol is audited against this exact release. It may intentionally
+lag the newest `actions/runner` release until a source audit and protocol
+update are complete.
+
+- `actions/runner` protocol release: `v2.337.0`
+- `actions/runner` protocol tag commit: `397b032cbf865e9c3ddfab89d533ec19325e1273`
+
 ## Protocol scope
 
 The Native path is one JIT V2 session per ephemeral runner slot. A daemon may

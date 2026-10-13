@@ -3006,7 +3006,10 @@ fn teardown_recorded_job_with_death_proof(
         job_snapshot,
         marker_record,
     )?;
-    teardown(job_id)?;
+    if let Err(error) = teardown(job_id) {
+        crate::runner::rollback_recorded_cleanup_claim_to_uncertain(marker_record)?;
+        return Err(error);
+    }
     proof.recheck_for_record(marker_record)?;
     Ok(proof)
 }

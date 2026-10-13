@@ -57,7 +57,7 @@ serde = { version = "1.0.219", features = ["derive"] }
 # (observed live: 434.15526315789475 parsed back ...8947). Exact parsing keeps
 # record validation sound across a write/read cycle.
 serde_json = { version = "1.0.140", features = ["float_roundtrip"] }
-serde_yaml = { package = "noyalib", version = "0.0.28", features = ["compat-serde-yaml"] }
+serde_yaml = { package = "noyalib", version = "0.0.53", features = ["compat-serde-yaml"] }
 globset = "0.4.16"
 proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
 rayon = "1.12.0"

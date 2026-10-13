@@ -3408,6 +3408,9 @@ mod tests {
             "--arg platform \"${RUNNER_OS}-${RUNNER_ARCH}\"",
             "--arg repository \"$GITHUB_REPOSITORY\"",
             "--arg run_id \"$GITHUB_RUN_ID\"",
+            "--arg run_attempt \"$GITHUB_RUN_ATTEMPT\"",
+            "--arg publisher_job \"$publisher_job\"",
+            "--arg artifact_name \"$artifact_name\"",
             "--arg revision \"$PR_HEAD\"",
             "--arg closure \"$head_closure\"",
             "--arg build_revision \"$build_rev\"",
@@ -3424,9 +3427,23 @@ mod tests {
         );
         assert!(
             candidate.contains(
-                "echo \"name=velnor-workflow-candidate-${head_closure:0:16}-${RUNNER_OS}-${RUNNER_ARCH}\""
+                "artifact_name=\"velnor-workflow-candidate-${head_closure:0:16}-${RUNNER_OS}-${RUNNER_ARCH}-r${GITHUB_RUN_ID}-a${GITHUB_RUN_ATTEMPT}-j${publisher_job}\""
             ),
-            "the artifact name derives exactly like the policy consumer's: {candidate}"
+            "the artifact name binds closure, platform, run, attempt, and publisher: {candidate}"
+        );
+        assert!(
+            candidate.contains("run_attempt: ($run_attempt | tonumber)")
+                && candidate.contains("publisher_job: $publisher_job")
+                && candidate.contains("artifact_name: $artifact_name"),
+            "the manifest carries the exact transport identity: {candidate}"
+        );
+        assert!(
+            candidate.contains("id: candidate-upload")
+                && candidate.contains("steps.candidate-upload.outputs.artifact-id")
+                && candidate.contains(
+                    "printf 'VELNOR_CANDIDATE_ARTIFACT\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \"$GITHUB_RUN_ID\" \"$GITHUB_RUN_ATTEMPT\" \"$publisher_job\" \"$CANDIDATE_ARTIFACT_ID\" \"$CANDIDATE_ARTIFACT_NAME\""
+                ),
+            "the uploader records its exact artifact ID after publication: {candidate}"
         );
         assert!(
             !candidate.contains("head_candidate"),
@@ -3465,8 +3482,8 @@ mod tests {
             solo_content
                 .matches("if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'\n")
                 .count(),
-            1,
-            "the publish step adds the skip gate: {solo_content}"
+            2,
+            "the publish and identity-record steps add the skip gate: {solo_content}"
         );
         assert!(
             !solo_content.contains("inputs.candidate_publish &&"),
@@ -3478,7 +3495,10 @@ mod tests {
     fn candidate_step_gates_sit_directly_after_their_name_lines() {
         // The presence-gate combiner only merges an `if:` it finds directly
         // after the step's `name:` line.
-        let steps = super::candidate_publish_steps("actions/upload-artifact@pinned");
+        let steps = super::candidate_publish_steps(
+            "actions/upload-artifact@pinned",
+            "github-hosted-rust-velnor-workflow",
+        );
         assert!(
             steps.contains("      - name: Prepare candidate generator product\n        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository\n"),
             "the prepare gate is the pull-request same-repo gate: {steps}"
@@ -3486,6 +3506,10 @@ mod tests {
         assert!(
             steps.contains("      - name: Publish candidate generator product\n        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'\n"),
             "the publish gate adds the skip output: {steps}"
+        );
+        assert!(
+            steps.contains("      - name: Record candidate artifact identity\n        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'\n"),
+            "the identity-record gate matches the publish gate: {steps}"
         );
     }
 
@@ -4988,17 +5012,25 @@ fn unit_owns_workflow_crate(unit: &Unit) -> bool {
 /// the manifest the policy consumer verifies (`profile`, `platform`,
 /// `repository`, `run_id`, `revision` = PR-head SHA, `closure` = head
 /// candidate closure, `build_revision` = tree the binary compiled from,
-/// `run_attempt`, `publisher_job`, `artifact_name`, `binary_sha256`). The slow build clears the runner environment before
-/// invoking Cargo, so PR build scripts receive only the executable search path.
-/// The publish step uploads both files under the name the
-/// policy derives the same way (`velnor-workflow-candidate-<closure16>-<os>-<arch>-r<run>-a<attempt>-j<job-key>`).
+/// `run_attempt`, `publisher_job`, `artifact_name`, `binary_sha256`). The
+/// renderer supplies `publisher_job` as the portable caller profile key used by
+/// acquisition: a reusable workflow's `GITHUB_JOB` names the collapsed callee,
+/// not the REST-selected caller identity. The slow build clears the runner
+/// environment before invoking Cargo, so PR build scripts receive only the
+/// executable search path.
 ///
-/// Both steps carry the pull-request same-repo gate directly after their name
-/// line (the presence-gate combiner only merges an `if:` it finds there),
-/// and the publish step additionally gates on the prepare step's `skip`
-/// output, so the collapsed renderer can add the per-unit input gate without
-/// touching them.
-fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
+/// The publish step uploads both files under the exact name the policy derives
+/// (`velnor-workflow-candidate-<closure16>-<os>-<arch>-r<run>-a<attempt>-j<job-key>`),
+/// and the identity-record step emits the upload action's immutable artifact ID
+/// in the job log after that upload completes.
+///
+/// All three steps carry the pull-request same-repo gate directly after their
+/// name line (the presence-gate combiner only merges an `if:` it finds there).
+/// Publishing and identity recording additionally gate on the prepare step's
+/// `skip` output, so the collapsed renderer can add the per-unit input gate
+/// without touching them.
+fn candidate_publish_steps(upload_artifact_pin: &str, publisher_job: &str) -> String {
+    let publisher_job = crate::s2::shell_quote(publisher_job);
     format!(
         r#"      - name: Prepare candidate generator product
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
@@ -5063,22 +5095,36 @@ fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
           reported="$(env -i PATH="$PATH" "$stage/velnor-workflow" --closure)"
           [[ "$reported" == "$head_closure" ]] || {{ echo "::error::candidate reports closure $reported, head $PR_HEAD declares $head_closure" >&2; exit 1; }}
           reported_revision="$(env -i PATH="$PATH" "$stage/velnor-workflow" --revision)"
-          jq -n --arg profile debug --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repository "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg revision "$PR_HEAD" --arg closure "$head_closure" --arg build_revision "$build_rev" --arg binary_sha256 "$digest" '{{profile: $profile, platform: $platform, repository: $repository, run_id: $run_id, revision: $revision, closure: $closure, build_revision: $build_revision, binary_sha256: $binary_sha256}}' > "$stage/candidate-manifest.json"
+          publisher_job={publisher_job}
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ && "$publisher_job" =~ ^[A-Za-z0-9_-]+$ ]] || {{ echo "::error::candidate publisher has invalid run, attempt, or job identity" >&2; exit 1; }}
+          artifact_name="velnor-workflow-candidate-${{head_closure:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}-r${{GITHUB_RUN_ID}}-a${{GITHUB_RUN_ATTEMPT}}-j${{publisher_job}}"
+          jq -n --arg profile debug --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repository "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$GITHUB_RUN_ATTEMPT" --arg publisher_job "$publisher_job" --arg artifact_name "$artifact_name" --arg revision "$PR_HEAD" --arg closure "$head_closure" --arg build_revision "$build_rev" --arg binary_sha256 "$digest" '{{profile: $profile, platform: $platform, repository: $repository, run_id: $run_id, run_attempt: ($run_attempt | tonumber), publisher_job: $publisher_job, artifact_name: $artifact_name, revision: $revision, closure: $closure, build_revision: $build_revision, binary_sha256: $binary_sha256}}' > "$stage/candidate-manifest.json"
           manifest_build_revision="$(jq -er '.build_revision' "$stage/candidate-manifest.json")"
           [[ "$reported_revision" == "$manifest_build_revision" ]] || {{ echo "::error::candidate reports revision $reported_revision, manifest build_revision $manifest_build_revision" >&2; exit 1; }}
           if [[ "$worktree" != "" ]]; then
             git worktree remove --force "$worktree"
             trap - EXIT
           fi
-          echo "name=velnor-workflow-candidate-${{head_closure:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}" >> "$GITHUB_OUTPUT"
+          echo "name=$artifact_name" >> "$GITHUB_OUTPUT"
       - name: Publish candidate generator product
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'
+        id: candidate-upload
         uses: {upload_artifact_pin}
         with:
           name: ${{{{ steps.candidate.outputs.name }}}}
           path: ${{{{ runner.temp }}}}/velnor-workflow-candidate
           if-no-files-found: error
           retention-days: 1
+      - name: Record candidate artifact identity
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'
+        env:
+          CANDIDATE_ARTIFACT_ID: ${{{{ steps.candidate-upload.outputs.artifact-id }}}}
+          CANDIDATE_ARTIFACT_NAME: ${{{{ steps.candidate.outputs.name }}}}
+        run: |
+          set -euo pipefail
+          publisher_job={publisher_job}
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ && "$publisher_job" =~ ^[A-Za-z0-9_-]+$ && "$CANDIDATE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ && "$CANDIDATE_ARTIFACT_NAME" != '' ]] || {{ echo "::error::upload action returned no valid candidate artifact identity or producer context" >&2; exit 1; }}
+          printf 'VELNOR_CANDIDATE_ARTIFACT\t%s\t%s\t%s\t%s\t%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$publisher_job" "$CANDIDATE_ARTIFACT_ID" "$CANDIDATE_ARTIFACT_NAME"
 "#,
     )
 }
@@ -9661,8 +9707,22 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // that event gate themselves), and only on success (no `always()`).
         let candidate = FeatureCoverage::over(&facts, |facts| facts.candidate_publish);
         if hosted && candidate.any {
+            let publisher_profiles = self.candidate_publisher_profiles(contracts);
+            let publisher_jobs = publisher_profiles
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let Some(publisher_job) = publisher_jobs
+                .first()
+                .copied()
+                .filter(|_| publisher_jobs.len() == 1)
+            else {
+                return Err(GeneratorError::usage(
+                    "candidate publication must identify exactly one trusted publisher profile",
+                ));
+            };
             output.push_str(&gated(
-                candidate_publish_steps(self.pins.upload_artifact),
+                candidate_publish_steps(self.pins.upload_artifact, publisher_job),
                 candidate,
                 provider_input::CANDIDATE_PUBLISH,
             ));
