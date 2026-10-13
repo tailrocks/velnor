@@ -12,7 +12,7 @@ idiomatic_version_file_enable_tools = ["rust"]
 [tools]
 # Rust is selected from the adjacent rust-toolchain.toml through the idiomatic
 # mise version-file setting above. Every other entry is an exact mise pin.
-"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.143"
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.148"
 "cargo:cargo-deny" = "0.20.2"
 "aqua:opentofu/opentofu" = "1.12.6"
 "aqua:oven-sh/bun" = "1.4.0"

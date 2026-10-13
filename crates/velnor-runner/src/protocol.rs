@@ -6804,6 +6804,14 @@ fn decode_acquire_job_success_body(
     };
 
     let raw = ordered.clone().into_value();
+    if !matches!(ordered, ClrOrderedValue::Object(_)) {
+        // A syntactically valid non-object body is a typed deserialization
+        // failure, not a JSON reader rejection: upstream Json.NET surfaces it
+        // as a retryable typed error instead of default(T).
+        return Err(serde::de::Error::custom(
+            "expected AgentJobRequestMessage object",
+        ));
+    }
     if let Err(error) =
         validate_clr_ordered_occurrences(&ordered, ClrWireShape::Object(ClrWireSchema::AgentJob))
     {
@@ -15126,7 +15134,7 @@ mod tests {
                 if responder_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                     ResponseTemplate::new(200)
                         .insert_header("content-type", "application/json")
-                        .set_body_string("[]")
+                        .set_body_json(json!([]))
                 } else {
                     ResponseTemplate::new(200).set_body_json(json!({
                         "planId": "00000000-0000-0000-0000-000000000002",

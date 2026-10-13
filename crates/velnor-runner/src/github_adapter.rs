@@ -1924,6 +1924,7 @@ mod tests {
     fn custom_pool_leases_and_mounts_share_one_scope_spelling() {
         use crate::trust_class::TrustClass;
 
+        let _serial = crate::trust_scope::test_support::serialized();
         let root =
             std::env::temp_dir().join(format!("velnor-custom-pool-scope-{}", uuid::Uuid::new_v4()));
         let work = root.join("work");

@@ -16,7 +16,6 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use clap::{ArgAction, Args, Parser, Subcommand};
 use regex::Regex;
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -29,9 +28,7 @@ use velnor_tools::homebrew_preview;
 
 const DEFAULT_FIXTURE_REPO: &str = "tailrocks/velnor-actions-fixture";
 const DEFAULT_FIXTURE_REF: &str = "main";
-const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/actions/runner/releases/latest";
-const LATEST_RELEASE_REDIRECT_URL: &str = "https://github.com/actions/runner/releases/latest";
-const GITHUB_HTTP_TIMEOUT_SECONDS: u64 = 20;
+const RUNNER_REMOTE_URL: &str = "https://github.com/actions/runner.git";
 
 #[derive(Debug, Parser)]
 #[command(name = "velnor-tools")]
@@ -553,7 +550,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let root = repo_root()?;
     match cli.command {
-        CommandKind::CheckRunnerReference => check_runner_reference(&root).await,
+        CommandKind::CheckRunnerReference => check_runner_reference(&root),
         CommandKind::FixtureAudit(args) => fixture_audit(args).await,
         CommandKind::FixtureReadiness(args) => fixture_readiness(args),
         CommandKind::FixtureReport(args) => fixture_report(&root, args),
@@ -603,34 +600,85 @@ fn repo_root() -> Result<PathBuf> {
     ))
 }
 
-async fn check_runner_reference(root: &Path) -> Result<()> {
+fn check_runner_reference(root: &Path) -> Result<()> {
     let reference = pinned_reference(root)?;
     let protocol_version = pinned_protocol_version(root)?;
-    let latest = latest_runner_release().await?;
+    let upstream_commit = runner_tag_commit(&reference.version)?;
+    validate_runner_reference(&reference, &protocol_version, &upstream_commit)?;
 
-    if protocol_version != reference.trim_start_matches('v') {
-        bail!(
-            "actions/runner protocol version drift: docs pin {reference}, protocol advertises {protocol_version}"
-        );
-    }
-    if reference != latest {
-        bail!(
-            "actions/runner reference drift: pinned {reference}, latest {latest}\nRefresh docs/reference/runner-protocol.md and re-audit V2 source anchors."
-        );
-    }
-
-    println!("actions/runner reference current: {reference}");
+    println!(
+        "actions/runner reference matches protocol: {} ({})",
+        reference.version, reference.tag_commit
+    );
     Ok(())
 }
 
-fn pinned_reference(root: &Path) -> Result<String> {
-    let path = root.join("docs/reference/runner-protocol.md");
+#[derive(Debug, PartialEq, Eq)]
+struct RunnerReference {
+    version: String,
+    tag_commit: String,
+}
+
+fn pinned_reference(root: &Path) -> Result<RunnerReference> {
+    let path = root.join("content/docs/reference/runner-protocol.mdx");
     let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    let regex = Regex::new(r"latest release checked:\s*`(v[0-9]+\.[0-9]+\.[0-9]+)`")?;
-    let captures = regex.captures(&text).ok_or_else(|| {
-        anyhow::anyhow!("could not find pinned runner version in {}", path.display())
-    })?;
-    Ok(captures[1].to_string())
+    let version = pinned_marker(
+        &text,
+        r"(?m)^[-*] `actions/runner` protocol release: `(v[0-9]+\.[0-9]+\.[0-9]+)`$",
+        "release",
+        &path,
+    )?;
+    let tag_commit = pinned_marker(
+        &text,
+        r"(?m)^[-*] `actions/runner` protocol tag commit: `([0-9a-f]{40})`$",
+        "tag commit",
+        &path,
+    )?;
+    Ok(RunnerReference {
+        version,
+        tag_commit,
+    })
+}
+
+fn pinned_marker(text: &str, pattern: &str, marker: &str, path: &Path) -> Result<String> {
+    let regex = Regex::new(pattern)?;
+    let mut captures = regex.captures_iter(text);
+    let value = captures.next().map_or_else(
+        || {
+            anyhow::bail!(
+                "could not find actions/runner {marker} marker in {}",
+                path.display()
+            )
+        },
+        |captures| Ok(captures[1].to_string()),
+    )?;
+    if captures.next().is_some() {
+        anyhow::bail!(
+            "multiple actions/runner {marker} markers in {}",
+            path.display()
+        );
+    }
+    Ok(value)
+}
+
+fn validate_runner_reference(
+    reference: &RunnerReference,
+    protocol_version: &str,
+    upstream_commit: &str,
+) -> Result<()> {
+    if protocol_version != reference.version.trim_start_matches('v') {
+        bail!(
+            "actions/runner protocol version drift: docs pin {}, protocol advertises {protocol_version}",
+            reference.version
+        );
+    }
+    if reference.tag_commit != upstream_commit {
+        bail!(
+            "actions/runner tag commit drift for {}: docs pin {}, upstream tag points to {upstream_commit}",
+            reference.version, reference.tag_commit
+        );
+    }
+    Ok(())
 }
 
 fn pinned_protocol_version(root: &Path) -> Result<String> {
@@ -652,105 +700,38 @@ fn pinned_protocol_version(root: &Path) -> Result<String> {
     Ok(version)
 }
 
-#[derive(Debug, Deserialize)]
-struct GitHubRelease {
-    tag_name: String,
-}
-
-async fn latest_runner_release() -> Result<String> {
-    let client = github_http_client()?;
-    let response = client
-        .get(LATEST_RELEASE_URL)
-        .headers(github_headers("velnor-runner-reference-check")?)
-        .send()
-        .await;
-    match response {
-        Ok(response) if response.status().is_success() => {
-            let release = response
-                .json::<GitHubRelease>()
-                .await
-                .context("parse latest actions/runner release response")?;
-            if !release.tag_name.starts_with('v') {
-                bail!("GitHub latest release response did not include a tag_name");
-            }
-            Ok(release.tag_name)
-        }
-        Ok(response) => {
-            latest_release_from_redirect_or_git(format!("API {}", response.status())).await
-        }
-        Err(error) => latest_release_from_redirect_or_git(format!("API {error}")).await,
-    }
-}
-
-async fn latest_release_from_redirect_or_git(reason: String) -> Result<String> {
-    let client = github_http_client()?;
-    let response = client
-        .get(LATEST_RELEASE_REDIRECT_URL)
-        .header(
-            USER_AGENT,
-            HeaderValue::from_static("velnor-runner-reference-check"),
-        )
-        .send()
-        .await
-        .with_context(|| format!("GitHub release redirect lookup failed: {reason}"));
-    let response = match response {
-        Ok(response) => response,
-        Err(error) => return latest_release_from_git_tags(format!("{error:#}")),
-    };
-    let final_url = response.url().to_string();
-    let regex = Regex::new(r"/releases/tag/(v[0-9]+\.[0-9]+\.[0-9]+)$")?;
-    let captures = regex.captures(&final_url).ok_or_else(|| {
-        anyhow::anyhow!("GitHub release lookup failed: {reason}, redirect URL {final_url}")
-    })?;
-    Ok(captures[1].to_string())
-}
-
-fn latest_release_from_git_tags(reason: String) -> Result<String> {
+fn runner_tag_commit(version: &str) -> Result<String> {
+    let tag_ref = format!("refs/tags/{version}");
     let output = Command::new("git")
-        .args([
-            "ls-remote",
-            "--tags",
-            "--refs",
-            "https://github.com/actions/runner.git",
-            "refs/tags/v*",
-        ])
+        .args(["ls-remote", RUNNER_REMOTE_URL, &tag_ref])
         .output()
-        .with_context(|| {
-            format!("GitHub release lookup failed and git tag fallback failed: {reason}")
-        })?;
+        .with_context(|| format!("look up actions/runner {version} tag"))?;
     if !output.status.success() {
         bail!(
-            "GitHub release lookup failed and git tag fallback failed: {reason}; git stderr: {}",
+            "actions/runner {version} tag lookup failed; git stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    latest_semver_tag_from_ls_remote(&String::from_utf8_lossy(&output.stdout))
-        .with_context(|| format!("GitHub release lookup failed: {reason}"))
+    runner_tag_commit_from_ls_remote(&String::from_utf8_lossy(&output.stdout), version)
 }
 
-fn latest_semver_tag_from_ls_remote(output: &str) -> Result<String> {
-    let regex = Regex::new(r"refs/tags/v([0-9]+)\.([0-9]+)\.([0-9]+)$")?;
-    let mut latest: Option<(u64, u64, u64, String)> = None;
-    for line in output.lines() {
-        let Some(captures) = regex.captures(line) else {
-            continue;
-        };
-        let major = captures[1].parse::<u64>()?;
-        let minor = captures[2].parse::<u64>()?;
-        let patch = captures[3].parse::<u64>()?;
-        let tag = format!("v{major}.{minor}.{patch}");
-        if latest
-            .as_ref()
-            .is_none_or(|(old_major, old_minor, old_patch, _)| {
-                (major, minor, patch) > (*old_major, *old_minor, *old_patch)
-            })
-        {
-            latest = Some((major, minor, patch, tag));
-        }
+fn runner_tag_commit_from_ls_remote(output: &str, version: &str) -> Result<String> {
+    let expected_ref = format!("refs/tags/{version}");
+    let mut commits = output.lines().filter_map(|line| {
+        let (commit, tag_ref) = line.trim_end().split_once('\t')?;
+        (tag_ref == expected_ref).then_some(commit)
+    });
+    let commit = commits.next().ok_or_else(|| {
+        anyhow::anyhow!("actions/runner {version} tag was not found in ls-remote output")
+    })?;
+    if commits.next().is_some() {
+        anyhow::bail!("multiple actions/runner {version} tag entries in ls-remote output");
     }
-    latest
-        .map(|(_, _, _, tag)| tag)
-        .ok_or_else(|| anyhow::anyhow!("no vX.Y.Z actions/runner tags found"))
+    if Regex::new(r"^[0-9a-f]{40}$")?.is_match(commit) {
+        Ok(commit.to_string())
+    } else {
+        anyhow::bail!("actions/runner {version} tag has a malformed commit SHA")
+    }
 }
 
 async fn fixture_audit(args: FixtureAuditArgs) -> Result<()> {
@@ -850,36 +831,6 @@ async fn fetch_github_file(repo: &str, git_ref: &str, path: &str) -> Result<Stri
         .decode(content)
         .with_context(|| format!("decode GitHub file content for {path}"))?;
     String::from_utf8(bytes).with_context(|| format!("decode UTF-8 content for {path}"))
-}
-
-fn github_http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(GITHUB_HTTP_TIMEOUT_SECONDS))
-        .build()
-        .context("build GitHub HTTP client")
-}
-
-fn github_headers(user_agent: &'static str) -> Result<HeaderMap> {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        ACCEPT,
-        HeaderValue::from_static("application/vnd.github+json"),
-    );
-    headers.insert(USER_AGENT, HeaderValue::from_static(user_agent));
-    headers.insert(
-        "X-GitHub-Api-Version",
-        HeaderValue::from_static("2026-03-10"),
-    );
-    if let Ok(token) = env::var("GITHUB_TOKEN")
-        && !token.trim().is_empty()
-    {
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {token}"))
-                .context("build GitHub authorization header")?,
-        );
-    }
-    Ok(headers)
 }
 
 /// Fixture workflow that must carry the whole Rust scenario matrix.
@@ -3097,7 +3048,7 @@ async fn target_verify(root: &Path, mut args: TargetVerifyArgs) -> Result<()> {
     )
     .context("write /tmp/velnor-target-audit-self-test.txt")?;
 
-    check_runner_reference(root).await?;
+    check_runner_reference(root)?;
     for script in target_verify_helper_scripts() {
         run_passthrough(root, script, Command::new(script))?;
     }
@@ -5672,6 +5623,172 @@ mod tests {
         }
     }
 
+    fn unique_runner_reference_root(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "velnor-runner-reference-{label}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+
+    fn write_runner_reference(root: &Path, text: &str) {
+        let path = root.join("content/docs/reference/runner-protocol.mdx");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn runner_reference_fails_closed_when_the_current_document_is_missing() {
+        let root = unique_runner_reference_root("missing");
+        fs::create_dir_all(root.join("content/docs/reference")).unwrap();
+
+        let error = pinned_reference(&root).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("content/docs/reference/runner-protocol.mdx"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runner_reference_fails_closed_when_the_release_marker_is_missing() {
+        let root = unique_runner_reference_root("missing-marker");
+        write_runner_reference(
+            &root,
+            "- `actions/runner` protocol tag commit: `397b032cbf865e9c3ddfab89d533ec19325e1273`\n",
+        );
+
+        let error = pinned_reference(&root).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("could not find actions/runner release marker"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runner_reference_fails_closed_when_a_marker_is_malformed() {
+        let root = unique_runner_reference_root("malformed-marker");
+        write_runner_reference(
+            &root,
+            "- `actions/runner` protocol release: `v2.337.0`\n\
+             - `actions/runner` protocol tag commit: `not-a-commit`\n",
+        );
+
+        let error = pinned_reference(&root).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("could not find actions/runner tag commit marker"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runner_reference_fails_closed_when_a_marker_is_duplicated() {
+        let root = unique_runner_reference_root("duplicate-marker");
+        write_runner_reference(
+            &root,
+            "- `actions/runner` protocol release: `v2.337.0`\n\
+             - `actions/runner` protocol release: `v2.338.0`\n\
+             - `actions/runner` protocol tag commit: `397b032cbf865e9c3ddfab89d533ec19325e1273`\n",
+        );
+
+        let error = pinned_reference(&root).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("multiple actions/runner release markers"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runner_reference_rejects_protocol_and_source_commit_drift() {
+        let reference = RunnerReference {
+            version: "v2.337.0".to_string(),
+            tag_commit: "397b032cbf865e9c3ddfab89d533ec19325e1273".to_string(),
+        };
+        let protocol_error = validate_runner_reference(
+            &reference,
+            "2.336.0",
+            "397b032cbf865e9c3ddfab89d533ec19325e1273",
+        )
+        .unwrap_err();
+        let source_error = validate_runner_reference(
+            &reference,
+            "2.337.0",
+            "197ca027b90de199464dee3bb9ff198a1db60967",
+        )
+        .unwrap_err();
+
+        assert!(protocol_error
+            .to_string()
+            .contains("docs pin v2.337.0, protocol advertises 2.336.0"));
+        assert!(source_error.to_string().contains(
+            "docs pin 397b032cbf865e9c3ddfab89d533ec19325e1273, upstream tag points to 197ca027b90de199464dee3bb9ff198a1db60967"
+        ));
+    }
+
+    #[test]
+    fn runner_reference_accepts_the_current_document_and_protocol_pin() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+
+        let reference = pinned_reference(root).unwrap();
+        let protocol_version = pinned_protocol_version(root).unwrap();
+
+        assert_eq!(
+            reference,
+            RunnerReference {
+                version: "v2.337.0".to_string(),
+                tag_commit: "397b032cbf865e9c3ddfab89d533ec19325e1273".to_string(),
+            }
+        );
+        validate_runner_reference(
+            &reference,
+            &protocol_version,
+            "397b032cbf865e9c3ddfab89d533ec19325e1273",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn runner_tag_commit_lookup_accepts_only_the_exact_tag() {
+        let output = "\
+197ca027b90de199464dee3bb9ff198a1db60967\trefs/tags/v2.338.0\n\
+397b032cbf865e9c3ddfab89d533ec19325e1273\trefs/tags/v2.337.0\n\
+397b032cbf865e9c3ddfab89d533ec19325e1273\trefs/heads/main\n\
+";
+
+        let commit = runner_tag_commit_from_ls_remote(output, "v2.337.0").unwrap();
+
+        assert_eq!(commit, "397b032cbf865e9c3ddfab89d533ec19325e1273");
+    }
+
+    #[test]
+    fn runner_tag_commit_lookup_fails_closed_for_missing_or_malformed_tags() {
+        let missing = runner_tag_commit_from_ls_remote(
+            "197ca027b90de199464dee3bb9ff198a1db60967\trefs/tags/v2.338.0\n",
+            "v2.337.0",
+        )
+        .unwrap_err();
+        let malformed =
+            runner_tag_commit_from_ls_remote("malformed-sha\trefs/tags/v2.337.0\n", "v2.337.0")
+                .unwrap_err();
+
+        assert!(missing
+            .to_string()
+            .contains("actions/runner v2.337.0 tag was not found"));
+        assert!(malformed
+            .to_string()
+            .contains("actions/runner v2.337.0 tag has a malformed commit SHA"));
+    }
+
     #[test]
     fn hardcoded_lane_context_window_survives_multibyte_chars() {
         // 19 `é` (2 bytes each) put both context-window edges mid-char:
@@ -5688,21 +5805,6 @@ mod tests {
             "{}",
             issues[0]
         );
-    }
-
-    #[test]
-    fn latest_semver_tag_from_ls_remote_ignores_non_release_tags() {
-        let output = "\
-abc\trefs/tags/v2.333.1
-def\trefs/tags/v2.334.0
-ghi\trefs/tags/v2.334.0-beta
-jkl\trefs/tags/v3.0.0
-mno\trefs/tags/not-a-runner-release
-";
-
-        let tag = latest_semver_tag_from_ls_remote(output).unwrap();
-
-        assert_eq!(tag, "v3.0.0");
     }
 
     #[test]

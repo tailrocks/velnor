@@ -206,14 +206,18 @@ fn full_lifecycle_holds_one_permit_until_confirmed_cleanup() {
         // Supervision tick: runner died mid-job → fail (no restart).
         ScriptRunner::ok("true\n"),
         ScriptRunner::ok("false\n"),
-        // Owned cleanup: stop, export ×4, rm ×2, network, volumes ×2.
+        // Owned cleanup: stop, export ×4, inspect+rm ×2, network, volumes ×2.
+        // Immutable full IDs fence every container removal.
         ScriptRunner::ok("runner\n"),
         ScriptRunner::ok("RUNNER-LOGS\n"),
         ScriptRunner::ok("DIND-LOGS\n"),
         ScriptRunner::ok("[{}]\n"),
         ScriptRunner::ok("[{}]\n"),
-        ScriptRunner::ok("runner\n"),
+        ScriptRunner::ok("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"),
+        ScriptRunner::ok(""),
         ScriptRunner::ok("dind\n"),
+        ScriptRunner::ok("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"),
+        ScriptRunner::ok(""),
         ScriptRunner::ok("dind\n"),
         ScriptRunner::ok("net\n"),
         ScriptRunner::ok("work\n"),

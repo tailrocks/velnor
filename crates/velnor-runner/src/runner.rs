@@ -20423,6 +20423,9 @@ mod tests {
     use crate::slot_log::LIFECYCLE_LOG;
     use velnor_model::action_reference::RepositoryActionReference;
 
+    static DISK_PRESSURE_ENV_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
     fn mark_test_steps_as_actions(job: &mut AgentJobRequestMessage) {
         for step in job.steps.iter_mut().flatten() {
             step.kind = Some(ActionStepKind::Action);
@@ -21562,6 +21565,7 @@ mod tests {
             let mut variables = serde_json::json!({
                 "github.repository": { "value": "octo/repo" },
                 "github.server_url": { "value": "https://github.com" },
+                "github.event_name": { "value": "push" },
                 "github.ref": { "value": "refs/heads/main" }
             });
             if let Some(repository_id) = repository_id {
@@ -28192,6 +28196,17 @@ jobs:
             plan_id: "plan-ordinary-recovery".to_owned(),
             job_id: "job-ordinary-recovery".to_owned(),
         };
+        let ledger_path = dir.join("permits.sqlite3");
+        configure_test_permit_ledger(&ledger_path, 1);
+        let permit_holder = "native/request-ordinary-recovery";
+        let mut permit_guard = crate::permit_guard::NativePermitGuard::acquire(
+            &ledger_path,
+            permit_holder.to_owned(),
+            "test",
+        )
+        .unwrap()
+        .expect("test ledger grants the only permit");
+        permit_guard.retain_until_terminal();
         let slot_dir = dir.join("slots/slot-1");
         fs::create_dir_all(&slot_dir).unwrap();
 
@@ -28209,9 +28224,9 @@ jobs:
             None,
             Some(&pressure_admission),
             Some("billing-owner"),
-            "native/request-ordinary-recovery",
-            &dir.join("permits.sqlite3"),
-            "",
+            permit_holder,
+            &ledger_path,
+            permit_guard.attempt_token(),
         )
         .unwrap();
         assert!(!rebuilt);
@@ -28273,6 +28288,7 @@ jobs:
         if recorded_in_flight_job_exists(&slot_dir).unwrap() {
             clear_in_flight_job(&slot_dir).unwrap();
         }
+        permit_guard.release_cancelled().unwrap();
         server.verify().await;
         broker_server.verify().await;
         fs::remove_dir_all(dir).ok();
@@ -28288,9 +28304,9 @@ jobs:
         transport_guard.set_native();
         let malformed = [
             serde_json::json!({}),
-            serde_json::json!({ "plan": { "planId": "plan-non-string-job" }, "jobId": 123 }),
-            serde_json::json!({ "plan": { "planId": " " }, "jobId": "job-blank-plan" }),
-            serde_json::json!({ "plan": { "planId": "plan-blank-job" }, "jobId": "\t" }),
+            serde_json::json!({ "jobDisplayName": [] }),
+            serde_json::json!({ "plan": { "planId": "00000000-0000-0000-0000-000000000002" } }),
+            serde_json::json!({ "jobId": "00000000-0000-0000-0000-000000000001" }),
         ];
 
         for (index, raw_response) in malformed.into_iter().enumerate() {
@@ -28560,10 +28576,10 @@ jobs:
                 Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
             );
             assert_eq!(record.run_service_url, selected_run_service_url);
-            assert!(record
-                .raw_acquire_response
-                .as_ref()
-                .is_some_and(|raw| raw["timeline"].is_null()));
+            assert_eq!(
+                record.raw_acquire_response, None,
+                "addressable acquired handoff must not preserve redundant raw response bytes"
+            );
             assert_eq!(state.jobs.len(), 1, "durable acquired identity is retained");
             assert_eq!(state.jobs[0].run_service_url, selected_run_service_url);
             assert!(!state.jobs[0].provisional);
@@ -28867,9 +28883,9 @@ jobs:
         )
         .await
         .unwrap_err();
-        assert!(first
+        assert!(first.chain().any(|cause| cause
             .to_string()
-            .contains("forced cancelled release failure"));
+            .contains("forced cancelled release failure")));
 
         let journal = Journal::open(service_dir.join("journal.db")).unwrap();
         let state = journal.materialized_state().unwrap();
@@ -29274,6 +29290,10 @@ jobs:
     /// terminal send.
     #[test]
     fn rebuilding_an_intent_adopts_an_existing_row_instead_of_forking_one() {
+        // Disk-pressure launch metadata is process-global and read while
+        // opening slot journals. Serialize this unrelated journal fixture
+        // against the test that publishes that environment.
+        let _pressure_env = DISK_PRESSURE_ENV_LOCK.lock().unwrap();
         let dir = unique_temp_dir("acquire-rebuild-adopts-row");
         fs::create_dir_all(&dir).unwrap();
         drop(ready_slot_journal(&dir));
@@ -29973,7 +29993,10 @@ jobs:
         let run_service_url = format!("{}/jobs/1", server.uri());
         let job = minimal_job_with_variables(serde_json::json!({}));
         let identity = AcquiredJobIdentity::from_job(&job);
-        let (mut journal, slot) = ready_slot_journal(&dir);
+        let service_instance = dir.canonicalize().unwrap().to_string_lossy().into_owned();
+        let (mut journal, slot) = ready_slot_journal_with(
+            Journal::open_for_service_instance(dir.join("journal.db"), &service_instance).unwrap(),
+        );
         let generation = journal.materialized_state().unwrap().slots[0].generation;
         let provisional_id = JobId("request-1".to_owned());
         crate::node::complete::intend_acquisition(
@@ -30288,12 +30311,9 @@ jobs:
             .unwrap_err();
 
         assert!(error.to_string().contains(
-            "complete recorded in-flight job after remote runner deletion of runner id 123"
+            "recorded in-flight job recovery deferred to the controller after remote runner deletion of runner id 123"
         ));
-        assert!(error
-            .chain()
-            .any(|cause| cause.to_string().contains("missing credentials")));
-        assert!(error.chain().any(|cause| cause.is::<LocalRunnerFailure>()));
+        assert!(!error.chain().any(|cause| cause.is::<LocalRunnerFailure>()));
         assert!(config::load(&config_dir).is_ok());
         assert!(in_flight_job_path(&config_dir).exists());
         server.verify().await;
@@ -30347,10 +30367,10 @@ jobs:
             .await
             .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("complete recorded in-flight job before retrying deletion"));
-        assert!(error
+        assert!(error.to_string().contains(
+            "quarantine runner id 123 until GitHub job is terminal; local identity preserved"
+        ));
+        assert!(!error
             .chain()
             .any(|cause| cause.to_string().contains("missing credentials")));
         assert!(error.chain().any(|cause| cause.is::<LocalRunnerFailure>()));
@@ -31988,6 +32008,7 @@ jobs:
             .issue_disk_pressure_launch(&service_instance, &slot_id, generation, 100)
             .unwrap();
         let generation_text = generation.0.to_string();
+        let _pressure_env = DISK_PRESSURE_ENV_LOCK.lock().unwrap();
         let _launch_env = TestEnvironmentRestore::set(&[
             (
                 crate::host_capacity::PRESSURE_SERVICE_INSTANCE_ENV,

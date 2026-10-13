@@ -51,6 +51,7 @@ static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 struct Generated {
     producer: String,
     acquire: String,
+    record: String,
     publish_name: String,
     publish_path: String,
     producer_workflow: String,
@@ -179,6 +180,8 @@ impl TransportFixture {
             .expect("producer run step");
         let acquire =
             step_run(&policy, "Acquire candidate generator product").expect("acquire run step");
+        let record = step_run(&producer_workflow, "Record candidate artifact identity")
+            .expect("producer artifact identity run step");
         let publish_name = step_with(
             &producer_workflow,
             "Publish candidate generator product",
@@ -212,6 +215,7 @@ impl TransportFixture {
             generated: Generated {
                 producer,
                 acquire,
+                record,
                 publish_name,
                 publish_path,
                 producer_workflow,
@@ -233,35 +237,29 @@ impl TransportFixture {
         self.valid_artifact_on_platform("Linux", "X64");
     }
 
-    fn candidate_name_prefix(&self, runner_os: &str, runner_arch: &str) -> String {
+    fn candidate_artifact_name(&self, runner_os: &str, runner_arch: &str) -> String {
         let template = self
             .generated
             .producer
             .lines()
             .find_map(|line| {
-                let rest = line.trim().strip_prefix("echo \"name=")?;
-                let (name, _redirect) = rest.split_once("\" >> \"$GITHUB_OUTPUT\"")?;
+                let rest = line.trim().strip_prefix("artifact_name=\"")?;
+                let (name, _quote) = rest.split_once('"')?;
                 Some(name)
             })
-            .expect("generated producer candidate name output");
+            .expect("generated producer artifact name assignment");
         assert_eq!(
-            template, "velnor-workflow-candidate-${head_closure:0:16}-${RUNNER_OS}-${RUNNER_ARCH}",
-            "producer candidate name must bind closure and platform"
+            template,
+            "velnor-workflow-candidate-${head_closure:0:16}-${RUNNER_OS}-${RUNNER_ARCH}-r${GITHUB_RUN_ID}-a${GITHUB_RUN_ATTEMPT}-j${publisher_job}",
+            "producer candidate name must bind closure, platform, run, attempt, and publisher"
         );
         template
             .replace("${head_closure:0:16}", &CLOSURE[..16])
             .replace("${RUNNER_OS}", runner_os)
             .replace("${RUNNER_ARCH}", runner_arch)
-    }
-
-    fn candidate_artifact_name(&self, runner_os: &str, runner_arch: &str) -> String {
-        // The acquire transport selects the exact artifact by the producer's
-        // closure/platform prefix qualified with the publishing run, attempt,
-        // and mapped publisher key.
-        format!(
-            "{}-r{RUN_ID}-a{RUN_ATTEMPT}-j{PUBLISHER_KEY}",
-            self.candidate_name_prefix(runner_os, runner_arch)
-        )
+            .replace("${GITHUB_RUN_ID}", &RUN_ID.to_string())
+            .replace("${GITHUB_RUN_ATTEMPT}", &RUN_ATTEMPT.to_string())
+            .replace("${publisher_job}", PUBLISHER_KEY)
     }
 
     fn valid_artifact_on_platform(&self, runner_os: &str, runner_arch: &str) {
@@ -871,6 +869,111 @@ impl TransportFixture {
             .env("RUSTFLAGS", "-C link-arg=sensitive")
             .output()
             .expect("run generated producer shell")
+    }
+
+    fn produce_artifact_on_platform(&self, runner_os: &str, runner_arch: &str) -> String {
+        self.valid_artifact_on_platform(runner_os, runner_arch);
+        let output = self.run_producer_build_on_platform(runner_os, runner_arch);
+        assert!(
+            output.status.success(),
+            "producer failed before artifact handoff ({:?}):\n{}\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let stage = self.run_temp.join("velnor-workflow-candidate");
+        let expected_name = self.candidate_artifact_name(runner_os, runner_arch);
+        let producer_output =
+            fs::read_to_string(self.run_temp.join("github.output")).expect("producer output");
+        assert!(
+            producer_output
+                .lines()
+                .any(|line| line == format!("name={expected_name}")),
+            "producer output must name the artifact consumed by acquire: {producer_output}"
+        );
+
+        fs::copy(stage.join("velnor-workflow"), &self.binary)
+            .expect("copy produced candidate binary");
+        fs::copy(stage.join("candidate-manifest.json"), &self.manifest)
+            .expect("copy produced candidate manifest");
+        let manifest: JsonValue = serde_json::from_slice(
+            &fs::read(&self.manifest).expect("produced candidate manifest bytes"),
+        )
+        .expect("produced candidate manifest JSON");
+        assert_eq!(
+            manifest,
+            json!({
+                "profile": "debug",
+                "platform": format!("{runner_os}-{runner_arch}"),
+                "repository": REPOSITORY,
+                "run_id": RUN_ID.to_string(),
+                "run_attempt": RUN_ATTEMPT,
+                "publisher_job": PUBLISHER_KEY,
+                "artifact_name": expected_name,
+                "revision": HEAD_SHA,
+                "closure": CLOSURE,
+                "build_revision": HEAD_SHA,
+                "binary_sha256": file_sha256(&self.binary),
+            }),
+            "producer manifest must carry the complete acquire identity"
+        );
+
+        zip_files(&self.archive, &self.binary, &self.manifest);
+        let archive_bytes = fs::read(&self.archive).expect("produced archive bytes");
+        let scenario = valid_scenario(
+            &expected_name,
+            archive_bytes.len() as u64,
+            &hex_sha256(&archive_bytes),
+        );
+        fs::write(
+            &self.scenario,
+            serde_json::to_vec(&scenario).expect("produced scenario JSON"),
+        )
+        .expect("produced scenario");
+        let marker = self.run_record_identity(&expected_name);
+        assert_eq!(
+            marker,
+            candidate_log_marker(
+                RUN_ID,
+                RUN_ATTEMPT,
+                PUBLISHER_KEY,
+                ARTIFACT_ID,
+                &expected_name,
+            ),
+            "producer must log its exact run, attempt, publisher, artifact ID, and name"
+        );
+        self.mutate_scenario(|scenario| {
+            scenario["job_log_contents"] = json!(marker);
+        });
+        expected_name
+    }
+
+    fn run_record_identity(&self, artifact_name: &str) -> String {
+        let script = materialize_producer_expressions(&self.generated.record, "", "")
+            .replace("${{ steps.candidate.outputs.name }}", artifact_name)
+            .replace(
+                "${{ steps.candidate-upload.outputs.artifact-id }}",
+                &ARTIFACT_ID.to_string(),
+            );
+        let output = Command::new("bash")
+            .args(["-euo", "pipefail", "-c", &script])
+            .current_dir(&self.root)
+            .env("PATH", prepend_path(&self.bin_dir))
+            .env("GITHUB_RUN_ID", RUN_ID.to_string())
+            .env("GITHUB_RUN_ATTEMPT", RUN_ATTEMPT.to_string())
+            .env("CANDIDATE_ARTIFACT_ID", ARTIFACT_ID.to_string())
+            .env("CANDIDATE_ARTIFACT_NAME", artifact_name)
+            .output()
+            .expect("run generated producer identity marker");
+        assert!(
+            output.status.success(),
+            "producer identity marker failed ({:?}):\n{}\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
     }
 }
 
@@ -1693,7 +1796,7 @@ fn generated_producer_keeps_upload_surface_after_build() {
     assert!(
         output
             .lines()
-            .any(|line| line == format!("name={}", fixture.candidate_name_prefix("Linux", "X64"))),
+            .any(|line| line == format!("name={}", fixture.candidate_artifact_name("Linux", "X64"))),
         "producer must publish its exact closure- and platform-qualified artifact name: {output}"
     );
     let build_env = fs::read_to_string(fixture.root.join("candidate-build-env.txt"))
@@ -1814,7 +1917,7 @@ fn generated_producer_binds_runner_platform_and_upload_contract() {
         .expect("alternate producer output");
     assert!(
         output.lines().any(|line| {
-            line == format!("name={}", fixture.candidate_name_prefix("Linux", "ARM64"))
+            line == format!("name={}", fixture.candidate_artifact_name("Linux", "ARM64"))
         }),
         "producer must publish exact alternate-platform identity: {output}"
     );
@@ -1854,6 +1957,79 @@ fn generated_producer_skips_when_candidate_matches_the_base_closure() {
         differs.run_temp.join("velnor-workflow-candidate").is_dir(),
         "different candidate closure must keep the candidate upload path live"
     );
+}
+
+#[test]
+fn generated_producer_artifact_is_consumed_by_generated_acquirer() {
+    let fixture = TransportFixture::new();
+    let artifact_name = fixture.produce_artifact_on_platform("Linux", "X64");
+    assert_eq!(
+        artifact_name,
+        format!(
+            "velnor-workflow-candidate-{}-Linux-X64-r{RUN_ID}-a{RUN_ATTEMPT}-j{PUBLISHER_KEY}",
+            &CLOSURE[..16]
+        )
+    );
+    let output = fixture.run_acquire(None);
+    assert!(
+        output.status.success(),
+        "generated acquire rejected the producer's actual artifact ({:?}):\n{}\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let github_env = fs::read_to_string(fixture.run_temp.join("github.env"))
+        .expect("acquire exports after producer handoff");
+    let binary_path = github_env
+        .lines()
+        .find_map(|line| line.strip_prefix("VELNOR_WORKFLOW_CANDIDATE_BINARY="))
+        .expect("acquire exports the produced binary");
+    let manifest_path = github_env
+        .lines()
+        .find_map(|line| line.strip_prefix("VELNOR_WORKFLOW_CANDIDATE_MANIFEST="))
+        .expect("acquire exports the produced manifest");
+    assert_eq!(
+        file_sha256(Path::new(binary_path)),
+        file_sha256(&fixture.binary)
+    );
+    let manifest: JsonValue = serde_json::from_slice(
+        &fs::read(manifest_path).expect("downloaded produced manifest bytes"),
+    )
+    .expect("downloaded produced manifest JSON");
+    assert_eq!(manifest["artifact_name"], json!(artifact_name));
+    assert_eq!(manifest["publisher_job"], json!(PUBLISHER_KEY));
+    assert_eq!(manifest["run_attempt"], json!(RUN_ATTEMPT));
+    assert_eq!(
+        manifest["binary_sha256"],
+        json!(file_sha256(Path::new(binary_path)))
+    );
+    assert!(!fixture.execution_sentinel.exists());
+}
+
+#[test]
+fn generated_producer_artifact_identity_mismatches_are_rejected() {
+    for case in [
+        FailureCase::WrongManifestAttempt,
+        FailureCase::WrongManifestPublisherJob,
+        FailureCase::WrongManifestArtifactName,
+        FailureCase::WrongBinaryDigest,
+    ] {
+        let fixture = TransportFixture::new();
+        fixture.produce_artifact_on_platform("Linux", "X64");
+        let output = fixture.run_acquire(Some(case));
+        assert!(
+            !output.status.success(),
+            "generated acquire accepted producer artifact mismatch {case:?}"
+        );
+        let environment =
+            fs::read_to_string(fixture.run_temp.join("github.env")).unwrap_or_default();
+        assert!(
+            !environment.contains("VELNOR_WORKFLOW_CANDIDATE_BINARY=")
+                && !environment.contains("VELNOR_WORKFLOW_CANDIDATE_MANIFEST="),
+            "mismatch {case:?} must reject before exporting candidate paths: {environment}"
+        );
+    }
 }
 
 #[test]

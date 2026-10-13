@@ -4627,7 +4627,7 @@ mod tests {
     /// which needs no container and runs on any daemon host. Ignored: it
     /// needs a live `/var/run/docker.sock` and spawns real `docker`
     /// children. Run it with:
-    /// `cargo test -p velnor-runner --lib live_engine_latency_bench -- --ignored --nocapture`
+    /// `cargo nextest run -p velnor-runner --lib live_engine_latency_bench --run-ignored only --no-capture`
     #[test]
     #[ignore]
     fn live_engine_latency_bench() {
@@ -6193,7 +6193,7 @@ mod tests {
     /// byte-identical stdout/stderr/exit code and printing both legs'
     /// latency. Ignored: it needs a live `/var/run/docker.sock` and pulls
     /// nothing (reuses `alpine:3.20` if present, else skips). Run it with:
-    /// `cargo test -p velnor-runner --lib live_exec_latency_bench -- --ignored --nocapture`
+    /// `cargo nextest run -p velnor-runner --lib live_exec_latency_bench --run-ignored only --no-capture`
     #[test]
     #[ignore]
     fn live_exec_latency_bench() {
@@ -6335,7 +6335,7 @@ mod tests {
     /// the job container keeps running — the CLI watchdog shape (client
     /// killed, container live). Ignored: it needs a live daemon (reuses
     /// `alpine:3.20` if present, else skips). Run it with:
-    /// `cargo test -p velnor-runner --lib live_exec_expiry_leaves_container_running -- --ignored --nocapture`
+    /// `cargo nextest run -p velnor-runner --lib live_exec_expiry_leaves_container_running --run-ignored only --no-capture`
     #[test]
     #[ignore]
     fn live_exec_expiry_leaves_container_running() {
