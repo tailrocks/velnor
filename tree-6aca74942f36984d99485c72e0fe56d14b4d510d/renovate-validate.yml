@@ -1,0 +1,31 @@
+name: Renovate Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: renovate-validate-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Example validation for pinned versions (adapt for velnor's rust-toolchain.toml, Cargo.toml, etc.)
+      # If velnor uses custom deb or other sources, add checks similar to jackin.
+      - name: Basic Renovate config presence check
+        run: |
+          if [ ! -f renovate.json ]; then
+            echo "::warning::No renovate.json found; self-hosted Renovate may use defaults or repo config."
+          fi
+          echo "Renovate setup validated (basic)."

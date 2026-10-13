@@ -1,0 +1,187 @@
+name: pages
+
+on:
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: "velnor | github | both (default: both)"
+        type: choice
+        default: both
+        options: [velnor, github, both]
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - '.github/workflows/pages.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'both')) && ('[{"lane":"velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":false},{"lane":"github","runner":"ubuntu-26.04","writer":true}]') || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && ('[{"lane":"github","runner":"ubuntu-26.04","writer":true}]') || '[{"lane":"velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":false}]') }}
+    runs-on: ${{ matrix.config.runner }}
+    timeout-minutes: 20
+    env:
+      SCCACHE_GHA_ENABLED: "false"
+      SCCACHE_CACHE_SIZE: 20G
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
+          save-on-workflow-dispatch: true
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+          disable_annotations: "false"
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: fixture-pages-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: fixture-pages-${{ matrix.config.lane }}-${{ runner.os }}-
+      - run: mbx doc --no-deps --workspace
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: target/doc
+          name: ${{ matrix.config.writer && 'github-pages' || format('github-pages-{0}', matrix.config.lane) }}
+      - uses: ./.github/actions/check-deployed-docs
+        with:
+          artifact-name: ${{ matrix.config.writer && 'github-pages' || format('github-pages-{0}', matrix.config.lane) }}
+      - name: Write deterministic pages evidence
+        env:
+          LANE: ${{ matrix.config.lane }}
+        run: |
+          set -euo pipefail
+          python3 - "$LANE" "$RUNNER_TEMP/$LANE.json" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          lane, destination = sys.argv[1:]
+          root = pathlib.Path("target/doc")
+          files = []
+
+          for path in root.rglob("*"):
+              if path.is_symlink() or not path.is_file():
+                  continue
+              relative = path.relative_to(root).as_posix()
+              digest = hashlib.sha256()
+              with path.open("rb") as handle:
+                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              files.append({
+                  "path": relative,
+                  "sha256": digest.hexdigest(),
+                  "size": path.stat().st_size,
+              })
+
+          files.sort(key=lambda record: record["path"])
+          with open(destination, "w", encoding="utf-8") as handle:
+              json.dump({"lane": lane, "files": files}, handle, separators=(",", ":"), sort_keys=True)
+              handle.write("\n")
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pages-evidence-${{ matrix.config.lane }}
+          path: ${{ runner.temp }}/${{ matrix.config.lane }}.json
+          if-no-files-found: error
+
+  compare:
+    needs: [build]
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: pages-evidence-github
+          path: evidence/github
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: pages-evidence-velnor
+          path: evidence/velnor
+      - name: Compare pages evidence
+        run: |
+          set -euo pipefail
+          for lane in github velnor; do
+            directory="evidence/$lane"
+            expected="$directory/$lane.json"
+            test -f "$expected"
+            mapfile -d '' files < <(find "$directory" -type f -print0 | LC_ALL=C sort -z)
+            test "${#files[@]}" -eq 1
+            test "${files[0]}" = "$expected"
+            jq -e --arg lane "$lane" '
+              type == "object"
+              and .lane == $lane
+              and (.files | type) == "array"
+              and all(.files[]?;
+                type == "object"
+                and ((keys | sort) == ["path", "sha256", "size"])
+                and (.path | type) == "string"
+                and (.path != "")
+                and (.path | startswith("/") | not)
+                and (.path | test("(^|/)\\.\\.?($|/)") | not)
+                and (.sha256 | test("^[0-9a-f]{64}$"))
+                and (.size | type) == "number"
+                and (.size >= 0)
+                and (.size == floor)
+              )
+              and ([.files[].path] == ([.files[].path] | sort))
+              and (([.files[].path] | unique | length) == (.files | length))
+            ' "$expected" >/dev/null
+          done
+
+          jq -S -c 'del(.lane)' evidence/github/github.json > "$RUNNER_TEMP/github-pages-evidence.json"
+          jq -S -c 'del(.lane)' evidence/velnor/velnor.json > "$RUNNER_TEMP/velnor-pages-evidence.json"
+          cmp "$RUNNER_TEMP/github-pages-evidence.json" "$RUNNER_TEMP/velnor-pages-evidence.json"
+
+  deploy:
+    needs: [build, compare]
+    if: >-
+      ${{
+        always() &&
+        needs.build.result == 'success' &&
+        (
+          (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') ||
+          (
+            (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'both')) &&
+            needs.compare.result == 'success'
+          )
+        )
+      }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        with:
+          artifact_name: github-pages

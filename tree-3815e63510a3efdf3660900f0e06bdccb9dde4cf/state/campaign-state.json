@@ -1,0 +1,328 @@
+{
+  "$schema": "../schemas/campaign-state.schema.json",
+  "schema_version": 1,
+  "campaign_id": "velnor-five-consumer-rollout",
+  "recorded_at": "2026-09-22T23:52:14Z",
+  "status": "blocked",
+  "canonical_plan": "docs/CAMPAIGN_PLAN.md",
+  "resumption_handoff": "docs/RESUMPTION_HANDOFF.md",
+  "source_commit": "054d13710e49e12c0df196fb663aef6a188e388b",
+  "scope": "coordination-only",
+  "operational_authorization": false,
+  "objective_evidence_ref": "E-OBJECTIVE",
+  "next_gate": "G0",
+  "gates": [
+    {
+      "id": "G0",
+      "title": "Current truth and access",
+      "status": "blocked",
+      "depends_on": [],
+      "author_role": "evidence and access author",
+      "verifier_role": "independent evidence/access reviewer",
+      "author": null,
+      "verifier": null,
+      "acceptance": "Inventory five consumers and three product/delivery repositories, exact SHAs, workflows, access and both hosts; reconcile historical contradictions.",
+      "blocker_ids": [
+        "B-FRESH",
+        "B-HISTORY"
+      ],
+      "evidence_refs": [],
+      "historical_evidence_refs": [
+        "E-LEDGER-GATES",
+        "E-PAUSE"
+      ]
+    },
+    {
+      "id": "G1",
+      "title": "Product prerequisites for the first Mac pilot",
+      "status": "blocked",
+      "depends_on": [
+        "G0"
+      ],
+      "author_role": "product, macOS and delivery authors",
+      "verifier_role": "independent macOS/protocol/generator/supply-chain reviewers",
+      "author": null,
+      "verifier": null,
+      "acceptance": "Prove published installed Mac binaries, immutable runtime/runner/DinD pins, generated hosted recovery, scoped credentials and protocol/Docker tests.",
+      "blocker_ids": [
+        "B-PINS",
+        "B-MAC"
+      ],
+      "evidence_refs": [],
+      "historical_evidence_refs": [
+        "E-LEDGER-GATES",
+        "E-PAUSE"
+      ]
+    },
+    {
+      "id": "G2",
+      "title": "essential-mac on Mac: Scale Set first",
+      "status": "blocked",
+      "depends_on": [
+        "G1"
+      ],
+      "author_role": "official-engine author",
+      "verifier_role": "independent official-engine/Mac integration reviewer",
+      "author": null,
+      "verifier": null,
+      "acceptance": "Run substantive eligible essential-mac tests on the actual Mac through ephemeral official runners and private DinD; prove placement and cleanup.",
+      "blocker_ids": [],
+      "evidence_refs": [],
+      "historical_evidence_refs": [
+        "E-LEDGER-GATES",
+        "E-PAUSE"
+      ]
+    },
+    {
+      "id": "G3",
+      "title": "essential-mac on Mac: native, then combined",
+      "status": "blocked",
+      "depends_on": [
+        "G2"
+      ],
+      "author_role": "native-engine author",
+      "verifier_role": "independent native/capacity/result reviewers",
+      "author": null,
+      "verifier": null,
+      "acceptance": "Prove native after Scale Set, then both modes plus hosted; representative PR and three consecutive full green main runs without manual reruns; shared N, no quotas, no orphans.",
+      "blocker_ids": [],
+      "evidence_refs": [],
+      "historical_evidence_refs": [
+        "E-LEDGER-GATES",
+        "E-PAUSE"
+      ]
+    },
+    {
+      "id": "G4",
+      "title": "Next three consumers on Mac, sequentially",
+      "status": "blocked",
+      "depends_on": [
+        "G3"
+      ],
+      "author_role": "consumer integration authors",
+      "verifier_role": "independent repository-stack/shared-runtime reviewers",
+      "author": null,
+      "verifier": null,
+      "acceptance": "Qualify jackin-agent-brown, then cloudflare-tofu, then github-terraform with full three-provider PR/main evidence; preserve OpenTofu and actual declared toolchains.",
+      "blocker_ids": [],
+      "evidence_refs": [],
+      "historical_evidence_refs": [
+        "E-LEDGER-GATES",
+        "E-PAUSE"
+      ]
+    },
+    {
+      "id": "G5",
+      "title": "java-monorepo last on Mac",
+      "status": "blocked",
+      "depends_on": [
+        "G4"
+      ],
+      "author_role": "Java/Rust/Docker/frontend authors",
+      "verifier_role": "independent coverage and stack reviewers",
+      "author": null,
+      "verifier": null,
+      "acceptance": "Preserve 71-unit baseline or reviewed equivalent; full provider/architecture/service coverage, PR plus three full green main runs, performance and recovery proof.",
+      "blocker_ids": [],
+      "evidence_refs": [],
+      "historical_evidence_refs": [
+        "E-LEDGER-GATES",
+        "E-PAUSE"
+      ]
+    },
+    {
+      "id": "G6",
+      "title": "Bastion inventory, Docker and signed APT activation",
+      "status": "blocked",
+      "depends_on": [
+        "G5"
+      ],
+      "author_role": "Debian/Docker/APT author",
+      "verifier_role": "independent package/deployment reviewer",
+      "author": null,
+      "verifier": null,
+      "acceptance": "Fresh inventory and repaired healthy installed service, exact signed APT origin/version/architecture, release verification, no quotas and untouched secondary NVMe; Mac G5 evidence precedes activation.",
+      "blocker_ids": [
+        "B-GITHUB",
+        "B-ROUTING",
+        "B-CONTROL",
+        "B-SUPERVISION",
+        "B-QUOTAS"
+      ],
+      "evidence_refs": [],
+      "historical_evidence_refs": [
+        "E-LEDGER-GATES",
+        "E-PAUSE"
+      ]
+    },
+    {
+      "id": "G7",
+      "title": "Bastion replay in the same five-consumer order",
+      "status": "blocked",
+      "depends_on": [
+        "G6"
+      ],
+      "author_role": "bastion placement and consumer authors",
+      "verifier_role": "independent host-placement/parity reviewers",
+      "author": null,
+      "verifier": null,
+      "acceptance": "Prove essential-mac native first, then Scale Set and combined; replay all five in order with bastion-bound evidence, java last, full PR/main coverage and measured shared N.",
+      "blocker_ids": [],
+      "evidence_refs": [],
+      "historical_evidence_refs": [
+        "E-LEDGER-GATES",
+        "E-PAUSE"
+      ]
+    },
+    {
+      "id": "G8",
+      "title": "Final acceptance and reproducible onboarding",
+      "status": "blocked",
+      "depends_on": [
+        "G7"
+      ],
+      "author_role": "operating documentation and integration authors",
+      "verifier_role": "independent final acceptance reviewer",
+      "author": null,
+      "verifier": null,
+      "acceptance": "Reconcile final identities and all required results on both hosts; prove trust, no quotas, cleanup/recovery, watchdog bounds, generated ownership and reproducible onboarding.",
+      "blocker_ids": [],
+      "evidence_refs": [],
+      "historical_evidence_refs": [
+        "E-LEDGER-GATES",
+        "E-PAUSE"
+      ]
+    }
+  ],
+  "blockers": [
+    {
+      "id": "B-FRESH",
+      "status": "blocked",
+      "scope": "all",
+      "gate_ids": [
+        "G0"
+      ],
+      "evidence_refs": [
+        "E-MAC-REFRESH",
+        "E-BASTION-REFRESH",
+        "E-PREVIEW-REFRESH"
+      ],
+      "reason": "User reports refresh both hosts and product main, but full installed-product, repository/workflow/required-result and access inventories are still missing.",
+      "next_action": "Collect authorized fresh inventories and immutable source/host identities in a later operational workstream."
+    },
+    {
+      "id": "B-HISTORY",
+      "status": "blocked",
+      "scope": "all",
+      "gate_ids": [
+        "G0"
+      ],
+      "evidence_refs": [
+        "E-LEDGER-GATES",
+        "E-PAUSE",
+        "E-LEDGER-CONFLICTS"
+      ],
+      "reason": "Gate meanings, completion claims, essential-mac run sets and host facts conflict across archives.",
+      "next_action": "Reconcile exact runs, attempts, commits and host evidence; retain contradictory records as history."
+    },
+    {
+      "id": "B-PINS",
+      "status": "blocked",
+      "scope": "preview",
+      "gate_ids": [
+        "G1"
+      ],
+      "evidence_refs": [
+        "E-RELEASE",
+        "E-OBJECTIVE",
+        "E-PREVIEW-REFRESH"
+      ],
+      "reason": "Live preview run 35797775098 is in_progress; its source, attempt and products are unverified. Rolling preview f7bc191 is stale and must never be selected.",
+      "next_action": "Populate every required preview component from independently verified immutable publication evidence; never copy an installed snapshot into the target by default."
+    },
+    {
+      "id": "B-GITHUB",
+      "status": "blocked",
+      "scope": "bastion",
+      "gate_ids": [
+        "G6"
+      ],
+      "evidence_refs": [
+        "E-ROUTING",
+        "E-HEALTH",
+        "E-BASTION-REFRESH"
+      ],
+      "reason": "Configured GitHub URL is a placeholder, credential is empty and GitHub is unreachable with repeated 401 recorded.",
+      "next_action": "Repair URL and scoped credential via protected channels, then prove registration; never persist credential values."
+    },
+    {
+      "id": "B-ROUTING",
+      "status": "blocked",
+      "scope": "bastion",
+      "gate_ids": [
+        "G6"
+      ],
+      "evidence_refs": [
+        "E-ROUTING",
+        "E-HEALTH"
+      ],
+      "reason": "Policy selects only tailrocks/velnor, group velnor, trust_scope untrusted; routing and group proofs are invalid.",
+      "next_action": "Reconcile intended five-consumer access, trusted-code admission, group and host placement; preserve sequential activation."
+    },
+    {
+      "id": "B-CONTROL",
+      "status": "blocked",
+      "scope": "bastion",
+      "gate_ids": [
+        "G6"
+      ],
+      "evidence_refs": [
+        "E-HEALTH"
+      ],
+      "reason": "Health reports control_live=true while CLI reports not ready/API unavailable; desired slots disagree (16 versus 4).",
+      "next_action": "Diagnose control endpoint/configuration ownership and prove consistent installed CLI, controller and ready-slot results."
+    },
+    {
+      "id": "B-SUPERVISION",
+      "status": "blocked",
+      "scope": "bastion",
+      "gate_ids": [
+        "G6"
+      ],
+      "evidence_refs": [
+        "E-SERVICES",
+        "E-BASTION-REFRESH"
+      ],
+      "reason": "Running controller and guardian units are disabled, daemon/timers inactive; persistence is unproven.",
+      "next_action": "Establish intended installed supervision and verify restart/recovery without relying on the historical nonexistent service."
+    },
+    {
+      "id": "B-QUOTAS",
+      "status": "blocked",
+      "scope": "bastion",
+      "gate_ids": [
+        "G6"
+      ],
+      "evidence_refs": [
+        "E-SERVICES",
+        "E-OBJECTIVE",
+        "E-BASTION-REFRESH"
+      ],
+      "reason": "Observed slice limits contradict the objective's no-quota requirement.",
+      "next_action": "Trace package/service ownership of ceilings; later fix the source and published delivery, then inspect effective ancestors and descendants."
+    },
+    {
+      "id": "B-MAC",
+      "status": "blocked",
+      "scope": "local-mac",
+      "gate_ids": [
+        "G1"
+      ],
+      "evidence_refs": [
+        "E-MAC-REFRESH"
+      ],
+      "reason": "Fresh Mac report has no live supervisor and disagrees on capacity: state N=1 versus monitor N=4.",
+      "next_action": "Diagnose installed supervision and the single durable capacity authority; measure and verify N before pilot admission. Do not silently choose 1 or 4."
+    }
+  ]
+}

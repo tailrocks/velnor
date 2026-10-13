@@ -1,0 +1,33 @@
+{
+  "captured_at": "2026-09-20T18:08:44.041924+00:00",
+  "baseline": "final bootstrap source in /tmp/velnor-bootstrap-97bac4c after hosted selector correction; snapshots /tmp/velnor-failures/preflight-baseline",
+  "base_head": "97bac4c4582bbe18ee607a1dd7a41b4854345c7e",
+  "patch_sha256": "fab365c813c3da8408074bdf4be9fa5bb7f6341501b77c8d6398ea73127e5e5b",
+  "files": [
+    {
+      "path": "crates/velnor-runner/Cargo.toml",
+      "baseline_sha256": "f29f293514b241b28c20714a0838e81e87839234391881a0adaac92b53dc8c76",
+      "wip_sha256": "8faee17faacee06ce591316a0ae78ab1cc99cff755b40f9d184c688be1ea6943"
+    },
+    {
+      "path": "crates/velnor-workflow/src/s2/mod.rs",
+      "baseline_sha256": "f1f0f71c6f03f6cdbf36d5be0699262f2289fb6cad5edfc9c075b83cb1155454",
+      "wip_sha256": "3f3bd845ede16e3052f06f42b058f811ad346b14f6580909e442d387cfa8ca05"
+    },
+    {
+      "path": "crates/velnor-workflow/src/s2/primitives/release.rs",
+      "baseline_sha256": "884751690d8db75b84cfc5bfaa082200876de04b3ac14266e6769a0fdd71c3a7",
+      "wip_sha256": "d2205870fb92dfb8ba19028aab2fdafb79907b93bb6c53e43c1a3f9bfe004584"
+    },
+    {
+      "path": "crates/velnor-workflow/src/s2/primitives/runtime_bootstrap.rs",
+      "baseline_sha256": "8225047c2214ba5c31589af431cb3f57e2fcebd01a98881741a468fb4aa1ebbb",
+      "wip_sha256": "8a25fc454a43ddea5618ac6a5dc51e311eb154ec810b9d990e86dab92bf1738d"
+    },
+    {
+      "path": "crates/velnor-workflow/src/s2/scan/rust.rs",
+      "baseline_sha256": "4f97917196fca9c072db024f3a3c59ee2135246bf5da0555eeaef1afedcaeb16",
+      "wip_sha256": "7ce3993e1ae68c81aacebb56557e3943b66e453f8cd9642ed49ef63fa7f95a70"
+    }
+  ]
+}

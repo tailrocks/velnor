@@ -1,0 +1,3 @@
+[tools]
+actionlint = "1.7.11"
+gh = "2.96.0"

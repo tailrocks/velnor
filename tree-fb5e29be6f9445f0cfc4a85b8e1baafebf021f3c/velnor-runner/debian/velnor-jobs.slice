@@ -1,0 +1,10 @@
+[Unit]
+Description=Velnor job-worker slice
+Documentation=https://github.com/tailrocks/velnor
+
+[Slice]
+# Identity and cleanup only. This slice carries no CPU/RAM ceiling
+# (no CPUQuota, MemoryMax, MemoryHigh, or TasksMax): workload containers run
+# unbounded and host capacity is governed by the single max_jobs=N permit
+# ledger. The retired host-scaled CPUQuota drop-in
+# (velnor-jobs.slice.d/10-host-cpu.conf) is deleted, never recreated.

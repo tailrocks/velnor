@@ -1,0 +1,46 @@
+# Canonical extra fixture workflow. Copy into tailrocks/velnor-actions-fixture
+# as .github/workflows/backend-parity.yml. Does not add a repository-controlled
+# backend input. Pool selection (docker vs microvm) is operator execution.toml.
+# lanes remains velnor | github | both.
+
+name: backend-parity
+on:
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: velnor (default) | github | both
+        type: choice
+        default: velnor
+        options: [velnor, github, both]
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  parity:
+    name: backend-parity (${{ matrix.config.lane }})
+    runs-on: ${{ matrix.config.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - { lane: GitHub, runner: ubuntu-26.04 }
+          - { lane: Velnor, runner: [self-hosted, velnor] }
+    steps:
+      - uses: actions/checkout@v5
+      - name: Record pool backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "lane=${{ matrix.config.lane }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "execution_backend=${VELNOR_EXECUTION_BACKEND:-unset}" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ matrix.config.lane }}" = "Velnor" ]; then
+            test -n "${VELNOR_EXECUTION_BACKEND:-}"
+            test "${VELNOR_EXECUTION_BACKEND}" = "docker" -o "${VELNOR_EXECUTION_BACKEND}" = "microvm"
+          fi
+      - name: Guest docker is not the host control plane
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker version
+          docker run --rm --network none busybox:1.36 echo ok

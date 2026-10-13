@@ -1,0 +1,39 @@
+{
+  "recorded_at": "2026-09-20T10:53:40.656410+00:00",
+  "campaign_parent": "56017bac6a04823d456be9deb6405468e90b87c5",
+  "upstream_parent": "9e5c0eb215d4169578d6f064806e89fe4c793e85",
+  "package_release_sha256": "9ab8b818d2f2d9169adad3c2add3505e0e46ad306ab9a24e74b63289fd5e2677",
+  "scope": "precommit integration tree, local correctness only",
+  "checks": [
+    {
+      "command": "cargo clippy -p velnor-workflow --all-targets --all-features -- -D warnings",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo fmt --all -- --check",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo nextest run -p velnor-workflow --all-features --no-fail-fast",
+      "exit_code": 0,
+      "passed": 1942,
+      "binaries": 21,
+      "execution_seconds": 38.148
+    },
+    {
+      "command": "velnor-workflow --plain --check",
+      "exit_code": 0,
+      "pinned_runtime": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d"
+    },
+    {
+      "command": "actionlint -shellcheck=",
+      "exit_code": 0
+    }
+  ],
+  "failed_initial_checks": {
+    "clippy": "four fixture panic calls and oversized helper",
+    "nextest": "generic repository literal in fixture; 1864 pass before fail-fast; 77 unrun"
+  },
+  "performance_claim": null,
+  "exact_committed_build": "pending"
+}

@@ -1,0 +1,3 @@
+[tools]
+actionlint = "latest"
+gh = "2.96.0"

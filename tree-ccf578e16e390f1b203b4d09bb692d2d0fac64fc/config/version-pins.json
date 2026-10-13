@@ -1,0 +1,84 @@
+{
+  "$comment": [
+    "Version literals that are repeated outside the mise configuration, and the one site that owns each of them.",
+    "scripts/pin_integrity.mjs re-extracts every entry here and fails when a copy disagrees with its authority, or when a copy has moved and is therefore no longer being compared at all.",
+    "mise-declared tools do not belong here: the same script derives those automatically from every mise.toml, its adjacent lockfile, and the other mise configs."
+  ],
+  "managerCoverage": [
+    {
+      "manager": "mise",
+      "filesMatching": "(^|/)[^/]*mise\\.toml$",
+      "description": "Every mise configuration in the tree must be reachable by Renovate's native mise manager. The build and job images use non-standard basenames that the manager's defaults do not match, so renovate.json overrides its managerFilePatterns; an override replaces the defaults outright, and a new docker/<name>-mise.toml would otherwise be silently unmanaged."
+    }
+  ],
+  "pins": [
+    {
+      "name": "mise",
+      "description": "The mise binary is curl-bootstrapped in both images. It is the one tool no lockfile can pin, so the two Dockerfiles are the only record of it and must agree.",
+      "authority": {
+        "file": "docker/job-ubuntu.Dockerfile",
+        "pattern": "MISE_VERSION=\"v(?<version>[0-9][0-9.]*)\""
+      },
+      "mirrors": [
+        {
+          "file": "Dockerfile",
+          "pattern": "MISE_VERSION=\"v(?<version>[0-9][0-9.]*)\""
+        }
+      ]
+    },
+    {
+      "name": "sccache",
+      "description": "The job image asserts the installed sccache version in its build. The assertion is a second copy of the pin and goes stale silently unless it is compared.",
+      "authority": {
+        "file": "docker/job-mise.toml",
+        "pattern": "sccache = \"(?<version>[0-9][0-9.]*)\""
+      },
+      "mirrors": [
+        {
+          "file": "docker/job-ubuntu.Dockerfile",
+          "pattern": "grep -F 'sccache (?<version>[0-9][0-9.]*)'"
+        }
+      ]
+    },
+    {
+      "name": "mr-boxington",
+      "description": "Same shape as sccache: the job image greps mbx --version for a literal that repeats the mise pin.",
+      "authority": {
+        "file": "docker/job-mise.toml",
+        "pattern": "mr-boxington = \"(?<version>[0-9][0-9.]*)\""
+      },
+      "mirrors": [
+        {
+          "file": "docker/job-ubuntu.Dockerfile",
+          "pattern": "mbx --version \\| grep -F '(?<version>[0-9][0-9.]*)'"
+        }
+      ]
+    },
+    {
+      "name": "rust",
+      "description": "rust-toolchain.toml is the single source of truth for the compiler. Every mise lockfile mirrors the resolved version, and mise exports RUSTUP_TOOLCHAIN from the lock entry, so a stale lock keeps building with the old compiler however the declaration reads.",
+      "authority": {
+        "file": "rust-toolchain.toml",
+        "pattern": "channel = \"(?<version>\\d+\\.\\d+\\.\\d+)\""
+      },
+      "mirrors": [
+        {
+          "file": "mise.lock",
+          "pattern": "\\[\\[tools\\.rust\\]\\]\\s+version = \"(?<version>\\d+\\.\\d+\\.\\d+)\""
+        },
+        {
+          "file": "docker/build-mise.lock",
+          "pattern": "\\[\\[tools\\.rust\\]\\]\\s+version = \"(?<version>\\d+\\.\\d+\\.\\d+)\""
+        },
+        {
+          "file": "docker/job-mise.lock",
+          "pattern": "\\[\\[tools\\.rust\\]\\]\\s+version = \"(?<version>\\d+\\.\\d+\\.\\d+)\""
+        },
+        {
+          "file": "content/docs/guides/development.mdx",
+          "pattern": "toolchain is Rust (?<version>\\d+\\.\\d+\\.\\d+)"
+        }
+      ]
+    }
+  ]
+}

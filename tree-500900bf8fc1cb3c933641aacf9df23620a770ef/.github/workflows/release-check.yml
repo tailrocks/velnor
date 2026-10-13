@@ -1,0 +1,28 @@
+# Release mirror equality is checked before a published release is consumed.
+name: Release fork equality
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  fork-equality:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out published release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Set up mise
+        uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
+        with:
+          install: true
+          cache: false
+      - name: Verify owner-local release trees
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: cargo run --locked -p velnor-actions-generator -- release-check --root . --release "${{ github.event.release.tag_name }}"

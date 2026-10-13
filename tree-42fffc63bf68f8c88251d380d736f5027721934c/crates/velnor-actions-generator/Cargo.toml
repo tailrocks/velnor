@@ -1,0 +1,16 @@
+[package]
+name = "velnor-actions-generator"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97.1"
+description = "Headless skeleton for the canonical Velnor Actions fleet generator."
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "velnor_actions_generator"
+path = "src/lib.rs"
+
+[[bin]]
+name = "velnor-actions-generator"
+path = "src/main.rs"

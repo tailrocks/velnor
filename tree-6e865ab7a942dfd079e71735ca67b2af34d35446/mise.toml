@@ -1,0 +1,117 @@
+[tools]
+actionlint = "1.7.12"
+cargo-binstall = "1.22.0"
+"aqua:EmbarkStudios/cargo-deny" = "0.20.2"
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.140"
+"cargo:cargo-zigbuild" = "0.23.0"
+"cargo:cargo-deb" = "3.7.0"
+zig = "0.16.0"
+
+[settings]
+# Plan 008: mandatory committed lockfile. `mise` reads pinned URLs/checksums
+# from mise.lock and (under MISE_LOCKED in CI/jobs) refuses unlocked artifacts.
+lockfile = true
+idiomatic_version_file_enable_tools = ["rust"]
+cargo.binstall_only = true
+cargo.binstall_quickinstall = true
+
+[tasks.fmt]
+run = "cargo fmt --all --check"
+
+# Apply formatting in place; `fmt` above stays the read-only gate.
+[tasks.fmt-fix]
+run = "cargo fmt --all"
+
+[tasks.lint]
+run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
+
+[tasks.test]
+run = "cargo nextest run --workspace --locked --color=always"
+
+[tasks.test-focused]
+description = "Focused nextest run; pass filters after the task, e.g. rtk mise run test-focused -- -p velnor-tools"
+run = "cargo nextest run --locked --color=always"
+
+[tasks.actionlint]
+run = "actionlint"
+
+[tasks.deny]
+run = "cargo deny check advisories"
+
+# Plan 039 tooling-law closure: policy generation remains fully offline. The
+# committed per-org desired-policy JSONs live in fleet/policies/ and are
+# byte-reproducible via [tasks.fleet-generate]; audit-ci enforces that they
+# stay current with fleet/release-refs.toml. The plan task is a live,
+# read-only GitHub observation and requires the explicit release-ref ledger.
+[tasks.fleet-generate]
+description = "Regenerate fleet/policies/<org>-desired-policy.json from the release-ref ledger (offline, deterministic)"
+run = "cargo run -p velnor-tools --locked --quiet -- fleet-policy generate --ledger fleet/release-refs.toml --out-dir fleet/policies"
+
+[tasks.fleet-plan]
+description = "Read live desired/observed fleet state and print policy summary + sha256 digest per org (requires --ledger and GitHub credentials)"
+run = """
+set -eu
+ledger=fleet/release-refs.toml
+if [ ! -f "$ledger" ]; then
+  echo "fleet plan: release-ref ledger '$ledger' not found" >&2
+  exit 1
+fi
+found=0
+for f in fleet/policies/*-desired-policy.json; do
+  [ -f "$f" ] || continue
+  found=1
+  echo "== $f =="
+  cargo run -p velnor-tools --locked --quiet -- fleet-policy plan --policy "$f" --ledger "$ledger"
+done
+if [ "$found" -ne 1 ]; then
+  echo "fleet plan: no *-desired-policy.json under fleet/policies/" >&2
+  echo "fleet plan: run rtk mise run fleet-generate to produce fleet/policies/<org>-desired-policy.json" >&2
+  exit 1
+fi
+"""
+
+[tasks.fleet-digests]
+description = "Emit one '<org> -> <digest>' line per desired policy after live read-only planning (requires --ledger and GitHub credentials)"
+run = """
+set -eu
+ledger=fleet/release-refs.toml
+if [ ! -f "$ledger" ]; then
+  echo "fleet digests: release-ref ledger '$ledger' not found" >&2
+  exit 1
+fi
+found=0
+plan_output=$(mktemp)
+digest_output=$(mktemp)
+trap 'rm -f "$plan_output" "$digest_output"' EXIT
+for f in fleet/policies/*-desired-policy.json; do
+  [ -f "$f" ] || continue
+  found=1
+  cargo run -p velnor-tools --locked --quiet -- fleet-policy plan --policy "$f" --ledger "$ledger" >"$plan_output"
+  digest=$(sed -n 's/^digest: //p' "$plan_output")
+  printf '%s -> %s\n' "$(basename "$f" -desired-policy.json)" "$digest" >>"$digest_output"
+done
+if [ "$found" -ne 1 ]; then
+  echo "fleet digests: no *-desired-policy.json under fleet/policies/" >&2
+  echo "fleet digests: run rtk mise run fleet-generate to produce fleet/policies/<org>-desired-policy.json" >&2
+  exit 1
+fi
+cat "$digest_output"
+"""
+
+[tasks.check]
+depends = ["fmt", "actionlint", "deny", "fleet-generate", "lint", "test"]
+
+# Plan 008 tool install gate: only the committed lockfile may satisfy tools.
+[tasks.install]
+run = "mise install --locked"
+
+# Real compile leaf: every crate, every target profile, from the committed
+# Cargo.lock. `check` alone skips codegen and link errors.
+[tasks.build]
+run = "cargo build --workspace --all-targets --locked"
+
+[tasks.ci]
+depends = ["install", "build", "test", "lint", "fmt", "actionlint", "deny", "fleet-generate"]
+# Depends-only aggregate: every gate is its own task, so the local contract
+# matches the generated CI workflow exactly (same commands, same order
+# freedom) and nothing runs twice.

@@ -1,0 +1,354 @@
+name: compat public unmerged
+
+on:
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: "velnor | github | both (default: both)"
+        type: choice
+        default: both
+        options: [velnor, github, both]
+
+permissions:
+  contents: read
+
+# Matches ChainArgos/Jackin: cancel in-progress on PR, keep on push/schedule
+concurrency:
+  group: compat-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  changes:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      docker: ${{ steps.filter.outputs.docker }}
+      tools: ${{ steps.filter.outputs.tools }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: |
+          echo "policy route: public unmerged code -> both lanes" >> "${GITHUB_STEP_SUMMARY}"
+      - id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            rust:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'crates/**'
+              - 'mise.toml'
+              - '.github/workflows/compat-public-unmerged.yml'
+            docker:
+              - 'Dockerfile.fixture'
+              - 'docker-bake.hcl'
+              - '.github/workflows/docker.yml'
+            tools:
+              - 'justfile'
+              - 'mise.toml'
+
+  compat:
+    needs: [changes]
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'merge_group' ||
+      needs.changes.outputs.rust == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [app-a, app-b]
+        config: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && ('[{"lane":"Velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":false},{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && ('[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]') || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && ('[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]') || '[{"lane":"Velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    env:
+      SCCACHE_GHA_ENABLED: "false"
+      SCCACHE_CACHE_SIZE: 20G
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Configure compiler acceleration before any project build. nextest is a
+      # pinned Aqua binary; CI tooling must never compile from source.
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
+          save-on-workflow-dispatch: true
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+          disable_annotations: "false"
+      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      # rustup syncs the pinned toolchain with a minimal profile; rustfmt and
+      # clippy are not guaranteed even though the just recipes need them.
+      - run: rustup component add rustfmt clippy
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: fixture-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: fixture-${{ matrix.config.lane }}-${{ runner.os }}-
+      - name: Cache Cargo target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: fixture-target-${{ matrix.config.lane }}-${{ runner.os }}-${{ github.job }}-${{ hashFiles('mise.toml', '**/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: fixture-target-${{ matrix.config.lane }}-${{ runner.os }}-${{ github.job }}-${{ hashFiles('mise.toml', '**/Cargo.toml', 'Cargo.lock') }}-
+      # Compute MSRV from package/workspace Cargo.toml. Bare `stable` forces
+      # rustup channel sync and collides with image-bundled clippy bits.
+      - id: msrv
+        run: |
+          set -euo pipefail
+          pkg="crates/${{ matrix.package }}/Cargo.toml"
+          version="$(grep -E '^rust-version\s*=' "$pkg" | head -1 | sed 's/.*= *"\(.*\)"/\1/' || true)"
+          if [[ -z "${version}" ]]; then
+            version="$(grep -E '^rust-version\s*=' Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/' || true)"
+          fi
+          if [[ -z "${version}" ]]; then
+            version="$(rustc -vV | sed -n 's/^release: \([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p')"
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+      - id: command-files
+        env:
+          PACKAGE: ${{ matrix.package }}
+          LANE: ${{ matrix.config.lane }}
+        run: |
+          set -euo pipefail
+          echo "FIXTURE_PACKAGE=${PACKAGE}" >> "${GITHUB_ENV}"
+          echo "package=${PACKAGE}" >> "${GITHUB_OUTPUT}"
+          echo "lane=${LANE}" >> "${GITHUB_OUTPUT}"
+          echo "setup-state=complete" >> "${GITHUB_STATE}"
+          # Multiline heredoc output — matches ChainArgos bake-targets pattern
+          printf 'packages<<EOF\n%s\n%s\nEOF\n' "app-a" "app-b" >> "${GITHUB_OUTPUT}"
+          mkdir -p "${HOME}/.local/bin"
+          printf '%s\n' '#!/usr/bin/env bash' 'echo fixture-tool-ok' > "${HOME}/.local/bin/fixture-tool"
+          chmod +x "${HOME}/.local/bin/fixture-tool"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          echo "### ${LANE} ${PACKAGE}" >> "${GITHUB_STEP_SUMMARY}"
+      - run: just fmt-check
+      - run: just clippy "${{ matrix.package }}"
+      - run: just nextest "${{ matrix.package }}"
+      - name: Run fixture-harness tests and examples
+        env:
+          LANE: ${{ matrix.config.lane == 'GitHub' && 'github' || 'velnor' }}
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          set -euo pipefail
+          mbx nextest run --locked -p fixture-harness --all-targets
+          mbx run --quiet --locked -p fixture-harness --example command_files
+          tmp_dir="$(mktemp -d)"
+          mkdir -p "${tmp_dir}/tree/nested"
+          printf '%s\n' alpha > "${tmp_dir}/tree/nested/a.txt"
+          mbx run --quiet --locked -p fixture-harness --example artifact_tree -- "${tmp_dir}/tree" > "${tmp_dir}/tree.txt"
+          test -s "${tmp_dir}/tree.txt"
+          mbx run --quiet --locked -p fixture-harness --example cache_payload -- compat-public "${LANE}-${PACKAGE}" > "${tmp_dir}/cache.txt"
+          grep -q '^velnor.fixture.cache.v1$' "${tmp_dir}/cache.txt"
+          printf '%s\n' release > "${tmp_dir}/fixture.tar.gz"
+          mbx run --quiet --locked -p fixture-harness --example release_subject -- 0000000000000000000000000000000000000000 "${tmp_dir}/fixture.tar.gz" > "${tmp_dir}/subject.json"
+          grep -q 'velnor.fixture.release-subject.v1' "${tmp_dir}/subject.json"
+          cp "${tmp_dir}/tree.txt" "${tmp_dir}/cache.txt" "${tmp_dir}/subject.json" .
+      # `steps` is computed by the runner, not written by this workflow, so the
+      # outcome and conclusion of every step above are the behavioural signal
+      # no workflow author can fabricate.
+      - name: Dump runner-computed step outcomes
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          cat > "${RUNNER_TEMP}/steps.json" <<'STEPS'
+          ${{ toJSON(steps) }}
+          STEPS
+      - name: Collect observed lane evidence
+        uses: ./.github/actions/collect-evidence
+        with:
+          scenario: compat-public
+          evidence-id: ${{ matrix.package }}
+          lane: ${{ matrix.config.lane == 'GitHub' && 'github' || 'velnor' }}
+          output: evidence/compat-public-${{ matrix.config.lane == 'GitHub' && 'github' || 'velnor' }}-${{ matrix.package }}.json
+          observations: |
+            --observe-command command-files=mbx run --quiet --locked -p fixture-harness --example command_files
+            --observe-file artifact-tree=tree.txt
+            --observe-file cache-payload=cache.txt
+            --observe-file release-subject=subject.json
+            --observe-steps steps=${{ runner.temp }}/steps.json
+      # Verify MSRV step with env injection — mirrors Jackin MSRV pattern
+      - name: Check MSRV
+        env:
+          MSRV: ${{ steps.msrv.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Install only the requested toolchain without clobbering image defaults.
+          rustup toolchain install "${MSRV}" --profile minimal --no-self-update
+          mbx +"${MSRV}" check -p "${{ matrix.package }}" --locked
+      - uses: ./.github/actions/check-fixture-output
+        with:
+          package: ${{ steps.command-files.outputs.package }}
+      # `steps` is computed by the runner, not written by this workflow, so the
+      # outcome and conclusion of every step above are the behavioural signal
+      # no workflow author can fabricate.
+      - name: Dump runner-computed step outcomes
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cat > "${{ runner.temp }}/steps.json" <<'STEPS'
+          ${{ toJSON(steps) }}
+          STEPS
+      - name: Collect observed lane evidence
+        uses: ./.github/actions/collect-evidence
+        with:
+          scenario: compat-public-result
+          evidence-id: ${{ matrix.package }}
+          lane: ${{ matrix.config.lane == 'GitHub' && 'github' || 'velnor' }}
+          output: out/result.json
+          observations: |
+            --observe-command build=mbx build --quiet --locked -p ${{ matrix.package }}
+            --observe-command run=mbx run --quiet --locked -p ${{ matrix.package }}
+            --observe-env package=FIXTURE_PACKAGE
+            --observe-steps steps=${{ runner.temp }}/steps.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: result-${{ matrix.config.lane == 'GitHub' && 'github' || 'velnor' }}-${{ matrix.package }}
+          path: out/result.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compat-public-harness-${{ matrix.config.lane == 'GitHub' && 'github' || 'velnor' }}-${{ matrix.package }}
+          path: evidence/compat-public-${{ matrix.config.lane == 'GitHub' && 'github' || 'velnor' }}-${{ matrix.package }}.json
+          if-no-files-found: error
+
+  cache-off:
+    name: Cache off (${{ matrix.config.lane }})
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && ('[{"lane":"Velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":false},{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && ('[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]') || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && ('[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]') || '[{"lane":"Velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
+          save-on-workflow-dispatch: true
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - run: test -z "${RUSTC_WRAPPER:-}"
+      - run: mbx check -p app-a --locked
+
+  cache-sccache:
+    name: Cache sccache (${{ matrix.config.lane }})
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && ('[{"lane":"Velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":false},{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && ('[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]') || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && ('[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]') || '[{"lane":"Velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
+    timeout-minutes: 15
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "false"
+      SCCACHE_CACHE_SIZE: 20G
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
+          save-on-workflow-dispatch: true
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+          disable_annotations: "false"
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - name: Cache Cargo target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: fixture-target-${{ matrix.config.lane }}-${{ runner.os }}-${{ github.job }}-${{ hashFiles('mise.toml', '**/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: fixture-target-${{ matrix.config.lane }}-${{ runner.os }}-${{ github.job }}-${{ hashFiles('mise.toml', '**/Cargo.toml', 'Cargo.lock') }}-
+      - run: test "${RUSTC_WRAPPER:-}" = sccache
+      - run: mbx check -p app-a --locked
+
+  services-postgres:
+    name: Postgres service (${{ matrix.config.lane }})
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && ('[{"lane":"Velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":false},{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && ('[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]') || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && ('[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]') || '[{"lane":"Velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
+    timeout-minutes: 15
+    container: ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b
+    services:
+      postgres:
+        image: postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: fixture
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - run: apt-get update && apt-get install -y --no-install-recommends postgresql-client
+      - env:
+          PGPASSWORD: postgres
+        run: test "$(psql -h postgres -U postgres -d fixture -Atc 'SELECT 41 + 1')" = 42
+
+  # Required aggregate job — mirrors ChainArgos rust-required / Jackin ci-required
+  compat-required:
+    if: always()
+    needs: [changes, compat, compare-results]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/aggregate-needs
+        with:
+          needs-json: ${{ toJSON(needs) }}
+          workflow-label: compat
+
+  compare-results:
+    needs: [compat]
+    # This comparator is meaningful only for an explicit dual-lane run.
+    if: inputs.lanes == 'both' && needs.compat.result == 'success'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+          merge-multiple: false
+      - uses: ./.github/actions/compare-evidence
+        with:
+          scenario: compat-public-result
+          directory: artifacts
+      - uses: ./.github/actions/aggregate-needs
+        with:
+          expected: success
+          actual: ${{ needs.compat.result }}

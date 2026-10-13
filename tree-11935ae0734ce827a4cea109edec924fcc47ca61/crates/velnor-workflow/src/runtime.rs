@@ -1,0 +1,4298 @@
+//! Rust replacement for the generated CI, policy, and release shell helpers.
+//!
+//! The generator still records project commands as data in `project.toml`.
+//! This module owns parsing, dependency ordering, affected-unit selection,
+//! policy validation, and release packaging. Project commands are the only
+//! shell boundary left: they are explicit repository inputs and run under the
+//! same Bash contract GitHub Actions provides for `run` steps.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::env;
+use std::ffi::OsString;
+use std::fs;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use globset::{Glob, GlobSet, GlobSetBuilder};
+use serde::Deserialize;
+
+use sha2::{Digest, Sha256};
+
+use super::primitives::snapshot::{
+    budget_report, plan_evictions, CacheEntry as SnapshotCacheEntry, RetentionPolicy,
+};
+use super::{lanes_support_unit_kind, GeneratorError, RunnerMode, UnitKind};
+
+const DEFAULT_CONFIG: &str = ".github/ci/project.toml";
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+#[expect(
+    dead_code,
+    reason = "runtime preserves the complete generated TOML contract while commands consume only their relevant fields"
+)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CiConfig {
+    schema: u32,
+    #[serde(default)]
+    repository: String,
+    #[serde(default)]
+    profile: String,
+    #[serde(default)]
+    verified: bool,
+    #[serde(default)]
+    default_branch: String,
+    #[serde(default)]
+    runners: String,
+    #[serde(default)]
+    automatic: String,
+    #[serde(default)]
+    analysis: Analysis,
+    #[serde(default)]
+    workflow: Workflow,
+    #[serde(default)]
+    release: Release,
+    #[serde(default)]
+    unit: Vec<CiUnit>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Analysis {
+    method: String,
+    detected: Vec<String>,
+    limitations: Vec<String>,
+}
+
+#[expect(
+    dead_code,
+    reason = "runtime preserves the complete generated workflow contract while execution consumes selected fields"
+)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Workflow {
+    github_runner: String,
+    #[serde(default)]
+    macos_runner: String,
+    velnor_labels: Vec<String>,
+    files: Vec<String>,
+    notes: Vec<String>,
+    #[serde(default)]
+    version_bump_units: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Release {
+    enabled: bool,
+    reason: String,
+    kind: String,
+    package: String,
+    packages: Vec<String>,
+    binary: String,
+    targets: Vec<String>,
+    image: String,
+    source_repository: String,
+    consumer_repository: String,
+    artifact_path: String,
+    description: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Cache {
+    key_files: Vec<String>,
+    paths: Vec<String>,
+}
+
+#[expect(
+    dead_code,
+    reason = "runtime preserves the complete generated unit contract while execution consumes selected fields"
+)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CiUnit {
+    id: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    root: String,
+    watch: Vec<String>,
+    github_pr_commands: Vec<String>,
+    github_full_commands: Vec<String>,
+    velnor_pr_commands: Vec<String>,
+    velnor_full_commands: Vec<String>,
+    #[serde(default)]
+    depends_on: Vec<String>,
+    #[serde(default)]
+    tool_version: Option<String>,
+    #[serde(default)]
+    cache: Option<Cache>,
+    /// A workspace-wide Rust verification gate. Its watch paths may stay
+    /// narrow; affected Rust changes select it explicitly to preserve the
+    /// workspace coverage without broadening every topology match.
+    #[serde(default)]
+    workspace_check: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunnerLane {
+    Github,
+    Velnor,
+}
+
+impl RunnerLane {
+    /// Velnor's job container advertises its authoritative execution backend;
+    /// hosted GitHub jobs and local invocations deliberately fall back to the
+    /// GitHub command set.
+    fn from_execution_backend(backend: Option<&str>) -> Self {
+        if backend.is_some_and(|value| {
+            value.trim().eq_ignore_ascii_case("docker")
+                || value.trim().eq_ignore_ascii_case("microvm")
+        }) {
+            Self::Velnor
+        } else {
+            Self::Github
+        }
+    }
+
+    fn current() -> Self {
+        Self::from_execution_backend(env::var("VELNOR_EXECUTION_BACKEND").ok().as_deref())
+    }
+}
+
+impl CiUnit {
+    fn commands(&self, lane: RunnerLane, scope: Scope) -> &[String] {
+        match (lane, scope) {
+            (RunnerLane::Github, Scope::Affected) => &self.github_pr_commands,
+            (RunnerLane::Github, Scope::Full) => &self.github_full_commands,
+            (RunnerLane::Velnor, Scope::Affected) => &self.velnor_pr_commands,
+            (RunnerLane::Velnor, Scope::Full) => &self.velnor_full_commands,
+        }
+    }
+
+    /// Whether affected Rust changes should also select this workspace gate.
+    /// The generator keeps the flag in generation config only; pinned Planning
+    /// runtimes infer the gate from the emitted `cargo check --workspace`
+    /// command contract.
+    fn is_workspace_check(&self) -> bool {
+        if self.workspace_check {
+            return true;
+        }
+        [
+            &self.github_pr_commands,
+            &self.github_full_commands,
+            &self.velnor_pr_commands,
+            &self.velnor_full_commands,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|command| {
+            command.contains("check --workspace --all-targets")
+                && (command.contains("cargo check --workspace")
+                    || command.contains("mbx check --workspace"))
+        })
+    }
+
+    /// Return the Cargo lockfile root recorded by the generator metadata.
+    ///
+    /// Workspace members carry the repository-root `Cargo.lock` in their
+    /// watch/cache contract, while an independent manifest tree carries its
+    /// own `<root>/Cargo.lock`. Keep this derived from those serialized
+    /// paths rather than from package names so the runtime follows the
+    /// generator's lockfile discovery for every repository.
+    fn cargo_lockfile_root(&self) -> &str {
+        if self.root == "." {
+            return ".";
+        }
+        let local_lockfile = format!("{}/Cargo.lock", self.root);
+        let has_local_lockfile = self.watch.iter().any(|path| path == &local_lockfile)
+            || self
+                .cache
+                .as_ref()
+                .is_some_and(|cache| cache.key_files.iter().any(|path| path == &local_lockfile));
+        if has_local_lockfile {
+            &self.root
+        } else {
+            "."
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Scope {
+    Affected,
+    Full,
+}
+
+impl Scope {
+    pub(crate) fn parse(value: &str) -> Result<Self, GeneratorError> {
+        match value {
+            "affected" => Ok(Self::Affected),
+            "full" => Ok(Self::Full),
+            _ => Err(GeneratorError::usage(format!(
+                "unsupported CI scope: {value}"
+            ))),
+        }
+    }
+}
+
+/// `velnor-workflow version [--json]`: the crate version and the source
+/// revision stamped at build time (the same value `--revision` prints), so a
+/// candidate binary can prove which commit it was built from.
+fn print_version(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let json = match arguments {
+        [] => false,
+        [flag] if flag == "--json" => true,
+        other => {
+            return Err(GeneratorError::usage(format!(
+                "version accepts only --json, got {}",
+                other
+                    .iter()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )));
+        }
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "crate_version": env!("CARGO_PKG_VERSION"),
+                "revision": crate::SOURCE_REVISION,
+                "closure": crate::SOURCE_CLOSURE,
+                "features": env!("VELNOR_WORKFLOW_FEATURES"),
+            })
+        );
+    } else {
+        println!(
+            "velnor-workflow {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            crate::SOURCE_REVISION
+        );
+    }
+    Ok(())
+}
+
+/// `velnor-workflow closure --rev SHA [--profile release|debug] [--repo PATH] [--candidate]`:
+/// print the source-closure digest of `SHA` in the repository at `--repo`
+/// (the current directory by default). CI jobs use it to name the product
+/// they need; policy resolves the same digest when it verifies.
+/// `--candidate` names the unit job's own debug build (default features); it
+/// cannot combine with `--profile`.
+fn print_closure(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let (candidate, rest): (Vec<&OsString>, Vec<&OsString>) =
+        arguments.iter().partition(|argument| {
+            argument
+                .to_str()
+                .is_some_and(|value| value == "--candidate")
+        });
+    if candidate.len() > 1 {
+        return Err(GeneratorError::usage(
+            "duplicate option: --candidate".to_owned(),
+        ));
+    }
+    let candidate = !candidate.is_empty();
+    let rest: Vec<OsString> = rest.into_iter().cloned().collect();
+    let options = parse_options(&rest, &["rev", "profile", "repo"])?;
+    let rev = options
+        .get("rev")
+        .ok_or_else(|| GeneratorError::usage("closure requires --rev SHA".to_owned()))?;
+    if !crate::is_full_revision(rev) {
+        return Err(GeneratorError::usage(format!(
+            "closure --rev must be a full 40-character commit SHA, got {rev:?}"
+        )));
+    }
+    if candidate && options.contains_key("profile") {
+        return Err(GeneratorError::usage(
+            "closure --candidate cannot combine with --profile".to_owned(),
+        ));
+    }
+    let profile = options
+        .get("profile")
+        .map_or(crate::closure::PROFILE_RELEASE, String::as_str);
+    if !matches!(
+        profile,
+        crate::closure::PROFILE_RELEASE | crate::closure::PROFILE_DEBUG
+    ) {
+        return Err(GeneratorError::usage(format!(
+            "closure --profile must be release or debug, got {profile:?}"
+        )));
+    }
+    let repo = match options.get("repo") {
+        Some(path) => PathBuf::from(path.as_str()),
+        None => env::current_dir()
+            .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?,
+    };
+    let digest = if candidate {
+        crate::closure::candidate_closure_of_tree(&repo, rev)?
+    } else {
+        crate::closure::closure_of_tree(&repo, rev, crate::closure::CI_FEATURES, profile)?
+    };
+    println!("{digest}");
+    Ok(())
+}
+
+/// `velnor-workflow promote --rev SHA|HEAD [--repo PATH] [--generator-repo PATH]
+/// [--default-branch BRANCH] [--runners MODE] [--message TEXT] [--dry-run]`:
+/// stamp the D19 pin and regenerate the whole tree in one atomic commit. The
+/// running binary must render with exactly the source closure the pin names
+/// (render with X ⇒ stamp X); anything else fails closed before touching the
+/// tree. `--generator-repo` points fleet promotion at a product checkout
+/// holding the pin's history; it defaults to the promoted repository itself.
+fn promote_command(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let (flags, rest): (Vec<&OsString>, Vec<&OsString>) = arguments
+        .iter()
+        .partition(|argument| argument.to_str().is_some_and(|value| value == "--dry-run"));
+    if flags.len() > 1 {
+        return Err(GeneratorError::usage(
+            "duplicate option: --dry-run".to_owned(),
+        ));
+    }
+    let dry_run = !flags.is_empty();
+    let rest: Vec<OsString> = rest.into_iter().cloned().collect();
+    let options = parse_options(
+        &rest,
+        &[
+            "rev",
+            "repo",
+            "generator-repo",
+            "default-branch",
+            "runners",
+            "message",
+        ],
+    )?;
+    let rev = options
+        .get("rev")
+        .ok_or_else(|| GeneratorError::usage("promote requires --rev SHA".to_owned()))?;
+    let repo = match options.get("repo") {
+        Some(path) => PathBuf::from(path.as_str()),
+        None => env::current_dir()
+            .map_err(|error| GeneratorError::usage(format!("resolve promote root: {error}")))?,
+    };
+    let runners = options
+        .get("runners")
+        .map_or(Ok(crate::RunnerMode::Both), |value| {
+            crate::parse_runner_mode(value)
+        })?;
+    let report = crate::promote::run_promote(&crate::promote::PromoteOptions {
+        rev: rev.clone(),
+        repo,
+        generator_repo: options
+            .get("generator-repo")
+            .map(|path| PathBuf::from(path.as_str())),
+        default_branch: options.get("default-branch").cloned(),
+        runners,
+        message: options.get("message").cloned(),
+        dry_run,
+    })?;
+    print!("{}", crate::promote::render_report(&report));
+    Ok(())
+}
+
+/// Dispatch the binary-only subcommands. `false` means the arguments belong
+/// to the workflow generator CLI proper.
+pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
+    let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
+        return Ok(false);
+    };
+    match command {
+        "plan" => {
+            let options = parse_options(&arguments[1..], &["config"])?;
+            plan(&resolve_config_path(options.get("config")))?;
+            Ok(true)
+        }
+        "run" => {
+            let options = parse_options(&arguments[1..], &["config", "scope", "unit"])?;
+            let root = env::current_dir()
+                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+            let config = resolve_config_path(options.get("config"));
+            let scope = options
+                .get("scope")
+                .map_or(Ok(Scope::Full), |value| Scope::parse(value))?;
+            run_units(
+                &root,
+                &config,
+                scope,
+                options.get("unit").map(String::as_str),
+            )?;
+            Ok(true)
+        }
+        "test-crates" => {
+            let options = parse_options(&arguments[1..], &["config"])?;
+            let root = env::current_dir()
+                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+            test_crates(&root, &resolve_config_path(options.get("config")), None)?;
+            Ok(true)
+        }
+        "policy" => {
+            crate::policy::run_cli(&arguments[1..])?;
+            Ok(true)
+        }
+        "release" => {
+            release(&arguments[1..])?;
+            Ok(true)
+        }
+        "version" => {
+            print_version(arguments.get(1..).unwrap_or_default())?;
+            Ok(true)
+        }
+        "closure" => {
+            print_closure(arguments.get(1..).unwrap_or_default())?;
+            Ok(true)
+        }
+        "promote" => {
+            promote_command(arguments.get(1..).unwrap_or_default())?;
+            Ok(true)
+        }
+        "cache-plan" => {
+            let options = parse_options(&arguments[1..], &["entries", "now", "mode"])?;
+            let mode = options.get("mode").map_or("plan", String::as_str);
+            if !matches!(mode, "plan" | "budget") {
+                return Err(GeneratorError::usage(format!(
+                    "unsupported cache-plan mode: {mode}; use --mode=plan or --mode=budget"
+                )));
+            }
+            if mode == "budget" {
+                if let Some(entries_path) = options.get("entries") {
+                    cache_budget_report(entries_path)?;
+                } else {
+                    println!("{}", retention_policy_for_plan().total_bytes);
+                }
+                return Ok(true);
+            }
+            cache_plan(
+                options.get("entries").map(String::as_str),
+                options.get("now").map(String::as_str),
+            )?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// One Actions cache entry as the maintenance job collects it from the API.
+#[derive(Deserialize)]
+struct CacheEntryRecord {
+    #[serde(deserialize_with = "deserialize_cache_id")]
+    id: String,
+    key: String,
+    size_in_bytes: u64,
+    created_at: String,
+}
+
+/// Accept the Actions API's numeric cache id and carry it losslessly as the
+/// planner's string identity. The API has shipped both JSON shapes; treating
+/// its current numeric encoding as invalid turns retention into a cold-cache
+/// failure instead of the bounded maintenance it exists to perform.
+fn deserialize_cache_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct CacheIdVisitor;
+
+    impl serde::de::Visitor<'_> for CacheIdVisitor {
+        type Value = String;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a numeric or string Actions cache id")
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_string())
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_string())
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_owned())
+        }
+    }
+
+    deserializer.deserialize_any(CacheIdVisitor)
+}
+
+fn read_cache_entries(entries_path: &str) -> Result<Vec<SnapshotCacheEntry>, GeneratorError> {
+    let entries_text = fs::read_to_string(entries_path).map_err(|error| {
+        GeneratorError::io(
+            "read cache account snapshot",
+            Path::new(entries_path),
+            &error,
+        )
+    })?;
+    let records: Vec<CacheEntryRecord> = serde_json::from_str(&entries_text).map_err(|error| {
+        GeneratorError::usage(format!(
+            "the cache account snapshot is not an array of cache records: {error}"
+        ))
+    })?;
+    Ok(records
+        .into_iter()
+        .map(|record| SnapshotCacheEntry {
+            id: record.id,
+            key: record.key,
+            size_in_bytes: record.size_in_bytes,
+            created_at: record.created_at,
+        })
+        .collect())
+}
+
+/// Resolve the GitHub Actions retention policy from `.github-gen/velnor-workflow.toml`
+/// when present, otherwise the generator default.
+fn retention_policy_for_plan() -> RetentionPolicy {
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| crate::config::discover(&cwd).ok().flatten())
+        .map_or_else(RetentionPolicy::default_policy, |config| {
+            RetentionPolicy::from_config(config.cache_github())
+        })
+}
+
+/// Emit per-class totals and headroom for the maintenance budget step.
+fn cache_budget_report(entries_path: &str) -> Result<(), GeneratorError> {
+    let entries = read_cache_entries(entries_path)?;
+    let report = budget_report(&entries, &retention_policy_for_plan());
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    serde_json::to_writer(&mut handle, &report)
+        .map_err(|error| GeneratorError::usage(format!("write budget report: {error}")))?;
+    writeln!(handle)
+        .map_err(|error| GeneratorError::usage(format!("write budget report: {error}")))?;
+    Ok(())
+}
+
+/// Compute the retention eviction plan for the Actions cache account: the same
+/// [`RetentionPolicy`] and the same `plan_evictions` the generator's tests
+/// exercise, run against the account snapshot the maintenance job collects.
+/// The plan is the workflow's only eviction decision — the job applies it
+/// verbatim and records every eviction's class and reason in the summary.
+///
+/// `--now` pins the clock for tests; a live run uses the system clock.
+fn cache_plan(entries_path: Option<&str>, now: Option<&str>) -> Result<(), GeneratorError> {
+    let entries = if let Some(path) = entries_path {
+        read_cache_entries(path)?
+    } else {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).map_err(|error| {
+            GeneratorError::usage(format!("read cache account snapshot: {error}"))
+        })?;
+        let records: Vec<CacheEntryRecord> = serde_json::from_str(&text).map_err(|error| {
+            GeneratorError::usage(format!(
+                "the cache account snapshot is not an array of cache records: {error}"
+            ))
+        })?;
+        records
+            .into_iter()
+            .map(|record| SnapshotCacheEntry {
+                id: record.id,
+                key: record.key,
+                size_in_bytes: record.size_in_bytes,
+                created_at: record.created_at,
+            })
+            .collect()
+    };
+    let now_epoch = match now {
+        Some(pinned) => parse_pinned_epoch(pinned)?,
+        None => std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| GeneratorError::usage(format!("resolve current time: {error}")))?
+            .as_secs()
+            .cast_signed(),
+    };
+    let plan = plan_evictions(&entries, &retention_policy_for_plan(), now_epoch);
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    serde_json::to_writer(&mut handle, &plan)
+        .map_err(|error| GeneratorError::usage(format!("write eviction plan: {error}")))?;
+    writeln!(handle)
+        .map_err(|error| GeneratorError::usage(format!("write eviction plan: {error}")))?;
+    Ok(())
+}
+
+/// Parse the pinned `--now` clock as seconds since the epoch, so a test run
+/// names a reproducible instant.
+fn parse_pinned_epoch(pinned: &str) -> Result<i64, GeneratorError> {
+    pinned.parse::<i64>().map_err(|_| {
+        GeneratorError::usage(format!(
+            "unsupported --now value {pinned}: name seconds since the epoch"
+        ))
+    })
+}
+
+fn parse_options(
+    arguments: &[OsString],
+    allowed: &[&str],
+) -> Result<BTreeMap<String, String>, GeneratorError> {
+    let mut options = BTreeMap::new();
+    let mut index = 0;
+    while index < arguments.len() {
+        let raw = arguments[index]
+            .to_str()
+            .ok_or_else(|| GeneratorError::usage("CI argument must be valid UTF-8"))?;
+        let (name, inline) = raw
+            .strip_prefix("--")
+            .and_then(|value| {
+                value
+                    .split_once('=')
+                    .map_or(Some((value, None)), |(n, v)| Some((n, Some(v))))
+            })
+            .ok_or_else(|| GeneratorError::usage(format!("unsupported CI argument: {raw}")))?;
+        if !allowed.contains(&name) {
+            return Err(GeneratorError::usage(format!(
+                "unsupported CI argument: --{name}"
+            )));
+        }
+        let value = match inline {
+            Some(value) if !value.is_empty() => value.to_owned(),
+            Some(_) => return Err(GeneratorError::usage(format!("--{name} needs a value"))),
+            None => {
+                index += 1;
+                arguments
+                    .get(index)
+                    .and_then(|value| value.to_str())
+                    .filter(|value| !value.starts_with('-'))
+                    .ok_or_else(|| GeneratorError::usage(format!("--{name} needs a value")))?
+                    .to_owned()
+            }
+        };
+        if options.insert(name.to_owned(), value).is_some() {
+            return Err(GeneratorError::usage(format!("duplicate option: --{name}")));
+        }
+        index += 1;
+    }
+    Ok(options)
+}
+
+fn resolve_config_path(config: Option<&String>) -> PathBuf {
+    config.map_or_else(|| PathBuf::from(DEFAULT_CONFIG), PathBuf::from)
+}
+
+/// Parse a generated `project.toml` through the real runtime contract.
+/// Emitter tests use it to prove the generator never ships a field the
+/// runtime rejects.
+#[cfg(test)]
+pub(crate) fn read_config_for_test(path: &Path) -> Result<(), GeneratorError> {
+    read_config(path).map(|_| ())
+}
+
+pub(crate) fn read_config(path: &Path) -> Result<CiConfig, GeneratorError> {
+    let contents = fs::read_to_string(path)
+        .map_err(|error| GeneratorError::io("read CI configuration", path, &error))?;
+    let config: CiConfig = toml::from_str(&contents).map_err(|error| {
+        GeneratorError::usage(format!(
+            "parse CI configuration {}: {error}",
+            path.display()
+        ))
+    })?;
+    if config.schema != 2 {
+        return Err(GeneratorError::usage(format!(
+            "unsupported CI configuration schema: {}",
+            config.schema
+        )));
+    }
+    validate_config(&config)
+}
+
+fn validate_config(config: &CiConfig) -> Result<CiConfig, GeneratorError> {
+    if config.unit.is_empty() {
+        return Err(GeneratorError::usage("CI configuration declares no units"));
+    }
+    let mut known = BTreeSet::new();
+    for unit in &config.unit {
+        if !is_unit_id(&unit.id) {
+            return Err(GeneratorError::usage(format!(
+                "invalid CI unit id: {}",
+                unit.id
+            )));
+        }
+        if !known.insert(unit.id.clone()) {
+            return Err(GeneratorError::usage(format!(
+                "duplicate CI unit id: {}",
+                unit.id
+            )));
+        }
+        // An empty watch is valid: a unit with no sources never matches an
+        // affected diff but still runs in full scope.
+        if unit.github_pr_commands.is_empty()
+            || unit.github_full_commands.is_empty()
+            || unit.velnor_pr_commands.is_empty()
+            || unit.velnor_full_commands.is_empty()
+        {
+            return Err(GeneratorError::usage(format!(
+                "CI unit must declare GitHub and Velnor PR/full commands: {}",
+                unit.id
+            )));
+        }
+    }
+    for unit in &config.unit {
+        for dependency in &unit.depends_on {
+            if !known.contains(dependency) {
+                return Err(GeneratorError::usage(format!(
+                    "{} depends on unknown unit: {}",
+                    unit.id, dependency
+                )));
+            }
+            if dependency == &unit.id {
+                return Err(GeneratorError::usage(format!(
+                    "unit cannot depend on itself: {}",
+                    unit.id
+                )));
+            }
+        }
+    }
+    let mut version_bump_units = BTreeSet::new();
+    for unit in &config.workflow.version_bump_units {
+        if !known.contains(unit) {
+            return Err(GeneratorError::usage(format!(
+                "workflow.version_bump_units names unknown unit: {unit}"
+            )));
+        }
+        if !version_bump_units.insert(unit) {
+            return Err(GeneratorError::usage(format!(
+                "workflow.version_bump_units contains duplicate unit: {unit}"
+            )));
+        }
+    }
+    Ok(config.clone())
+}
+
+pub(crate) fn is_unit_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && value.as_bytes()[0].is_ascii_lowercase()
+}
+
+fn plan(config_path: &Path) -> Result<(), GeneratorError> {
+    let config = read_config(config_path)?;
+    let scope = match scope_for_event()? {
+        Some(value) => Scope::parse(&value)?,
+        None => Scope::Full,
+    };
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    let base = env::var("BASE_SHA").unwrap_or_default();
+    let head = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
+    let lanes = plan_lanes()?;
+    let selection = selection_for_lanes(
+        &config,
+        selection_for_diff(&root, &config, scope, &base, &head)?,
+        lanes,
+    );
+    let units = selection
+        .units
+        .iter()
+        .map(|unit| unit.id.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let full_units = selection
+        .full_units
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(",");
+    if let Some(path) = env::var_os("VELNOR_SELECTION_FILE") {
+        write_selection_file(
+            &PathBuf::from(path),
+            &base,
+            &head,
+            scope,
+            &units,
+            &full_units,
+        )?;
+    }
+    if let Some(output) = env::var_os("GITHUB_OUTPUT") {
+        let output_path = PathBuf::from(output);
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&output_path)
+            .map_err(|error| GeneratorError::io("open GitHub output", &output_path, &error))?;
+        writeln!(file, "scope={}", scope_name(scope))
+            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+        writeln!(file, "base_sha={base}")
+            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+        writeln!(file, "head_sha={head}")
+            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+        writeln!(file, "units={units}")
+            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+        writeln!(file, "full_units={full_units}")
+            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+        write_kind_matrices(&mut file, &config, &selection, &output_path)?;
+    }
+    println!("scope={}", scope_name(scope));
+    println!("units={units}");
+    println!("full_units={full_units}");
+    Ok(())
+}
+
+fn write_kind_matrices(
+    file: &mut fs::File,
+    config: &CiConfig,
+    selection: &UnitSelection<'_>,
+    output_path: &Path,
+) -> Result<(), GeneratorError> {
+    let selected = selection
+        .units
+        .iter()
+        .map(|unit| unit.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut matrices: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
+    for unit in &config.unit {
+        matrices.entry(unit_matrix_output(unit)).or_default();
+    }
+    for unit in &config.unit {
+        if !selected.contains(unit.id.as_str()) {
+            continue;
+        }
+        let label = if unit.label.is_empty() {
+            unit.id.clone()
+        } else {
+            unit.label.clone()
+        };
+        matrices
+            .entry(unit_matrix_output(unit))
+            .or_default()
+            .push(serde_json::json!({ "unit": unit.id, "label": label }));
+    }
+    for (matrix_output, entries) in matrices {
+        let json = serde_json::to_string(&entries).map_err(|error| {
+            GeneratorError::usage(format!("serialize {matrix_output}: {error}"))
+        })?;
+        writeln!(file, "{matrix_output}={json}")
+            .map_err(|error| GeneratorError::io("write GitHub output", output_path, &error))?;
+    }
+    Ok(())
+}
+
+fn unit_matrix_output(unit: &CiUnit) -> String {
+    format!("{}_matrix", unit.kind.as_str())
+}
+
+fn scope_for_event() -> Result<Option<String>, GeneratorError> {
+    let event = env::var("EVENT_NAME").unwrap_or_default();
+    let override_scope = env::var("CI_SCOPE_OVERRIDE")
+        .ok()
+        .filter(|value| !value.is_empty());
+    scope_for_event_values(&event, override_scope.as_deref())
+}
+
+pub(crate) fn scope_for_event_values(
+    event: &str,
+    override_scope: Option<&str>,
+) -> Result<Option<String>, GeneratorError> {
+    match event {
+        // Merge-queue validation is a trusted event like push and schedule:
+        // the ephemeral merge ref has no pull_request base to diff against,
+        // so it always runs full scope.
+        "push" | "schedule" | "merge_group" => {
+            if override_scope.is_some_and(|scope| scope != "full") {
+                return Err(GeneratorError::usage(
+                    "trusted events require full CI scope",
+                ));
+            }
+            Ok(Some("full".to_owned()))
+        }
+        "workflow_dispatch" => match override_scope {
+            None | Some("full") => Ok(Some("full".to_owned())),
+            Some("affected") => Ok(Some("affected".to_owned())),
+            Some(other) => Err(GeneratorError::usage(format!(
+                "unsupported CI scope override `{other}`"
+            ))),
+        },
+        "pull_request" => Ok(override_scope
+            .map(ToOwned::to_owned)
+            .or_else(|| Some("affected".to_owned()))),
+        "" => Ok(override_scope.map(ToOwned::to_owned)),
+        other => Err(GeneratorError::usage(format!(
+            "unsupported CI event `{other}`"
+        ))),
+    }
+}
+
+fn scope_name(scope: Scope) -> &'static str {
+    match scope {
+        Scope::Affected => "affected",
+        Scope::Full => "full",
+    }
+}
+
+/// The lanes admitted for this plan, from the `VELNOR_LANES` environment the
+/// Both-mode plan step sets to `needs.lane-admission.outputs.lanes`.
+/// Absent or empty means `both`: single-lane aggregates and local runs plan
+/// without lane filtering, exactly as before.
+fn plan_lanes() -> Result<RunnerMode, GeneratorError> {
+    plan_lanes_for_value(env::var("VELNOR_LANES").unwrap_or_default().as_str())
+}
+
+fn plan_lanes_for_value(value: &str) -> Result<RunnerMode, GeneratorError> {
+    match value.trim() {
+        "" | "both" => Ok(RunnerMode::Both),
+        "velnor" => Ok(RunnerMode::Velnor),
+        "github" => Ok(RunnerMode::Github),
+        other => Err(GeneratorError::usage(format!(
+            "unsupported CI lanes `{other}`: use velnor, github, or both"
+        ))),
+    }
+}
+
+/// Narrow a diff selection to the units the admitted `lanes` can execute.
+/// A velnor-only dispatch drops whatever the Velnor lane cannot run (Swift
+/// units); the required gate already tolerates `skipped` for unselected
+/// units, so the excluded callers stay green instead of failing a selection
+/// they can never satisfy. Units of an unknown kind are kept: dropping a
+/// unit the planner does not recognize would silently skip verification.
+///
+/// A both-lane plan keeps pairable kinds. A GitHub-only kind (Swift) stays
+/// selected so an explicit `jobs = ["github"]` opt-out still runs on the
+/// hosted lane when the plan admits GitHub.
+fn selection_for_lanes<'a>(
+    config: &'a CiConfig,
+    selection: UnitSelection<'a>,
+    lanes: RunnerMode,
+) -> UnitSelection<'a> {
+    let kinds = config
+        .unit
+        .iter()
+        .map(|unit| (unit.id.as_str(), unit.kind.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let supported = |kind: &str| {
+        UnitKind::from_prefix(kind).is_none_or(|parsed| {
+            if lanes_support_unit_kind(lanes, parsed) {
+                return true;
+            }
+            lanes == RunnerMode::Both
+                && (crate::lane_supports_unit_kind(RunnerMode::Github, parsed)
+                    || crate::lane_supports_unit_kind(RunnerMode::Velnor, parsed))
+        })
+    };
+    UnitSelection {
+        units: selection
+            .units
+            .into_iter()
+            .filter(|unit| supported(unit.kind.as_str()))
+            .collect(),
+        full_units: selection
+            .full_units
+            .into_iter()
+            .filter(|id| kinds.get(id.as_str()).is_none_or(|kind| supported(kind)))
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod scope_event_tests {
+    use super::scope_for_event_values;
+    use crate::GeneratorError;
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must<T>(result: Result<T, GeneratorError>, context: &str) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{context}: {error}"),
+        }
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must_fail<T>(result: Result<T, GeneratorError>, context: &str) -> GeneratorError {
+        match result {
+            Ok(_) => panic!("{context}: expected a failure, got success"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn merge_group_is_a_trusted_full_scope_event() {
+        assert_eq!(
+            must(scope_for_event_values("merge_group", None), "resolve scope").as_deref(),
+            Some("full")
+        );
+        assert_eq!(
+            must(
+                scope_for_event_values("merge_group", Some("full")),
+                "resolve explicit full scope"
+            )
+            .as_deref(),
+            Some("full")
+        );
+        let error = must_fail(
+            scope_for_event_values("merge_group", Some("affected")),
+            "merge_group must reject a narrowed scope",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("trusted events require full CI scope"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn unknown_events_are_rejected_and_empty_keeps_local_passthrough() {
+        let error = must_fail(
+            scope_for_event_values("release", None),
+            "unknown events must fail closed",
+        );
+        assert!(
+            error.to_string().contains("unsupported CI event `release`"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            must(scope_for_event_values("", None), "resolve empty scope"),
+            None
+        );
+        assert_eq!(
+            must(
+                scope_for_event_values("", Some("affected")),
+                "resolve empty override"
+            )
+            .as_deref(),
+            Some("affected")
+        );
+    }
+}
+
+#[cfg(test)]
+mod runner_lane_tests {
+    use super::{collect_manifests, expand_affected_units, CiUnit, RunnerLane, Scope};
+    use std::path::Path;
+
+    #[test]
+    fn github_is_the_default_lane_and_velnor_backend_selects_velnor() {
+        assert_eq!(RunnerLane::from_execution_backend(None), RunnerLane::Github);
+        assert_eq!(
+            RunnerLane::from_execution_backend(Some("github-hosted")),
+            RunnerLane::Github
+        );
+        assert_eq!(
+            RunnerLane::from_execution_backend(Some("docker")),
+            RunnerLane::Velnor
+        );
+        assert_eq!(
+            RunnerLane::from_execution_backend(Some("MICROVM")),
+            RunnerLane::Velnor
+        );
+        assert_eq!(
+            RunnerLane::Github,
+            RunnerLane::from_execution_backend(Some("self-hosted"))
+        );
+        assert_eq!(
+            RunnerLane::Github,
+            RunnerLane::from_execution_backend(Some("unknown"))
+        );
+    }
+
+    #[test]
+    fn lane_and_scope_select_the_matching_command_array() {
+        let unit = CiUnit {
+            id: "docker".to_owned(),
+            label: "Docker".to_owned(),
+            kind: "docker".to_owned(),
+            root: ".".to_owned(),
+            watch: vec!["Dockerfile".to_owned()],
+            github_pr_commands: vec!["github-pr".to_owned()],
+            github_full_commands: vec!["github-full".to_owned()],
+            velnor_pr_commands: vec!["velnor-pr".to_owned()],
+            velnor_full_commands: vec!["velnor-full".to_owned()],
+            depends_on: Vec::new(),
+            tool_version: None,
+            cache: None,
+            workspace_check: false,
+        };
+        assert_eq!(
+            unit.commands(RunnerLane::Github, Scope::Affected),
+            &["github-pr".to_owned()]
+        );
+        assert_eq!(
+            unit.commands(RunnerLane::Github, Scope::Full),
+            &["github-full".to_owned()]
+        );
+        assert_eq!(
+            unit.commands(RunnerLane::Velnor, Scope::Affected),
+            &["velnor-pr".to_owned()]
+        );
+        assert_eq!(
+            unit.commands(RunnerLane::Velnor, Scope::Full),
+            &["velnor-full".to_owned()]
+        );
+    }
+
+    #[test]
+    fn affected_closure_does_not_follow_dependents_of_added_prerequisites() {
+        let units = vec![
+            CiUnit {
+                id: "base".to_owned(),
+                label: "base".to_owned(),
+                kind: "rust".to_owned(),
+                root: ".".to_owned(),
+                watch: Vec::new(),
+                github_pr_commands: vec!["base".to_owned()],
+                github_full_commands: vec!["base".to_owned()],
+                velnor_pr_commands: vec!["base".to_owned()],
+                velnor_full_commands: vec!["base".to_owned()],
+                depends_on: Vec::new(),
+                tool_version: None,
+                cache: None,
+                workspace_check: false,
+            },
+            CiUnit {
+                id: "changed".to_owned(),
+                label: "changed".to_owned(),
+                kind: "rust".to_owned(),
+                root: ".".to_owned(),
+                watch: Vec::new(),
+                github_pr_commands: vec!["changed".to_owned()],
+                github_full_commands: vec!["changed".to_owned()],
+                velnor_pr_commands: vec!["changed".to_owned()],
+                velnor_full_commands: vec!["changed".to_owned()],
+                depends_on: vec!["base".to_owned()],
+                tool_version: None,
+                cache: None,
+                workspace_check: false,
+            },
+            CiUnit {
+                id: "sibling".to_owned(),
+                label: "sibling".to_owned(),
+                kind: "rust".to_owned(),
+                root: ".".to_owned(),
+                watch: Vec::new(),
+                github_pr_commands: vec!["sibling".to_owned()],
+                github_full_commands: vec!["sibling".to_owned()],
+                velnor_pr_commands: vec!["sibling".to_owned()],
+                velnor_full_commands: vec!["sibling".to_owned()],
+                depends_on: vec!["base".to_owned()],
+                tool_version: None,
+                cache: None,
+                workspace_check: false,
+            },
+            CiUnit {
+                id: "leaf".to_owned(),
+                label: "leaf".to_owned(),
+                kind: "rust".to_owned(),
+                root: ".".to_owned(),
+                watch: Vec::new(),
+                github_pr_commands: vec!["leaf".to_owned()],
+                github_full_commands: vec!["leaf".to_owned()],
+                velnor_pr_commands: vec!["leaf".to_owned()],
+                velnor_full_commands: vec!["leaf".to_owned()],
+                depends_on: vec!["changed".to_owned()],
+                tool_version: None,
+                cache: None,
+                workspace_check: false,
+            },
+        ];
+        let selected = expand_affected_units(&units, ["changed".to_owned()].into_iter().collect());
+        assert_eq!(
+            selected,
+            ["base", "changed", "leaf"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+    }
+
+    #[test]
+    fn crate_test_collection_matches_scanner_fixture_exclusions() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut manifests = Vec::new();
+        assert!(collect_manifests(root, root, &mut manifests).is_ok());
+        assert!(manifests.iter().all(|path| {
+            path.strip_prefix(root).is_ok_and(|relative| {
+                !super::super::is_test_support_path(&relative.to_string_lossy())
+            })
+        }));
+    }
+}
+
+pub(crate) fn run_units(
+    root: &Path,
+    config_path: &Path,
+    scope: Scope,
+    only_unit: Option<&str>,
+) -> Result<(), GeneratorError> {
+    let selection_file = env::var_os("VELNOR_SELECTION_FILE").map_or_else(
+        || root.join(".velnor-ci-selection/velnor-ci-selection"),
+        PathBuf::from,
+    );
+    run_units_with_selection_file(root, config_path, scope, only_unit, &selection_file)
+}
+
+pub(crate) fn run_units_with_selection_file(
+    root: &Path,
+    config_path: &Path,
+    scope: Scope,
+    only_unit: Option<&str>,
+    selection_file: &Path,
+) -> Result<(), GeneratorError> {
+    let config = read_config(config_path)?;
+    if matches!(env::var("EVENT_NAME").as_deref(), Ok("push" | "schedule")) && scope != Scope::Full
+    {
+        return Err(GeneratorError::usage(
+            "trusted events require full CI scope",
+        ));
+    }
+    let selection = read_selection_file(selection_file)?;
+    validate_selection_sha(&selection)?;
+    if selection.scope != scope {
+        return Err(GeneratorError::usage(format!(
+            "CI selection artifact scope mismatch: plan={} job={}",
+            scope_name(selection.scope),
+            scope_name(scope)
+        )));
+    }
+    let selected = ordered_units(&config.unit, Some(&selection.units))?;
+    if selected.len() != selection.units.len() {
+        return Err(GeneratorError::usage(
+            "CI selection artifact names an unknown unit",
+        ));
+    }
+    if selection
+        .full_units
+        .iter()
+        .any(|unit| !selection.units.contains(unit))
+    {
+        return Err(GeneratorError::usage(
+            "CI selection artifact marks an unselected unit as full",
+        ));
+    }
+    let full_units = selection.full_units;
+    let selected = select_units_for_job(selected, only_unit)?;
+    run_layers(root, &selected, scope, &full_units)
+}
+
+fn select_units_for_job<'a>(
+    selected: Vec<&'a CiUnit>,
+    only_unit: Option<&str>,
+) -> Result<Vec<&'a CiUnit>, GeneratorError> {
+    match only_unit {
+        Some(id) => {
+            if !selected.iter().any(|unit| unit.id == id) {
+                return Err(GeneratorError::usage(format!(
+                    "CI selection artifact does not include requested unit `{id}`"
+                )));
+            }
+            Ok(selected.into_iter().filter(|unit| unit.id == id).collect())
+        }
+        None => Ok(selected),
+    }
+}
+
+struct UnitSelection<'a> {
+    units: Vec<&'a CiUnit>,
+    full_units: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PlannedSelection {
+    base_sha: String,
+    head_sha: String,
+    scope: Scope,
+    units: BTreeSet<String>,
+    full_units: BTreeSet<String>,
+}
+
+pub(crate) const SELECTION_FILE_VERSION: &str = "1";
+
+fn write_selection_file(
+    path: &Path,
+    base_sha: &str,
+    head_sha: &str,
+    scope: Scope,
+    units: &str,
+    full_units: &str,
+) -> Result<(), GeneratorError> {
+    let contents = format!(
+        "version={SELECTION_FILE_VERSION}\nbase_sha={base_sha}\nhead_sha={head_sha}\nscope={}\nunits={units}\nfull_units={full_units}\n",
+        scope_name(scope)
+    );
+    fs::write(path, contents)
+        .map_err(|error| GeneratorError::io("write CI selection", path, &error))
+}
+
+fn read_selection_file(path: &Path) -> Result<PlannedSelection, GeneratorError> {
+    let contents = fs::read_to_string(path)
+        .map_err(|error| GeneratorError::io("read CI selection", path, &error))?;
+    let mut fields = BTreeMap::new();
+    for line in contents.lines() {
+        let (key, value) = line
+            .split_once('=')
+            .ok_or_else(|| GeneratorError::usage("malformed CI selection artifact"))?;
+        if fields.insert(key.to_owned(), value.to_owned()).is_some() {
+            return Err(GeneratorError::usage(
+                "CI selection artifact contains duplicate fields",
+            ));
+        }
+    }
+    if fields.remove("version").as_deref() != Some(SELECTION_FILE_VERSION) {
+        return Err(GeneratorError::usage(
+            "unsupported CI selection artifact version",
+        ));
+    }
+    let base_sha = fields
+        .remove("base_sha")
+        .ok_or_else(|| GeneratorError::usage("CI selection artifact is missing base_sha"))?;
+    let head_sha = fields
+        .remove("head_sha")
+        .ok_or_else(|| GeneratorError::usage("CI selection artifact is missing head_sha"))?;
+    let scope = Scope::parse(
+        &fields
+            .remove("scope")
+            .ok_or_else(|| GeneratorError::usage("CI selection artifact is missing scope"))?,
+    )?;
+    let units = parse_selection_ids(
+        &fields
+            .remove("units")
+            .ok_or_else(|| GeneratorError::usage("CI selection artifact is missing units"))?,
+    )?;
+    let full_units =
+        parse_selection_ids(&fields.remove("full_units").ok_or_else(|| {
+            GeneratorError::usage("CI selection artifact is missing full_units")
+        })?)?;
+    if !fields.is_empty() {
+        return Err(GeneratorError::usage(
+            "CI selection artifact contains unknown fields",
+        ));
+    }
+    Ok(PlannedSelection {
+        base_sha,
+        head_sha,
+        scope,
+        units,
+        full_units,
+    })
+}
+
+fn parse_selection_ids(value: &str) -> Result<BTreeSet<String>, GeneratorError> {
+    let mut ids = BTreeSet::new();
+    for value in value.split(',').filter(|value| !value.is_empty()) {
+        if !is_unit_id(value) {
+            return Err(GeneratorError::usage(format!(
+                "invalid unit id in CI selection artifact: {value}"
+            )));
+        }
+        if !ids.insert(value.to_owned()) {
+            return Err(GeneratorError::usage(format!(
+                "duplicate unit id in CI selection artifact: {value}"
+            )));
+        }
+    }
+    Ok(ids)
+}
+
+fn validate_selection_sha(selection: &PlannedSelection) -> Result<(), GeneratorError> {
+    let job_base = env::var("BASE_SHA").unwrap_or_default();
+    let job_head = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
+    // workflow_dispatch leaves BASE_SHA empty; plan already wrote the resolved
+    // base into the artifact. Unit jobs consume that plan and must not re-diff.
+    // A non-empty job BASE_SHA still has to match. HEAD always has to match.
+    let head_mismatch = selection.head_sha != job_head;
+    let base_mismatch = !job_base.is_empty() && selection.base_sha != job_base;
+    if head_mismatch || base_mismatch {
+        println!(
+            "::warning::CI selection artifact SHA mismatch: plan base SHA `{}` vs job base SHA `{}`; plan head SHA `{}` vs job head SHA `{}`",
+            selection.base_sha, job_base, selection.head_sha, job_head
+        );
+        return Err(GeneratorError::usage(
+            "CI selection artifact does not match this job checkout",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn selected_units_for_diff<'a>(
+    root: &Path,
+    config: &'a CiConfig,
+    scope: Scope,
+    base: &str,
+    head: &str,
+) -> Result<Vec<&'a CiUnit>, GeneratorError> {
+    Ok(selection_for_diff(root, config, scope, base, head)?.units)
+}
+
+fn selection_for_diff<'a>(
+    root: &Path,
+    config: &'a CiConfig,
+    scope: Scope,
+    base: &str,
+    head: &str,
+) -> Result<UnitSelection<'a>, GeneratorError> {
+    if scope == Scope::Full {
+        return full_selection(config);
+    }
+    if base.is_empty() || base.chars().all(|character| character == '0') {
+        return full_selection(config);
+    }
+    let Some(changed) = git_changed_files(root, base, head)? else {
+        return full_selection(config);
+    };
+    if changed.is_empty() {
+        return Ok(UnitSelection {
+            units: Vec::new(),
+            full_units: BTreeSet::new(),
+        });
+    }
+    if changed.iter().any(|file| file.starts_with(".github/")) {
+        return full_selection(config);
+    }
+    if version_bump_matches(
+        root,
+        base,
+        head,
+        &changed,
+        &config.unit,
+        &config.workflow.version_bump_units,
+    )? {
+        let allowlist = config
+            .workflow
+            .version_bump_units
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut selected = allowlist.clone();
+        extend_workspace_checks_for_cargo_roots(config, &mut selected);
+        return Ok(UnitSelection {
+            units: ordered_units(&config.unit, Some(&selected))?,
+            full_units: selected,
+        });
+    }
+    let matchers = config
+        .unit
+        .iter()
+        .map(|unit| {
+            let mut builder = GlobSetBuilder::new();
+            for pattern in &unit.watch {
+                let glob = Glob::new(pattern).map_err(|error| {
+                    GeneratorError::usage(format!("invalid watch pattern {pattern}: {error}"))
+                })?;
+                builder.add(glob);
+            }
+            let matcher = builder
+                .build()
+                .map_err(|error| GeneratorError::usage(format!("build watch matcher: {error}")))?;
+            Ok::<_, GeneratorError>((unit, matcher))
+        })
+        .collect::<Result<Vec<(&CiUnit, GlobSet)>, _>>()?;
+    let mut selected = BTreeSet::new();
+    for file in &changed {
+        let mut matched = false;
+        for (unit, matcher) in &matchers {
+            if matcher.is_match(file) {
+                selected.insert(unit.id.clone());
+                matched = true;
+            }
+        }
+        if !matched {
+            return full_selection(config);
+        }
+    }
+    extend_workspace_checks_for_cargo_roots(config, &mut selected);
+    let (selected, full_units) = expand_affected_units_with_full(&config.unit, selected);
+    Ok(UnitSelection {
+        units: ordered_units(&config.unit, Some(&selected))?,
+        full_units,
+    })
+}
+
+/// Select only the workspace checks that share a Cargo lockfile root with a
+/// directly selected Rust unit. This keeps independent Cargo projects
+/// affected-only while preserving the workspace gate for each matching root.
+fn extend_workspace_checks_for_cargo_roots(config: &CiConfig, selected: &mut BTreeSet<String>) {
+    let selected_cargo_roots = config
+        .unit
+        .iter()
+        .filter(|unit| {
+            selected.contains(&unit.id) && unit.kind == "rust" && !unit.is_workspace_check()
+        })
+        .map(CiUnit::cargo_lockfile_root)
+        .collect::<BTreeSet<_>>();
+    if selected_cargo_roots.is_empty() {
+        return;
+    }
+    selected.extend(
+        config
+            .unit
+            .iter()
+            .filter(|unit| {
+                unit.is_workspace_check()
+                    && selected_cargo_roots.contains(unit.cargo_lockfile_root())
+            })
+            .map(|unit| unit.id.clone()),
+    );
+}
+
+fn full_selection(config: &CiConfig) -> Result<UnitSelection<'_>, GeneratorError> {
+    Ok(UnitSelection {
+        units: ordered_units(&config.unit, None)?,
+        full_units: config.unit.iter().map(|unit| unit.id.clone()).collect(),
+    })
+}
+
+fn version_bump_matches(
+    root: &Path,
+    base: &str,
+    head: &str,
+    changed: &[String],
+    units: &[CiUnit],
+    allowlist: &[String],
+) -> Result<bool, GeneratorError> {
+    if allowlist.is_empty() || changed.is_empty() {
+        return Ok(false);
+    }
+    let independent_lockfiles = units
+        .iter()
+        .filter(|unit| unit.kind == "rust" && allowlist.iter().any(|allowed| allowed == &unit.id))
+        .filter_map(|unit| {
+            let cargo_root = unit.cargo_lockfile_root();
+            (cargo_root != ".").then(|| format!("{cargo_root}/Cargo.lock"))
+        })
+        .collect::<BTreeSet<_>>();
+    let mut diff_files = Vec::new();
+    for file in changed {
+        if file == "Cargo.lock" || independent_lockfiles.contains(file) {
+            diff_files.push(file.clone());
+            continue;
+        }
+        let Some(crate_name) = file
+            .strip_prefix("crates/")
+            .and_then(|value| value.strip_suffix("/Cargo.toml"))
+        else {
+            return Ok(false);
+        };
+        let unit_id = format!("rust-{crate_name}");
+        if !allowlist.iter().any(|allowed| allowed == &unit_id) {
+            return Ok(false);
+        }
+        diff_files.push(file.clone());
+    }
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--unified=0"])
+        .arg(format!("{base}...{head}"))
+        .arg("--");
+    for file in &diff_files {
+        command.arg(file);
+    }
+    let output = command
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("run version diff: {error}")))?;
+    if !output.status.success() {
+        return Ok(false);
+    }
+    let mut changed_lines = 0;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        let Some(content) = line.strip_prefix('+').or_else(|| line.strip_prefix('-')) else {
+            continue;
+        };
+        changed_lines += 1;
+        if !content.trim_start().starts_with("version = \"") {
+            return Ok(false);
+        }
+    }
+    Ok(changed_lines > 0)
+}
+
+fn expand_affected_units_with_full(
+    units: &[CiUnit],
+    changed: BTreeSet<String>,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut affected = changed.clone();
+    let mut pending = changed.into_iter().collect::<Vec<_>>();
+    while let Some(changed_id) = pending.pop() {
+        for unit in units {
+            if unit
+                .depends_on
+                .iter()
+                .any(|dependency| dependency == &changed_id)
+                && affected.insert(unit.id.clone())
+            {
+                pending.push(unit.id.clone());
+            }
+        }
+    }
+    let full_units = affected.clone();
+    let mut required = affected;
+    let mut pending = required.iter().cloned().collect::<Vec<_>>();
+    while let Some(unit_id) = pending.pop() {
+        let Some(unit) = units.iter().find(|unit| unit.id == unit_id) else {
+            continue;
+        };
+        for dependency in &unit.depends_on {
+            if required.insert(dependency.clone()) {
+                pending.push(dependency.clone());
+            }
+        }
+    }
+    (required, full_units)
+}
+
+#[cfg(test)]
+fn expand_affected_units(units: &[CiUnit], changed: BTreeSet<String>) -> BTreeSet<String> {
+    expand_affected_units_with_full(units, changed).0
+}
+
+fn git_changed_files(
+    root: &Path,
+    base: &str,
+    head: &str,
+) -> Result<Option<Vec<String>>, GeneratorError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--name-only"])
+        .arg(format!("{base}...{head}"))
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("run git diff: {error}")))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+    ))
+}
+
+fn ordered_units<'a>(
+    units: &'a [CiUnit],
+    selected: Option<&BTreeSet<String>>,
+) -> Result<Vec<&'a CiUnit>, GeneratorError> {
+    let wanted = units
+        .iter()
+        .filter(|unit| selected.is_none_or(|ids| ids.contains(&unit.id)))
+        .collect::<Vec<_>>();
+    let wanted_ids = wanted
+        .iter()
+        .map(|unit| unit.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut emitted = BTreeSet::new();
+    let mut result = Vec::with_capacity(wanted.len());
+    while result.len() < wanted.len() {
+        let mut progress = false;
+        for unit in &wanted {
+            if emitted.contains(&unit.id)
+                || unit.depends_on.iter().any(|dependency| {
+                    wanted_ids.contains(dependency.as_str()) && !emitted.contains(dependency)
+                })
+            {
+                continue;
+            }
+            emitted.insert(unit.id.clone());
+            result.push(*unit);
+            progress = true;
+        }
+        if !progress {
+            return Err(GeneratorError::usage(
+                "CI dependency graph contains a cycle",
+            ));
+        }
+    }
+    Ok(result)
+}
+
+fn run_layers(
+    root: &Path,
+    units: &[&CiUnit],
+    run_scope: Scope,
+    full_units: &BTreeSet<String>,
+) -> Result<(), GeneratorError> {
+    let runner_lane = RunnerLane::current();
+    let mut finished = BTreeSet::new();
+    while finished.len() < units.len() {
+        let ready = units
+            .iter()
+            .filter(|unit| {
+                !finished.contains(&unit.id)
+                    && unit
+                        .depends_on
+                        .iter()
+                        .filter(|dependency| {
+                            units.iter().any(|candidate| candidate.id == **dependency)
+                        })
+                        .all(|dependency| finished.contains(dependency))
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        if ready.is_empty() {
+            return Err(GeneratorError::usage(
+                "CI dependency graph contains a cycle or invalid ordering",
+            ));
+        }
+        let (sender, receiver) = mpsc::channel();
+        thread::scope(|thread_scope| {
+            for unit in ready.iter().copied() {
+                let sender = sender.clone();
+                let commands = if full_units.contains(&unit.id) {
+                    unit.commands(runner_lane, run_scope).to_vec()
+                } else {
+                    prerequisite_commands(unit, runner_lane, run_scope)
+                };
+                thread_scope.spawn(move || {
+                    let result = run_unit(root, unit, &commands);
+                    let _ = sender.send((unit.id.clone(), result));
+                });
+            }
+        });
+        drop(sender);
+        for (id, result) in receiver {
+            result?;
+            finished.insert(id);
+        }
+    }
+    Ok(())
+}
+
+fn prerequisite_commands(unit: &CiUnit, lane: RunnerLane, scope: Scope) -> Vec<String> {
+    if unit.kind != "rust" {
+        return Vec::new();
+    }
+    unit.commands(lane, scope)
+        .iter()
+        .filter(|command| command.contains(" clippy "))
+        .map(|command| {
+            let command = command
+                .replacen(" clippy ", " check ", 1)
+                .replace(" -- -D warnings", "");
+            if lane == RunnerLane::Velnor {
+                // `mbx check` does not expose Cargo's `--no-deps` flag.
+                command.replace(" --no-deps", "")
+            } else {
+                command
+            }
+        })
+        .collect()
+}
+
+/// Default output-stall budget for one `run_unit` project command: kill the
+/// child when no stdout/stderr byte arrives for this long.
+///
+/// Ten minutes because healthy compile/test commands stream at least a line
+/// every ~2-5 minutes while measured Mac wedges sat 34+ minutes with zero
+/// stdout bytes at the first compile-path `mbx` call — the gap between ~5
+/// and 34 minutes leaves 10 far from both a slow healthy command and a real
+/// wedge. The guard is stall-based, never wall-clock: every output byte
+/// resets the timer, so a chatty 28-minute suite runs to completion.
+/// Override with `VELNOR_RUN_CMD_STALL_SECS`; a missing, unparsable, or
+/// zero value falls back to this default.
+const DEFAULT_RUN_CMD_STALL_SECS: u64 = 600;
+/// Environment override for [`DEFAULT_RUN_CMD_STALL_SECS`], in seconds.
+const RUN_CMD_STALL_ENV: &str = "VELNOR_RUN_CMD_STALL_SECS";
+/// Silence quantum between child-exit polls while waiting for output: a
+/// silent command that already exited (or whose pipes grandchildren hold
+/// open) is noticed within this long instead of at the stall deadline.
+const RUN_CMD_EXIT_POLL_QUANTUM: Duration = Duration::from_secs(1);
+/// Bounded grace to drain a piped tail after the child exits, so detached
+/// pumps forward every byte before completion. Grandchildren holding the
+/// pipes open must not hang this drain.
+const RUN_CMD_DRAIN_GRACE: Duration = Duration::from_secs(10);
+
+fn run_cmd_stall_limit() -> Duration {
+    parse_run_cmd_stall_limit(env::var(RUN_CMD_STALL_ENV).ok().as_deref())
+}
+
+fn parse_run_cmd_stall_limit(raw: Option<&str>) -> Duration {
+    let seconds = raw
+        .map(str::trim)
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0);
+    Duration::from_secs(seconds.unwrap_or(DEFAULT_RUN_CMD_STALL_SECS))
+}
+
+/// One output chunk forwarded by a child-stream pump, or that stream's EOF.
+enum PumpEvent {
+    Output,
+    Eof,
+}
+
+/// Forward one child pipe to the matching process stream, reporting every
+/// chunk as [`PumpEvent::Output`] so the stall guard treats output bytes as
+/// heartbeats. Runs detached: it exits on pipe EOF (or when the guard drops
+/// the receiver), so a wedged grandchild holding the pipe cannot hang the
+/// stall kill.
+fn pump_child_stream<R, W>(mut reader: R, mut writer: W, sender: &mpsc::Sender<PumpEvent>)
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+{
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                let _ = writer.write_all(&buffer[..read]);
+                let _ = writer.flush();
+                if sender.send(PumpEvent::Output).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = sender.send(PumpEvent::Eof);
+}
+
+/// The pre-guard failure contract, unchanged: exit status decides.
+fn check_unit_command_status(unit_id: &str, status: ExitStatus) -> Result<(), GeneratorError> {
+    if status.success() {
+        Ok(())
+    } else {
+        Err(GeneratorError::usage(format!(
+            "CI command failed for unit {unit_id} with {status}"
+        )))
+    }
+}
+
+/// Run one project command, killing it on output stall: no stdout/stderr
+/// byte for `stall_limit` while the child is still alive. Every output byte
+/// resets the timer; a silent exit inside the deadline race counts as
+/// completion, not a stall.
+fn run_command_with_stall_guard(
+    root: &Path,
+    unit_id: &str,
+    command: &str,
+    stall_limit: Duration,
+) -> Result<(), GeneratorError> {
+    let mut child = Command::new("bash")
+        .args(["-euo", "pipefail", "-c", command])
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| GeneratorError::usage(format!("run CI command {unit_id}: {error}")))?;
+    let (sender, receiver) = mpsc::channel();
+    let mut expected_eof = 0;
+    if let Some(stdout) = child.stdout.take() {
+        expected_eof += 1;
+        let sender = sender.clone();
+        thread::spawn(move || pump_child_stream(stdout, std::io::stdout(), &sender));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        expected_eof += 1;
+        let sender = sender.clone();
+        thread::spawn(move || pump_child_stream(stderr, std::io::stderr(), &sender));
+    }
+    drop(sender);
+    let pid = child.id();
+    let mut deadline = Instant::now() + stall_limit;
+    let mut eofs = 0;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match receiver.recv_timeout(remaining.min(RUN_CMD_EXIT_POLL_QUANTUM)) {
+            Ok(PumpEvent::Output) => {
+                deadline = Instant::now() + stall_limit;
+            }
+            Ok(PumpEvent::Eof) => {
+                eofs += 1;
+                if eofs >= expected_eof {
+                    break;
+                }
+            }
+            Err(_) => {
+                // A silent exit (or grandchildren holding the pipes) is
+                // completion, noticed within one poll quantum.
+                if child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    // No pool.lock/inflight path constants exist in
+                    // velnor-workflow, so there is no scheduler state to dump
+                    // without hardcoding host paths; the error carries unit,
+                    // command, stall budget, pid, and child state instead.
+                    let state = match child.try_wait() {
+                        Ok(Some(status)) => {
+                            return check_unit_command_status(unit_id, status);
+                        }
+                        Ok(None) => String::from("running"),
+                        Err(error) => format!("unknown (try_wait failed: {error})"),
+                    };
+                    let _ = child.kill();
+                    let reaped = match child.wait() {
+                        Ok(status) => format!("reaped with {status}"),
+                        Err(error) => format!("reap failed: {error}"),
+                    };
+                    return Err(GeneratorError::usage(format!(
+                        "CI command stalled for unit {unit_id}: no stdout/stderr output for {}s; killed pid {pid} (was {state}, {reaped}); command: {command}",
+                        stall_limit.as_secs(),
+                    )));
+                }
+            }
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|error| GeneratorError::usage(format!("run CI command {unit_id}: {error}")))?;
+    let drain_deadline = Instant::now() + RUN_CMD_DRAIN_GRACE;
+    while eofs < expected_eof && Instant::now() < drain_deadline {
+        match receiver.recv_timeout(drain_deadline.saturating_duration_since(Instant::now())) {
+            Ok(PumpEvent::Output) => {}
+            Ok(PumpEvent::Eof) => {
+                eofs += 1;
+            }
+            Err(_) => break,
+        }
+    }
+    check_unit_command_status(unit_id, status)
+}
+
+fn run_unit(root: &Path, unit: &CiUnit, commands: &[String]) -> Result<(), GeneratorError> {
+    let stall_limit = run_cmd_stall_limit();
+    for command in commands {
+        println!("::group::{}: {}", unit.id, command);
+        let outcome = run_command_with_stall_guard(root, &unit.id, command, stall_limit);
+        println!("::endgroup::");
+        outcome?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod run_cmd_stall_tests {
+    use super::{
+        parse_run_cmd_stall_limit, run_command_with_stall_guard, DEFAULT_RUN_CMD_STALL_SECS,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn stall_limit_parses_override_and_falls_back() {
+        assert_eq!(
+            parse_run_cmd_stall_limit(None),
+            Duration::from_secs(DEFAULT_RUN_CMD_STALL_SECS)
+        );
+        assert_eq!(
+            parse_run_cmd_stall_limit(Some("30")),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            parse_run_cmd_stall_limit(Some(" 120 ")),
+            Duration::from_secs(120)
+        );
+        for invalid in ["", "0", "-5", "ten", "1.5"] {
+            assert_eq!(
+                parse_run_cmd_stall_limit(Some(invalid)),
+                Duration::from_secs(DEFAULT_RUN_CMD_STALL_SECS),
+                "invalid override {invalid:?} must fall back to the default",
+            );
+        }
+    }
+
+    #[test]
+    fn silent_command_past_stall_limit_fails_naming_the_stall() {
+        let result = run_command_with_stall_guard(
+            &std::env::temp_dir(),
+            "test-unit",
+            "exec sleep 30",
+            Duration::from_millis(200),
+        );
+        let message = match result {
+            Ok(()) => String::from("<unexpected success>"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains("stall"),
+            "silent sleeper must fail naming the stall, got: {message}"
+        );
+        assert!(
+            message.contains("test-unit") && message.contains("exec sleep 30"),
+            "stall error must name unit and command, got: {message}"
+        );
+    }
+
+    #[test]
+    fn chatty_slow_command_succeeds_past_wall_clock_limit() {
+        // ~6s of wall-clock against a 4s stall window: periodic output
+        // resets the timer, so this must succeed. The chatter is
+        // shell-builtin-only: `echo` plus `read -t` on a pipe from one
+        // setup-time `sleep` (its stderr detached so the sleeper can't hold
+        // the child's pipes open past exit). The old per-tick external
+        // `sleep` fork/execed under parallel-test load, and its scheduling
+        // jitter crossed the window and flaked the suite. Six ~1s gaps
+        // hold 3s of slack each; the spelling stays bash-3.2-safe (no
+        // coproc, no fractional `read -t`).
+        let result = run_command_with_stall_guard(
+            &std::env::temp_dir(),
+            "test-unit",
+            "exec 3< <(sleep 15 2>&-); for i in 1 2 3 4 5 6; do echo tick-$i; read -t 1 <&3 || true; done; exec 3<&-",
+            Duration::from_secs(4),
+        );
+        let message = match &result {
+            Ok(()) => String::new(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            result.is_ok(),
+            "chatty command must succeed, got: {message}"
+        );
+    }
+
+    #[test]
+    fn failing_command_keeps_original_error() {
+        let result = run_command_with_stall_guard(
+            &std::env::temp_dir(),
+            "test-unit",
+            "exit 3",
+            Duration::from_secs(60),
+        );
+        let message = match result {
+            Ok(()) => String::from("<unexpected success>"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains("CI command failed for unit test-unit"),
+            "exit-status failure must keep its error, got: {message}"
+        );
+    }
+}
+
+pub(crate) fn test_crates(
+    root: &Path,
+    config_path: &Path,
+    cargo_program: Option<&Path>,
+) -> Result<(), GeneratorError> {
+    let config = read_config(config_path)?;
+    let mut manifests = Vec::new();
+    collect_manifests(root, root, &mut manifests)?;
+    manifests.sort();
+    let locked = root.join("Cargo.lock").is_file();
+    let nextest = config
+        .analysis
+        .detected
+        .iter()
+        .any(|item| item == "cargo-nextest-policy");
+    for manifest in manifests {
+        let contents = fs::read_to_string(&manifest)
+            .map_err(|error| GeneratorError::io("read Cargo manifest", &manifest, &error))?;
+        let value: toml::Value = toml::from_str(&contents).map_err(|error| {
+            GeneratorError::usage(format!(
+                "parse Cargo manifest {}: {error}",
+                manifest.display()
+            ))
+        })?;
+        if !value.get("package").is_some_and(toml::Value::is_table) {
+            continue;
+        }
+        println!("::group::cargo tests: {}", manifest.display());
+        let default_cargo =
+            if env::var(super::MR_BOXINGTON_ENABLED_ENV).is_ok_and(|value| value == "1") {
+                Path::new("mbx")
+            } else {
+                Path::new("cargo")
+            };
+        let mut command = Command::new(cargo_program.unwrap_or(default_cargo));
+        command
+            .arg(if nextest { "nextest" } else { "test" })
+            .arg(if nextest { "run" } else { "--all-features" });
+        if nextest {
+            command.arg("--all-features");
+        }
+        if locked {
+            command.arg("--locked");
+        }
+        command.arg("--manifest-path").arg(&manifest);
+        let status = command
+            .current_dir(root)
+            .status()
+            .map_err(|error| GeneratorError::usage(format!("run Cargo tests: {error}")))?;
+        println!("::endgroup::");
+        if !status.success() {
+            return Err(GeneratorError::usage(format!(
+                "Cargo tests failed: {}",
+                manifest.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn collect_manifests(
+    root: &Path,
+    directory: &Path,
+    manifests: &mut Vec<PathBuf>,
+) -> Result<(), GeneratorError> {
+    for entry in fs::read_dir(directory)
+        .map_err(|error| GeneratorError::io("read CI source directory", directory, &error))?
+    {
+        let entry = entry
+            .map_err(|error| GeneratorError::usage(format!("read directory entry: {error}")))?;
+        let path = entry.path();
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+        if entry
+            .file_type()
+            .map_err(|error| GeneratorError::usage(format!("inspect {}: {error}", path.display())))?
+            .is_dir()
+        {
+            if matches!(relative.to_str(), Some(".git" | "target")) {
+                continue;
+            }
+            collect_manifests(root, &path, manifests)?;
+        } else if path.file_name().is_some_and(|name| name == "Cargo.toml")
+            && relative
+                .to_str()
+                .is_none_or(|path| !super::is_test_support_path(path))
+        {
+            manifests.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
+        return Err(GeneratorError::usage(
+            "usage: release verify-tag | release package-binary | release package-deb | release package-guest | release verify-feed | release update-feed",
+        ));
+    };
+    match command {
+        "verify-tag" => verify_tag(&arguments[1..]),
+        "package-binary" => package_binary(&arguments[1..]),
+        "package-deb" => package_deb(&arguments[1..]),
+        "package-guest" => package_guest(&arguments[1..]),
+        "verify-feed" => verify_feed(&arguments[1..]),
+        "update-feed" => update_feed(&arguments[1..]),
+        _ => Err(GeneratorError::usage(format!(
+            "unsupported release command: {command}"
+        ))),
+    }
+}
+
+fn verify_tag(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["branch", "package"])?;
+    let reference = env::var("GITHUB_REF").unwrap_or_default();
+    let tag = reference
+        .strip_prefix("refs/tags/v")
+        .filter(|value| is_semver(value))
+        .ok_or_else(|| GeneratorError::usage("release requires a semver v* tag"))?;
+    if env::var("GITHUB_REF_TYPE").unwrap_or_else(|_| "tag".to_owned()) != "tag" {
+        return Err(GeneratorError::usage("release ref is not a tag"));
+    }
+    let branch = options
+        .get("branch")
+        .map(String::as_str)
+        .ok_or_else(|| GeneratorError::usage("release requires --branch"))?;
+    if !valid_branch(branch) {
+        return Err(GeneratorError::usage("invalid release branch"));
+    }
+    let branch_reference = format!("refs/remotes/origin/{branch}");
+    let tag_commit = git_revision(&reference)?;
+    let branch_commit = git_revision(&branch_reference)?;
+    if tag_commit != branch_commit {
+        return Err(GeneratorError::usage(format!(
+            "release tag must equal current origin/{branch} tip"
+        )));
+    }
+    if let Some(package) = options.get("package") {
+        if !valid_package(package) {
+            return Err(GeneratorError::usage("invalid release package"));
+        }
+        let metadata = Command::new("cargo")
+            .args(["metadata", "--no-deps", "--format-version", "1", "--locked"])
+            .output()
+            .map_err(|error| GeneratorError::usage(format!("cargo metadata failed: {error}")))?;
+        if !metadata.status.success() {
+            return Err(GeneratorError::usage("cargo metadata failed"));
+        }
+        let document: serde_json::Value = serde_json::from_slice(&metadata.stdout)
+            .map_err(|error| GeneratorError::usage(format!("parse cargo metadata: {error}")))?;
+        let found = document["packages"].as_array().is_some_and(|packages| {
+            packages.iter().any(|item| {
+                item["name"].as_str() == Some(package) && item["version"].as_str() == Some(tag)
+            })
+        });
+        if !found {
+            return Err(GeneratorError::usage(
+                "release tag version does not match the declared package",
+            ));
+        }
+    }
+    println!("{tag}");
+    Ok(())
+}
+
+fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["target", "version", "package", "binary"])?;
+    let target = required_option(&options, "target")?;
+    let version = required_option(&options, "version")?;
+    let package = required_option(&options, "package")?;
+    let binary = required_option(&options, "binary")?;
+    if !valid_target(target)
+        || !is_artifact_version(version)
+        || !valid_package(package)
+        || !valid_binary(binary)
+    {
+        return Err(GeneratorError::usage(
+            "invalid target, version, package, or binary",
+        ));
+    }
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    let source = root
+        .join("target")
+        .join(target)
+        .join("release")
+        .join(binary);
+    if !source.is_file() {
+        return Err(GeneratorError::usage(format!(
+            "built binary is missing: {}",
+            source.display()
+        )));
+    }
+    let dist = root.join("dist");
+    fs::create_dir_all(&dist)
+        .map_err(|error| GeneratorError::io("create release directory", &dist, &error))?;
+    let archive = dist.join(format!("{binary}-{version}-{target}.tar.gz"));
+    let status = Command::new("tar")
+        .arg("-C")
+        .arg(source.parent().unwrap_or(&root))
+        .arg("-czf")
+        .arg(&archive)
+        .arg(binary)
+        .status()
+        .map_err(|error| GeneratorError::usage(format!("package binary: {error}")))?;
+    if !status.success() {
+        return Err(GeneratorError::usage("tar failed while packaging binary"));
+    }
+    let digest = sha256_file(&archive)?;
+    // Append, never `with_extension`: the sidecar sits next to its subject
+    // as `<subject>.sha256`, the name consumer lanes download it under.
+    let checksum = archive.with_file_name(format!(
+        "{}.sha256",
+        archive
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+    ));
+    fs::write(
+        &checksum,
+        format!(
+            "{digest}  {}\n",
+            archive
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+        ),
+    )
+    .map_err(|error| GeneratorError::io("write release checksum", &checksum, &error))?;
+    println!("{}", archive.display());
+    Ok(())
+}
+
+fn package_deb(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "package",
+            "version",
+            "guest",
+            "target",
+            "no-build",
+            "asset-name",
+        ],
+    )?;
+    let package = required_option(&options, "package")?;
+    let version = required_option(&options, "version")?;
+    if !valid_package(package) || !is_artifact_version(version) {
+        return Err(GeneratorError::usage("invalid package or version"));
+    }
+    // A release lane that builds its binaries itself (identity features the
+    // packager cannot pass through) tells the packager to skip cargo-deb's
+    // own default-feature rebuild.
+    let skip_build = match options.get("no-build").map(String::as_str) {
+        None => false,
+        Some("true") => true,
+        Some(other) => {
+            return Err(GeneratorError::usage(format!(
+                "invalid --no-build value: {other}"
+            )));
+        }
+    };
+    if let Some(name) = options.get("asset-name")
+        && !valid_deb_asset_name(name)
+    {
+        return Err(GeneratorError::usage("invalid deb asset name"));
+    }
+    if let Some(guest) = options.get("guest") {
+        let guest = Path::new(guest);
+        if !guest.is_dir() {
+            return Err(GeneratorError::usage(format!(
+                "guest payload directory is missing: {}",
+                guest.display()
+            )));
+        }
+        let dest = cargo_package_manifest_dir(package)?.join("release/microvm");
+        copy_dir_files(guest, &dest)?;
+    }
+    let mut command = Command::new("cargo");
+    command.args([
+        "deb",
+        "--no-strip",
+        "--package",
+        package,
+        "--deb-version",
+        version,
+    ]);
+    if skip_build {
+        command.arg("--no-build");
+    }
+    if let Some(target) = options.get("target") {
+        if !valid_target(target) {
+            return Err(GeneratorError::usage("invalid package target"));
+        }
+        command.args(["--target", target]);
+    }
+    let status = command
+        .status()
+        .map_err(|error| GeneratorError::usage(format!("cargo deb: {error}")))?;
+    if !status.success() {
+        return Err(GeneratorError::usage("cargo deb failed"));
+    }
+    collect_debian_packages(
+        options.get("target").map(String::as_str),
+        options.get("asset-name").map(String::as_str),
+    )
+}
+
+fn cargo_package_manifest_dir(package: &str) -> Result<PathBuf, GeneratorError> {
+    let metadata = Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1", "--locked"])
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("cargo metadata failed: {error}")))?;
+    if !metadata.status.success() {
+        return Err(GeneratorError::usage("cargo metadata failed"));
+    }
+    let document: serde_json::Value = serde_json::from_slice(&metadata.stdout)
+        .map_err(|error| GeneratorError::usage(format!("parse cargo metadata: {error}")))?;
+    document["packages"]
+        .as_array()
+        .and_then(|packages| {
+            packages.iter().find_map(|item| {
+                (item["name"].as_str() == Some(package)).then(|| {
+                    item["manifest_path"]
+                        .as_str()
+                        .map(PathBuf::from)
+                        .and_then(|path| path.parent().map(Path::to_path_buf))
+                })
+            })
+        })
+        .flatten()
+        .ok_or_else(|| GeneratorError::usage(format!("cargo package `{package}` was not found")))
+}
+
+fn copy_dir_files(src: &Path, dest: &Path) -> Result<(), GeneratorError> {
+    fs::create_dir_all(dest)
+        .map_err(|error| GeneratorError::io("create guest package directory", dest, &error))?;
+    let entries =
+        fs::read_dir(src).map_err(|error| GeneratorError::io("read guest payload", src, &error))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| GeneratorError::io("read guest payload entry", src, &error))?;
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .map_err(|error| GeneratorError::io("stat guest payload entry", &from, &error))?;
+        if file_type.is_dir() {
+            copy_dir_files(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)
+                .map_err(|error| GeneratorError::io("copy guest payload file", &to, &error))?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_debian_packages(
+    target: Option<&str>,
+    asset_name: Option<&str>,
+) -> Result<(), GeneratorError> {
+    let dist = Path::new("dist");
+    fs::create_dir_all(dist)
+        .map_err(|error| GeneratorError::io("create release directory", dist, &error))?;
+    let mut sources = vec![PathBuf::from("target/debian")];
+    if let Some(target) = target {
+        sources.push(PathBuf::from("target").join(target).join("debian"));
+    }
+    let mut found = Vec::new();
+    for source in sources {
+        let Ok(entries) = fs::read_dir(&source) else {
+            continue;
+        };
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| GeneratorError::io("read debian output", &source, &error))?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("deb") {
+                continue;
+            }
+            if path.file_name().is_none() {
+                continue;
+            }
+            found.push(path);
+        }
+    }
+    if found.is_empty() {
+        return Err(GeneratorError::usage(
+            "cargo deb produced no .deb under target/debian",
+        ));
+    }
+    // A lane that names its consumer asset renames exactly one freshly built
+    // deb; anything else is a stale corpus and fails closed instead of
+    // publishing an ambiguous pick.
+    if let Some(asset_name) = asset_name {
+        if found.len() != 1 {
+            return Err(GeneratorError::usage(format!(
+                "expected exactly one .deb to rename, found {}",
+                found.len()
+            )));
+        }
+        let destination = dist.join(asset_name);
+        fs::copy(&found[0], &destination)
+            .map_err(|error| GeneratorError::io("copy debian package", &found[0], &error))?;
+        write_bare_digest_sidecar(&destination)?;
+        println!("{}", destination.display());
+        return Ok(());
+    }
+    for path in &found {
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        let destination = dist.join(name);
+        fs::copy(path, &destination)
+            .map_err(|error| GeneratorError::io("copy debian package", path, &error))?;
+        write_bare_digest_sidecar(&destination)?;
+        println!("{}", destination.display());
+    }
+    Ok(())
+}
+
+/// The bare-digest sidecar a consumer lane cross-checks against its own
+/// manifest: the digest alone, so both `sha256sum --check` corpora and
+/// first-token readers accept it.
+fn write_bare_digest_sidecar(artifact: &Path) -> Result<(), GeneratorError> {
+    let digest = sha256_file(artifact)?;
+    let Some(name) = artifact.file_name().and_then(|name| name.to_str()) else {
+        return Err(GeneratorError::usage("deb asset name is not portable"));
+    };
+    let sidecar = artifact.with_file_name(format!("{name}.sha256"));
+    fs::write(&sidecar, format!("{digest}\n"))
+        .map_err(|error| GeneratorError::io("write deb checksum", &sidecar, &error))?;
+    Ok(())
+}
+
+fn package_guest(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["arch", "package", "bin", "agent"])?;
+    let arch = required_option(&options, "arch")?;
+    if !matches!(arch, "x86_64" | "aarch64") {
+        return Err(GeneratorError::usage(
+            "guest arch must be x86_64 or aarch64",
+        ));
+    }
+    let pins = Path::new("microvm/pins.json");
+    if pins.is_file() {
+        let package = required_option(&options, "package")?;
+        let bin = required_option(&options, "bin")?;
+        let agent = required_option(&options, "agent")?;
+        if !valid_package(package) || !valid_binary(bin) || !valid_binary(agent) {
+            return Err(GeneratorError::usage(
+                "invalid guest package, bin, or agent",
+            ));
+        }
+        let status = Command::new("bash")
+            .arg("-c")
+            .arg(
+                r#"
+set -euo pipefail
+url="$(jq -er '.kernel_tarball' microvm/pins.json)"
+sha="$(jq -er '.kernel_tarball_sha256' microvm/pins.json)"
+curl --fail --show-error --silent --location --http1.1 \
+  --connect-timeout 30 --max-time 900 \
+  -o linux.tar.xz "$url"
+echo "$sha  linux.tar.xz" | sha256sum -c -
+"#,
+            )
+            .status()
+            .map_err(|error| GeneratorError::usage(format!("download guest kernel: {error}")))?;
+        if !status.success() {
+            return Err(GeneratorError::usage("guest kernel download failed"));
+        }
+        fs::create_dir_all("dist/microvm").map_err(|error| {
+            GeneratorError::io("create guest output", Path::new("dist/microvm"), &error)
+        })?;
+        let status = Command::new("cargo")
+            .args([
+                "run",
+                "--locked",
+                "--release",
+                "--package",
+                package,
+                "--bin",
+                bin,
+                "--",
+                "build",
+                "--arch",
+                arch,
+                "--out",
+                "dist/microvm",
+                "--tarball",
+                "linux.tar.xz",
+                "--guest-agent",
+                agent,
+            ])
+            .status()
+            .map_err(|error| GeneratorError::usage(format!("build guest image: {error}")))?;
+        if !status.success() {
+            return Err(GeneratorError::usage("guest image build failed"));
+        }
+        return Ok(());
+    }
+    let script = Path::new("microvm/build.sh");
+    if !script.is_file() {
+        return Err(GeneratorError::usage(
+            "guest image requires microvm/pins.json or a repository-owned microvm/build.sh",
+        ));
+    }
+    let status = Command::new("bash")
+        .args(["microvm/build.sh", arch])
+        .status()
+        .map_err(|error| GeneratorError::usage(format!("build guest image: {error}")))?;
+    if !status.success() {
+        return Err(GeneratorError::usage("guest image build failed"));
+    }
+    Ok(())
+}
+
+fn verify_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["kind", "package", "coordinate"])?;
+    let kind = required_option(&options, "kind")?;
+    let package = required_option(&options, "package")?;
+    if !valid_package(package) {
+        return Err(GeneratorError::usage("invalid feed package"));
+    }
+    match kind {
+        "homebrew" => {
+            let formula = Path::new("Formula").join(format!("{package}.rb"));
+            if !formula.is_file() {
+                return Err(GeneratorError::usage(format!(
+                    "homebrew feed requires {}",
+                    formula.display()
+                )));
+            }
+        }
+        "apt" => {
+            if !Path::new("conf/distributions").is_file() && !Path::new("debian").is_dir() {
+                return Err(GeneratorError::usage(
+                    "apt feed requires conf/distributions or debian/",
+                ));
+            }
+        }
+        other => {
+            return Err(GeneratorError::usage(format!(
+                "unsupported feed kind: {other}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn update_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["kind", "package", "coordinate", "channel"])?;
+    verify_feed(arguments)?;
+    let kind = required_option(&options, "kind")?;
+    let channel = options.get("channel").map_or("stable", String::as_str);
+    if !matches!(channel, "stable" | "preview") {
+        return Err(GeneratorError::usage("channel must be stable or preview"));
+    }
+    match kind {
+        "homebrew" | "apt" => {
+            println!("feed {kind} channel {channel} verified; mutation is GitHub-writer only");
+            Ok(())
+        }
+        other => Err(GeneratorError::usage(format!(
+            "unsupported feed kind: {other}"
+        ))),
+    }
+}
+
+fn required_option<'a>(
+    options: &'a BTreeMap<String, String>,
+    name: &str,
+) -> Result<&'a str, GeneratorError> {
+    options
+        .get(name)
+        .map(String::as_str)
+        .ok_or_else(|| GeneratorError::usage(format!("--{name} needs a value")))
+}
+
+fn git_revision(reference: &str) -> Result<String, GeneratorError> {
+    let revision_reference = format!("{reference}^{{commit}}");
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", &revision_reference])
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("run git: {error}")))?;
+    if !output.status.success() {
+        return Err(GeneratorError::usage(format!(
+            "git could not resolve release reference {reference}"
+        )));
+    }
+    let revision = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(GeneratorError::usage(format!(
+            "git returned an invalid revision for {reference}"
+        )));
+    }
+    Ok(revision)
+}
+
+fn sha256_file(path: &Path) -> Result<String, GeneratorError> {
+    let contents =
+        fs::read(path).map_err(|error| GeneratorError::io("read release archive", path, &error))?;
+    let digest = Sha256::digest(contents);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        output.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+        output.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
+    }
+    Ok(output)
+}
+
+fn is_semver(value: &str) -> bool {
+    let (core, suffix) = value
+        .split_once('-')
+        .map_or((value, None), |(core, suffix)| (core, Some(suffix)));
+    let parts = core.split('.').collect::<Vec<_>>();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        && suffix.is_none_or(|value| {
+            !value.is_empty()
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+        })
+}
+
+fn is_artifact_version(value: &str) -> bool {
+    value == "preview" || is_semver(value) || is_preview_version(value)
+}
+
+/// A rolling-preview Debian version: the crate version, a `~preview.N`
+/// Debian-sortable pre-release (older than the coming stable), and the
+/// 7-hex source the lane built. Strict: the consumer lane matches this
+/// exact shape before it binds a preview.
+fn is_preview_version(value: &str) -> bool {
+    let Some((core, preview)) = value.split_once('~') else {
+        return false;
+    };
+    let parts = core.split('.').collect::<Vec<_>>();
+    if parts.len() != 3
+        || !parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return false;
+    }
+    let Some(number) = preview.strip_prefix("preview.") else {
+        return false;
+    };
+    let Some((run, commit)) = number.split_once('+') else {
+        return false;
+    };
+    !run.is_empty()
+        && run.bytes().all(|byte| byte.is_ascii_digit())
+        && commit.len() == 7
+        && commit
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+/// A consumer-facing deb file name: a bare file name (no directories, no
+/// traversal), ending in `.deb`, over the portable asset alphabet.
+fn valid_deb_asset_name(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains('/')
+        && !value.contains("..")
+        && value.strip_suffix(".deb").is_some_and(|stem| {
+            !stem.is_empty()
+                && stem.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'~' | b'+')
+                })
+        })
+}
+
+pub(crate) fn valid_branch(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'/' | b'-'))
+}
+
+fn valid_target(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn valid_package(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn valid_binary(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{context}: {error}"),
+        }
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must_fail<T>(result: Result<T, GeneratorError>, context: &str) -> GeneratorError {
+        match result {
+            Ok(_) => panic!("{context}: expected a failure, got success"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn package_deb_rejects_bad_inputs_before_any_cargo_call() {
+        // Every case below fails on option validation, before package-deb
+        // shells out: no cargo, no filesystem writes, no network.
+        let args = |options: &[&str]| options.iter().map(OsString::from).collect::<Vec<_>>();
+        let error = must_fail(
+            package_deb(&args(&["--version", "1.2.3"])),
+            "package-deb without --package",
+        );
+        assert!(
+            error.to_string().contains("--package needs a value"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            package_deb(&args(&[
+                "--package",
+                "velnor-runner",
+                "--version",
+                "v1.2.3",
+            ])),
+            "package-deb with a v-prefixed version",
+        );
+        assert!(
+            error.to_string().contains("invalid package or version"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            package_deb(&args(&[
+                "--package",
+                "velnor-runner",
+                "--version",
+                "1.2.3",
+                "--guest",
+                "/nonexistent-velnor-guest-payload",
+            ])),
+            "package-deb with a missing guest directory",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("guest payload directory is missing"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            package_deb(&args(&[
+                "--package",
+                "velnor-runner",
+                "--version",
+                "1.2.3",
+                "--target",
+                "x86_64!",
+            ])),
+            "package-deb with an invalid target",
+        );
+        assert!(
+            error.to_string().contains("invalid package target"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn preview_versions_are_strictly_shaped() {
+        for version in [
+            "0.1.274~preview.145+d3e441f",
+            "1.0.0~preview.1+abcdef0",
+            "10.20.30~preview.9999999+0123456",
+        ] {
+            assert!(is_preview_version(version), "{version} must be accepted");
+            assert!(
+                is_artifact_version(version),
+                "{version} must package as an artifact version"
+            );
+        }
+        for version in [
+            "0.1.274",
+            "preview",
+            "v0.1.274",
+            "0.1.274~preview.145",
+            "0.1.274~preview.+d3e441f",
+            "0.1.274~preview145+d3e441f",
+            "0.1.274~preview.145+d3e441",
+            "0.1.274~preview.145+d3e441fg",
+            "0.1.274~preview.x+d3e441f",
+            "0.1~preview.145+d3e441f",
+            "0.1.274~stable.145+d3e441f",
+            "0.1.274~~preview.145+d3e441f",
+            "0.1.274~preview.145+D3E441F",
+        ] {
+            assert!(!is_preview_version(version), "{version} must be rejected");
+        }
+        // The tag gate stays strict semver: preview shapes never leak into it.
+        assert!(!is_semver("0.1.274~preview.145+d3e441f"));
+    }
+
+    #[test]
+    fn package_deb_validates_packaging_options_before_any_cargo_call() {
+        // Every case below fails on option validation, before package-deb
+        // shells out: no cargo, no filesystem writes, no network.
+        let args = |options: &[&str]| options.iter().map(OsString::from).collect::<Vec<_>>();
+        let error = must_fail(
+            package_deb(&args(&[
+                "--package",
+                "widget",
+                "--version",
+                "1.2.3",
+                "--no-build",
+                "yes",
+            ])),
+            "package-deb with a non-true --no-build",
+        );
+        assert!(
+            error.to_string().contains("invalid --no-build value"),
+            "unexpected error: {error}"
+        );
+        for name in [
+            "widget-1.2.3-amd64.deb/../escape.deb",
+            "../escape.deb",
+            "widget-1.2.3-amd64.tar.gz",
+            "widget 1.2.3.deb",
+            ".deb",
+        ] {
+            let error = must_fail(
+                package_deb(&args(&[
+                    "--package",
+                    "widget",
+                    "--version",
+                    "1.2.3",
+                    "--asset-name",
+                    name,
+                ])),
+                "package-deb with a hostile asset name",
+            );
+            assert!(
+                error.to_string().contains("invalid deb asset name"),
+                "unexpected error for {name}: {error}"
+            );
+        }
+        // A preview version passes version validation: the failure below
+        // names the missing guest directory, never the version.
+        let error = must_fail(
+            package_deb(&args(&[
+                "--package",
+                "widget",
+                "--version",
+                "1.2.3~preview.7+abcdef0",
+                "--guest",
+                "/nonexistent-widget-guest-payload",
+                "--no-build",
+                "true",
+                "--asset-name",
+                "widget-preview-1.2.3~preview.7+abcdef0-amd64.deb",
+            ])),
+            "package-deb with a preview version and missing guest directory",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("guest payload directory is missing"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn numeric_actions_cache_ids_become_lossless_internal_strings() {
+        let record: CacheEntryRecord = must(
+            serde_json::from_str(
+                r#"{"id":7636963307,"key":"example-docker-seed-Linux-X64",
+                "size_in_bytes":1,"created_at":"2026-09-01T00:00:00Z"}"#,
+            ),
+            "deserialize a numeric Actions cache id",
+        );
+        assert_eq!(record.id, "7636963307");
+        assert_eq!(record.key, "example-docker-seed-Linux-X64");
+    }
+
+    fn selection_config() -> CiConfig {
+        let unit = |id: &str, watch: &[&str], depends_on: &[&str]| CiUnit {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            kind: "rust".to_owned(),
+            root: ".".to_owned(),
+            watch: watch.iter().map(|value| (*value).to_owned()).collect(),
+            github_pr_commands: vec!["true".to_owned()],
+            github_full_commands: vec!["true".to_owned()],
+            velnor_pr_commands: vec!["true".to_owned()],
+            velnor_full_commands: vec!["true".to_owned()],
+            depends_on: depends_on.iter().map(|value| (*value).to_owned()).collect(),
+            tool_version: None,
+            cache: None,
+            workspace_check: false,
+        };
+        CiConfig {
+            schema: 2,
+            repository: "example/repository".to_owned(),
+            profile: "rust-workspace".to_owned(),
+            verified: true,
+            default_branch: "main".to_owned(),
+            runners: "github".to_owned(),
+            automatic: "github".to_owned(),
+            analysis: Analysis::default(),
+            workflow: Workflow::default(),
+            release: Release::default(),
+            unit: vec![
+                unit("base", &["crates/base/**"], &[]),
+                unit("app", &["crates/app/**"], &["base"]),
+                unit("consumer", &["crates/consumer/**"], &["app"]),
+                unit("docs", &["docs/**"], &[]),
+            ],
+        }
+    }
+
+    fn selection_git_fixture(
+        name: &str,
+        changed: &str,
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-selection-{name}-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let init = |args: &[&str]| -> Result<(), Box<dyn Error>> {
+            let status = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .status()?;
+            assert!(status.success(), "git command failed: {args:?}");
+            Ok(())
+        };
+        init(&["init", "-q"])?;
+        init(&["config", "user.email", "test@example.invalid"])?;
+        init(&["config", "user.name", "Velnor test"])?;
+        for path in [
+            "crates/base/src/lib.rs",
+            "crates/app/src/lib.rs",
+            "crates/consumer/src/lib.rs",
+            "docs/index.md",
+        ] {
+            let path = root.join(path);
+            let parent = path.parent().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "fixture parent")
+            })?;
+            std::fs::create_dir_all(parent)?;
+            std::fs::write(path, "initial\n")?;
+        }
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "base"])?;
+        let base = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .to_owned();
+        let changed_path = root.join(changed);
+        let parent = changed_path.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "changed parent")
+        })?;
+        std::fs::create_dir_all(parent)?;
+        std::fs::write(changed_path, "changed\n")?;
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "change"])?;
+        let head = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .to_owned();
+        Ok((root, base, head))
+    }
+
+    fn stale_base_selection_git_fixture(
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-stale-base-selection-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("crates/base/src"))?;
+        std::fs::create_dir_all(root.join("docs"))?;
+        let init = |args: &[&str]| -> Result<(), Box<dyn Error>> {
+            let status = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .status()?;
+            assert!(status.success(), "git command failed: {args:?}");
+            Ok(())
+        };
+        init(&["init", "-q"])?;
+        init(&["config", "user.email", "test@example.invalid"])?;
+        init(&["config", "user.name", "Velnor test"])?;
+        std::fs::write(root.join("crates/base/src/lib.rs"), "initial\n")?;
+        std::fs::write(root.join("docs/index.md"), "initial\n")?;
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "base"])?;
+        let initial = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .to_owned();
+
+        init(&["checkout", "-q", "-b", "base-line"])?;
+        std::fs::write(root.join("docs/index.md"), "base-only\n")?;
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "base-only"])?;
+        let base = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .to_owned();
+
+        init(&["checkout", "-q", "-b", "feature", &initial])?;
+        std::fs::write(root.join("crates/base/src/lib.rs"), "feature-only\n")?;
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "feature-only"])?;
+        let head = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .to_owned();
+        Ok((root, base, head))
+    }
+
+    fn lockfile_version_selection_git_fixture(
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-version-selection-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("crates/runner"))?;
+        std::fs::create_dir_all(root.join("crates/ctl"))?;
+        let init = |args: &[&str]| -> Result<(), Box<dyn Error>> {
+            let status = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .status()?;
+            assert!(status.success(), "git command failed: {args:?}");
+            Ok(())
+        };
+        init(&["init", "-q"])?;
+        init(&["config", "user.email", "test@example.invalid"])?;
+        init(&["config", "user.name", "Velnor test"])?;
+        std::fs::write(
+            root.join("Cargo.lock"),
+            "version = \"1\"\nchecksum = \"unchanged\"\n",
+        )?;
+        std::fs::write(
+            root.join("crates/runner/Cargo.toml"),
+            "version = \"0.1.0\"\n",
+        )?;
+        std::fs::write(root.join("crates/ctl/Cargo.toml"), "version = \"0.1.0\"\n")?;
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "base"])?;
+        let base = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .to_owned();
+        std::fs::write(
+            root.join("Cargo.lock"),
+            "version = \"2\"\nchecksum = \"unchanged\"\n",
+        )?;
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "version bump"])?;
+        let head = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .to_owned();
+        Ok((root, base, head))
+    }
+
+    /// A repo-owned project config written for these tests: one docker unit,
+    /// a small rust crate graph, and a version-bump allowlist. The selection
+    /// engine consumes whatever the file declares, so the fixture stays
+    /// independent of any repository the workspace happens to live in.
+    const SELECTION_PROJECT_CONFIG: &str = r#"schema = 2
+repository = "example/selection"
+profile = "generic"
+verified = true
+default_branch = "main"
+runners = "github"
+
+[analysis]
+method = "static-filesystem-and-manifest-inspection"
+detected = []
+limitations = []
+
+[workflow]
+github_runner = "ubuntu-24.04"
+files = ["ci-docker-docker.yml", "ci-rust-base.yml", "ci-rust-leaf.yml", "ci-pr.yml", "ci-main.yml", "ci-policy.yml", "maintenance.yml", "nightly.yml"]
+version_bump_units = ["docker", "rust-bench", "rust-leaf"]
+
+[[unit]]
+id = "docker"
+kind = "docker"
+root = "."
+watch = ["Dockerfile"]
+github_pr_commands = ["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+github_full_commands = ["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+velnor_pr_commands = ["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+velnor_full_commands = ["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+
+[[unit]]
+id = "rust-base"
+kind = "rust"
+root = "crates/base"
+watch = ["crates/base/**", "Cargo.lock"]
+github_pr_commands = ["cargo test --manifest-path 'crates/base/Cargo.toml'"]
+github_full_commands = ["cargo test --manifest-path 'crates/base/Cargo.toml'"]
+velnor_pr_commands = ["cargo test --manifest-path 'crates/base/Cargo.toml'"]
+velnor_full_commands = ["cargo test --manifest-path 'crates/base/Cargo.toml'"]
+
+[[unit]]
+id = "rust-leaf"
+kind = "rust"
+root = "crates/leaf"
+depends_on = ["rust-base"]
+watch = ["crates/leaf/**", "Cargo.lock"]
+github_pr_commands = ["cargo test --manifest-path 'crates/leaf/Cargo.toml'"]
+github_full_commands = ["cargo test --manifest-path 'crates/leaf/Cargo.toml'"]
+velnor_pr_commands = ["cargo test --manifest-path 'crates/leaf/Cargo.toml'"]
+velnor_full_commands = ["cargo test --manifest-path 'crates/leaf/Cargo.toml'"]
+
+[[unit]]
+id = "rust-bench"
+kind = "rust"
+root = "crates/bench"
+depends_on = ["rust-base"]
+watch = ["crates/bench/**", "Cargo.lock"]
+github_pr_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
+github_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
+velnor_pr_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
+velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
+"#;
+
+    const ROOT_SCOPED_SELECTION_PROJECT_CONFIG: &str = r#"schema = 2
+repository = "example/selection"
+profile = "generic"
+verified = true
+default_branch = "main"
+runners = "both"
+
+[workflow]
+version_bump_units = ["rust-contract"]
+
+[[unit]]
+id = "rust-root"
+kind = "rust"
+root = "crates/root"
+watch = ["crates/root/**", "Cargo.lock"]
+github_pr_commands = ["true"]
+github_full_commands = ["true"]
+velnor_pr_commands = ["true"]
+velnor_full_commands = ["true"]
+
+[[unit]]
+id = "rust-contract"
+kind = "rust"
+root = "crates/velnor-workflow-contract"
+watch = ["crates/velnor-workflow-contract/**", "Cargo.lock", "crates/velnor-workflow-contract/Cargo.lock"]
+github_pr_commands = ["true"]
+github_full_commands = ["true"]
+velnor_pr_commands = ["true"]
+velnor_full_commands = ["true"]
+
+[[unit]]
+id = "rust-root-workspace"
+kind = "rust"
+root = "."
+watch = ["Cargo.toml"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+
+[[unit]]
+id = "rust-contract-workspace"
+kind = "rust"
+root = "crates/velnor-workflow-contract"
+watch = ["crates/velnor-workflow-contract/Cargo.lock"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+"#;
+
+    fn current_project_selection_git_fixture(
+        name: &str,
+        changed: &str,
+        base_contents: &str,
+        head_contents: &str,
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        current_project_selection_git_fixture_with_config(
+            name,
+            changed,
+            base_contents,
+            head_contents,
+            SELECTION_PROJECT_CONFIG,
+        )
+    }
+
+    fn current_project_selection_git_fixture_with_config(
+        name: &str,
+        changed: &str,
+        base_contents: &str,
+        head_contents: &str,
+        config_text: &str,
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        current_project_selection_git_fixture_with_changes(
+            name,
+            &[(changed, base_contents, head_contents)],
+            config_text,
+        )
+    }
+
+    fn current_project_selection_git_fixture_with_changes(
+        name: &str,
+        changes: &[(&str, &str, &str)],
+        config_text: &str,
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-current-project-selection-{name}-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let init = |args: &[&str]| -> Result<String, Box<dyn Error>> {
+            let output = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .output()?;
+            assert!(
+                output.status.success(),
+                "git command failed: {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+        };
+        init(&["init", "-q"])?;
+        init(&["config", "user.email", "test@example.invalid"])?;
+        init(&["config", "user.name", "Velnor test"])?;
+
+        let config = root.join(".github/ci/project.toml");
+        std::fs::create_dir_all(config.parent().ok_or("project config parent")?)?;
+        std::fs::write(&config, config_text)?;
+
+        for (changed, base_contents, _) in changes {
+            let changed_path = root.join(changed);
+            std::fs::create_dir_all(changed_path.parent().ok_or("changed file parent")?)?;
+            std::fs::write(changed_path, base_contents)?;
+        }
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "base"])?;
+        let base = init(&["rev-parse", "HEAD"])?;
+
+        for (changed, _, head_contents) in changes {
+            std::fs::write(root.join(changed), head_contents)?;
+        }
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "change"])?;
+        let head = init(&["rev-parse", "HEAD"])?;
+        Ok((root, base, head))
+    }
+
+    fn selected_ids(units: Vec<&CiUnit>) -> Vec<&str> {
+        units.into_iter().map(|unit| unit.id.as_str()).collect()
+    }
+
+    fn selected_id_set(selection: &UnitSelection<'_>) -> BTreeSet<String> {
+        selection.units.iter().map(|unit| unit.id.clone()).collect()
+    }
+
+    fn lanes_selection_config() -> CiConfig {
+        let unit = |id: &str, kind: &str| CiUnit {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            kind: kind.to_owned(),
+            root: ".".to_owned(),
+            watch: vec!["**".to_owned()],
+            github_pr_commands: vec!["true".to_owned()],
+            github_full_commands: vec!["true".to_owned()],
+            velnor_pr_commands: vec!["true".to_owned()],
+            velnor_full_commands: vec!["true".to_owned()],
+            depends_on: Vec::new(),
+            tool_version: None,
+            cache: None,
+            workspace_check: false,
+        };
+        CiConfig {
+            schema: 2,
+            repository: String::new(),
+            profile: String::new(),
+            verified: true,
+            default_branch: "main".to_owned(),
+            runners: "both".to_owned(),
+            automatic: "both".to_owned(),
+            analysis: Analysis::default(),
+            workflow: Workflow::default(),
+            release: Release::default(),
+            unit: vec![
+                unit("rust-app", "rust"),
+                unit("swift-app", "swift"),
+                unit("future-app", "quantum"),
+            ],
+        }
+    }
+
+    #[test]
+    fn plan_lanes_default_to_both_and_reject_unknown_lanes() {
+        assert_eq!(
+            must(plan_lanes_for_value(""), "empty lanes"),
+            RunnerMode::Both
+        );
+        assert_eq!(
+            must(plan_lanes_for_value("both"), "both lanes"),
+            RunnerMode::Both
+        );
+        assert_eq!(
+            must(plan_lanes_for_value("velnor"), "velnor lanes"),
+            RunnerMode::Velnor
+        );
+        assert_eq!(
+            must(plan_lanes_for_value("github"), "github lanes"),
+            RunnerMode::Github
+        );
+        let result = plan_lanes_for_value("self-hosted");
+        assert!(
+            result.as_ref().is_err_and(|error| error
+                .to_string()
+                .contains("unsupported CI lanes `self-hosted`")),
+            "unknown lanes must fail closed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn velnor_only_selection_drops_swift_but_keeps_unknown_kinds() {
+        let config = lanes_selection_config();
+        let narrowed = selection_for_lanes(
+            &config,
+            must(full_selection(&config), "full selection"),
+            RunnerMode::Velnor,
+        );
+        let ids = narrowed
+            .units
+            .iter()
+            .map(|unit| unit.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["rust-app", "future-app"]);
+        assert_eq!(
+            narrowed.full_units,
+            ["future-app", "rust-app"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        for lanes in [RunnerMode::Github, RunnerMode::Both] {
+            let narrowed = selection_for_lanes(
+                &config,
+                must(full_selection(&config), "full selection"),
+                lanes,
+            );
+            let ids = narrowed
+                .units
+                .iter()
+                .map(|unit| unit.id.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                ids,
+                vec!["rust-app", "swift-app", "future-app"],
+                "{lanes:?}"
+            );
+            assert_eq!(narrowed.full_units.len(), 3, "{lanes:?}");
+        }
+    }
+
+    #[test]
+    fn velnor_only_selection_prunes_full_marks_of_excluded_units() {
+        let config = lanes_selection_config();
+        let units = config.unit.iter().collect::<Vec<_>>();
+        let selection = UnitSelection {
+            units,
+            full_units: ["swift-app"].into_iter().map(str::to_owned).collect(),
+        };
+        let narrowed = selection_for_lanes(&config, selection, RunnerMode::Velnor);
+        assert!(narrowed.full_units.is_empty());
+        assert!(narrowed.units.iter().all(|unit| unit.id != "swift-app"));
+    }
+
+    #[test]
+    fn velnor_only_plan_output_excludes_swift_and_empties_its_matrix() -> Result<(), Box<dyn Error>>
+    {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "velnor-workflow-runner-matrices-{}-{id}",
+            std::process::id()
+        ));
+        let config = lanes_selection_config();
+        let narrowed = selection_for_lanes(
+            &config,
+            full_selection(&config).map_err(|error| error.to_string())?,
+            RunnerMode::Velnor,
+        );
+        let units = narrowed
+            .units
+            .iter()
+            .map(|unit| unit.id.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(!units.contains("swift-app"), "units={units}");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        write_kind_matrices(&mut file, &config, &narrowed, &path)
+            .map_err(|error| error.to_string())?;
+        drop(file);
+        let output = std::fs::read_to_string(&path)?;
+        std::fs::remove_file(&path)?;
+        assert!(
+            !output.contains("swift_matrix=[{"),
+            "swift matrix must be omitted when no swift units are selected: {output}"
+        );
+        assert!(
+            output.contains("rust_matrix=[{")
+                && output.contains("rust-app")
+                && output.contains("quantum_matrix=[{"),
+            "supported kinds keep their matrices: {output}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selection_artifact_round_trips_scope_and_sha() -> Result<(), Box<dyn Error>> {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "velnor-workflow-selection-artifact-{}-{id}",
+            std::process::id()
+        ));
+        write_selection_file(
+            &path,
+            "base-sha",
+            "head-sha",
+            Scope::Affected,
+            "base,app",
+            "app",
+        )?;
+        let selection = read_selection_file(&path)?;
+        assert_eq!(selection.base_sha, "base-sha");
+        assert_eq!(selection.head_sha, "head-sha");
+        assert_eq!(selection.scope, Scope::Affected);
+        assert_eq!(
+            selection.units,
+            ["app", "base"].into_iter().map(str::to_owned).collect()
+        );
+        assert_eq!(
+            selection.full_units,
+            ["app"].into_iter().map(str::to_owned).collect()
+        );
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn unselected_unit_fails_closed_instead_of_succeeding_as_a_noop() {
+        let config = selection_config();
+        let selected = config.unit.iter().collect::<Vec<_>>();
+        let result = super::select_units_for_job(selected, Some("not-selected"));
+        assert!(
+            result.as_ref().is_err_and(|error| error
+                .to_string()
+                .contains("does not include requested unit `not-selected`")),
+            "an unselected unit must fail closed with a useful error: {result:?}"
+        );
+    }
+
+    #[test]
+    fn prerequisite_tier_rewrites_rust_clippy_to_check() {
+        let unit = CiUnit {
+            id: "rust-app".to_owned(),
+            label: "rust-app".to_owned(),
+            kind: "rust".to_owned(),
+            root: ".".to_owned(),
+            watch: vec!["crates/app/**".to_owned()],
+            github_pr_commands: vec![
+                "cargo fmt --check".to_owned(),
+                "cargo clippy --locked --no-deps --all-targets -- -D warnings".to_owned(),
+                "cargo nextest run --locked".to_owned(),
+            ],
+            github_full_commands: vec!["true".to_owned()],
+            velnor_pr_commands: vec![
+                "mbx clippy --locked --no-deps --all-targets -- -D warnings".to_owned()
+            ],
+            velnor_full_commands: vec!["true".to_owned()],
+            depends_on: Vec::new(),
+            tool_version: None,
+            cache: None,
+            workspace_check: false,
+        };
+        assert_eq!(
+            prerequisite_commands(&unit, RunnerLane::Github, Scope::Affected),
+            vec!["cargo check --locked --no-deps --all-targets"]
+        );
+        assert_eq!(
+            prerequisite_commands(&unit, RunnerLane::Velnor, Scope::Affected),
+            vec!["mbx check --locked --all-targets"]
+        );
+    }
+
+    #[test]
+    fn affected_selection_expands_dependency_and_dependent_closure() -> Result<(), Box<dyn Error>> {
+        let (root, base, head) = selection_git_fixture("closure", "crates/base/src/lib.rs")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units),
+            vec!["base", "app", "consumer"]
+        );
+        assert_eq!(
+            selection.full_units,
+            ["app", "base", "consumer"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        std::fs::remove_dir_all(root)?;
+
+        let (root, base, head) = selection_git_fixture("prerequisite", "crates/app/src/lib.rs")?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units),
+            vec!["base", "app", "consumer"]
+        );
+        assert_eq!(
+            selection.full_units,
+            ["app", "consumer"].into_iter().map(str::to_owned).collect()
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_falls_back_to_full_for_global_or_unmatched_changes(
+    ) -> Result<(), Box<dyn Error>> {
+        for (name, changed) in [
+            ("github", ".github/workflows/ci.yml"),
+            ("unmatched", "README.md"),
+        ] {
+            let (root, base, head) = selection_git_fixture(name, changed)?;
+            let config = selection_config();
+            let units = selected_units_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+            assert_eq!(selected_ids(units), vec!["base", "app", "consumer", "docs"]);
+            std::fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_is_empty_for_an_empty_diff() -> Result<(), Box<dyn Error>> {
+        let (root, base, _) = selection_git_fixture("empty", "crates/base/src/lib.rs")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &base)?;
+        assert!(selection.units.is_empty());
+        assert!(selection.full_units.is_empty());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_falls_back_to_full_for_a_stale_base() -> Result<(), Box<dyn Error>> {
+        let (root, _, head) = selection_git_fixture("stale-base", "crates/base/src/lib.rs")?;
+        let config = selection_config();
+        let units = selected_units_for_diff(
+            &root,
+            &config,
+            Scope::Affected,
+            "0000000000000000000000000000000000000001",
+            &head,
+        )?;
+        assert_eq!(selected_ids(units), vec!["base", "app", "consumer", "docs"]);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_uses_merge_base_for_a_stale_branch_base() -> Result<(), Box<dyn Error>> {
+        let (root, base, head) = stale_base_selection_git_fixture()?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units),
+            vec!["base", "app", "consumer"]
+        );
+        assert!(!selection.full_units.contains("docs"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn cargo_version_bump_uses_the_explicit_allowlist_ids() -> Result<(), Box<dyn Error>> {
+        let (root, base, head) = lockfile_version_selection_git_fixture()?;
+        let command_unit = |id: &str, watch: &[&str]| CiUnit {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            kind: "rust".to_owned(),
+            root: ".".to_owned(),
+            watch: watch.iter().map(|value| (*value).to_owned()).collect(),
+            github_pr_commands: vec!["true".to_owned()],
+            github_full_commands: vec!["true".to_owned()],
+            velnor_pr_commands: vec!["true".to_owned()],
+            velnor_full_commands: vec!["true".to_owned()],
+            depends_on: Vec::new(),
+            tool_version: None,
+            cache: None,
+            workspace_check: false,
+        };
+        let mut config = selection_config();
+        config.workflow.version_bump_units = vec![
+            "rust-runner".to_owned(),
+            "rust-ctl".to_owned(),
+            "docker".to_owned(),
+        ];
+        config.unit = vec![
+            command_unit("rust-runner", &["crates/runner/**"]),
+            command_unit("rust-ctl", &["crates/ctl/**"]),
+            command_unit("docker", &["Dockerfile"]),
+            command_unit("unrelated", &["unrelated/**"]),
+        ];
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units),
+            vec!["rust-runner", "rust-ctl", "docker"]
+        );
+        assert_eq!(
+            selection.full_units,
+            ["docker", "rust-ctl", "rust-runner"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn current_project_cargo_lock_only_change_selects_exact_allowlist_units(
+    ) -> Result<(), Box<dyn Error>> {
+        let (root, base, head) = current_project_selection_git_fixture(
+            "cargo-lock-only",
+            "Cargo.lock",
+            "[[package]]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+            "[[package]]\nname = \"fixture\"\nversion = \"0.1.1\"\n",
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let expected = ["docker", "rust-bench", "rust-leaf"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(selected_id_set(&selection), expected);
+        assert_eq!(selection.full_units, expected);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn current_project_leaf_change_selects_exact_dependency_closure() -> Result<(), Box<dyn Error>>
+    {
+        let (root, base, head) = current_project_selection_git_fixture(
+            "leaf-source",
+            "crates/leaf/src/lib.rs",
+            "pub fn fixture() {}\n",
+            "pub fn fixture() { let _ = 1; }\n",
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let expected_selected = ["rust-base", "rust-leaf"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        // `full_units` carries the affected set (the changed unit and its
+        // dependents); the dependency closure lives on the selected side.
+        let expected_full = ["rust-leaf"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(selected_id_set(&selection), expected_selected);
+        assert_eq!(selection.full_units, expected_full);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_checks_are_selected_only_for_matching_cargo_roots() -> Result<(), Box<dyn Error>> {
+        let workspace_unit = r#"[[unit]]
+id = "rust-workspace"
+kind = "rust"
+root = "."
+watch = ["Cargo.toml", "Cargo.lock"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+
+[[unit]]
+id = "rust-contract"
+kind = "rust"
+root = "crates/contract"
+watch = ["crates/contract/**", "crates/contract/Cargo.lock"]
+github_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+github_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+velnor_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+velnor_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+[unit.cache]
+key_files = ["crates/contract/Cargo.lock"]
+paths = ["~/.cargo/registry"]
+
+[[unit]]
+id = "rust-contract-workspace"
+kind = "rust"
+root = "crates/contract"
+watch = ["crates/contract/Cargo.toml", "crates/contract/Cargo.lock"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+
+[[unit]]
+id = "docs"
+kind = "docs"
+root = "."
+watch = ["docs/**"]
+github_pr_commands = ["markdownlint docs"]
+github_full_commands = ["markdownlint docs"]
+velnor_pr_commands = ["markdownlint docs"]
+velnor_full_commands = ["markdownlint docs"]
+"#;
+        let config_text = format!("{SELECTION_PROJECT_CONFIG}\n{workspace_unit}");
+        let (root, base, head) = current_project_selection_git_fixture_with_config(
+            "leaf-source-workspace-check",
+            "crates/leaf/src/lib.rs",
+            "pub fn fixture() {}\n",
+            "pub fn fixture() { let _ = 1; }\n",
+            &config_text,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_id_set(&selection),
+            ["rust-base", "rust-leaf", "rust-workspace"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(
+            selection.full_units,
+            ["rust-leaf", "rust-workspace"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        std::fs::remove_dir_all(root)?;
+
+        let (root, base, head) = current_project_selection_git_fixture_with_config(
+            "contract-source-workspace-check",
+            "crates/contract/src/lib.rs",
+            "initial\n",
+            "changed\n",
+            &config_text,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_id_set(&selection),
+            ["rust-contract", "rust-contract-workspace"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(
+            selection.full_units,
+            ["rust-contract", "rust-contract-workspace"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert!(!selection.full_units.contains("rust-workspace"));
+        std::fs::remove_dir_all(root)?;
+
+        let (root, base, head) = current_project_selection_git_fixture_with_config(
+            "docs-source-workspace-check",
+            "docs/index.md",
+            "initial\n",
+            "changed\n",
+            &config_text,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_id_set(&selection),
+            BTreeSet::from(["docs".to_owned()])
+        );
+        assert!(!selection.full_units.contains("rust-workspace"));
+        assert!(!selection.full_units.contains("rust-contract-workspace"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_workspace_roots_select_only_the_matching_checks_and_keep_closure(
+    ) -> Result<(), Box<dyn Error>> {
+        let workspace_unit = r#"[[unit]]
+id = "rust-workspace"
+kind = "rust"
+root = "."
+watch = ["Cargo.toml", "Cargo.lock"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+
+[[unit]]
+id = "rust-contract"
+kind = "rust"
+root = "crates/contract"
+watch = ["crates/contract/**", "crates/contract/Cargo.lock"]
+github_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+github_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+velnor_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+velnor_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+[unit.cache]
+key_files = ["crates/contract/Cargo.lock"]
+paths = ["~/.cargo/registry"]
+
+[[unit]]
+id = "rust-contract-workspace"
+kind = "rust"
+root = "crates/contract"
+watch = ["crates/contract/Cargo.toml", "crates/contract/Cargo.lock"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+"#;
+        let config_text = format!("{SELECTION_PROJECT_CONFIG}\n{workspace_unit}");
+        let (root, base, head) = current_project_selection_git_fixture_with_changes(
+            "mixed-workspace-roots",
+            &[
+                ("crates/leaf/src/lib.rs", "initial\n", "changed leaf\n"),
+                (
+                    "crates/contract/src/lib.rs",
+                    "initial\n",
+                    "changed contract\n",
+                ),
+            ],
+            &config_text,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_id_set(&selection),
+            [
+                "rust-base",
+                "rust-contract",
+                "rust-contract-workspace",
+                "rust-leaf",
+                "rust-workspace"
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        );
+        assert_eq!(
+            selection.full_units,
+            [
+                "rust-contract",
+                "rust-contract-workspace",
+                "rust-leaf",
+                "rust-workspace"
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn version_bump_selects_workspace_check_for_the_allowlisted_root_only(
+    ) -> Result<(), Box<dyn Error>> {
+        let workspace_unit = r#"[[unit]]
+id = "rust-workspace"
+kind = "rust"
+root = "."
+watch = ["Cargo.toml", "Cargo.lock"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+
+[[unit]]
+id = "rust-contract"
+kind = "rust"
+root = "crates/contract"
+watch = ["crates/contract/**", "crates/contract/Cargo.lock"]
+github_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+github_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+velnor_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+velnor_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+[unit.cache]
+key_files = ["crates/contract/Cargo.lock"]
+paths = ["~/.cargo/registry"]
+
+[[unit]]
+id = "rust-contract-workspace"
+kind = "rust"
+root = "crates/contract"
+watch = ["crates/contract/Cargo.toml", "crates/contract/Cargo.lock"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+"#;
+        let config_text = format!("{SELECTION_PROJECT_CONFIG}\n{workspace_unit}").replace(
+            "version_bump_units = [\"docker\", \"rust-bench\", \"rust-leaf\"]",
+            "version_bump_units = [\"rust-contract\"]",
+        );
+        let (root, base, head) = current_project_selection_git_fixture_with_config(
+            "contract-version-bump",
+            "crates/contract/Cargo.toml",
+            "version = \"0.1.0\"\n",
+            "version = \"0.1.1\"\n",
+            &config_text,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_id_set(&selection),
+            ["rust-contract", "rust-contract-workspace"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(
+            selection.full_units,
+            ["rust-contract", "rust-contract-workspace"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert!(!selection.full_units.contains("rust-workspace"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn independent_manifest_and_lock_version_bump_selects_matching_workspace_check(
+    ) -> Result<(), Box<dyn Error>> {
+        let workspace_unit = r#"[[unit]]
+id = "rust-contract-workspace"
+kind = "rust"
+root = "crates/contract"
+watch = ["crates/contract/Cargo.toml", "crates/contract/Cargo.lock"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+
+[[unit]]
+id = "rust-contract"
+kind = "rust"
+root = "crates/contract"
+watch = ["crates/contract/**", "crates/contract/Cargo.lock"]
+github_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+github_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+velnor_pr_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+velnor_full_commands = ["cargo test --manifest-path 'Cargo.toml'"]
+[unit.cache]
+key_files = ["crates/contract/Cargo.lock"]
+paths = ["~/.cargo/registry"]
+"#;
+        let config_text = format!("{SELECTION_PROJECT_CONFIG}\n{workspace_unit}").replace(
+            "version_bump_units = [\"docker\", \"rust-bench\", \"rust-leaf\"]",
+            "version_bump_units = [\"rust-contract\"]",
+        );
+        let (root, base, head) = current_project_selection_git_fixture_with_changes(
+            "contract-version-bump-with-lock",
+            &[
+                (
+                    "crates/contract/Cargo.toml",
+                    "version = \"0.1.0\"\n",
+                    "version = \"0.1.1\"\n",
+                ),
+                (
+                    "crates/contract/Cargo.lock",
+                    "version = \"1\"\n",
+                    "version = \"2\"\n",
+                ),
+            ],
+            &config_text,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_id_set(&selection),
+            ["rust-contract", "rust-contract-workspace"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(selection.full_units, selected_id_set(&selection));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn hosted_selection_keeps_matching_workspace_checks() -> Result<(), Box<dyn Error>> {
+        let workspace_unit = r#"[[unit]]
+id = "rust-workspace"
+kind = "rust"
+root = "."
+watch = ["Cargo.toml", "Cargo.lock"]
+github_pr_commands = ["cargo check --workspace --all-targets --locked"]
+github_full_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_pr_commands = ["cargo check --workspace --all-targets --locked"]
+velnor_full_commands = ["cargo check --workspace --all-targets --locked"]
+workspace_check = true
+"#;
+        let config_text = format!("{SELECTION_PROJECT_CONFIG}\n{workspace_unit}");
+        let (root, base, head) = current_project_selection_git_fixture_with_config(
+            "hosted-workspace-check",
+            "crates/leaf/src/lib.rs",
+            "initial\n",
+            "changed\n",
+            &config_text,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let hosted = selection_for_lanes(&config, selection, RunnerMode::Github);
+        assert!(hosted.units.iter().any(|unit| unit.id == "rust-workspace"));
+        assert!(hosted.full_units.contains("rust-workspace"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_scopes_root_workspace_check_to_root_cargo_project(
+    ) -> Result<(), Box<dyn Error>> {
+        let (root, base, head) = current_project_selection_git_fixture_with_config(
+            "root-cargo-project",
+            "crates/root/src/lib.rs",
+            "initial\n",
+            "changed\n",
+            ROOT_SCOPED_SELECTION_PROJECT_CONFIG,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let expected = BTreeSet::from(["rust-root".to_owned(), "rust-root-workspace".to_owned()]);
+        assert_eq!(selected_id_set(&selection), expected);
+        assert_eq!(selection.full_units, expected);
+        assert!(!selection
+            .units
+            .iter()
+            .any(|unit| unit.id == "rust-contract"));
+        assert!(!selection
+            .units
+            .iter()
+            .any(|unit| unit.id == "rust-contract-workspace"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_scopes_contract_workspace_check_to_independent_cargo_project(
+    ) -> Result<(), Box<dyn Error>> {
+        let (root, base, head) = current_project_selection_git_fixture_with_config(
+            "independent-cargo-project",
+            "crates/velnor-workflow-contract/src/lib.rs",
+            "initial\n",
+            "changed\n",
+            ROOT_SCOPED_SELECTION_PROJECT_CONFIG,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let expected = BTreeSet::from([
+            "rust-contract".to_owned(),
+            "rust-contract-workspace".to_owned(),
+        ]);
+        assert_eq!(selected_id_set(&selection), expected);
+        assert_eq!(selection.full_units, expected);
+        assert!(!selection
+            .units
+            .iter()
+            .any(|unit| unit.id == "rust-root-workspace"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_includes_workspace_checks_for_each_changed_cargo_root(
+    ) -> Result<(), Box<dyn Error>> {
+        let (root, base, head) = current_project_selection_git_fixture_with_config(
+            "mixed-cargo-roots",
+            "Cargo.lock",
+            "initial\n",
+            "changed\n",
+            ROOT_SCOPED_SELECTION_PROJECT_CONFIG,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let expected = BTreeSet::from([
+            "rust-root".to_owned(),
+            "rust-contract".to_owned(),
+            "rust-root-workspace".to_owned(),
+            "rust-contract-workspace".to_owned(),
+        ]);
+        assert_eq!(selected_id_set(&selection), expected);
+        assert_eq!(selection.full_units, expected);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn version_bump_selection_scopes_workspace_check_to_matching_cargo_root(
+    ) -> Result<(), Box<dyn Error>> {
+        let (root, base, head) = current_project_selection_git_fixture_with_config(
+            "independent-version-bump",
+            "crates/velnor-workflow-contract/Cargo.toml",
+            "version = \"0.1.0\"\n",
+            "version = \"0.1.1\"\n",
+            ROOT_SCOPED_SELECTION_PROJECT_CONFIG,
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let expected = BTreeSet::from([
+            "rust-contract".to_owned(),
+            "rust-contract-workspace".to_owned(),
+        ]);
+        assert_eq!(selected_id_set(&selection), expected);
+        assert_eq!(selection.full_units, expected);
+        assert!(!selection
+            .units
+            .iter()
+            .any(|unit| unit.id == "rust-root-workspace"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}

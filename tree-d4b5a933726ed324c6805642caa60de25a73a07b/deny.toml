@@ -1,0 +1,10 @@
+# cargo-deny configuration for the canonical Velnor Actions fleet.
+#
+# The skeleton gate audits security advisories only (`cargo deny check advisories`).
+# Plans 005/006 may extend this to bans, licenses, and sources as real dependencies
+# and building blocks land.
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []

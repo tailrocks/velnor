@@ -1,0 +1,10 @@
+# Minimal locked build toolchain for the release Dockerfile. The full job
+# image keeps its separate job-mise.toml; this file prevents a binary build
+# from installing unrelated job tools.
+[settings]
+cargo.binstall = true
+idiomatic_version_file_enable_tools = ["rust"]
+lockfile = true
+
+[tools]
+sccache = "0.16.0"

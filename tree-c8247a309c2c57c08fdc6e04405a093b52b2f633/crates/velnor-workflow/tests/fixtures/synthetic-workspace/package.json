@@ -1,0 +1,9 @@
+{
+  "name": "synthetic-app",
+  "private": true,
+  "scripts": {
+    "build": "echo build",
+    "test": "echo test",
+    "lint": "echo lint"
+  }
+}

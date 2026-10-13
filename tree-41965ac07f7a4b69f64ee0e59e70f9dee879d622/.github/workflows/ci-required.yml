@@ -1,0 +1,25 @@
+# Temporary placeholder. All real workflows were removed until the release
+# publisher contract is finalized; afterwards workflows are regenerated
+# with velnor-workflow (see .github/ci/project.toml). This job exists only
+# to report the repository-required `ci-required` check so the branch stays
+# mergeable while there is intentionally no CI.
+name: ci-required
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  ci-required:
+    name: ci-required
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Confirm intentional no-CI state
+        run: echo "No CI by design until the release process is finalized and workflows are regenerated."

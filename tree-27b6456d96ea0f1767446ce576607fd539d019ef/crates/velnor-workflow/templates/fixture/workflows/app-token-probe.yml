@@ -1,0 +1,151 @@
+name: app-token-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: "velnor | github | both (default: both)"
+        type: choice
+        default: both
+        options: [velnor, github, both]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-token-probe-${{ github.ref }}-${{ inputs.lanes }}
+  cancel-in-progress: true
+
+# Explicit opt-in only. Missing secrets produce a not-ready evidence result;
+# they never turn an ordinary positive run into a secret-dependent fake success.
+jobs:
+  probe:
+    name: app-token-probe (${{ matrix.lane }})
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON(inputs.lanes == 'both' && '["github","velnor"]' || format('["{0}"]', inputs.lanes)) }}
+    runs-on: ${{ matrix.lane == 'github' && 'ubuntu-26.04' || fromJSON('{"group":"velnor-trusted","labels":"velnor-target-mvp"}') }}
+    timeout-minutes: 10
+    env:
+      VELNOR_APP_ID: ${{ secrets.VELNOR_APP_ID }}
+      VELNOR_APP_PRIVATE_KEY: ${{ secrets.VELNOR_APP_PRIVATE_KEY }}
+    steps:
+      - id: prerequisite
+        name: Record app-token prerequisite
+        run: |
+          if [[ -n "${VELNOR_APP_ID}" && -n "${VELNOR_APP_PRIVATE_KEY}" ]]; then
+            echo 'status=present' >> "${GITHUB_OUTPUT}"
+          else
+            echo 'status=missing' >> "${GITHUB_OUTPUT}"
+          fi
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        if: steps.prerequisite.outputs.status == 'present'
+        id: app-token
+        continue-on-error: true
+        with:
+          app-id: ${{ env.VELNOR_APP_ID }}
+          private-key: ${{ env.VELNOR_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+      - id: result
+        if: always()
+        name: Write canonical app-token result
+        env:
+          PREREQUISITE: ${{ steps.prerequisite.outputs.status }}
+          TOKEN_OUTCOME: ${{ steps.app-token.outcome }}
+          TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          if [[ "${PREREQUISITE}" == missing ]]; then
+            result=skipped
+            status=not-ready
+          elif [[ "${TOKEN_OUTCOME}" == success && -n "${TOKEN}" ]]; then
+            result=verified
+            status=ready
+          else
+            result=failed
+            status=failed
+          fi
+          PREREQUISITE="${PREREQUISITE}" RESULT="${result}" STATUS="${status}" LANE="${{ matrix.lane }}" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          payload = {
+              "lane": os.environ["LANE"],
+              "prerequisite": os.environ["PREREQUISITE"],
+              "result": os.environ["RESULT"],
+              "schema": "velnor.fixture.app-token.v1",
+              "status": os.environ["STATUS"],
+          }
+          Path(f"evidence/app-token-{payload['lane']}.json").write_text(
+              json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          [[ "${status}" != failed ]]
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: app-token-${{ matrix.lane }}
+          path: evidence/app-token-${{ matrix.lane }}.json
+          if-no-files-found: error
+
+  readiness:
+    needs: probe
+    if: always()
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: app-token-*
+          path: evidence
+      - id: consume
+        name: Consume explicit app-token readiness status
+        env:
+          LANES: ${{ inputs.lanes }}
+        run: |
+          set -euo pipefail
+          mkdir -p readiness
+          LANES="${LANES}" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          expected_lanes = {"github", "velnor"} if os.environ["LANES"] == "both" else {os.environ["LANES"]}
+          paths = sorted(Path("evidence").rglob("app-token-*.json"))
+          rows = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+          if {row.get("lane") for row in rows} != expected_lanes:
+              raise SystemExit(f"missing app-token evidence lanes: {rows}")
+          statuses = {row["status"] for row in rows}
+          if statuses == {"ready"}:
+              status, reason = "ready", "credentials-verified"
+          elif statuses == {"not-ready"} and all(row["result"] == "skipped" for row in rows):
+              status, reason = "not-ready", "missing-credentials"
+          else:
+              status, reason = "failed", "lane-status-mismatch-or-probe-failure"
+          payload = {
+              "reason": reason,
+              "schema": "velnor.fixture.app-token-readiness.v1",
+              "status": status,
+          }
+          Path("readiness/app-token-readiness.json").write_text(
+              json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          print(f"APP_TOKEN_READINESS status={status} reason={reason}")
+          if status == "failed":
+              raise SystemExit(1)
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: app-token-readiness
+          path: readiness/app-token-readiness.json
+          if-no-files-found: error

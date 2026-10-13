@@ -1,0 +1,2 @@
+[tools]
+"cargo:boltffi_cli" = "0.30.1"

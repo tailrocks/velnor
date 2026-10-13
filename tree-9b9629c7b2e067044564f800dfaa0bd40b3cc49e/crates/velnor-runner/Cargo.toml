@@ -1,0 +1,89 @@
+[package]
+name = "velnor-runner"
+version = "0.1.17"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Velnor self-hosted GitHub Actions runner daemon"
+
+[[bin]]
+name = "velnor-runner"
+path = "src/main.rs"
+
+# Debian packaging (cargo-deb). 
+# The release-deb.yml (on tag) handles:
+#   cargo zigbuild --release --locked --target $TGT
+#   cargo deb -p velnor-runner --target $TGT --no-build --deb-version "$VERSION"
+# This produces target/<triple>/debian/velnor-runner_<ver>_<arch>.deb .
+#
+# NOTE: an explicit `assets` list REPLACES cargo-deb's implicit defaults
+# (including the [[bin]] itself) in current cargo-deb, so the binary MUST be
+# listed below — the 0.1.2 deb shipped without /usr/bin/velnor-runner exactly
+# because it was missing. cargo-deb rewrites target/release/... to
+# target/<triple>/release/... when --target is passed.
+[package.metadata.deb]
+maintainer = "Alexey Zhokhov <alexey@zhokhov.com>"
+copyright = "2026, Tailrocks"
+license-file = []
+extended-description = """
+Velnor is a self-hosted GitHub Actions runner daemon. This package installs the
+velnor-runner binary, a systemd unit (velnor-daemon), and a config file at
+/etc/velnor/velnor.env. Set GITHUB_TOKEN + VELNOR_URL there, then start the
+service to register JIT runners and execute jobs in Docker."""
+section = "devel"
+priority = "optional"
+# Explicit depends instead of $auto: dpkg-shlibdeps cannot resolve shared-lib
+# info for a cross-built (arm64) binary on an amd64 host. OpenSSL is vendored,
+# so the runtime surface is just glibc + libgcc (>= 2.34 covers every "latest
+# Debian/Ubuntu" this package targets).
+depends = "libc6 (>= 2.34), libgcc-s1, git, curl, ca-certificates, docker.io | docker-ce"
+conf-files = ["/etc/velnor/velnor.env"]
+maintainer-scripts = "debian/"
+assets = [
+  ["target/release/velnor-runner", "usr/bin/velnor-runner", "755"],
+  ["debian/velnor-daemon.service", "lib/systemd/system/velnor-daemon.service", "644"],
+  ["debian/velnor-daemon@.service", "lib/systemd/system/velnor-daemon@.service", "644"],
+  ["debian/velnor-doctor.service", "lib/systemd/system/velnor-doctor.service", "644"],
+  ["debian/velnor-doctor.timer", "lib/systemd/system/velnor-doctor.timer", "644"],
+  ["debian/velnor-doctor@.service", "lib/systemd/system/velnor-doctor@.service", "644"],
+  ["debian/velnor-doctor@.timer", "lib/systemd/system/velnor-doctor@.timer", "644"],
+  ["debian/velnor.env", "etc/velnor/velnor.env", "640"],
+  ["../../README.md", "usr/share/doc/velnor-runner/README.md", "644"],
+]
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+clap.workspace = true
+jsonwebtoken.workspace = true
+reqwest.workspace = true
+rsa.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+globset.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+url.workspace = true
+uuid.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+zip.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-opentelemetry = { workspace = true, optional = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+
+[features]
+default = []
+# OTLP span export, activated at runtime only when VELNOR_OTLP_ENDPOINT is set.
+otel = [
+  "dep:tracing-opentelemetry",
+  "dep:opentelemetry",
+  "dep:opentelemetry_sdk",
+  "dep:opentelemetry-otlp",
+]

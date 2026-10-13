@@ -1,0 +1,714 @@
+##[group]Set up job
+Current runner version: 'Velnor Runner/0.1.16 (protocol: 2.334.0)'
+##[group]Operating System
+Ubuntu
+24.04.2
+LTS
+##[endgroup]
+##[group]Runner Image
+Image: velnor/job-ubuntu:24.04
+##[endgroup]
+##[group]GITHUB_TOKEN Permissions
+  Actions: read
+  Contents: read
+  Metadata: read
+##[endgroup]
+Secret source: Actions
+Prepare workflow directory
+##[group]Prepare all required actions
+Getting action download info
+Download action repository 'actions/checkout@v6'
+Download action repository 'mozilla-actions/sccache-action@v0.0.10'
+Download action repository 'rui314/setup-mold@v1'
+Download action repository 'jdx/mise-action@v4'
+Download action repository 'Swatinem/rust-cache@v2'
+Download action repository 'actions/upload-artifact@v7'
+##[endgroup]
+Complete job name: compat (app-b, velnor, ["self-hosted","velnor-target-mvp"])
+##[endgroup]
+##[group]Run mozilla-actions/sccache-action@v0.0.10
+##[group]Run mozilla-actions/sccache-action@v0.0.10
+sccache 0.15.0
+sccache: Starting the server...
+sccache: Listening on address 127.0.0.1:4226
+##[endgroup]
+Finishing: Run mozilla-actions/sccache-action@v0.0.10
+##[endgroup]
+##[group]Run rui314/setup-mold@v1
+##[group]Run rui314/setup-mold@v1
+mold 2.40.4 (compatible with GNU ld)
+##[endgroup]
+Finishing: Run rui314/setup-mold@v1
+##[endgroup]
+##[group]Run jdx/mise-action@v4
+##[group]Run jdx/mise-action@v4
+mise install completed, cargo: /root/.cargo/bin/cargo
+2026.6.2 linux-x64 (2026-06-09)
+[35mDEBUG[0m ARGS: mise install --verbose
+[35mDEBUG[0m [vfox] Getting metadata for yarn
+[35mDEBUG[0m config: /__w/mise.toml
+[35mDEBUG[0m config: /opt/mise/config/config.toml
+[36mINFO[0m  all tools are installed
+[35mDEBUG[0m updating 2 lockfiles
+##[endgroup]
+Finishing: Run jdx/mise-action@v4
+##[endgroup]
+##[group]Run rustup component add rustfmt clippy
+##[group]Run rustup component add rustfmt clippy
+Run rustup component add rustfmt clippy
+rustup component add rustfmt clippy
+shell: bash -e {0}
+info: component rustfmt is up to date
+info: component clippy is up to date
+##[endgroup]
+Finishing: Run rustup component add rustfmt clippy
+##[endgroup]
+##[group]Run Swatinem/rust-cache@v2
+##[group]Run Swatinem/rust-cache@v2
+with:
+  key: app-b
+  shared-key: fixture-velnor-Linux
+[33mRust cache miss for shared key 'fixture-velnor-Linux'[0m
+##[endgroup]
+Finishing: Run Swatinem/rust-cache@v2
+##[endgroup]
+##[group]msrv
+##[group]msrv
+Run set -euo pipefail
+set -euo pipefail
+version="$(grep '^rust-version' "crates/app-b/Cargo.toml" | sed 's/.*= *"\(.*\)"/\1/' || echo 'stable')"
+echo "version=${version:-stable}" >> "${GITHUB_OUTPUT}"
+shell: bash -e {0}
+##[endgroup]
+Finishing: msrv
+##[endgroup]
+##[group]command-files
+##[group]command-files
+Run set -euo pipefail
+set -euo pipefail
+echo "FIXTURE_PACKAGE=${PACKAGE}" >> "${GITHUB_ENV}"
+echo "package=${PACKAGE}" >> "${GITHUB_OUTPUT}"
+echo "lane=${LANE}" >> "${GITHUB_OUTPUT}"
+echo "setup-state=complete" >> "${GITHUB_STATE}"
+# Multiline heredoc output — matches ChainArgos bake-targets pattern
+printf 'packages<<EOF\n%s\n%s\nEOF\n' "app-a" "app-b" >> "${GITHUB_OUTPUT}"
+mkdir -p "${HOME}/.local/bin"
+printf '%s\n' '#!/usr/bin/env bash' 'echo fixture-tool-ok' > "${HOME}/.local/bin/fixture-tool"
+chmod +x "${HOME}/.local/bin/fixture-tool"
+echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+echo "### ${LANE} ${PACKAGE}" >> "${GITHUB_STEP_SUMMARY}"
+shell: bash -e {0}
+env:
+  PACKAGE: app-b
+  LANE: velnor
+Step summary:
+### velnor app-b
+##[endgroup]
+Finishing: command-files
+##[endgroup]
+##[group]Run just fmt-check
+##[group]Run just fmt-check
+Run just fmt-check
+just fmt-check
+shell: bash -e {0}
+cargo fmt --check
+##[endgroup]
+Finishing: Run just fmt-check
+##[endgroup]
+##[group]Run just clippy "app-b"
+##[group]Run just clippy "app-b"
+Run just clippy "app-b"
+just clippy "app-b"
+shell: bash -e {0}
+cargo clippy -p "app-b" -- -D warnings
+    Checking shared v0.1.0 (/__w/crates/shared)
+    Checking app-b v0.1.0 (/__w/crates/app-b)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.23s
+##[endgroup]
+Finishing: Run just clippy "app-b"
+##[endgroup]
+##[group]Run just test "app-b"
+##[group]Run just test "app-b"
+Run just test "app-b"
+just test "app-b"
+shell: bash -e {0}
+
+running 1 test
+test tests::prints_expected_label ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+cargo test -p "app-b"
+   Compiling shared v0.1.0 (/__w/crates/shared)
+   Compiling app-b v0.1.0 (/__w/crates/app-b)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.34s
+     Running unittests src/main.rs (target/debug/deps/app_b-230947847b26aa82)
+##[endgroup]
+Finishing: Run just test "app-b"
+##[endgroup]
+##[group]Run just nextest "app-b"
+##[group]Run just nextest "app-b"
+Run just nextest "app-b"
+just nextest "app-b"
+shell: bash -e {0}
+cargo nextest run -p "app-b"
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+────────────
+ Nextest run ID ad0ab76c-0923-44a2-99a9-49208cd732f2 with nextest profile: default
+    Starting 1 test across 1 binary
+        PASS [   0.004s] (1/1) app-b::bin/app-b tests::prints_expected_label
+────────────
+     Summary [   0.004s] 1 test run: 1 passed, 0 skipped
+##[endgroup]
+Finishing: Run just nextest "app-b"
+##[endgroup]
+##[group]Check MSRV
+##[group]Check MSRV
+Run cargo check -p "app-b" --locked
+cargo check -p "app-b" --locked
+shell: bash -e {0}
+env:
+  RUSTUP_TOOLCHAIN: stable
+info: syncing channel updates for stable-x86_64-unknown-linux-gnu
+info: latest update on 2026-05-28 for version 1.96.0 (ac68faa20 2026-05-25)
+info: downloading 6 components
+    Checking shared v0.1.0 (/__w/crates/shared)
+    Checking app-b v0.1.0 (/__w/crates/app-b)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.68s
+##[endgroup]
+Finishing: Check MSRV
+##[endgroup]
+##[group]Run {
+##[group]Run {
+Run {
+{
+  echo "### sccache stats (velnor app-b)"
+  echo '```'
+  sccache --show-stats 2>/dev/null || echo 'sccache not available'
+  echo '```'
+} >> "${GITHUB_STEP_SUMMARY}"
+shell: bash -e {0}
+Step summary:
+### sccache stats (velnor app-b)
+```
+Compile requests                     17
+Compile requests executed             0
+Cache hits                            0
+Cache misses                          0
+Cache hits rate                       -
+Cache timeouts                        0
+Cache read errors                     0
+Forced recaches                       0
+Cache write errors                    0
+Cache errors                          0
+Compilations                          0
+Compilation failures                  0
+Non-cacheable compilations            0
+Non-cacheable calls                  17
+Non-compilation calls                 0
+Unsupported compiler calls            0
+Average cache write               0.000 s
+Average compiler                  0.000 s
+Average cache read hit            0.000 s
+Failed distributed compilations       0
+
+Non-cacheable reasons:
+-                                     5
+missing input                         4
+incremental                           3
+missing output_dir                    2
+multiple input files                  2
+crate-type                            1
+
+Cache location                  Local disk: "/var/cache/sccache"
+Base directories                (none)
+Use direct/preprocessor mode?   yes
+Version (client)                0.15.0
+Max cache size                       10 GiB
+```
+##[endgroup]
+Finishing: Run {
+##[endgroup]
+##[group]Run set -euo pipefail
+##[group]Run set -euo pipefail
+Run set -euo pipefail
+set -euo pipefail
+test "app-b" = "${FIXTURE_PACKAGE}"
+test "$(fixture-tool)" = "fixture-tool-ok"
+echo "checked=true" >> "${GITHUB_OUTPUT}"
+shell: bash -e {0}
+env:
+  GITHUB_ACTION_PATH: /__w/.github/actions/check-fixture-output
+##[endgroup]
+Finishing: Run set -euo pipefail
+##[endgroup]
+##[group]Run python3 .github/scripts/write-result.py "app-b" "velnor" "out/result.json"
+##[group]Run python3 .github/scripts/write-result.py "app-b" "velnor" "out/result.json"
+Run python3 .github/scripts/write-result.py "app-b" "velnor" "out/result.json"
+python3 .github/scripts/write-result.py "app-b" "velnor" "out/result.json"
+shell: bash -e {0}
+##[endgroup]
+Finishing: Run python3 .github/scripts/write-result.py "app-b" "velnor" "out/result.json"
+##[endgroup]
+##[group]Run actions/upload-artifact@v7
+##[group]Run actions/upload-artifact@v7
+with:
+  name: result-velnor-app-b
+  path: out/result.json
+Uploaded artifact 'result-velnor-app-b' with 1 path(s)
+##[endgroup]
+Finishing: Run actions/upload-artifact@v7
+##[endgroup]
+##[group]Post Run Swatinem/rust-cache@v2
+##[group]Post Run Swatinem/rust-cache@v2
+with:
+  key: app-b
+  shared-key: fixture-velnor-Linux
+Cache not saved because no paths exist for key 'fixture-velnor-Linux'
+##[endgroup]
+Finishing: Post Run Swatinem/rust-cache@v2
+##[endgroup]
+##[group]Post Run mozilla-actions/sccache-action@v0.0.10
+##[group]Post Run mozilla-actions/sccache-action@v0.0.10
+Compile requests                     17
+Compile requests executed             0
+Cache hits                            0
+Cache misses                          0
+Cache hits rate                       -
+Cache timeouts                        0
+Cache read errors                     0
+Forced recaches                       0
+Cache write errors                    0
+Cache errors                          0
+Compilations                          0
+Compilation failures                  0
+Non-cacheable compilations            0
+Non-cacheable calls                  17
+Non-compilation calls                 0
+Unsupported compiler calls            0
+Average cache write               0.000 s
+Average compiler                  0.000 s
+Average cache read hit            0.000 s
+Failed distributed compilations       0
+
+Non-cacheable reasons:
+-                                     5
+missing input                         4
+incremental                           3
+missing output_dir                    2
+multiple input files                  2
+crate-type                            1
+
+Cache location                  Local disk: "/var/cache/sccache"
+Base directories                (none)
+Use direct/preprocessor mode?   yes
+Version (client)                0.15.0
+Max cache size                       10 GiB
+Stopping sccache server...
+Compile requests                     17
+Compile requests executed             0
+Cache hits                            0
+Cache misses                          0
+Cache hits rate                       -
+Cache timeouts                        0
+Cache read errors                     0
+Forced recaches                       0
+Cache write errors                    0
+Cache errors                          0
+Compilations                          0
+Compilation failures                  0
+Non-cacheable compilations            0
+Non-cacheable calls                  17
+Non-compilation calls                 0
+Unsupported compiler calls            0
+Average cache write               0.000 s
+Average compiler                  0.000 s
+Average cache read hit            0.000 s
+Failed distributed compilations       0
+
+Non-cacheable reasons:
+-                                     5
+missing input                         4
+incremental                           3
+missing output_dir                    2
+multiple input files                  2
+crate-type                            1
+
+Cache location                  Local disk: "/var/cache/sccache"
+Base directories                (none)
+Use direct/preprocessor mode?   yes
+Version (client)                0.15.0
+Max cache size                       10 GiB
+##[endgroup]
+Finishing: Post Run mozilla-actions/sccache-action@v0.0.10
+##[endgroup]
+##[group]Post Run actions/checkout@v6
+[command]git -C /var/lib/velnor-fixture/work/slot-2/74fcbfb6-ba7f-506a-918a-a576e1875dd2/workspace/. config --local --unset-all http.https://github.com/.extraheader
+##[endgroup]
+##[group]Complete job
+##[group]Post-job cleanup
+Stop job container
+Remove per-job network
+Clean work directory
+Recycle runner slot
+##[endgroup]
+Finishing: Complete job
+##[endgroup]
+
+##[group]Set up job
+Current runner version: 'Velnor Runner/0.1.16 (protocol: 2.334.0)'
+##[group]Operating System
+Ubuntu
+24.04.2
+LTS
+##[endgroup]
+##[group]Runner Image
+Image: velnor/job-ubuntu:24.04
+##[endgroup]
+##[group]GITHUB_TOKEN Permissions
+  Actions: read
+  Contents: read
+  Metadata: read
+##[endgroup]
+Secret source: Actions
+Prepare workflow directory
+##[group]Prepare all required actions
+Getting action download info
+Download action repository 'actions/checkout@v6'
+Download action repository 'mozilla-actions/sccache-action@v0.0.10'
+Download action repository 'rui314/setup-mold@v1'
+Download action repository 'jdx/mise-action@v4'
+Download action repository 'Swatinem/rust-cache@v2'
+Download action repository 'actions/upload-artifact@v7'
+##[endgroup]
+Complete job name: compat (app-a, velnor, ["self-hosted","velnor-target-mvp"])
+##[endgroup]
+##[group]Run mozilla-actions/sccache-action@v0.0.10
+##[group]Run mozilla-actions/sccache-action@v0.0.10
+sccache 0.15.0
+sccache: Starting the server...
+sccache: Listening on address 127.0.0.1:4226
+##[endgroup]
+Finishing: Run mozilla-actions/sccache-action@v0.0.10
+##[endgroup]
+##[group]Run rui314/setup-mold@v1
+##[group]Run rui314/setup-mold@v1
+mold 2.40.4 (compatible with GNU ld)
+##[endgroup]
+Finishing: Run rui314/setup-mold@v1
+##[endgroup]
+##[group]Run jdx/mise-action@v4
+##[group]Run jdx/mise-action@v4
+mise install completed, cargo: /root/.cargo/bin/cargo
+2026.6.2 linux-x64 (2026-06-09)
+[35mDEBUG[0m ARGS: mise install --verbose
+[35mDEBUG[0m [vfox] Getting metadata for yarn
+[35mDEBUG[0m config: /__w/mise.toml
+[35mDEBUG[0m config: /opt/mise/config/config.toml
+[36mINFO[0m  all tools are installed
+[35mDEBUG[0m updating 2 lockfiles
+##[endgroup]
+Finishing: Run jdx/mise-action@v4
+##[endgroup]
+##[group]Run rustup component add rustfmt clippy
+##[group]Run rustup component add rustfmt clippy
+Run rustup component add rustfmt clippy
+rustup component add rustfmt clippy
+shell: bash -e {0}
+info: component rustfmt is up to date
+info: component clippy is up to date
+##[endgroup]
+Finishing: Run rustup component add rustfmt clippy
+##[endgroup]
+##[group]Run Swatinem/rust-cache@v2
+##[group]Run Swatinem/rust-cache@v2
+with:
+  key: app-a
+  shared-key: fixture-velnor-Linux
+[33mRust cache miss for shared key 'fixture-velnor-Linux'[0m
+##[endgroup]
+Finishing: Run Swatinem/rust-cache@v2
+##[endgroup]
+##[group]msrv
+##[group]msrv
+Run set -euo pipefail
+set -euo pipefail
+version="$(grep '^rust-version' "crates/app-a/Cargo.toml" | sed 's/.*= *"\(.*\)"/\1/' || echo 'stable')"
+echo "version=${version:-stable}" >> "${GITHUB_OUTPUT}"
+shell: bash -e {0}
+##[endgroup]
+Finishing: msrv
+##[endgroup]
+##[group]command-files
+##[group]command-files
+Run set -euo pipefail
+set -euo pipefail
+echo "FIXTURE_PACKAGE=${PACKAGE}" >> "${GITHUB_ENV}"
+echo "package=${PACKAGE}" >> "${GITHUB_OUTPUT}"
+echo "lane=${LANE}" >> "${GITHUB_OUTPUT}"
+echo "setup-state=complete" >> "${GITHUB_STATE}"
+# Multiline heredoc output — matches ChainArgos bake-targets pattern
+printf 'packages<<EOF\n%s\n%s\nEOF\n' "app-a" "app-b" >> "${GITHUB_OUTPUT}"
+mkdir -p "${HOME}/.local/bin"
+printf '%s\n' '#!/usr/bin/env bash' 'echo fixture-tool-ok' > "${HOME}/.local/bin/fixture-tool"
+chmod +x "${HOME}/.local/bin/fixture-tool"
+echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+echo "### ${LANE} ${PACKAGE}" >> "${GITHUB_STEP_SUMMARY}"
+shell: bash -e {0}
+env:
+  PACKAGE: app-a
+  LANE: velnor
+Step summary:
+### velnor app-a
+##[endgroup]
+Finishing: command-files
+##[endgroup]
+##[group]Run just fmt-check
+##[group]Run just fmt-check
+Run just fmt-check
+just fmt-check
+shell: bash -e {0}
+cargo fmt --check
+##[endgroup]
+Finishing: Run just fmt-check
+##[endgroup]
+##[group]Run just clippy "app-a"
+##[group]Run just clippy "app-a"
+Run just clippy "app-a"
+just clippy "app-a"
+shell: bash -e {0}
+cargo clippy -p "app-a" -- -D warnings
+    Checking shared v0.1.0 (/__w/crates/shared)
+    Checking app-a v0.1.0 (/__w/crates/app-a)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.23s
+##[endgroup]
+Finishing: Run just clippy "app-a"
+##[endgroup]
+##[group]Run just test "app-a"
+##[group]Run just test "app-a"
+Run just test "app-a"
+just test "app-a"
+shell: bash -e {0}
+
+running 1 test
+test tests::prints_expected_label ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+cargo test -p "app-a"
+   Compiling shared v0.1.0 (/__w/crates/shared)
+   Compiling app-a v0.1.0 (/__w/crates/app-a)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.39s
+     Running unittests src/main.rs (target/debug/deps/app_a-9fad261e9e02d166)
+##[endgroup]
+Finishing: Run just test "app-a"
+##[endgroup]
+##[group]Run just nextest "app-a"
+##[group]Run just nextest "app-a"
+Run just nextest "app-a"
+just nextest "app-a"
+shell: bash -e {0}
+cargo nextest run -p "app-a"
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+────────────
+ Nextest run ID 3d36f099-7cd5-4b80-bf34-f211b36c4c0d with nextest profile: default
+    Starting 1 test across 1 binary
+        PASS [   0.002s] (1/1) app-a::bin/app-a tests::prints_expected_label
+────────────
+     Summary [   0.003s] 1 test run: 1 passed, 0 skipped
+##[endgroup]
+Finishing: Run just nextest "app-a"
+##[endgroup]
+##[group]Check MSRV
+##[group]Check MSRV
+Run cargo check -p "app-a" --locked
+cargo check -p "app-a" --locked
+shell: bash -e {0}
+env:
+  RUSTUP_TOOLCHAIN: stable
+info: syncing channel updates for stable-x86_64-unknown-linux-gnu
+info: latest update on 2026-05-28 for version 1.96.0 (ac68faa20 2026-05-25)
+info: downloading 6 components
+    Checking shared v0.1.0 (/__w/crates/shared)
+    Checking app-a v0.1.0 (/__w/crates/app-a)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.01s
+##[endgroup]
+Finishing: Check MSRV
+##[endgroup]
+##[group]Run {
+##[group]Run {
+Run {
+{
+  echo "### sccache stats (velnor app-a)"
+  echo '```'
+  sccache --show-stats 2>/dev/null || echo 'sccache not available'
+  echo '```'
+} >> "${GITHUB_STEP_SUMMARY}"
+shell: bash -e {0}
+Step summary:
+### sccache stats (velnor app-a)
+```
+Compile requests                     17
+Compile requests executed             0
+Cache hits                            0
+Cache misses                          0
+Cache hits rate                       -
+Cache timeouts                        0
+Cache read errors                     0
+Forced recaches                       0
+Cache write errors                    0
+Cache errors                          0
+Compilations                          0
+Compilation failures                  0
+Non-cacheable compilations            0
+Non-cacheable calls                  17
+Non-compilation calls                 0
+Unsupported compiler calls            0
+Average cache write               0.000 s
+Average compiler                  0.000 s
+Average cache read hit            0.000 s
+Failed distributed compilations       0
+
+Non-cacheable reasons:
+-                                     5
+missing input                         4
+incremental                           3
+missing output_dir                    2
+multiple input files                  2
+crate-type                            1
+
+Cache location                  Local disk: "/var/cache/sccache"
+Base directories                (none)
+Use direct/preprocessor mode?   yes
+Version (client)                0.15.0
+Max cache size                       10 GiB
+```
+##[endgroup]
+Finishing: Run {
+##[endgroup]
+##[group]Run set -euo pipefail
+##[group]Run set -euo pipefail
+Run set -euo pipefail
+set -euo pipefail
+test "app-a" = "${FIXTURE_PACKAGE}"
+test "$(fixture-tool)" = "fixture-tool-ok"
+echo "checked=true" >> "${GITHUB_OUTPUT}"
+shell: bash -e {0}
+env:
+  GITHUB_ACTION_PATH: /__w/.github/actions/check-fixture-output
+##[endgroup]
+Finishing: Run set -euo pipefail
+##[endgroup]
+##[group]Run python3 .github/scripts/write-result.py "app-a" "velnor" "out/result.json"
+##[group]Run python3 .github/scripts/write-result.py "app-a" "velnor" "out/result.json"
+Run python3 .github/scripts/write-result.py "app-a" "velnor" "out/result.json"
+python3 .github/scripts/write-result.py "app-a" "velnor" "out/result.json"
+shell: bash -e {0}
+##[endgroup]
+Finishing: Run python3 .github/scripts/write-result.py "app-a" "velnor" "out/result.json"
+##[endgroup]
+##[group]Run actions/upload-artifact@v7
+##[group]Run actions/upload-artifact@v7
+with:
+  name: result-velnor-app-a
+  path: out/result.json
+Uploaded artifact 'result-velnor-app-a' with 1 path(s)
+##[endgroup]
+Finishing: Run actions/upload-artifact@v7
+##[endgroup]
+##[group]Post Run Swatinem/rust-cache@v2
+##[group]Post Run Swatinem/rust-cache@v2
+with:
+  key: app-a
+  shared-key: fixture-velnor-Linux
+Cache not saved because no paths exist for key 'fixture-velnor-Linux'
+##[endgroup]
+Finishing: Post Run Swatinem/rust-cache@v2
+##[endgroup]
+##[group]Post Run mozilla-actions/sccache-action@v0.0.10
+##[group]Post Run mozilla-actions/sccache-action@v0.0.10
+Compile requests                     17
+Compile requests executed             0
+Cache hits                            0
+Cache misses                          0
+Cache hits rate                       -
+Cache timeouts                        0
+Cache read errors                     0
+Forced recaches                       0
+Cache write errors                    0
+Cache errors                          0
+Compilations                          0
+Compilation failures                  0
+Non-cacheable compilations            0
+Non-cacheable calls                  17
+Non-compilation calls                 0
+Unsupported compiler calls            0
+Average cache write               0.000 s
+Average compiler                  0.000 s
+Average cache read hit            0.000 s
+Failed distributed compilations       0
+
+Non-cacheable reasons:
+-                                     5
+missing input                         4
+incremental                           3
+missing output_dir                    2
+multiple input files                  2
+crate-type                            1
+
+Cache location                  Local disk: "/var/cache/sccache"
+Base directories                (none)
+Use direct/preprocessor mode?   yes
+Version (client)                0.15.0
+Max cache size                       10 GiB
+Stopping sccache server...
+Compile requests                     17
+Compile requests executed             0
+Cache hits                            0
+Cache misses                          0
+Cache hits rate                       -
+Cache timeouts                        0
+Cache read errors                     0
+Forced recaches                       0
+Cache write errors                    0
+Cache errors                          0
+Compilations                          0
+Compilation failures                  0
+Non-cacheable compilations            0
+Non-cacheable calls                  17
+Non-compilation calls                 0
+Unsupported compiler calls            0
+Average cache write               0.000 s
+Average compiler                  0.000 s
+Average cache read hit            0.000 s
+Failed distributed compilations       0
+
+Non-cacheable reasons:
+-                                     5
+missing input                         4
+incremental                           3
+missing output_dir                    2
+multiple input files                  2
+crate-type                            1
+
+Cache location                  Local disk: "/var/cache/sccache"
+Base directories                (none)
+Use direct/preprocessor mode?   yes
+Version (client)                0.15.0
+Max cache size                       10 GiB
+##[endgroup]
+Finishing: Post Run mozilla-actions/sccache-action@v0.0.10
+##[endgroup]
+##[group]Post Run actions/checkout@v6
+[command]git -C /var/lib/velnor-fixture/work/slot-1/d0110cc8-8c69-5863-9651-42cab373adf8/workspace/. config --local --unset-all http.https://github.com/.extraheader
+##[endgroup]
+##[group]Complete job
+##[group]Post-job cleanup
+Stop job container
+Remove per-job network
+Clean work directory
+Recycle runner slot
+##[endgroup]
+Finishing: Complete job
+##[endgroup]
+

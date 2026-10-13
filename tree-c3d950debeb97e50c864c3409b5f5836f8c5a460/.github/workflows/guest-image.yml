@@ -1,0 +1,90 @@
+# Reproducible Firecracker guest kernel + rootfs. Not the generated estate CI template.
+name: Guest image
+
+on:
+  pull_request:
+    paths:
+      - "microvm/**"
+      - "crates/velnor-runner/src/execution/guest.rs"
+      - "crates/velnor-runner/src/execution/guest_image.rs"
+      - "crates/velnor-runner/src/bin/velnor-guest-image.rs"
+      - ".github/workflows/guest-image.yml"
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: velnor (default) | github | both
+        type: choice
+        default: velnor
+        options: [velnor, github, both]
+  push:
+    tags:
+      - "v[0-9]*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guest-image-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guest-image:
+    name: Guest kernel/rootfs ${{ matrix.arch }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            deb: amd64
+          - arch: aarch64
+            deb: arm64
+    # Always GitHub-hosted: mmdebstrap needs unprivileged user namespaces
+    # (or CAP_SYS_ADMIN), which the Velnor job sandbox drops. Building the
+    # signed guest kernel/rootfs release artifacts is a trusted operation on
+    # the documented trust route anyway.
+    runs-on: ${{ matrix.deb == 'arm64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4.2.5
+        with:
+          install_args: "rust"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install kernel and rootfs build packages
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential flex bison bc libssl-dev libelf-dev xz-utils e2fsprogs \
+            mmdebstrap debootstrap qemu-user-binfmt binfmt-support gnupg arch-test \
+            gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu
+
+      - name: Download pinned kernel tarball
+        run: |
+          set -euo pipefail
+          url="$(jq -er '.kernel_tarball' microvm/pins.json)"
+          sha="$(jq -er '.kernel_tarball_sha256' microvm/pins.json)"
+          curl -fsSL -o linux.tar.xz "$url"
+          echo "$sha  linux.tar.xz" | sha256sum -c -
+
+      - name: Build guest vmlinux and rootfs.ext4
+        run: |
+          set -euo pipefail
+          mkdir -p dist/microvm
+          cargo run -p velnor-runner --bin velnor-guest-image --locked -- \
+            build --arch "${{ matrix.arch }}" --out dist/microvm --tarball linux.tar.xz
+          test -s dist/microvm/vmlinux
+          test -s dist/microvm/rootfs.ext4
+          sha256sum dist/microvm/vmlinux dist/microvm/rootfs.ext4 | tee dist/microvm/SHA256SUMS
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: guest-image-${{ matrix.arch }}
+          path: |
+            dist/microvm/vmlinux
+            dist/microvm/rootfs.ext4
+            dist/microvm/SHA256SUMS

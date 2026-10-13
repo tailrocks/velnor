@@ -1,0 +1,21 @@
+# Generator-owned tool policy. Consumer mise.toml files render only the entries
+# they use; bare source values use mise's native tool aliases, while qualified
+# values select an alternate backend. `backend` records the lockfile resolver
+# for native aliases. Rust is intentionally absent from this fleet registry:
+# mise installs the version declared by rust-toolchain.toml, and consumer rust
+# pins are rejected.
+schema = 1
+
+[tools]
+actionlint = { version = "1.7.12", source = "actionlint", backend = "aqua:rhysd/actionlint", notes = "Use mise's native actionlint alias." }
+"cargo-deny" = { version = "0.20.2", source = "cargo:cargo-deny", notes = "Native cargo-deny is unavailable; use mise's cargo backend." }
+nextest = { version = "0.9.140", source = "aqua:nextest-rs/nextest/cargo-nextest", notes = "Native nextest is unavailable; use the pinned mise Aqua backend." }
+gh = { version = "2.96.0", source = "gh", backend = "aqua:cli/cli", notes = "Use mise's native GitHub CLI alias." }
+mise = { version = "2026.7.12", source = "github:jdx/mise", notes = "Pinned mise runtime used by locked repository tasks." }
+cosign = { version = "3.1.3", source = "cosign", backend = "aqua:sigstore/cosign", notes = "Use mise's native cosign alias." }
+gitleaks = { version = "8.30.1", source = "gitleaks", backend = "aqua:gitleaks/gitleaks", notes = "Use mise's native gitleaks alias." }
+uv = { version = "0.12.5", source = "uv", backend = "aqua:astral-sh/uv", notes = "Use mise's native uv alias at the selected fleet pin." }
+bun = { version = "1.4.0", source = "bun", backend = "core:bun", notes = "Use mise's native Bun alias." }
+python = { version = "3.14.7", source = "python", backend = "core:python", notes = "Use mise's native Python alias." }
+ruby = { version = "3.4.10", source = "ruby", backend = "core:ruby", notes = "Use mise's native Ruby alias instead of ruby=latest." }
+tofu = { version = "1.12.5", source = "aqua:opentofu/opentofu", notes = "Reserved canonical OpenTofu source/version for infrastructure consumers." }

@@ -1,0 +1,7 @@
+schema = 2
+
+[generator]
+repository = "example/polyglot"
+
+[workflow]
+

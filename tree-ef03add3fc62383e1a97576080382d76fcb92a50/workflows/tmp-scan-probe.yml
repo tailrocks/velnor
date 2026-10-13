@@ -1,0 +1,64 @@
+# TEMPORARY PROBE — DO NOT MERGE TO MAIN. Removed by the follow-up fixup
+# commit that installs the renderer's own bytes. Renders the candidate
+# .github tree on a healthy runner (local toolchain is wedged) and uploads
+# it as an artifact.
+name: Candidate render probe (temporary)
+run-name: Render probe · ${{ github.ref_name }}
+
+on:
+  pull_request:
+
+jobs:
+  probe:
+    name: Render candidate tree
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Restore Rust toolchain
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Provision Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+      - name: Build debug and release generators
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --no-default-features --package velnor-workflow --bin velnor-workflow
+          cargo build --locked --no-default-features --release --package velnor-workflow --bin velnor-workflow
+          cargo build --locked --package velnor-workflow --bin velnor-workflow --target-dir target/feat
+      - name: Render with all three binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./target/debug/velnor-workflow "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/scratch-debug" --plain --force --default-branch main
+          ./target/release/velnor-workflow "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/scratch-release" --plain --force --default-branch main
+          ./target/feat/debug/velnor-workflow "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/scratch-feat" --plain --force --default-branch main
+      - name: Prove profile and feature independence
+        shell: bash
+        run: |
+          set -euo pipefail
+          diff -r "$RUNNER_TEMP/scratch-debug" "$RUNNER_TEMP/scratch-release"
+          diff -r "$RUNNER_TEMP/scratch-debug" "$RUNNER_TEMP/scratch-feat"
+          echo PROFILES_AND_FEATURES_IDENTICAL
+      - name: Show rendered ownership state
+        shell: bash
+        run: cat "$RUNNER_TEMP/scratch-release/.github/ci/.github-actions-generator-state"
+      - name: Upload candidate render
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-render
+          path: ${{ runner.temp }}/scratch-release
+          if-no-files-found: error
+          retention-days: 7

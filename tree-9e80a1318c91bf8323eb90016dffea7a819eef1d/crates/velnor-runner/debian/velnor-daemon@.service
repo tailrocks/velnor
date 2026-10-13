@@ -1,0 +1,57 @@
+[Unit]
+Description=Velnor self-hosted GitHub Actions runner daemon (%i)
+Documentation=https://github.com/tailrocks/velnor
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+# Template instance: one daemon per target scope (repo/org), e.g.
+#   systemctl enable --now velnor-daemon@blockchain-nodes
+# reads /etc/velnor/blockchain-nodes.env (+ optional
+# /etc/velnor/blockchain-nodes.secrets.env for the token) and keeps state in
+# /var/lib/velnor-blockchain-nodes. See velnor-daemon.service for the
+# semantics of Type=notify/WatchdogSec and the never-exit retry behavior.
+Type=notify
+WatchdogSec=180
+Environment=VELNOR_JOB_CPUS=4
+Environment=VELNOR_JOB_MEMORY=12g
+Environment=VELNOR_STORAGE_ROOT=/var
+EnvironmentFile=/etc/velnor/%i.env
+EnvironmentFile=-/etc/velnor/%i.secrets.env
+ExecStart=/usr/bin/velnor-runner daemon \
+  --url ${VELNOR_URL} \
+  --name ${VELNOR_NAME} \
+  --labels ${VELNOR_LABELS} \
+  --slots ${VELNOR_SLOTS} \
+  --work-dir ${VELNOR_WORK_DIR} \
+  --replace \
+  --require-docker-socket
+Restart=always
+RestartSec=5
+# Graceful drain: on stop/restart (including apt upgrades) the daemon finishes
+# running jobs and deregisters idle slots instead of dying mid-job (incident
+# 2026-06-11: an upgrade restart killed 7 in-flight jobs). The stop timeout
+# bounds the longest job we wait for (3h, matching the estate's largest
+# timeout-minutes); systemd escalates to SIGKILL after that.
+TimeoutStopSec=10800
+User=root
+StateDirectory=velnor-%i
+CacheDirectory=velnor
+RuntimeDirectory=velnor
+LogsDirectory=velnor
+WorkingDirectory=/var/lib/velnor-%i
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# Per-instance state, work, and forensic logs all live below this root.
+# JIT slot credentials remain under the root user's configured runner state.
+ReadWritePaths=/var/lib/velnor-%i /var/cache/velnor /run/velnor /var/log/velnor /root/.velnor/runner
+
+[Install]
+WantedBy=multi-user.target

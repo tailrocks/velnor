@@ -1,0 +1,141 @@
+name: fixture-rust-check
+
+on:
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: "velnor | github | both (default: both)"
+        type: choice
+        default: both
+        options: [velnor, github, both]
+      package:
+        required: true
+        type: string
+        description: Cargo package name to check.
+  workflow_call:
+    inputs:
+      lane:
+        required: true
+        type: string
+        description: "Explicit lane identity: github or velnor."
+      package:
+        required: true
+        type: string
+        description: Cargo package name to check.
+      runner:
+        required: false
+        type: string
+        default: '"ubuntu-26.04"'
+        description: Runner label as JSON string (e.g. '"ubuntu-26.04"' or '["self-hosted","velnor-target-mvp"]').
+      cache-key-suffix:
+        required: false
+        type: string
+        default: 'github'
+        description: Lane component for the rust-cache shared-key (e.g. 'github' or 'velnor') so lanes do not share one cache.
+    secrets:
+      github-token:
+        required: false
+        description: Optional GitHub token override.
+
+permissions:
+  contents: read
+
+concurrency:
+  # Include the lane so a lanes=both caller cannot cancel its own sibling lane:
+  # dispatch uses inputs.lanes; workflow_call uses its explicit cache suffix.
+  group: fixture-rust-check-${{ github.workflow }}-${{ github.ref }}-${{ inputs.package }}-${{ inputs.lanes || inputs.cache-key-suffix }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  rust-check:
+    name: rust-check (${{ matrix.lane }}, ${{ inputs.package }})
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '["github","velnor"]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '["github"]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor') && '["velnor"]' || format('["{0}"]', inputs.lane)) }}
+    runs-on: ${{ github.event_name == 'workflow_call' && fromJSON(inputs.runner) || matrix.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
+    timeout-minutes: 20
+    env:
+      FIXTURE_PACKAGE: ${{ inputs.package }}
+      FIXTURE_LANE: ${{ matrix.lane }}
+      SCCACHE_GHA_ENABLED: "false"
+      SCCACHE_CACHE_SIZE: 20G
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
+          save-on-workflow-dispatch: true
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+          disable_annotations: "false"
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: fixture-reusable-${{ github.event_name == 'workflow_dispatch' && matrix.lane || inputs.cache-key-suffix }}-${{ runner.os }}-${{ inputs.package }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: fixture-reusable-${{ github.event_name == 'workflow_dispatch' && matrix.lane || inputs.cache-key-suffix }}-${{ runner.os }}-
+      - name: Cache Cargo target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: fixture-target-${{ github.event_name == 'workflow_dispatch' && matrix.lane || inputs.cache-key-suffix }}-${{ runner.os }}-${{ github.job }}-${{ inputs.package }}-${{ hashFiles('mise.toml', '**/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: fixture-target-${{ github.event_name == 'workflow_dispatch' && matrix.lane || inputs.cache-key-suffix }}-${{ runner.os }}-${{ github.job }}-${{ inputs.package }}-${{ hashFiles('mise.toml', '**/Cargo.toml', 'Cargo.lock') }}-
+      - name: Validate package input
+        id: validate_package
+        env:
+          PACKAGE: ${{ inputs.package }}
+        run: |
+          set -euo pipefail
+          case "${PACKAGE}" in
+            app-a|app-b) ;;
+            *) echo "unsupported fixture package: ${PACKAGE}" >&2; exit 1 ;;
+          esac
+      - id: check
+        run: mbx check -p "${FIXTURE_PACKAGE}" --locked
+      - name: Record command-file effects
+        id: effects
+        run: |
+          set -euo pipefail
+          echo "### reusable rust-check: ${FIXTURE_PACKAGE}" >> "${GITHUB_STEP_SUMMARY}"
+          echo "reusable-check-passed=true" >> "${GITHUB_OUTPUT}"
+          echo "FIXTURE_CHECKED=${FIXTURE_PACKAGE}" >> "${GITHUB_ENV}"
+      # `steps` is computed by the runner, not by this workflow, so the outcome
+      # and conclusion of every step above are the one behavioural signal here
+      # that no workflow author can write down.
+      - name: Dump runner-computed step outcomes
+        run: |
+          set -euo pipefail
+          cat > "${RUNNER_TEMP}/steps.json" <<'STEPS'
+          ${{ toJSON(steps) }}
+          STEPS
+      - name: Collect observed lane evidence
+        uses: ./.github/actions/collect-evidence
+        with:
+          scenario: fixture-rust-check
+          evidence-id: ${{ inputs.package }}
+          lane: ${{ env.FIXTURE_LANE }}
+          output: result-${{ env.FIXTURE_LANE }}-${{ inputs.package }}/result.json
+          observations: |
+            --observe-command build=mbx build --quiet --locked -p "${FIXTURE_PACKAGE}"
+            --observe-command run=mbx run --quiet --locked -p "${FIXTURE_PACKAGE}"
+            --observe-env checked=FIXTURE_CHECKED
+            --observe-steps steps=${{ runner.temp }}/steps.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: result-${{ matrix.lane }}-${{ inputs.package }}
+          path: result-${{ matrix.lane }}-${{ inputs.package }}/result.json
+          if-no-files-found: error

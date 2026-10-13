@@ -1,0 +1,23 @@
+# Velnor job-image toolchain (Plan 008). This is the committed, locked mise
+# config baked as the job container's global config. `mise install --locked`
+# runs fail-closed against docker/job-mise.lock for linux-x64 and linux-arm64;
+# there is no apt/Cargo/curl fallback (N8: one toolchain contract). Regenerate
+# the adjacent lock with `mise lock --platform linux-x64,linux-arm64` — never
+# hand-edit lock entries.
+[settings]
+lockfile = true
+
+[tools]
+# Rust CI toolchain. core:rust and cargo:* are version-locked only (no URL
+# pinning is available for those backends); every aqua-backed tool below pins
+# an exact URL + checksum (and provenance where upstream publishes it).
+rust = { version = "1.97.1", components = "clippy,rustfmt" }
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.140"
+"cargo:rust-script" = "0.36.0"
+just = "1.57.0"
+protoc = "35.1"
+gh = "2.96.0"
+# Admitted locked mise keys backing the mold/just/cosign native adapters,
+# replacing the previous apt/curl installs.
+mold = "2.41.0"
+cosign = "3.1.2"

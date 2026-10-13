@@ -1,0 +1,166 @@
+{
+  "date": "2026-08-24",
+  "repo": "tailrocks/velnor-actions-fixture",
+  "ref": "campaign/control-plane-corpus@46f71d3f81a731b2c4fb7b2bb0e90f73a6f062d3",
+  "pr": 90,
+  "hygiene": {
+    "cancelled_run_ids": [],
+    "note_cancelled": "No pending/in-progress runs older than PR #90's own runs existed at start; PR #90's own runs (CI 32702825087, compat public unmerged 32702824642) were left untouched and completed successfully.",
+    "deleted_runner_registrations": [],
+    "runners_seen": [
+      {"id": 5538, "name": "velnor-fixture-slot-1", "status": "online", "busy": false, "labels": ["fixture", "self-hosted", "velnor", "velnor-target-mvp"]},
+      {"id": 5539, "name": "velnor-fixture-slot-2", "status": "online", "busy": false, "labels": ["fixture", "self-hosted", "velnor", "velnor-target-mvp"]}
+    ],
+    "note_runners": "Zero registrations carried the dedicated validation prefix velnor-cp-queue-validation; nothing matched the deletion rule, so zero deletions and zero orphans."
+  },
+  "runs": [
+    {
+      "id": null,
+      "scenario": "pr90-checks",
+      "conclusion": "success",
+      "detail": "13 checks SUCCESS, 12 SKIPPED, 0 FAILED; mergeable=MERGEABLE mergeStateStatus=CLEAN",
+      "url": "https://github.com/tailrocks/velnor-actions-fixture/pull/90/checks"
+    },
+    {
+      "id": 32703106587,
+      "scenario": "compat lane=both (step B)",
+      "conclusion": "success",
+      "lane_split_proof": [
+        "compat (app-a, GitHub, ubuntu-26.04, false): success",
+        "compat (app-a, Velnor, velnor-trusted, velnor-target-mvp, true): success",
+        "compat (app-b, GitHub, ubuntu-26.04, false): success",
+        "compat (app-b, Velnor, velnor-trusted, velnor-target-mvp, true): success",
+        "compare-results: success (aggregate-needs: success)",
+        "compat-required: success"
+      ],
+      "url": "https://github.com/tailrocks/velnor-actions-fixture/actions/runs/32703106587"
+    },
+    {"id": null, "scenario": "control success", "conclusion": "unproven-blocked"},
+    {"id": null, "scenario": "control failure", "conclusion": "unproven-blocked"},
+    {"id": null, "scenario": "control hold", "conclusion": "unproven-blocked"},
+    {"id": null, "scenario": "control queue", "conclusion": "unproven-blocked"},
+    {"id": null, "scenario": "control concurrent", "conclusion": "unproven-blocked"},
+    {"id": null, "scenario": "control artifacts", "conclusion": "unproven-blocked"},
+    {"id": null, "scenario": "control cache cold/warm/unchanged", "conclusion": "unproven-blocked"},
+    {"id": null, "scenario": "control load + teardown", "conclusion": "unproven-blocked"}
+  ],
+  "blocker": {
+    "kind": "workflow-not-dispatchable-pre-merge",
+    "diagnosis": "control-plane.yml exists only on campaign/control-plane-corpus (PR #90 open). GitHub registers workflow_dispatch targets from the default branch only: gh workflow run control-plane.yml -> HTTP 404 'workflow not found on the default branch'; POST /actions/workflows/control-plane.yml/dispatches -> HTTP 404; GET /actions/workflows lists 14 workflows, none matching 'control'. Merging PR #90 to register the workflow is an operator merge decision and was out of scope for this validation run.",
+    "evidence": ["gh workflow run 404 message", "dispatch API 404", "workflows list count=14 without control"],
+    "resolved_by": "PR #90 merged (see post_merge section)"
+  },
+  "post_merge": {
+    "merge": {
+      "pr": 90,
+      "method": "squash",
+      "merge_commit_sha": "799178c1b53ddb5d1db5ddfc46d41c6284e1b72b",
+      "subject": "feat(ci): add control-plane corpus and align compat to sole lane selector",
+      "trailers_preserved_verbatim": [
+        "Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>.",
+        "Co-authored-by: Codex <codex@openai.com>.",
+        "Plan 063 step 3."
+      ],
+      "local_fixture_clone": "/Users/donbeave/Projects/tailrocks/velnor-project/velnor-actions-fixture main fast-forwarded 415cadf -> 799178c (= origin/main), clean"
+    },
+    "hygiene_pre_dispatch": {
+      "pending_or_in_progress_runs_found": 0,
+      "cancelled_run_ids": [],
+      "validation_prefix_registrations_seen": 0,
+      "deleted_runner_registrations": []
+    },
+    "runs": [
+      {
+        "id": 32703865136,
+        "scenario": "success",
+        "inputs": {"scenario": "success", "hold_seconds": 30, "artifact_count": 3, "lane": "velnor"},
+        "conclusion": "success",
+        "proof": "aggregator verdict=match; scenario-success (Velnor) success; all others skipped; CP_DETERMINISTIC_RESULT=42",
+        "url": "https://github.com/tailrocks/velnor-actions-fixture/actions/runs/32703865136"
+      },
+      {
+        "id": 32704019420,
+        "scenario": "failure",
+        "inputs": {"scenario": "failure", "lane": "velnor"},
+        "conclusion": "failure",
+        "named_step_failed_at": "controlled-failure",
+        "log_quote": "##[error]CP_MARKER scenario=failure phase=controlled-failure lane=Velnor expected=true (then exit 1)",
+        "step_conclusions": ["Emit start markers: success", "controlled-failure: failure", "Report expected terminal state: failure (see observation_1)", "Complete job: success"],
+        "aggregator": "expect scenario-failure=failure satisfied; aggregator success",
+        "observation_1": "Velnor-lane divergence candidate: env OUTCOME: steps.controlled-failure.outcome rendered LITERALLY ('${{ steps.controlled-failure.outcome }}') in the follow-up step instead of evaluating to 'failure', so that step's mismatch guard exited 1. Hyphenated step-id dot-path evaluation must be checked against GitHub-hosted behavior before blaming either side. Recorded verbatim; no fix applied here.",
+        "url": "https://github.com/tailrocks/velnor-actions-fixture/actions/runs/32704019420"
+      },
+      {
+        "id": 32704204228,
+        "scenario": "hold",
+        "inputs": {"scenario": "hold", "hold_seconds": 30, "lane": "velnor"},
+        "conclusion": "cancelled",
+        "cancel_proof": "gh run cancel submitted while scenario-hold was in_progress (sleeping); final status=completed conclusion=cancelled",
+        "orphan_check_after_cancel": "runners = [velnor-fixture-slot-1, velnor-fixture-slot-2] only; zero velnor-cp-queue-validation* or validation-owned registrations; zero deletions needed",
+        "url": "https://github.com/tailrocks/velnor-actions-fixture/actions/runs/32704204228"
+      },
+      {
+        "id": 32704312250,
+        "scenario": "concurrent",
+        "inputs": {"scenario": "concurrent", "lane": "velnor"},
+        "conclusion": "success",
+        "overlap_timestamps_epoch": {"slot_1": {"start": 1787558569, "end": 1787558589}, "slot_2": {"start": 1787558569, "end": 1787558589}},
+        "overlap_proof": "CP_OVERLAP lane=Velnor overlap_seconds=20 (aggregator interval intersection)",
+        "url": "https://github.com/tailrocks/velnor-actions-fixture/actions/runs/32704312250"
+      },
+      {
+        "id": 32704438283,
+        "scenario": "artifacts",
+        "inputs": {"scenario": "artifacts", "artifact_count": 3, "lane": "velnor"},
+        "conclusion": "success",
+        "artifact_list": "cp-artifact-Velnor-1,cp-artifact-Velnor-2,cp-artifact-Velnor-3",
+        "verified": "CP_ARTIFACTS_VERIFIED count=3 distinct=3; API artifacts total_count=2 (cp-artifacts-Velnor 568B + job-log); each file <=256 bytes enforced in step",
+        "url": "https://github.com/tailrocks/velnor-actions-fixture/actions/runs/32704438283"
+      },
+      {
+        "id": 32704574052,
+        "scenario": "cache cold",
+        "inputs": {"scenario": "cache", "lane": "velnor"},
+        "conclusion": "success",
+        "markers": "Cache not found for input keys: cp-control-plane-Linux-fixed-v1; CP_CACHE_HIT=false",
+        "observation_2": "CP_CACHE_PRIMARY_KEY output rendered empty on cold miss (actions/cache v7 adapter on Velnor lane); hit path below proves key handling works. Recorded verbatim.",
+        "url": "https://github.com/tailrocks/velnor-actions-fixture/actions/runs/32704574052"
+      },
+      {
+        "id": 32704719858,
+        "scenario": "cache warm/unchanged",
+        "inputs": {"scenario": "cache", "lane": "velnor"},
+        "conclusion": "success",
+        "markers": "Cache restored from key: cp-control-plane-Linux-fixed-v1; CP_CACHE_HIT=true; post step 'Cache hit occurred on primary key ..., not saving cache'",
+        "url": "https://github.com/tailrocks/velnor-actions-fixture/actions/runs/32704719858"
+      },
+      {
+        "id": 32704848711,
+        "scenario": "load",
+        "inputs": {"scenario": "load", "lane": "velnor"},
+        "conclusion": "success",
+        "markers": "phase=ready; CP_LOAD_NPROC=4; tolerance cpu_seconds=10 pct50 memory_mib=256 disk_mib=64; phase=done; phase=teardown complete=true",
+        "url": "https://github.com/tailrocks/velnor-actions-fixture/actions/runs/32704848711"
+      },
+      {
+        "id": 32705006580,
+        "scenario": "queue",
+        "inputs": {"scenario": "queue", "lane": "velnor"},
+        "conclusion": "cancelled",
+        "isolation": "ISOLATION-UNPROVEN",
+        "evidence": "Dispatched 2026-08-24T07:56+08:11:02Z; validate-inputs completed on hosted runner; scenario-queue remained status=queued from 08:11:02Z past 08:16:42Z (>4min diagnosis window). GET /actions/runners throughout window listed only velnor-fixture-slot-1/-2 with labels [fixture, self-hosted, velnor, velnor-target-mvp]; NO runner carries label velnor-cp-queue-validation and NOTHING JIT-registered under any queue/validation name during the window. Job targets runs-on: [self-hosted, velnor-cp-queue-validation]. Run cancelled at 08:16:52Z to restore clean state; conclusion=cancelled; zero orphaned registrations afterward (fleet = slot-1, slot-2).",
+        "requirement": "A dedicated validation instance carrying exactly the velnor-cp-queue-validation label must be registered before this proof can exist. Do not fake by relabeling shared slots.",
+        "url": "https://github.com/tailrocks/velnor-actions-fixture/actions/runs/32705006580"
+      }
+    ],
+    "final_hygiene": {
+      "noncompleted_runs_remaining": 0,
+      "runner_fleet_final": ["velnor-fixture-slot-1", "velnor-fixture-slot-2"],
+      "validation_prefix_registrations_final": 0
+    },
+    "unproven": [
+      "queue isolation to a dedicated velnor-cp-queue-validation instance (no such instance exists; nothing JIT-registered within the ~4min window; run cancelled rather than faked)",
+      "GitHub-lane control-plane executions (all eight scenarios ran with default lane=velnor per dispatch defaults; github/both legs are future optional coverage)"
+    ]
+  }
+}

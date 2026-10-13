@@ -1,0 +1,17 @@
+[workspace]
+members = ["crates/velnor-runner"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/donbeave/velnor"
+
+[workspace.dependencies]
+anyhow = "1.0.98"
+clap = { version = "4.5.38", features = ["derive", "env"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+thiserror = "2.0.12"
+tokio = { version = "1.45.1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+

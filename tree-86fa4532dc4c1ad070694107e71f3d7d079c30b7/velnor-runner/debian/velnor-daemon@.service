@@ -1,0 +1,34 @@
+[Unit]
+Description=Velnor self-hosted GitHub Actions runner daemon (%i)
+Documentation=https://github.com/tailrocks/velnor
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+# Template instance: one daemon per target scope (repo/org), e.g.
+#   systemctl enable --now velnor-daemon@blockchain-nodes
+# reads /etc/velnor/blockchain-nodes.env (+ optional
+# /etc/velnor/blockchain-nodes.secrets.env for the token) and keeps state in
+# /var/lib/velnor-blockchain-nodes. See velnor-daemon.service for the
+# semantics of Type=notify/WatchdogSec and the never-exit retry behavior.
+Type=notify
+WatchdogSec=180
+EnvironmentFile=/etc/velnor/%i.env
+EnvironmentFile=-/etc/velnor/%i.secrets.env
+ExecStart=/usr/bin/velnor-runner daemon \
+  --url ${VELNOR_URL} \
+  --name ${VELNOR_NAME} \
+  --labels ${VELNOR_LABELS} \
+  --slots ${VELNOR_SLOTS} \
+  --work-dir ${VELNOR_WORK_DIR} \
+  --replace \
+  --require-docker-socket
+Restart=always
+RestartSec=5
+User=root
+StateDirectory=velnor-%i
+WorkingDirectory=/var/lib/velnor-%i
+
+[Install]
+WantedBy=multi-user.target

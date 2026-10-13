@@ -1,0 +1,1571 @@
+2026-06-11T10:41:18.9374539Z ##[group]Set up job
+2026-06-11T10:41:18.9374539Z Current runner version: 'Velnor Runner/0.1.18 (protocol: 2.335.1)'
+2026-06-11T10:41:18.9374539Z ##[group]Operating System
+2026-06-11T10:41:18.9374539Z Ubuntu
+2026-06-11T10:41:18.9374539Z 24.04.2
+2026-06-11T10:41:18.9374539Z LTS
+2026-06-11T10:41:18.9374539Z ##[endgroup]
+2026-06-11T10:41:18.9374539Z ##[group]Runner Image
+2026-06-11T10:41:18.9374539Z Image: velnor/job-ubuntu:24.04
+2026-06-11T10:41:18.9374539Z ##[endgroup]
+2026-06-11T10:41:18.9374539Z ##[group]GITHUB_TOKEN Permissions
+2026-06-11T10:41:18.9374539Z   Actions: read
+2026-06-11T10:41:18.9374539Z   Contents: read
+2026-06-11T10:41:18.9374539Z   Metadata: read
+2026-06-11T10:41:18.9374539Z ##[endgroup]
+2026-06-11T10:41:18.9374539Z Secret source: Actions
+2026-06-11T10:41:18.9374539Z Prepare workflow directory
+2026-06-11T10:41:18.9374539Z ##[group]Prepare all required actions
+2026-06-11T10:41:18.9374539Z Getting action download info
+2026-06-11T10:41:18.9374539Z Download action repository 'actions/checkout@v6'
+2026-06-11T10:41:18.9374539Z Download action repository 'mozilla-actions/sccache-action@v0.0.10'
+2026-06-11T10:41:18.9374539Z Download action repository 'rui314/setup-mold@v1'
+2026-06-11T10:41:18.9374539Z Download action repository 'jdx/mise-action@v4'
+2026-06-11T10:41:18.9374539Z Download action repository 'Swatinem/rust-cache@v2'
+2026-06-11T10:41:18.9374539Z Download action repository 'actions/upload-artifact@v7'
+2026-06-11T10:41:18.9374539Z ##[endgroup]
+2026-06-11T10:41:18.9374539Z Complete job name: compat (app-b, velnor, ["self-hosted","velnor-target-mvp"])
+2026-06-11T10:41:18.9374539Z ##[endgroup]
+2026-06-11T10:41:19.0000000Z ##[group]Run mozilla-actions/sccache-action@v0.0.10
+2026-06-11T10:41:19.0000000Z ##[group]Run mozilla-actions/sccache-action@v0.0.10
+2026-06-11T10:41:19.0000000Z ##[endgroup]
+2026-06-11T10:41:19.0000000Z sccache 0.15.0
+2026-06-11T10:41:19.0000000Z sccache: Starting the server...
+2026-06-11T10:41:19.0000000Z sccache: Listening on address 127.0.0.1:4226
+2026-06-11T10:41:19.0000000Z ##[endgroup]
+2026-06-11T10:41:20.0000000Z ##[group]Run rui314/setup-mold@v1
+2026-06-11T10:41:20.0000000Z ##[group]Run rui314/setup-mold@v1
+2026-06-11T10:41:20.0000000Z ##[endgroup]
+2026-06-11T10:41:20.0000000Z mold 2.40.4 (compatible with GNU ld)
+2026-06-11T10:41:20.0000000Z ##[endgroup]
+2026-06-11T10:43:15.0000000Z ##[group]Run jdx/mise-action@v4
+2026-06-11T10:43:15.0000000Z ##[group]Run jdx/mise-action@v4
+2026-06-11T10:43:15.0000000Z ##[endgroup]
+2026-06-11T10:43:15.0000000Z mise install completed, cargo: /root/.cargo/bin/cargo
+2026-06-11T10:43:15.0000000Z 2026.6.2 linux-x64 (2026-06-09)
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m ARGS: mise install --verbose
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m [vfox] Getting metadata for yarn
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m config: /__w/mise.toml
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m config: /opt/mise/config/config.toml
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m Loaded 144 CA root certificates from the system
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://mise-versions.jdx.dev/tools/rust.toml
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://mise-versions.jdx.dev/tools/rust.toml 200 OK
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://crates.io/api/v1/crates/cargo-nextest/versions
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://crates.io/api/v1/crates/cargo-nextest/versions 200 OK
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://mise-versions.jdx.dev/tools/just.toml
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://mise-versions.jdx.dev/tools/just.toml 200 OK
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://crates.io/api/v1/crates/rust-script/versions
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://crates.io/api/v1/crates/rust-script/versions 200 OK
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://mise-versions.jdx.dev/tools/protoc.toml
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://mise-versions.jdx.dev/tools/protoc.toml 200 OK
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://mise-versions.jdx.dev/tools/gh.toml
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://mise-versions.jdx.dev/tools/gh.toml 200 OK
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mrust[0m@1.96.0         [1/3] install
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mjust[0m@1.52.0         [1/3] install
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mprotoc[0m@35.0         [1/3] install
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mgh[0m@2.94.0           [1/3] install
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mrust[0m@1.96.0         [1/3] Downloading rustup-init
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m waiting for lock on /opt/mise/cache/lockfiles/d4e413be9370bb95
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m Loaded 144 CA root certificates from the system
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET Downloading https://sh.rustup.rs/ to /opt/mise/cache/rust/rustup-init
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://api.github.com/repos/protocolbuffers/protobuf/releases
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m POST https://mise-versions.jdx.dev/api/tools/protoc
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://sh.rustup.rs/
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m POST https://mise-versions.jdx.dev/api/tools/rust
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m POST https://mise-versions.jdx.dev/api/tools/gh
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://sh.rustup.rs/ 200 OK
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m $ /opt/mise/cache/rust/rustup-init --no-modify-path --default-toolchain none -y
+2026-06-11T10:43:15.0000000Z info: downloading installer
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://api.github.com/repos/protocolbuffers/protobuf/releases 200 OK
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://mise-versions.jdx.dev/api/github/repos/protocolbuffers/protobuf/releases/v35.0
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://api.github.com/repos/cli/cli/releases
+2026-06-11T10:43:15.0000000Z warn: It looks like you have an existing installation of Rust at:
+2026-06-11T10:43:15.0000000Z warn: /opt/mise/shims
+2026-06-11T10:43:15.0000000Z warn: It is recommended that rustup be the primary Rust installation.
+2026-06-11T10:43:15.0000000Z warn: Otherwise you may have confusion unless you are careful with your PATH.
+2026-06-11T10:43:15.0000000Z warn: If you are sure that you want both rustup and your already installed Rust
+2026-06-11T10:43:15.0000000Z warn: then please reply `y' or `yes' or set RUSTUP_INIT_SKIP_PATH_CHECK to yes
+2026-06-11T10:43:15.0000000Z warn: or pass `-y' to ignore all ignorable checks.
+2026-06-11T10:43:15.0000000Z error: cannot install while Rust is installed
+2026-06-11T10:43:15.0000000Z warn: continuing (because the -y flag is set and the error is ignorable)
+2026-06-11T10:43:15.0000000Z warn: It looks like you have an existing rustup settings file at:
+2026-06-11T10:43:15.0000000Z warn: /root/.rustup/settings.toml
+2026-06-11T10:43:15.0000000Z warn: Rustup will install the default toolchain as specified in the settings file,
+2026-06-11T10:43:15.0000000Z warn: instead of the one inferred from the default host triple.
+2026-06-11T10:43:15.0000000Z info: profile set to default
+2026-06-11T10:43:15.0000000Z info: default host triple is x86_64-unknown-linux-gnu
+2026-06-11T10:43:15.0000000Z info: skipping toolchain installation
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mrust[0m@1.96.0         [1/3] Rust is installed now. Great!
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mrust[0m@1.96.0         [1/3] To get started you need Cargo's bin directory (/github/home/.cargo/bin) in your
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mrust[0m@1.96.0         [1/3] PATH
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mrust[0m@1.96.0         [1/3] environment variable. This has not been done automatically.
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mrust[0m@1.96.0         [1/3] To configure your current shell, you need to source
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mrust[0m@1.96.0         [1/3] the corresponding env file under /github/home/.cargo.
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mrust[0m@1.96.0         [1/3] This is usually done by running one of the following (note the leading DOT):
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mrust[0m@1.96.0         [1/3] . "/github/home/.cargo/env"            # For sh/bash/zsh/ash/dash/pdksh
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mrust[0m@1.96.0         [1/3] source "/github/home/.cargo/env.fish"  # For fish
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mrust[0m@1.96.0         [1/3] source "/github/home/.cargo/env.nu"  # For nushell
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mrust[0m@1.96.0         [1/3] source "/github/home/.cargo/env.tcsh"  # For tcsh
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mrust[0m@1.96.0         [1/3] . "/github/home/.cargo/env.ps1"        # For pwsh
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mrust[0m@1.96.0         [1/3] source "/github/home/.cargo/env.xsh"   # For xonsh
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m $ rustup toolchain install 1.96.0
+2026-06-11T10:43:15.0000000Z info: syncing channel updates for 1.96.0-x86_64-unknown-linux-gnu
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mrust[0m@1.96.0         [1/3]   1.96.0-x86_64-unknown-linux-gnu unchanged - rustc 1.96.0 (ac68faa20 2026-05-25)
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mrust[0m@1.96.0         [1/3] rustc -V
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m $ rustc -V
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mrust[0m@1.96.0         [1/3] rustc 1.96.0 (ac68faa20 2026-05-25)
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mrust[0m@1.96.0       [38;5;10m✓[0m installed
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mcargo:rust-script[0m@0.36.0 [1/3] install
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m waiting for lock on /opt/mise/cache/lockfiles/bf1270f699aec297
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mcargo:cargo-nextest[0m@0.9.137 [1/3] install
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m waiting for lock on /opt/mise/cache/lockfiles/517c47684a6e0fdc
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://mise-versions.jdx.dev/api/github/repos/protocolbuffers/protobuf/releases/v35.0 200 OK
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mprotoc[0m@35.0         [1/3] download protoc-35.0-linux-x86_64.zip
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET Downloading https://github.com/protocolbuffers/protobuf/releases/download/v35.0/protoc-35.0-linux-x86_64.zip to /opt/mise/downloads/protoc/35.0/protoc-35.0-linux-x86_64.zip
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://github.com/protocolbuffers/protobuf/releases/download/v35.0/protoc-35.0-linux-x86_64.zip
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://github.com/protocolbuffers/protobuf/releases/download/v35.0/protoc-35.0-linux-x86_64.zip 200 OK
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m using GitHub API digest for checksum verification
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mprotoc[0m@35.0         [2/3] checksum protoc-35.0-linux-x86_64.zip
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mprotoc[0m@35.0         [3/3] extract protoc-35.0-linux-x86_64.zip
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m unzip /opt/mise/downloads/protoc/35.0/protoc-35.0-linux-x86_64.zip -d /opt/mise/installs/protoc/35.0
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mprotoc[0m@35.0       [38;5;10m✓[0m installed
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m POST https://mise-versions.jdx.dev/api/tools/just
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://api.github.com/repos/cli/cli/releases 200 OK
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://mise-versions.jdx.dev/api/github/repos/cli/cli/releases/v2.94.0
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://mise-versions.jdx.dev/api/github/repos/cli/cli/releases/v2.94.0 200 OK
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mgh[0m@2.94.0           [1/3] download gh_2.94.0_linux_amd64.tar.gz
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET Downloading https://github.com/cli/cli/releases/download/v2.94.0/gh_2.94.0_linux_amd64.tar.gz to /opt/mise/downloads/gh/2.94.0/gh_2.94.0_linux_amd64.tar.gz
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://github.com/cli/cli/releases/download/v2.94.0/gh_2.94.0_linux_amd64.tar.gz
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://github.com/cli/cli/releases/download/v2.94.0/gh_2.94.0_linux_amd64.tar.gz 200 OK
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m using GitHub API digest for checksum verification
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mgh[0m@2.94.0           [2/3] verify GitHub artifact attestations
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://mise-versions.jdx.dev/api/github/repos/cli/cli/attestations/sha256:a757f1ba6db18f4de8cbadb244843a5f89bc75b5e7c6fc127d2bd77fbd12ed62
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://mise-versions.jdx.dev/api/github/repos/cli/cli/attestations/sha256:a757f1ba6db18f4de8cbadb244843a5f89bc75b5e7c6fc127d2bd77fbd12ed62 200 OK
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m removing '/root/.cache/sigstore-rust/tuf/https%3A%2F%2Ftuf-repo-cdn.sigstore.dev/root.json'
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m removing '/root/.cache/sigstore-rust/tuf/https%3A%2F%2Ftuf-repo-cdn.sigstore.dev/root.json'
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GitHub attestations verified for cli/cli
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mgh[0m@2.94.0           [2/3] ✓ GitHub artifact attestations verified
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mgh[0m@2.94.0           [2/3] checksum gh_2.94.0_linux_amd64.tar.gz
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mgh[0m@2.94.0           [3/3] extract gh_2.94.0_linux_amd64.tar.gz
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m tar -xf /opt/mise/downloads/gh/2.94.0/gh_2.94.0_linux_amd64.tar.gz -C /opt/mise/installs/gh/2.94.0
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mgh[0m@2.94.0         [38;5;10m✓[0m installed
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m [vfox] Getting metadata for yarn
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m config: /__w/mise.toml
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m config: /opt/mise/config/config.toml
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m [core:rust@1.96.0] list_bin_paths: ["/github/home/.cargo/bin"]
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m [core:rust@1.96.0] exec_env: {"CARGO_HOME": "/github/home/.cargo", "RUSTUP_HOME": "/root/.rustup", "RUSTUP_TOOLCHAIN": "1.96.0"}
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m [cargo:cargo-nextest@0.9.137] list_bin_paths: ["/opt/mise/installs/cargo-cargo-nextest/0.9.137/bin"]
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m [aqua:casey/just@1.52.0] list_bin_paths: ["/opt/mise/installs/just/1.52.0"]
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m [cargo:rust-script@0.36.0] list_bin_paths: ["/opt/mise/installs/cargo-rust-script/0.36.0/bin"]
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m [aqua:protocolbuffers/protobuf/protoc@35.0] list_bin_paths: ["/opt/mise/installs/protoc/35.0/bin"]
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m [aqua:cli/cli@2.94.0] list_bin_paths: ["/opt/mise/installs/gh/2.94.0/gh_2.94.0_linux_amd64/bin"]
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m updating 2 lockfiles
+2026-06-11T10:43:15.0000000Z ##[endgroup]
+2026-06-11T10:43:15.0000000Z ##[group]Run rustup component add rustfmt clippy
+2026-06-11T10:43:15.0000000Z ##[group]Run rustup component add rustfmt clippy
+2026-06-11T10:43:15.0000000Z [36;1mrustup component add rustfmt clippy[0m
+2026-06-11T10:43:15.0000000Z shell: bash -e {0}
+2026-06-11T10:43:15.0000000Z ##[endgroup]
+2026-06-11T10:43:15.0000000Z info: component rustfmt is up to date
+2026-06-11T10:43:15.0000000Z info: component clippy is up to date
+2026-06-11T10:43:15.0000000Z ##[endgroup]
+2026-06-11T10:43:15.0000000Z ##[group]Run Swatinem/rust-cache@v2
+2026-06-11T10:43:15.0000000Z ##[group]Run Swatinem/rust-cache@v2
+2026-06-11T10:43:15.0000000Z with:
+2026-06-11T10:43:15.0000000Z   key: app-b
+2026-06-11T10:43:15.0000000Z   shared-key: fixture-velnor-Linux
+2026-06-11T10:43:15.0000000Z ##[endgroup]
+2026-06-11T10:43:15.0000000Z [33mRust cache miss for shared key 'fixture-velnor-Linux'[0m
+2026-06-11T10:43:15.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z ##[group]Run set -euo pipefail
+2026-06-11T10:43:16.0000000Z ##[group]Run set -euo pipefail
+2026-06-11T10:43:16.0000000Z [36;1mset -euo pipefail[0m
+2026-06-11T10:43:16.0000000Z [36;1mversion="$(grep '^rust-version' "crates/app-b/Cargo.toml" | sed 's/.*= *"\(.*\)"/\1/' || echo 'stable')"[0m
+2026-06-11T10:43:16.0000000Z [36;1mecho "version=${version:-stable}" >> "${GITHUB_OUTPUT}"[0m
+2026-06-11T10:43:16.0000000Z shell: bash -e {0}
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z ##[group]Run set -euo pipefail
+2026-06-11T10:43:16.0000000Z ##[group]Run set -euo pipefail
+2026-06-11T10:43:16.0000000Z [36;1mset -euo pipefail[0m
+2026-06-11T10:43:16.0000000Z [36;1mecho "FIXTURE_PACKAGE=${PACKAGE}" >> "${GITHUB_ENV}"[0m
+2026-06-11T10:43:16.0000000Z [36;1mecho "package=${PACKAGE}" >> "${GITHUB_OUTPUT}"[0m
+2026-06-11T10:43:16.0000000Z [36;1mecho "lane=${LANE}" >> "${GITHUB_OUTPUT}"[0m
+2026-06-11T10:43:16.0000000Z [36;1mecho "setup-state=complete" >> "${GITHUB_STATE}"[0m
+2026-06-11T10:43:16.0000000Z [36;1m# Multiline heredoc output — matches ChainArgos bake-targets pattern[0m
+2026-06-11T10:43:16.0000000Z [36;1mprintf 'packages<<EOF\n%s\n%s\nEOF\n' "app-a" "app-b" >> "${GITHUB_OUTPUT}"[0m
+2026-06-11T10:43:16.0000000Z [36;1mmkdir -p "${HOME}/.local/bin"[0m
+2026-06-11T10:43:16.0000000Z [36;1mprintf '%s\n' '#!/usr/bin/env bash' 'echo fixture-tool-ok' > "${HOME}/.local/bin/fixture-tool"[0m
+2026-06-11T10:43:16.0000000Z [36;1mchmod +x "${HOME}/.local/bin/fixture-tool"[0m
+2026-06-11T10:43:16.0000000Z [36;1mecho "${HOME}/.local/bin" >> "${GITHUB_PATH}"[0m
+2026-06-11T10:43:16.0000000Z [36;1mecho "### ${LANE} ${PACKAGE}" >> "${GITHUB_STEP_SUMMARY}"[0m
+2026-06-11T10:43:16.0000000Z shell: bash -e {0}
+2026-06-11T10:43:16.0000000Z env:
+2026-06-11T10:43:16.0000000Z   PACKAGE: app-b
+2026-06-11T10:43:16.0000000Z   LANE: velnor
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z ##[group]Run just fmt-check
+2026-06-11T10:43:16.0000000Z ##[group]Run just fmt-check
+2026-06-11T10:43:16.0000000Z [36;1mjust fmt-check[0m
+2026-06-11T10:43:16.0000000Z shell: bash -e {0}
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z cargo fmt --check
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z ##[group]Run just clippy "app-b"
+2026-06-11T10:43:16.0000000Z ##[group]Run just clippy "app-b"
+2026-06-11T10:43:16.0000000Z [36;1mjust clippy "app-b"[0m
+2026-06-11T10:43:16.0000000Z shell: bash -e {0}
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z cargo clippy -p "app-b" -- -D warnings
+2026-06-11T10:43:16.0000000Z     Checking shared v0.1.0 (/__w/crates/shared)
+2026-06-11T10:43:16.0000000Z     Checking app-b v0.1.0 (/__w/crates/app-b)
+2026-06-11T10:43:16.0000000Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.19s
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z ##[group]Run just test "app-b"
+2026-06-11T10:43:16.0000000Z ##[group]Run just test "app-b"
+2026-06-11T10:43:16.0000000Z [36;1mjust test "app-b"[0m
+2026-06-11T10:43:16.0000000Z shell: bash -e {0}
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z 
+2026-06-11T10:43:16.0000000Z running 1 test
+2026-06-11T10:43:16.0000000Z test tests::prints_expected_label ... ok
+2026-06-11T10:43:16.0000000Z 
+2026-06-11T10:43:16.0000000Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+2026-06-11T10:43:16.0000000Z 
+2026-06-11T10:43:16.0000000Z cargo test -p "app-b"
+2026-06-11T10:43:16.0000000Z    Compiling shared v0.1.0 (/__w/crates/shared)
+2026-06-11T10:43:16.0000000Z    Compiling app-b v0.1.0 (/__w/crates/app-b)
+2026-06-11T10:43:16.0000000Z     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s
+2026-06-11T10:43:16.0000000Z      Running unittests src/main.rs (target/debug/deps/app_b-230947847b26aa82)
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z ##[group]Run just nextest "app-b"
+2026-06-11T10:43:16.0000000Z ##[group]Run just nextest "app-b"
+2026-06-11T10:43:16.0000000Z [36;1mjust nextest "app-b"[0m
+2026-06-11T10:43:16.0000000Z shell: bash -e {0}
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z cargo nextest run -p "app-b"
+2026-06-11T10:43:16.0000000Z     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+2026-06-11T10:43:16.0000000Z ────────────
+2026-06-11T10:43:16.0000000Z  Nextest run ID b90dfbd2-ecff-458c-883e-63183bb761bb with nextest profile: default
+2026-06-11T10:43:16.0000000Z     Starting 1 test across 1 binary
+2026-06-11T10:43:16.0000000Z         PASS [   0.003s] (1/1) app-b::bin/app-b tests::prints_expected_label
+2026-06-11T10:43:16.0000000Z ────────────
+2026-06-11T10:43:16.0000000Z      Summary [   0.003s] 1 test run: 1 passed, 0 skipped
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:26.0000000Z ##[group]Check MSRV
+2026-06-11T10:43:26.0000000Z ##[group]Check MSRV
+2026-06-11T10:43:26.0000000Z [36;1mcargo check -p "app-b" --locked[0m
+2026-06-11T10:43:26.0000000Z shell: bash -e {0}
+2026-06-11T10:43:26.0000000Z env:
+2026-06-11T10:43:26.0000000Z   RUSTUP_TOOLCHAIN: stable
+2026-06-11T10:43:26.0000000Z ##[endgroup]
+2026-06-11T10:43:26.0000000Z info: syncing channel updates for stable-x86_64-unknown-linux-gnu
+2026-06-11T10:43:26.0000000Z info: latest update on 2026-05-28 for version 1.96.0 (ac68faa20 2026-05-25)
+2026-06-11T10:43:26.0000000Z info: downloading 6 components
+2026-06-11T10:43:26.0000000Z     Checking shared v0.1.0 (/__w/crates/shared)
+2026-06-11T10:43:26.0000000Z     Checking app-b v0.1.0 (/__w/crates/app-b)
+2026-06-11T10:43:26.0000000Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.24s
+2026-06-11T10:43:26.0000000Z ##[endgroup]
+2026-06-11T10:43:27.0000000Z ##[group]Run {
+2026-06-11T10:43:27.0000000Z ##[group]Run {
+2026-06-11T10:43:27.0000000Z [36;1m{[0m
+2026-06-11T10:43:27.0000000Z [36;1m  echo "### sccache stats (velnor app-b)"[0m
+2026-06-11T10:43:27.0000000Z [36;1m  echo '```'[0m
+2026-06-11T10:43:27.0000000Z [36;1m  sccache --show-stats 2>/dev/null || echo 'sccache not available'[0m
+2026-06-11T10:43:27.0000000Z [36;1m  echo '```'[0m
+2026-06-11T10:43:27.0000000Z [36;1m} >> "${GITHUB_STEP_SUMMARY}"[0m
+2026-06-11T10:43:27.0000000Z shell: bash -e {0}
+2026-06-11T10:43:27.0000000Z ##[endgroup]
+2026-06-11T10:43:27.0000000Z ##[endgroup]
+2026-06-11T10:43:27.0000000Z ##[group]Run ./.github/actions/check-fixture-output
+2026-06-11T10:43:27.0000000Z ##[group]Run ./.github/actions/check-fixture-output
+2026-06-11T10:43:27.0000000Z with:
+2026-06-11T10:43:27.0000000Z   package: app-b
+2026-06-11T10:43:27.0000000Z ##[endgroup]
+2026-06-11T10:43:27.0000000Z ##[group]Run set -euo pipefail
+2026-06-11T10:43:27.0000000Z [36;1mset -euo pipefail[0m
+2026-06-11T10:43:27.0000000Z [36;1mtest "app-b" = "${FIXTURE_PACKAGE}"[0m
+2026-06-11T10:43:27.0000000Z [36;1mtest "$(fixture-tool)" = "fixture-tool-ok"[0m
+2026-06-11T10:43:27.0000000Z [36;1mecho "checked=true" >> "${GITHUB_OUTPUT}"[0m
+2026-06-11T10:43:27.0000000Z shell: bash -e {0}
+2026-06-11T10:43:27.0000000Z env:
+2026-06-11T10:43:27.0000000Z   GITHUB_ACTION_PATH: /__w/.github/actions/check-fixture-output
+2026-06-11T10:43:27.0000000Z ##[endgroup]
+2026-06-11T10:43:27.0000000Z ##[group]356e4574-85a7-4b33-9595-bc21b2a10187
+2026-06-11T10:43:27.0000000Z ##[endgroup]
+2026-06-11T10:43:27.0000000Z ##[endgroup]
+2026-06-11T10:43:27.0000000Z ##[group]Run python3 .github/scripts/write-result.py "app-b" "velnor" "out/result.json"
+2026-06-11T10:43:27.0000000Z ##[group]Run python3 .github/scripts/write-result.py "app-b" "velnor" "out/result.json"
+2026-06-11T10:43:27.0000000Z [36;1mpython3 .github/scripts/write-result.py "app-b" "velnor" "out/result.json"[0m
+2026-06-11T10:43:27.0000000Z shell: bash -e {0}
+2026-06-11T10:43:27.0000000Z ##[endgroup]
+2026-06-11T10:43:27.0000000Z ##[endgroup]
+2026-06-11T10:43:28.0000000Z ##[group]Run actions/upload-artifact@v7
+2026-06-11T10:43:28.0000000Z ##[group]Run actions/upload-artifact@v7
+2026-06-11T10:43:28.0000000Z with:
+2026-06-11T10:43:28.0000000Z   name: result-velnor-app-b
+2026-06-11T10:43:28.0000000Z   path: out/result.json
+2026-06-11T10:43:28.0000000Z ##[endgroup]
+2026-06-11T10:43:28.0000000Z Uploaded artifact 'result-velnor-app-b' with 1 path(s)
+2026-06-11T10:43:28.0000000Z ##[endgroup]
+2026-06-11T10:43:28.0000000Z ##[group]Post Run Swatinem/rust-cache@v2
+2026-06-11T10:43:28.0000000Z ##[group]Post Run Swatinem/rust-cache@v2
+2026-06-11T10:43:28.0000000Z with:
+2026-06-11T10:43:28.0000000Z   key: app-b
+2026-06-11T10:43:28.0000000Z   shared-key: fixture-velnor-Linux
+2026-06-11T10:43:28.0000000Z ##[endgroup]
+2026-06-11T10:43:28.0000000Z Cache not saved because no paths exist for key 'fixture-velnor-Linux'
+2026-06-11T10:43:28.0000000Z ##[endgroup]
+2026-06-11T10:43:28.0000000Z ##[group]Post Run mozilla-actions/sccache-action@v0.0.10
+2026-06-11T10:43:28.0000000Z ##[group]Post Run mozilla-actions/sccache-action@v0.0.10
+2026-06-11T10:43:28.0000000Z ##[endgroup]
+2026-06-11T10:43:28.0000000Z Compile requests                     17
+2026-06-11T10:43:28.0000000Z Compile requests executed             0
+2026-06-11T10:43:28.0000000Z Cache hits                            0
+2026-06-11T10:43:28.0000000Z Cache misses                          0
+2026-06-11T10:43:28.0000000Z Cache hits rate                       -
+2026-06-11T10:43:28.0000000Z Cache timeouts                        0
+2026-06-11T10:43:28.0000000Z Cache read errors                     0
+2026-06-11T10:43:28.0000000Z Forced recaches                       0
+2026-06-11T10:43:28.0000000Z Cache write errors                    0
+2026-06-11T10:43:28.0000000Z Cache errors                          0
+2026-06-11T10:43:28.0000000Z Compilations                          0
+2026-06-11T10:43:28.0000000Z Compilation failures                  0
+2026-06-11T10:43:28.0000000Z Non-cacheable compilations            0
+2026-06-11T10:43:28.0000000Z Non-cacheable calls                  17
+2026-06-11T10:43:28.0000000Z Non-compilation calls                 0
+2026-06-11T10:43:28.0000000Z Unsupported compiler calls            0
+2026-06-11T10:43:28.0000000Z Average cache write               0.000 s
+2026-06-11T10:43:28.0000000Z Average compiler                  0.000 s
+2026-06-11T10:43:28.0000000Z Average cache read hit            0.000 s
+2026-06-11T10:43:28.0000000Z Failed distributed compilations       0
+2026-06-11T10:43:28.0000000Z 
+2026-06-11T10:43:28.0000000Z Non-cacheable reasons:
+2026-06-11T10:43:28.0000000Z -                                     5
+2026-06-11T10:43:28.0000000Z missing input                         4
+2026-06-11T10:43:28.0000000Z incremental                           3
+2026-06-11T10:43:28.0000000Z missing output_dir                    2
+2026-06-11T10:43:28.0000000Z multiple input files                  2
+2026-06-11T10:43:28.0000000Z crate-type                            1
+2026-06-11T10:43:28.0000000Z 
+2026-06-11T10:43:28.0000000Z Cache location                  Local disk: "/var/cache/sccache"
+2026-06-11T10:43:28.0000000Z Base directories                (none)
+2026-06-11T10:43:28.0000000Z Use direct/preprocessor mode?   yes
+2026-06-11T10:43:28.0000000Z Version (client)                0.15.0
+2026-06-11T10:43:28.0000000Z Max cache size                       10 GiB
+2026-06-11T10:43:28.0000000Z Stopping sccache server...
+2026-06-11T10:43:28.0000000Z Compile requests                     17
+2026-06-11T10:43:28.0000000Z Compile requests executed             0
+2026-06-11T10:43:28.0000000Z Cache hits                            0
+2026-06-11T10:43:28.0000000Z Cache misses                          0
+2026-06-11T10:43:28.0000000Z Cache hits rate                       -
+2026-06-11T10:43:28.0000000Z Cache timeouts                        0
+2026-06-11T10:43:28.0000000Z Cache read errors                     0
+2026-06-11T10:43:28.0000000Z Forced recaches                       0
+2026-06-11T10:43:28.0000000Z Cache write errors                    0
+2026-06-11T10:43:28.0000000Z Cache errors                          0
+2026-06-11T10:43:28.0000000Z Compilations                          0
+2026-06-11T10:43:28.0000000Z Compilation failures                  0
+2026-06-11T10:43:28.0000000Z Non-cacheable compilations            0
+2026-06-11T10:43:28.0000000Z Non-cacheable calls                  17
+2026-06-11T10:43:28.0000000Z Non-compilation calls                 0
+2026-06-11T10:43:28.0000000Z Unsupported compiler calls            0
+2026-06-11T10:43:28.0000000Z Average cache write               0.000 s
+2026-06-11T10:43:28.0000000Z Average compiler                  0.000 s
+2026-06-11T10:43:28.0000000Z Average cache read hit            0.000 s
+2026-06-11T10:43:28.0000000Z Failed distributed compilations       0
+2026-06-11T10:43:28.0000000Z 
+2026-06-11T10:43:28.0000000Z Non-cacheable reasons:
+2026-06-11T10:43:28.0000000Z -                                     5
+2026-06-11T10:43:28.0000000Z missing input                         4
+2026-06-11T10:43:28.0000000Z incremental                           3
+2026-06-11T10:43:28.0000000Z missing output_dir                    2
+2026-06-11T10:43:28.0000000Z multiple input files                  2
+2026-06-11T10:43:28.0000000Z crate-type                            1
+2026-06-11T10:43:28.0000000Z 
+2026-06-11T10:43:28.0000000Z Cache location                  Local disk: "/var/cache/sccache"
+2026-06-11T10:43:28.0000000Z Base directories                (none)
+2026-06-11T10:43:28.0000000Z Use direct/preprocessor mode?   yes
+2026-06-11T10:43:28.0000000Z Version (client)                0.15.0
+2026-06-11T10:43:28.0000000Z Max cache size                       10 GiB
+2026-06-11T10:43:28.0000000Z ##[endgroup]
+2026-06-11T10:43:36.1185049Z ##[group]Post Run actions/checkout@v6
+2026-06-11T10:43:36.1185049Z [command]git -C /var/lib/velnor-fixture/work/slot-2/dfb5b490-8aba-5623-9496-2271358da927/workspace/. config --local --unset-all http.https://github.com/.extraheader
+2026-06-11T10:43:36.1185049Z ##[endgroup]
+2026-06-11T10:43:36.1185213Z ##[group]Complete job
+2026-06-11T10:43:36.1185213Z ##[group]Post-job cleanup
+2026-06-11T10:43:36.1185213Z Stop job container
+2026-06-11T10:43:36.1185213Z Remove per-job network
+2026-06-11T10:43:36.1185213Z Clean work directory
+2026-06-11T10:43:36.1185213Z Recycle runner slot
+2026-06-11T10:43:36.1185213Z ##[endgroup]
+2026-06-11T10:43:36.1185213Z Finishing: Complete job
+2026-06-11T10:43:36.1185213Z ##[endgroup]
+
+2026-06-11T10:41:18.9834933Z ##[group]Set up job
+2026-06-11T10:41:18.9834933Z Current runner version: 'Velnor Runner/0.1.18 (protocol: 2.335.1)'
+2026-06-11T10:41:18.9834933Z ##[group]Operating System
+2026-06-11T10:41:18.9834933Z Ubuntu
+2026-06-11T10:41:18.9834933Z 24.04.2
+2026-06-11T10:41:18.9834933Z LTS
+2026-06-11T10:41:18.9834933Z ##[endgroup]
+2026-06-11T10:41:18.9834933Z ##[group]Runner Image
+2026-06-11T10:41:18.9834933Z Image: velnor/job-ubuntu:24.04
+2026-06-11T10:41:18.9834933Z ##[endgroup]
+2026-06-11T10:41:18.9834933Z ##[group]GITHUB_TOKEN Permissions
+2026-06-11T10:41:18.9834933Z   Actions: read
+2026-06-11T10:41:18.9834933Z   Contents: read
+2026-06-11T10:41:18.9834933Z   Metadata: read
+2026-06-11T10:41:18.9834933Z ##[endgroup]
+2026-06-11T10:41:18.9834933Z Secret source: Actions
+2026-06-11T10:41:18.9834933Z Prepare workflow directory
+2026-06-11T10:41:18.9834933Z ##[group]Prepare all required actions
+2026-06-11T10:41:18.9834933Z Getting action download info
+2026-06-11T10:41:18.9834933Z Download action repository 'actions/checkout@v6'
+2026-06-11T10:41:18.9834933Z Download action repository 'mozilla-actions/sccache-action@v0.0.10'
+2026-06-11T10:41:18.9834933Z Download action repository 'rui314/setup-mold@v1'
+2026-06-11T10:41:18.9834933Z Download action repository 'jdx/mise-action@v4'
+2026-06-11T10:41:18.9834933Z Download action repository 'Swatinem/rust-cache@v2'
+2026-06-11T10:41:18.9834933Z Download action repository 'actions/upload-artifact@v7'
+2026-06-11T10:41:18.9834933Z ##[endgroup]
+2026-06-11T10:41:18.9834933Z Complete job name: compat (app-a, velnor, ["self-hosted","velnor-target-mvp"])
+2026-06-11T10:41:18.9834933Z ##[endgroup]
+2026-06-11T10:41:20.0000000Z ##[group]Run mozilla-actions/sccache-action@v0.0.10
+2026-06-11T10:41:20.0000000Z ##[group]Run mozilla-actions/sccache-action@v0.0.10
+2026-06-11T10:41:20.0000000Z ##[endgroup]
+2026-06-11T10:41:20.0000000Z sccache 0.15.0
+2026-06-11T10:41:20.0000000Z sccache: Starting the server...
+2026-06-11T10:41:20.0000000Z sccache: Listening on address 127.0.0.1:4226
+2026-06-11T10:41:20.0000000Z ##[endgroup]
+2026-06-11T10:41:20.0000000Z ##[group]Run rui314/setup-mold@v1
+2026-06-11T10:41:20.0000000Z ##[group]Run rui314/setup-mold@v1
+2026-06-11T10:41:20.0000000Z ##[endgroup]
+2026-06-11T10:41:20.0000000Z mold 2.40.4 (compatible with GNU ld)
+2026-06-11T10:41:20.0000000Z ##[endgroup]
+2026-06-11T10:43:15.0000000Z ##[group]Run jdx/mise-action@v4
+2026-06-11T10:43:15.0000000Z ##[group]Run jdx/mise-action@v4
+2026-06-11T10:43:15.0000000Z ##[endgroup]
+2026-06-11T10:43:15.0000000Z mise install completed, cargo: /root/.cargo/bin/cargo
+2026-06-11T10:43:15.0000000Z 2026.6.2 linux-x64 (2026-06-09)
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m ARGS: mise install --verbose
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m [vfox] Getting metadata for yarn
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m config: /__w/mise.toml
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m config: /opt/mise/config/config.toml
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m Loaded 144 CA root certificates from the system
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://mise-versions.jdx.dev/tools/rust.toml
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://mise-versions.jdx.dev/tools/rust.toml 200 OK
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://crates.io/api/v1/crates/cargo-nextest/versions
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://crates.io/api/v1/crates/cargo-nextest/versions 200 OK
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mjust[0m@1.52.0         [1/3] install
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mprotoc[0m@35.0         [1/3] install
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mgh[0m@2.94.0           [1/3] install
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mcargo:cargo-nextest[0m@0.9.137 [1/3] install
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mcargo:rust-script[0m@0.36.0 [1/3] install
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m waiting for lock on /opt/mise/cache/lockfiles/cb197a702c249217
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://api.github.com/repos/casey/just/releases
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m POST https://mise-versions.jdx.dev/api/tools/just
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m waiting for lock on /opt/mise/cache/lockfiles/59f8fc0ff74501f0
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m $ cargo install cargo-nextest@0.9.137 --locked --root /opt/mise/installs/cargo-cargo-nextest/0.9.137
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m $ cargo install rust-script@0.36.0 --locked --root /opt/mise/installs/cargo-rust-script/0.36.0
+2026-06-11T10:43:15.0000000Z     Updating crates.io index
+2026-06-11T10:43:15.0000000Z     Blocking waiting for file lock on package cache
+2026-06-11T10:43:15.0000000Z  Downloading crates ...
+2026-06-11T10:43:15.0000000Z   Downloaded cargo-nextest v0.9.137
+2026-06-11T10:43:15.0000000Z     Updating crates.io index
+2026-06-11T10:43:15.0000000Z     Blocking waiting for file lock on package cache
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://api.github.com/repos/casey/just/releases 200 OK
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://mise-versions.jdx.dev/api/github/repos/casey/just/releases/1.52.0
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://mise-versions.jdx.dev/api/github/repos/casey/just/releases/1.52.0 200 OK
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mjust[0m@1.52.0         [1/3] download just-1.52.0-x86_64-unknown-linux-musl.tar.gz
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m Loaded 144 CA root certificates from the system
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET Downloading https://github.com/casey/just/releases/download/1.52.0/just-1.52.0-x86_64-unknown-linux-musl.tar.gz to /opt/mise/downloads/just/1.52.0/just-1.52.0-x86_64-unknown-linux-musl.tar.gz
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://github.com/casey/just/releases/download/1.52.0/just-1.52.0-x86_64-unknown-linux-musl.tar.gz
+2026-06-11T10:43:15.0000000Z  Downloading crates ...
+2026-06-11T10:43:15.0000000Z   Downloaded rust-script v0.36.0
+2026-06-11T10:43:15.0000000Z   Installing cargo-nextest v0.9.137
+2026-06-11T10:43:15.0000000Z     Updating crates.io index
+2026-06-11T10:43:15.0000000Z   Installing rust-script v0.36.0
+2026-06-11T10:43:15.0000000Z     Blocking waiting for file lock on package cache
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m POST https://mise-versions.jdx.dev/api/tools/protoc
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m GET https://github.com/casey/just/releases/download/1.52.0/just-1.52.0-x86_64-unknown-linux-musl.tar.gz 200 OK
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m using GitHub API digest for checksum verification
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mjust[0m@1.52.0         [2/3] checksum just-1.52.0-x86_64-unknown-linux-musl.tar.gz
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mjust[0m@1.52.0         [3/3] extract just-1.52.0-x86_64-unknown-linux-musl.tar.gz
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m tar -xf /opt/mise/downloads/just/1.52.0/just-1.52.0-x86_64-unknown-linux-musl.tar.gz -C /opt/mise/installs/just/1.52.0
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mjust[0m@1.52.0       [38;5;10m✓[0m installed
+2026-06-11T10:43:15.0000000Z     Blocking waiting for file lock on package cache
+2026-06-11T10:43:15.0000000Z     Updating crates.io index
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m POST https://mise-versions.jdx.dev/api/tools/gh
+2026-06-11T10:43:15.0000000Z     Blocking waiting for file lock on package cache
+2026-06-11T10:43:15.0000000Z     Blocking waiting for file lock on package cache
+2026-06-11T10:43:15.0000000Z     Updating crates.io index
+2026-06-11T10:43:15.0000000Z     Blocking waiting for file lock on package cache
+2026-06-11T10:43:15.0000000Z     Updating crates.io index
+2026-06-11T10:43:15.0000000Z     Blocking waiting for file lock on package cache
+2026-06-11T10:43:15.0000000Z     Blocking waiting for file lock on package cache
+2026-06-11T10:43:15.0000000Z  Downloading crates ...
+2026-06-11T10:43:15.0000000Z   Downloaded adler2 v2.0.1
+2026-06-11T10:43:15.0000000Z   Downloaded addr2line v0.24.2
+2026-06-11T10:43:15.0000000Z   Downloaded anstyle-query v1.1.2
+2026-06-11T10:43:15.0000000Z   Downloaded allocator-api2 v0.2.21
+2026-06-11T10:43:15.0000000Z   Downloaded aho-corasick v1.1.4
+2026-06-11T10:43:15.0000000Z   Downloaded ahash v0.8.12
+2026-06-11T10:43:15.0000000Z   Downloaded enum_dispatch v0.3.13
+2026-06-11T10:43:15.0000000Z   Downloaded home v0.5.12
+2026-06-11T10:43:15.0000000Z   Downloaded pathdiff v0.2.3
+2026-06-11T10:43:15.0000000Z   Downloaded fnv v1.0.7
+2026-06-11T10:43:15.0000000Z   Downloaded filetime v0.2.25
+2026-06-11T10:43:15.0000000Z   Downloaded duct v1.1.1
+2026-06-11T10:43:15.0000000Z   Downloaded guppy-workspace-hack v0.1.0
+2026-06-11T10:43:15.0000000Z   Downloaded fancy-regex v0.11.0
+2026-06-11T10:43:15.0000000Z   Downloaded bit-set v0.5.3
+2026-06-11T10:43:15.0000000Z   Downloaded ed25519 v2.2.3
+2026-06-11T10:43:15.0000000Z   Downloaded futures-task v0.3.32
+2026-06-11T10:43:15.0000000Z   Downloaded hashbrown v0.17.0
+2026-06-11T10:43:15.0000000Z   Downloaded foldhash v0.2.0
+2026-06-11T10:43:15.0000000Z   Downloaded itoa v1.0.17
+2026-06-11T10:43:15.0000000Z   Downloaded is_ci v1.2.0
+2026-06-11T10:43:15.0000000Z   Downloaded iana-time-zone v0.1.63
+2026-06-11T10:43:15.0000000Z   Downloaded openssl-macros v0.1.1
+2026-06-11T10:43:15.0000000Z   Downloaded once_cell v1.21.3
+2026-06-11T10:43:15.0000000Z   Downloaded percent-encoding v2.3.2
+2026-06-11T10:43:15.0000000Z   Downloaded dirs-sys v0.5.0
+2026-06-11T10:43:15.0000000Z   Downloaded nom v7.1.3
+2026-06-11T10:43:15.0000000Z   Downloaded lazy_static v1.5.0
+2026-06-11T10:43:15.0000000Z   Downloaded dirs v6.0.0
+2026-06-11T10:43:15.0000000Z   Downloaded phf_shared v0.11.3
+2026-06-11T10:43:15.0000000Z   Downloaded phf_generator v0.11.3
+2026-06-11T10:43:15.0000000Z   Downloaded dialoguer v0.12.0
+2026-06-11T10:43:15.0000000Z   Downloaded pin-project-lite v0.2.17
+2026-06-11T10:43:15.0000000Z   Downloaded scopeguard v1.2.0
+2026-06-11T10:43:15.0000000Z   Downloaded idna_adapter v1.0.0
+2026-06-11T10:43:15.0000000Z   Downloaded quick-junit v0.6.0
+2026-06-11T10:43:15.0000000Z   Downloaded serde_spanned v1.1.1
+2026-06-11T10:43:15.0000000Z   Downloaded plain v0.2.3
+2026-06-11T10:43:15.0000000Z   Downloaded rustc_version v0.4.1
+2026-06-11T10:43:15.0000000Z   Downloaded pretty-hex v0.4.1
+2026-06-11T10:43:15.0000000Z   Downloaded memoffset v0.9.1
+2026-06-11T10:43:15.0000000Z   Downloaded memmap2 v0.9.8
+2026-06-11T10:43:15.0000000Z   Downloaded lab v0.11.0
+2026-06-11T10:43:15.0000000Z   Downloaded terminal_size v0.4.3
+2026-06-11T10:43:15.0000000Z   Downloaded strsim v0.11.1
+2026-06-11T10:43:15.0000000Z   Downloaded target-lexicon v0.13.3
+2026-06-11T10:43:15.0000000Z   Downloaded fs_extra v1.3.0
+2026-06-11T10:43:15.0000000Z   Downloaded static_assertions v1.1.0
+2026-06-11T10:43:15.0000000Z   Downloaded sharded-slab v0.1.7
+2026-06-11T10:43:15.0000000Z   Downloaded self_update v0.44.0
+2026-06-11T10:43:15.0000000Z   Downloaded tokio-macros v2.7.0
+2026-06-11T10:43:15.0000000Z   Downloaded tracing-error v0.2.1
+2026-06-11T10:43:15.0000000Z   Downloaded time-core v0.1.8
+2026-06-11T10:43:15.0000000Z   Downloaded usdt v0.6.0
+2026-06-11T10:43:15.0000000Z   Downloaded usdt-attr-macro v0.6.0
+2026-06-11T10:43:15.0000000Z   Downloaded urlencoding v2.1.3
+2026-06-11T10:43:15.0000000Z   Downloaded unicase v2.9.0
+2026-06-11T10:43:15.0000000Z   Downloaded version_check v0.9.5
+2026-06-11T10:43:15.0000000Z   Downloaded wezterm-dynamic v0.2.1
+2026-06-11T10:43:15.0000000Z   Downloaded usdt-macro v0.6.0
+2026-06-11T10:43:15.0000000Z   Downloaded vtparse v0.6.2
+2026-06-11T10:43:15.0000000Z   Downloaded usdt-impl v0.6.0
+2026-06-11T10:43:15.0000000Z   Downloaded wezterm-dynamic-derive v0.1.1
+2026-06-11T10:43:15.0000000Z   Downloaded xattr v1.5.0
+2026-06-11T10:43:15.0000000Z   Downloaded vec_map v0.8.2
+2026-06-11T10:43:15.0000000Z   Downloaded rustls-webpki v0.103.13
+2026-06-11T10:43:15.0000000Z   Downloaded zstd v0.13.3
+2026-06-11T10:43:15.0000000Z   Downloaded zstd-safe v7.2.4
+2026-06-11T10:43:15.0000000Z   Downloaded typenum v1.18.0
+2026-06-11T10:43:15.0000000Z   Downloaded uuid v1.18.1
+2026-06-11T10:43:15.0000000Z   Downloaded unicode-segmentation v1.12.0
+2026-06-11T10:43:15.0000000Z   Downloaded unicode-normalization v0.1.25
+2026-06-11T10:43:15.0000000Z   Downloaded wezterm-bidi v0.2.3
+2026-06-11T10:43:15.0000000Z   Downloaded itertools v0.14.0
+2026-06-11T10:43:15.0000000Z   Downloaded zerocopy-derive v0.8.27
+2026-06-11T10:43:15.0000000Z   Downloaded tracing-subscriber v0.3.23
+2026-06-11T10:43:15.0000000Z   Downloaded ureq v3.3.0
+2026-06-11T10:43:15.0000000Z   Downloaded winnow v1.0.3
+2026-06-11T10:43:15.0000000Z   Downloaded webpki-root-certs v1.0.6
+2026-06-11T10:43:15.0000000Z   Downloaded time v0.3.47
+2026-06-11T10:43:15.0000000Z   Downloaded unicode-width v0.1.14
+2026-06-11T10:43:15.0000000Z   Downloaded vcpkg v0.2.15
+2026-06-11T10:43:15.0000000Z   Downloaded zerocopy v0.8.27
+2026-06-11T10:43:15.0000000Z   Downloaded object v0.36.7
+2026-06-11T10:43:15.0000000Z   Downloaded syn v2.0.117
+2026-06-11T10:43:15.0000000Z   Downloaded rustix v1.0.7
+2026-06-11T10:43:15.0000000Z   Downloaded termwiz v0.23.3
+2026-06-11T10:43:15.0000000Z   Downloaded nix v0.31.3
+2026-06-11T10:43:15.0000000Z   Downloaded webpki-roots v1.0.0
+2026-06-11T10:43:15.0000000Z   Downloaded unicode-width v0.2.2
+2026-06-11T10:43:15.0000000Z   Downloaded tracing v0.1.44
+2026-06-11T10:43:15.0000000Z   Downloaded rustls v0.23.40
+2026-06-11T10:43:15.0000000Z   Downloaded rustix v0.38.44
+2026-06-11T10:43:15.0000000Z   Downloaded gimli v0.31.1
+2026-06-11T10:43:15.0000000Z   Downloaded regex-automata v0.4.14
+2026-06-11T10:43:15.0000000Z   Downloaded color-eyre v0.6.5
+2026-06-11T10:43:15.0000000Z   Downloaded openssl v0.10.79
+2026-06-11T10:43:15.0000000Z   Downloaded nix v0.29.0
+2026-06-11T10:43:15.0000000Z   Downloaded syn v1.0.109
+2026-06-11T10:43:15.0000000Z   Downloaded regex-syntax v0.8.10
+2026-06-11T10:43:15.0000000Z   Downloaded nextest-runner v0.118.0
+2026-06-11T10:43:15.0000000Z   Downloaded goblin v0.10.3
+2026-06-11T10:43:15.0000000Z   Downloaded bstr v1.12.1
+2026-06-11T10:43:15.0000000Z   Downloaded petgraph v0.8.3
+2026-06-11T10:43:15.0000000Z   Downloaded portable-atomic v1.13.1
+2026-06-11T10:43:15.0000000Z   Downloaded curve25519-dalek v4.1.3
+2026-06-11T10:43:15.0000000Z   Downloaded iddqd v0.4.2
+2026-06-11T10:43:15.0000000Z   Downloaded futures-util v0.3.32
+2026-06-11T10:43:15.0000000Z   Downloaded chrono v0.4.44
+2026-06-11T10:43:15.0000000Z   Downloaded ron v0.12.0
+2026-06-11T10:43:15.0000000Z   Downloaded zstd-sys v2.0.15+zstd.1.5.7
+2026-06-11T10:43:15.0000000Z   Downloaded libc v0.2.186
+2026-06-11T10:43:15.0000000Z   Downloaded hashbrown v0.15.5
+2026-06-11T10:43:15.0000000Z   Downloaded tokio v1.52.3
+2026-06-11T10:43:15.0000000Z   Downloaded guppy v0.17.26
+2026-06-11T10:43:15.0000000Z   Downloaded quick-xml v0.38.4
+2026-06-11T10:43:15.0000000Z   Downloaded pest v2.8.3
+2026-06-11T10:43:15.0000000Z   Downloaded memchr v2.7.6
+2026-06-11T10:43:15.0000000Z   Downloaded idna v1.1.0
+2026-06-11T10:43:15.0000000Z   Downloaded url v2.5.7
+2026-06-11T10:43:15.0000000Z   Downloaded tracing-core v0.1.36
+2026-06-11T10:43:15.0000000Z   Downloaded toml_edit v0.25.11+spec-1.1.0
+2026-06-11T10:43:15.0000000Z   Downloaded serde_json v1.0.149
+2026-06-11T10:43:15.0000000Z   Downloaded indexmap v2.14.0
+2026-06-11T10:43:15.0000000Z   Downloaded zmij v1.0.18
+2026-06-11T10:43:15.0000000Z   Downloaded zipsign-api v0.1.5
+2026-06-11T10:43:15.0000000Z   Downloaded zeroize v1.8.1
+2026-06-11T10:43:15.0000000Z   Downloaded xxhash-rust v0.8.15
+2026-06-11T10:43:15.0000000Z   Downloaded vte v0.14.1
+2026-06-11T10:43:15.0000000Z   Downloaded rand v0.10.1
+2026-06-11T10:43:15.0000000Z   Downloaded pulldown-cmark v0.13.3
+2026-06-11T10:43:15.0000000Z   Downloaded mio v1.2.0
+2026-06-11T10:43:15.0000000Z   Downloaded encoding_rs v0.8.35
+2026-06-11T10:43:15.0000000Z   Downloaded miette v7.6.0
+2026-06-11T10:43:15.0000000Z   Downloaded http v1.4.0
+2026-06-11T10:43:15.0000000Z   Downloaded clap_builder v4.6.0
+2026-06-11T10:43:15.0000000Z   Downloaded wezterm-input-types v0.1.0
+2026-06-11T10:43:15.0000000Z   Downloaded recursion v0.5.4
+2026-06-11T10:43:15.0000000Z   Downloaded ureq-proto v0.6.0
+2026-06-11T10:43:15.0000000Z   Downloaded minimal-lexical v0.2.1
+2026-06-11T10:43:15.0000000Z   Downloaded regex v1.12.3
+2026-06-11T10:43:15.0000000Z   Downloaded ring v0.17.14
+2026-06-11T10:43:15.0000000Z   Downloaded tracing-attributes v0.1.31
+2026-06-11T10:43:15.0000000Z   Downloaded tempfile v3.20.0
+2026-06-11T10:43:15.0000000Z   Downloaded unicode-ident v1.0.24
+2026-06-11T10:43:15.0000000Z   Downloaded tinyvec v1.9.0
+2026-06-11T10:43:15.0000000Z   Downloaded wezterm-color-types v0.3.0
+2026-06-11T10:43:15.0000000Z   Downloaded tar v0.4.46
+2026-06-11T10:43:15.0000000Z   Downloaded ucd-trie v0.1.7
+2026-06-11T10:43:15.0000000Z   Downloaded getrandom v0.3.4
+2026-06-11T10:43:15.0000000Z   Downloaded wezterm-blob-leases v0.1.1
+2026-06-11T10:43:15.0000000Z   Downloaded utf8-zero v0.8.1
+2026-06-11T10:43:15.0000000Z   Downloaded toml v1.1.2+spec-1.1.0
+2026-06-11T10:43:15.0000000Z   Downloaded smol_str v0.3.2
+2026-06-11T10:43:15.0000000Z   Downloaded pin-project v1.1.10
+2026-06-11T10:43:15.0000000Z   Downloaded crossterm v0.29.0
+2026-06-11T10:43:15.0000000Z   Downloaded utf8parse v0.2.2
+2026-06-11T10:43:15.0000000Z   Downloaded utf8_iter v1.0.4
+2026-06-11T10:43:15.0000000Z   Downloaded textwrap v0.16.2
+2026-06-11T10:43:15.0000000Z   Downloaded toml_writer v1.1.1+spec-1.1.0
+2026-06-11T10:43:15.0000000Z   Downloaded indicatif v0.18.4
+2026-06-11T10:43:15.0000000Z   Downloaded deltae v0.3.2
+2026-06-11T10:43:15.0000000Z   Downloaded thiserror-impl v2.0.18
+2026-06-11T10:43:15.0000000Z   Downloaded thiserror v1.0.69
+2026-06-11T10:43:15.0000000Z   Downloaded spki v0.7.3
+2026-06-11T10:43:15.0000000Z   Downloaded serde v1.0.228
+2026-06-11T10:43:15.0000000Z   Downloaded untrusted v0.9.0
+2026-06-11T10:43:15.0000000Z   Downloaded unit-prefix v0.5.1
+2026-06-11T10:43:15.0000000Z   Downloaded tracing-log v0.2.0
+2026-06-11T10:43:15.0000000Z   Downloaded toml_parser v1.1.2+spec-1.1.0
+2026-06-11T10:43:15.0000000Z   Downloaded tokio-stream v0.1.18
+2026-06-11T10:43:15.0000000Z   Downloaded time-macros v0.2.27
+2026-06-11T10:43:15.0000000Z   Downloaded terminfo v0.9.0
+2026-06-11T10:43:15.0000000Z   Downloaded pkg-config v0.3.32
+2026-06-11T10:43:15.0000000Z   Downloaded nextest-filtering v0.21.1
+2026-06-11T10:43:15.0000000Z   Downloaded unicode-linebreak v0.1.5
+2026-06-11T10:43:15.0000000Z   Downloaded typeid v1.0.3
+2026-06-11T10:43:15.0000000Z   Downloaded toml_datetime v1.1.1+spec-1.1.0
+2026-06-11T10:43:15.0000000Z   Downloaded termios v0.3.3
+2026-06-11T10:43:15.0000000Z   Downloaded target-spec-miette v0.4.8
+2026-06-11T10:43:15.0000000Z   Downloaded slab v0.4.11
+2026-06-11T10:43:15.0000000Z   Downloaded signal-hook-registry v1.4.5
+2026-06-11T10:43:15.0000000Z   Downloaded linux-raw-sys v0.4.15
+2026-06-11T10:43:15.0000000Z   Downloaded serde_derive v1.0.228
+2026-06-11T10:43:15.0000000Z   Downloaded rand v0.8.6
+2026-06-11T10:43:15.0000000Z   Downloaded linux-raw-sys v0.9.4
+2026-06-11T10:43:15.0000000Z   Downloaded num-traits v0.2.19
+2026-06-11T10:43:15.0000000Z   Downloaded miniz_oxide v0.8.9
+2026-06-11T10:43:15.0000000Z   Downloaded litrs v0.4.1
+2026-06-11T10:43:15.0000000Z   Downloaded smallvec v1.15.1
+2026-06-11T10:43:15.0000000Z   Downloaded serde_core v1.0.228
+2026-06-11T10:43:15.0000000Z   Downloaded sapling-streampager v0.12.0
+2026-06-11T10:43:15.0000000Z   Downloaded futures-channel v0.3.32
+2026-06-11T10:43:15.0000000Z   Downloaded der v0.8.0
+2026-06-11T10:43:15.0000000Z   Downloaded thread-id v5.0.0
+2026-06-11T10:43:15.0000000Z   Downloaded supports-hyperlinks v3.1.0
+2026-06-11T10:43:15.0000000Z   Downloaded supports-color v3.0.2
+2026-06-11T10:43:15.0000000Z   Downloaded subtle v2.6.1
+2026-06-11T10:43:15.0000000Z   Downloaded signature v2.2.0
+2026-06-11T10:43:15.0000000Z   Downloaded rustc-demangle v0.1.25
+2026-06-11T10:43:15.0000000Z   Downloaded pest_derive v2.8.3
+2026-06-11T10:43:15.0000000Z   Downloaded parking_lot v0.12.4
+2026-06-11T10:43:15.0000000Z   Downloaded httparse v1.10.1
+2026-06-11T10:43:15.0000000Z   Downloaded tinyvec_macros v0.1.1
+2026-06-11T10:43:15.0000000Z   Downloaded thread_local v1.1.8
+2026-06-11T10:43:15.0000000Z   Downloaded thiserror-impl v1.0.69
+2026-06-11T10:43:15.0000000Z   Downloaded thiserror v2.0.18
+2026-06-11T10:43:15.0000000Z   Downloaded target-spec v3.6.0
+2026-06-11T10:43:15.0000000Z   Downloaded swrite v0.1.0
+2026-06-11T10:43:15.0000000Z   Downloaded supports-unicode v3.0.0
+2026-06-11T10:43:15.0000000Z   Downloaded socks v0.3.4
+2026-06-11T10:43:15.0000000Z   Downloaded siphasher v1.0.1
+2026-06-11T10:43:15.0000000Z   Downloaded signal-hook v0.3.18
+2026-06-11T10:43:15.0000000Z   Downloaded log v0.4.29
+2026-06-11T10:43:15.0000000Z   Downloaded self-replace v1.5.0
+2026-06-11T10:43:15.0000000Z   Downloaded rustls-pki-types v1.12.0
+2026-06-11T10:43:15.0000000Z   Downloaded rand_core v0.6.4
+2026-06-11T10:43:15.0000000Z   Downloaded pest_meta v2.8.3
+2026-06-11T10:43:15.0000000Z   Downloaded pem-rfc7468 v1.0.0
+2026-06-11T10:43:15.0000000Z   Downloaded parking_lot_core v0.9.11
+2026-06-11T10:43:15.0000000Z   Downloaded owo-colors v4.3.0
+2026-06-11T10:43:15.0000000Z   Downloaded miette-derive v7.6.0
+2026-06-11T10:43:15.0000000Z   Downloaded humantime v2.3.0
+2026-06-11T10:43:15.0000000Z   Downloaded globset v0.4.18
+2026-06-11T10:43:15.0000000Z   Downloaded euclid v0.22.11
+2026-06-11T10:43:15.0000000Z   Downloaded derive_more v2.0.1
+2026-06-11T10:43:15.0000000Z   Downloaded config v0.15.23
+2026-06-11T10:43:15.0000000Z   Downloaded clap v4.6.1
+2026-06-11T10:43:15.0000000Z   Downloaded bytes v1.11.1
+2026-06-11T10:43:15.0000000Z   Downloaded strip-ansi-escapes v0.2.1
+2026-06-11T10:43:15.0000000Z   Downloaded signal-hook-mio v0.2.5
+2026-06-11T10:43:15.0000000Z   Downloaded shlex v1.3.0
+2026-06-11T10:43:15.0000000Z   Downloaded shell-words v1.1.1
+2026-06-11T10:43:15.0000000Z   Downloaded shared_child v1.1.1
+2026-06-11T10:43:15.0000000Z   Downloaded sha2 v0.10.9
+2026-06-11T10:43:15.0000000Z   Downloaded serde_tokenstream v0.2.2
+2026-06-11T10:43:15.0000000Z   Downloaded serde_path_to_error v0.1.20
+2026-06-11T10:43:15.0000000Z   Downloaded semver v1.0.28
+2026-06-11T10:43:15.0000000Z   Downloaded rand_core v0.10.0
+2026-06-11T10:43:15.0000000Z   Downloaded proc-macro2 v1.0.106
+2026-06-11T10:43:15.0000000Z   Downloaded nextest-metadata v0.14.1
+2026-06-11T10:43:15.0000000Z   Downloaded native-tls v0.2.14
+2026-06-11T10:43:15.0000000Z   Downloaded lru v0.16.3
+2026-06-11T10:43:15.0000000Z   Downloaded lock_api v0.4.13
+2026-06-11T10:43:15.0000000Z   Downloaded hex v0.4.3
+2026-06-11T10:43:15.0000000Z   Downloaded bytemuck v1.24.0
+2026-06-11T10:43:15.0000000Z   Downloaded sigchld v0.2.4
+2026-06-11T10:43:15.0000000Z   Downloaded shared_thread v0.2.0
+2026-06-11T10:43:15.0000000Z   Downloaded serde_ignored v0.1.14
+2026-06-11T10:43:15.0000000Z   Downloaded scroll_derive v0.13.1
+2026-06-11T10:43:15.0000000Z   Downloaded scroll v0.13.0
+2026-06-11T10:43:15.0000000Z   Downloaded powerfmt v0.2.0
+2026-06-11T10:43:15.0000000Z   Downloaded pest_generator v2.8.3
+2026-06-11T10:43:15.0000000Z   Downloaded mac_address v1.1.8
+2026-06-11T10:43:15.0000000Z   Downloaded crc32fast v1.5.0
+2026-06-11T10:43:15.0000000Z   Downloaded future-queue v0.4.0
+2026-06-11T10:43:15.0000000Z   Downloaded derive_more-impl v2.0.1
+2026-06-11T10:43:15.0000000Z   Downloaded ordered-float v4.6.0
+2026-06-11T10:43:15.0000000Z   Downloaded option-ext v0.2.0
+2026-06-11T10:43:15.0000000Z   Downloaded indenter v0.3.4
+2026-06-11T10:43:15.0000000Z   Downloaded futures-sink v0.3.32
+2026-06-11T10:43:15.0000000Z   Downloaded futures-macro v0.3.32
+2026-06-11T10:43:15.0000000Z   Downloaded derive-where v1.6.1
+2026-06-11T10:43:15.0000000Z   Downloaded cookie v0.18.1
+2026-06-11T10:43:15.0000000Z   Downloaded cookie_store v0.22.1
+2026-06-11T10:43:15.0000000Z   Downloaded console v0.16.3
+2026-06-11T10:43:15.0000000Z   Downloaded chacha20 v0.10.0
+2026-06-11T10:43:15.0000000Z   Downloaded anyhow v1.0.98
+2026-06-11T10:43:15.0000000Z   Downloaded quote v1.0.45
+2026-06-11T10:43:15.0000000Z   Downloaded pkcs8 v0.10.2
+2026-06-11T10:43:15.0000000Z   Downloaded phf v0.11.3
+2026-06-11T10:43:15.0000000Z   Downloaded os_pipe v1.2.2
+2026-06-11T10:43:15.0000000Z   Downloaded memmem v0.1.1
+2026-06-11T10:43:15.0000000Z   Downloaded generic-array v0.14.7
+2026-06-11T10:43:15.0000000Z   Downloaded form_urlencoded v1.2.2
+2026-06-11T10:43:15.0000000Z   Downloaded const-oid v0.9.6
+2026-06-11T10:43:15.0000000Z   Downloaded anstyle-parse v1.0.0
+2026-06-11T10:43:15.0000000Z   Downloaded pin-project-internal v1.1.10
+2026-06-11T10:43:15.0000000Z   Downloaded phf_macros v0.11.3
+2026-06-11T10:43:15.0000000Z   Downloaded base64ct v1.7.3
+2026-06-11T10:43:15.0000000Z   Downloaded nextest-workspace-hack v0.1.0
+2026-06-11T10:43:15.0000000Z   Downloaded mukti-metadata v0.3.0
+2026-06-11T10:43:15.0000000Z   Downloaded is_terminal_polyfill v1.70.1
+2026-06-11T10:43:15.0000000Z   Downloaded deranged v0.5.8
+2026-06-11T10:43:15.0000000Z   Downloaded cpufeatures v0.2.17
+2026-06-11T10:43:15.0000000Z   Downloaded phf_codegen v0.11.3
+2026-06-11T10:43:15.0000000Z   Downloaded futures-io v0.3.32
+2026-06-11T10:43:15.0000000Z   Downloaded either v1.15.0
+2026-06-11T10:43:15.0000000Z   Downloaded colorchoice v1.0.3
+2026-06-11T10:43:15.0000000Z   Downloaded cmake v0.1.54
+2026-06-11T10:43:15.0000000Z   Downloaded cargo_metadata v0.23.1
+2026-06-11T10:43:15.0000000Z   Downloaded bitflags v1.3.2
+2026-06-11T10:43:15.0000000Z   Downloaded bit-vec v0.6.3
+2026-06-11T10:43:15.0000000Z   Downloaded async-scoped v0.9.0
+2026-06-11T10:43:15.0000000Z   Downloaded countio v0.2.19
+2026-06-11T10:43:15.0000000Z   Downloaded clap_lex v1.0.0
+2026-06-11T10:43:15.0000000Z   Downloaded ed25519-dalek v2.1.1
+2026-06-11T10:43:15.0000000Z   Downloaded eazip v0.2.4
+2026-06-11T10:43:15.0000000Z   Downloaded cpufeatures v0.3.0
+2026-06-11T10:43:15.0000000Z   Downloaded convert_case v0.7.1
+2026-06-11T10:43:15.0000000Z   Downloaded color-spantrace v0.3.0
+2026-06-11T10:43:15.0000000Z   Downloaded camino v1.2.2
+2026-06-11T10:43:15.0000000Z   Downloaded byteorder v1.5.0
+2026-06-11T10:43:15.0000000Z   Downloaded autocfg v1.5.0
+2026-06-11T10:43:15.0000000Z   Downloaded getrandom v0.4.2
+2026-06-11T10:43:15.0000000Z   Downloaded cfg-if v1.0.4
+2026-06-11T10:43:15.0000000Z   Downloaded openssl-sys v0.9.115
+2026-06-11T10:43:15.0000000Z   Downloaded openssl-probe v0.1.6
+2026-06-11T10:43:15.0000000Z   Downloaded num-derive v0.4.2
+2026-06-11T10:43:15.0000000Z   Downloaded newtype-uuid v1.3.2
+2026-06-11T10:43:15.0000000Z   Downloaded nested v0.1.1
+2026-06-11T10:43:15.0000000Z   Downloaded heck v0.5.0
+2026-06-11T10:43:15.0000000Z   Downloaded futures v0.3.32
+2026-06-11T10:43:15.0000000Z   Downloaded errno v0.3.12
+2026-06-11T10:43:15.0000000Z   Downloaded dof v0.4.0
+2026-06-11T10:43:15.0000000Z   Downloaded document-features v0.2.11
+2026-06-11T10:43:15.0000000Z   Downloaded locked-tripwire v0.1.0
+2026-06-11T10:43:15.0000000Z   Downloaded futures-core v0.3.32
+2026-06-11T10:43:15.0000000Z   Downloaded atomic v0.6.1
+2026-06-11T10:43:15.0000000Z   Downloaded num-conv v0.2.0
+2026-06-11T10:43:15.0000000Z   Downloaded jobserver v0.1.33
+2026-06-11T10:43:15.0000000Z   Downloaded getrandom v0.2.16
+2026-06-11T10:43:15.0000000Z   Downloaded crypto-common v0.1.6
+2026-06-11T10:43:15.0000000Z   Downloaded clap_derive v4.6.1
+2026-06-11T10:43:15.0000000Z   Downloaded cc v1.2.30
+2026-06-11T10:43:15.0000000Z   Downloaded bitflags v2.11.1
+2026-06-11T10:43:15.0000000Z   Downloaded anstyle v1.0.14
+2026-06-11T10:43:15.0000000Z   Downloaded humantime-serde v1.1.1
+2026-06-11T10:43:15.0000000Z   Downloaded filedescriptor v0.8.3
+2026-06-11T10:43:15.0000000Z   Downloaded eyre v0.6.12
+2026-06-11T10:43:15.0000000Z   Downloaded digest v0.10.7
+2026-06-11T10:43:15.0000000Z   Downloaded csscolorparser v0.6.2
+2026-06-11T10:43:15.0000000Z   Downloaded backtrace-ext v0.2.1
+2026-06-11T10:43:15.0000000Z   Downloaded atomicwrites v0.4.4
+2026-06-11T10:43:15.0000000Z   Downloaded futures-executor v0.3.32
+2026-06-11T10:43:15.0000000Z   Downloaded dunce v1.0.5
+2026-06-11T10:43:15.0000000Z   Downloaded debug-ignore v1.0.5
+2026-06-11T10:43:15.0000000Z   Downloaded cfg_aliases v0.2.1
+2026-06-11T10:43:15.0000000Z   Downloaded cargo-platform v0.3.0
+2026-06-11T10:43:15.0000000Z   Downloaded hashbrown v0.16.1
+2026-06-11T10:43:15.0000000Z   Downloaded fixedbitset v0.4.2
+2026-06-11T10:43:15.0000000Z   Downloaded borsh v1.5.7
+2026-06-11T10:43:15.0000000Z   Downloaded anstream v1.0.0
+2026-06-11T10:43:15.0000000Z   Downloaded enable-ansi-support v0.3.1
+2026-06-11T10:43:15.0000000Z   Downloaded der v0.7.10
+2026-06-11T10:43:15.0000000Z   Downloaded camino-tempfile v1.4.1
+2026-06-11T10:43:15.0000000Z   Downloaded bytesize v2.3.1
+2026-06-11T10:43:15.0000000Z   Downloaded backtrace v0.3.75
+2026-06-11T10:43:15.0000000Z   Downloaded flate2 v1.1.1
+2026-06-11T10:43:15.0000000Z   Downloaded equivalent v1.0.2
+2026-06-11T10:43:15.0000000Z   Downloaded dtrace-parser v0.3.0
+2026-06-11T10:43:15.0000000Z   Downloaded curve25519-dalek-derive v0.1.1
+2026-06-11T10:43:15.0000000Z   Downloaded cfg-expr v0.20.6
+2026-06-11T10:43:15.0000000Z   Downloaded block-buffer v0.10.4
+2026-06-11T10:43:15.0000000Z   Downloaded base64 v0.22.1
+2026-06-11T10:43:15.0000000Z   Downloaded foreign-types-shared v0.1.1
+2026-06-11T10:43:15.0000000Z   Downloaded fixedbitset v0.5.7
+2026-06-11T10:43:15.0000000Z   Downloaded finl_unicode v1.4.0
+2026-06-11T10:43:15.0000000Z   Downloaded fastrand v2.3.0
+2026-06-11T10:43:15.0000000Z   Downloaded foreign-types v0.3.2
+2026-06-11T10:43:15.0000000Z   Downloaded foldhash v0.1.5
+2026-06-11T10:43:15.0000000Z   Downloaded aws-lc-rs v1.16.2
+2026-06-11T10:43:15.0000000Z   Downloaded etcetera v0.11.0
+2026-06-11T10:43:15.0000000Z   Downloaded aws-lc-sys v0.39.0
+2026-06-11T10:43:15.0000000Z  Downloading crates ...
+2026-06-11T10:43:15.0000000Z     Blocking waiting for file lock on package cache
+2026-06-11T10:43:15.0000000Z   Downloaded anstyle-parse v0.2.7
+2026-06-11T10:43:15.0000000Z   Downloaded anstyle-query v1.1.4
+2026-06-11T10:43:15.0000000Z   Downloaded anstyle v1.0.11
+2026-06-11T10:43:15.0000000Z   Downloaded anstream v0.6.20
+2026-06-11T10:43:15.0000000Z   Downloaded colorchoice v1.0.4
+2026-06-11T10:43:15.0000000Z   Downloaded aho-corasick v1.1.3
+2026-06-11T10:43:15.0000000Z   Downloaded toml_datetime v0.7.0
+2026-06-11T10:43:15.0000000Z   Downloaded clap v4.5.45
+2026-06-11T10:43:15.0000000Z   Downloaded unicase v2.8.1
+2026-06-11T10:43:15.0000000Z   Downloaded errno v0.3.13
+2026-06-11T10:43:15.0000000Z   Downloaded env_filter v0.1.3
+2026-06-11T10:43:15.0000000Z   Downloaded sha1 v0.10.6
+2026-06-11T10:43:15.0000000Z   Downloaded toml_writer v1.0.2
+2026-06-11T10:43:15.0000000Z   Downloaded env_logger v0.11.8
+2026-06-11T10:43:15.0000000Z   Downloaded pulldown-cmark-escape v0.11.0
+2026-06-11T10:43:15.0000000Z   Downloaded clap_lex v0.7.5
+2026-06-11T10:43:15.0000000Z   Downloaded cfg-if v1.0.1
+2026-06-11T10:43:15.0000000Z   Downloaded shell-words v1.1.0
+2026-06-11T10:43:15.0000000Z   Downloaded bitflags v2.9.1
+2026-06-11T10:43:15.0000000Z   Downloaded winnow v0.7.12
+2026-06-11T10:43:15.0000000Z   Downloaded toml_parser v1.0.2
+2026-06-11T10:43:15.0000000Z   Downloaded getrandom v0.3.3
+2026-06-11T10:43:15.0000000Z   Downloaded serde v1.0.219
+2026-06-11T10:43:15.0000000Z   Downloaded log v0.4.27
+2026-06-11T10:43:15.0000000Z   Downloaded getopts v0.2.23
+2026-06-11T10:43:15.0000000Z   Downloaded toml v0.9.5
+2026-06-11T10:43:15.0000000Z   Downloaded serde_spanned v1.0.0
+2026-06-11T10:43:15.0000000Z   Downloaded memchr v2.7.5
+2026-06-11T10:43:15.0000000Z   Downloaded indexmap v2.10.0
+2026-06-11T10:43:15.0000000Z   Downloaded clap_builder v4.5.44
+2026-06-11T10:43:15.0000000Z   Downloaded regex v1.11.1
+2026-06-11T10:43:15.0000000Z   Downloaded pulldown-cmark v0.13.0
+2026-06-11T10:43:15.0000000Z   Downloaded unicode-width v0.2.1
+2026-06-11T10:43:15.0000000Z   Downloaded rustix v1.0.8
+2026-06-11T10:43:15.0000000Z   Downloaded regex-syntax v0.8.5
+2026-06-11T10:43:15.0000000Z   Downloaded regex-automata v0.4.9
+2026-06-11T10:43:15.0000000Z   Downloaded libc v0.2.175
+2026-06-11T10:43:15.0000000Z   Downloaded jiff v0.2.15
+2026-06-11T10:43:15.0000000Z    Compiling typenum v1.18.0
+2026-06-11T10:43:15.0000000Z    Compiling version_check v0.9.5
+2026-06-11T10:43:15.0000000Z    Compiling libc v0.2.175
+2026-06-11T10:43:15.0000000Z    Compiling memchr v2.7.5
+2026-06-11T10:43:15.0000000Z    Compiling utf8parse v0.2.2
+2026-06-11T10:43:15.0000000Z    Compiling serde v1.0.219
+2026-06-11T10:43:15.0000000Z    Compiling colorchoice v1.0.4
+2026-06-11T10:43:15.0000000Z    Compiling is_terminal_polyfill v1.70.1
+2026-06-11T10:43:15.0000000Z    Compiling anstyle-query v1.1.4
+2026-06-11T10:43:15.0000000Z    Compiling anstyle v1.0.11
+2026-06-11T10:43:15.0000000Z    Compiling regex-syntax v0.8.5
+2026-06-11T10:43:15.0000000Z    Compiling cfg-if v1.0.1
+2026-06-11T10:43:15.0000000Z    Compiling bitflags v2.9.1
+2026-06-11T10:43:15.0000000Z    Compiling rustix v1.0.8
+2026-06-11T10:43:15.0000000Z    Compiling getrandom v0.3.3
+2026-06-11T10:43:15.0000000Z    Compiling linux-raw-sys v0.9.4
+2026-06-11T10:43:15.0000000Z    Compiling log v0.4.27
+2026-06-11T10:43:15.0000000Z    Compiling clap_lex v0.7.5
+2026-06-11T10:43:15.0000000Z    Compiling option-ext v0.2.0
+2026-06-11T10:43:15.0000000Z    Compiling strsim v0.11.1
+2026-06-11T10:43:15.0000000Z    Compiling proc-macro2 v1.0.106
+2026-06-11T10:43:15.0000000Z    Compiling quote v1.0.45
+2026-06-11T10:43:15.0000000Z    Compiling unicode-ident v1.0.24
+2026-06-11T10:43:15.0000000Z    Compiling libc v0.2.186
+2026-06-11T10:43:15.0000000Z    Compiling cfg-if v1.0.4
+2026-06-11T10:43:15.0000000Z    Compiling serde_core v1.0.228
+2026-06-11T10:43:15.0000000Z    Compiling memchr v2.7.6
+2026-06-11T10:43:15.0000000Z    Compiling log v0.4.29
+2026-06-11T10:43:15.0000000Z    Compiling serde v1.0.228
+2026-06-11T10:43:15.0000000Z    Compiling autocfg v1.5.0
+2026-06-11T10:43:15.0000000Z    Compiling bitflags v2.11.1
+2026-06-11T10:43:15.0000000Z    Compiling zmij v1.0.18
+2026-06-11T10:43:15.0000000Z    Compiling once_cell v1.21.3
+2026-06-11T10:43:15.0000000Z    Compiling shlex v1.3.0
+2026-06-11T10:43:15.0000000Z    Compiling thiserror v2.0.18
+2026-06-11T10:43:15.0000000Z    Compiling rustix v1.0.7
+2026-06-11T10:43:15.0000000Z    Compiling getrandom v0.3.4
+2026-06-11T10:43:15.0000000Z    Compiling itoa v1.0.17
+2026-06-11T10:43:15.0000000Z    Compiling pulldown-cmark v0.13.0
+2026-06-11T10:43:15.0000000Z    Compiling winnow v0.7.12
+2026-06-11T10:43:15.0000000Z    Compiling unicode-width v0.2.1
+2026-06-11T10:43:15.0000000Z    Compiling anstyle-parse v0.2.7
+2026-06-11T10:43:15.0000000Z    Compiling linux-raw-sys v0.9.4
+2026-06-11T10:43:15.0000000Z    Compiling pulldown-cmark-escape v0.11.0
+2026-06-11T10:43:15.0000000Z    Compiling cpufeatures v0.2.17
+2026-06-11T10:43:15.0000000Z    Compiling once_cell v1.21.3
+2026-06-11T10:43:15.0000000Z    Compiling unicase v2.8.1
+2026-06-11T10:43:15.0000000Z    Compiling jiff v0.2.15
+2026-06-11T10:43:15.0000000Z    Compiling version_check v0.9.5
+2026-06-11T10:43:15.0000000Z    Compiling generic-array v0.14.7
+2026-06-11T10:43:15.0000000Z    Compiling serde_json v1.0.149
+2026-06-11T10:43:15.0000000Z    Compiling fastrand v2.3.0
+2026-06-11T10:43:15.0000000Z    Compiling ucd-trie v0.1.7
+2026-06-11T10:43:15.0000000Z    Compiling siphasher v1.0.1
+2026-06-11T10:43:15.0000000Z    Compiling toml_writer v1.0.2
+2026-06-11T10:43:15.0000000Z    Compiling rand_core v0.6.4
+2026-06-11T10:43:15.0000000Z    Compiling thiserror v1.0.69
+2026-06-11T10:43:15.0000000Z    Compiling shell-words v1.1.0
+2026-06-11T10:43:15.0000000Z    Compiling adler2 v2.0.1
+2026-06-11T10:43:15.0000000Z    Compiling pin-project-lite v0.2.17
+2026-06-11T10:43:15.0000000Z    Compiling cfg_aliases v0.2.1
+2026-06-11T10:43:15.0000000Z    Compiling getopts v0.2.23
+2026-06-11T10:43:15.0000000Z    Compiling dunce v1.0.5
+2026-06-11T10:43:15.0000000Z    Compiling num-traits v0.2.19
+2026-06-11T10:43:15.0000000Z    Compiling typenum v1.18.0
+2026-06-11T10:43:15.0000000Z    Compiling anstream v0.6.20
+2026-06-11T10:43:15.0000000Z    Compiling fs_extra v1.3.0
+2026-06-11T10:43:15.0000000Z    Compiling aho-corasick v1.1.3
+2026-06-11T10:43:15.0000000Z    Compiling unicode-width v0.2.2
+2026-06-11T10:43:15.0000000Z    Compiling rand v0.8.6
+2026-06-11T10:43:15.0000000Z    Compiling smallvec v1.15.1
+2026-06-11T10:43:15.0000000Z    Compiling phf_shared v0.11.3
+2026-06-11T10:43:15.0000000Z    Compiling generic-array v0.14.7
+2026-06-11T10:43:15.0000000Z    Compiling lazy_static v1.5.0
+2026-06-11T10:43:15.0000000Z    Compiling equivalent v1.0.2
+2026-06-11T10:43:15.0000000Z    Compiling miniz_oxide v0.8.9
+2026-06-11T10:43:15.0000000Z    Compiling camino v1.2.2
+2026-06-11T10:43:15.0000000Z    Compiling pest v2.8.3
+2026-06-11T10:43:15.0000000Z    Compiling signal-hook v0.3.18
+2026-06-11T10:43:15.0000000Z    Compiling syn v1.0.109
+2026-06-11T10:43:15.0000000Z    Compiling dirs-sys v0.5.0
+2026-06-11T10:43:15.0000000Z    Compiling clap_builder v4.5.44
+2026-06-11T10:43:15.0000000Z    Compiling futures-core v0.3.32
+2026-06-11T10:43:15.0000000Z    Compiling target-lexicon v0.13.3
+2026-06-11T10:43:15.0000000Z    Compiling strsim v0.11.1
+2026-06-11T10:43:15.0000000Z    Compiling zeroize v1.8.1
+2026-06-11T10:43:15.0000000Z    Compiling regex-syntax v0.8.10
+2026-06-11T10:43:15.0000000Z    Compiling zerocopy v0.8.27
+2026-06-11T10:43:15.0000000Z    Compiling hashbrown v0.17.0
+2026-06-11T10:43:15.0000000Z    Compiling aho-corasick v1.1.4
+2026-06-11T10:43:15.0000000Z    Compiling object v0.36.7
+2026-06-11T10:43:15.0000000Z    Compiling phf_generator v0.11.3
+2026-06-11T10:43:15.0000000Z    Compiling memoffset v0.9.1
+2026-06-11T10:43:15.0000000Z    Compiling dirs v6.0.0
+2026-06-11T10:43:15.0000000Z    Compiling aws-lc-rs v1.16.2
+2026-06-11T10:43:15.0000000Z    Compiling jobserver v0.1.33
+2026-06-11T10:43:15.0000000Z    Compiling gimli v0.31.1
+2026-06-11T10:43:15.0000000Z    Compiling bytes v1.11.1
+2026-06-11T10:43:15.0000000Z    Compiling owo-colors v4.3.0
+2026-06-11T10:43:15.0000000Z    Compiling bytemuck v1.24.0
+2026-06-11T10:43:15.0000000Z    Compiling pkg-config v0.3.32
+2026-06-11T10:43:15.0000000Z    Compiling block-buffer v0.10.4
+2026-06-11T10:43:15.0000000Z    Compiling crypto-common v0.1.6
+2026-06-11T10:43:15.0000000Z    Compiling utf8parse v0.2.2
+2026-06-11T10:43:15.0000000Z    Compiling toml_parser v1.0.2
+2026-06-11T10:43:15.0000000Z    Compiling pest_meta v2.8.3
+2026-06-11T10:43:15.0000000Z    Compiling signal-hook-registry v1.4.5
+2026-06-11T10:43:15.0000000Z    Compiling tempfile v3.20.0
+2026-06-11T10:43:15.0000000Z    Compiling guppy-workspace-hack v0.1.0
+2026-06-11T10:43:15.0000000Z    Compiling ordered-float v4.6.0
+2026-06-11T10:43:15.0000000Z    Compiling regex-automata v0.4.9
+2026-06-11T10:43:15.0000000Z    Compiling digest v0.10.7
+2026-06-11T10:43:15.0000000Z    Compiling indexmap v2.14.0
+2026-06-11T10:43:15.0000000Z    Compiling cc v1.2.30
+2026-06-11T10:43:15.0000000Z    Compiling syn v2.0.117
+2026-06-11T10:43:15.0000000Z    Compiling serde_spanned v1.0.0
+2026-06-11T10:43:15.0000000Z    Compiling toml_datetime v0.7.0
+2026-06-11T10:43:15.0000000Z    Compiling atomic v0.6.1
+2026-06-11T10:43:15.0000000Z    Compiling nix v0.29.0
+2026-06-11T10:43:15.0000000Z    Compiling tracing-core v0.1.36
+2026-06-11T10:43:15.0000000Z    Compiling fastrand v2.3.0
+2026-06-11T10:43:15.0000000Z    Compiling sha1 v0.10.6
+2026-06-11T10:43:15.0000000Z    Compiling crc32fast v1.5.0
+2026-06-11T10:43:15.0000000Z    Compiling target-spec v3.6.0
+2026-06-11T10:43:15.0000000Z    Compiling rustc-demangle v0.1.25
+2026-06-11T10:43:15.0000000Z    Compiling futures-sink v0.3.32
+2026-06-11T10:43:15.0000000Z    Compiling cfg-expr v0.20.6
+2026-06-11T10:43:15.0000000Z    Compiling clap v4.5.45
+2026-06-11T10:43:15.0000000Z    Compiling crypto-common v0.1.6
+2026-06-11T10:43:15.0000000Z    Compiling block-buffer v0.10.4
+2026-06-11T10:43:15.0000000Z    Compiling terminal_size v0.4.3
+2026-06-11T10:43:15.0000000Z    Compiling toml v0.9.5
+2026-06-11T10:43:15.0000000Z    Compiling semver v1.0.28
+2026-06-11T10:43:15.0000000Z    Compiling futures-channel v0.3.32
+2026-06-11T10:43:15.0000000Z    Compiling cmake v0.1.54
+2026-06-11T10:43:15.0000000Z    Compiling zstd-sys v2.0.15+zstd.1.5.7
+2026-06-11T10:43:15.0000000Z    Compiling tempfile v3.20.0
+2026-06-11T10:43:15.0000000Z    Compiling regex-automata v0.4.14
+2026-06-11T10:43:15.0000000Z    Compiling addr2line v0.24.2
+2026-06-11T10:43:15.0000000Z    Compiling phf_codegen v0.11.3
+2026-06-11T10:43:15.0000000Z    Compiling mio v1.2.0
+2026-06-11T10:43:15.0000000Z    Compiling rustls-pki-types v1.12.0
+2026-06-11T10:43:15.0000000Z    Compiling httparse v1.10.1
+2026-06-11T10:43:15.0000000Z    Compiling slab v0.4.11
+2026-06-11T10:43:15.0000000Z    Compiling byteorder v1.5.0
+2026-06-11T10:43:15.0000000Z    Compiling winnow v1.0.3
+2026-06-11T10:43:15.0000000Z    Compiling futures-task v0.3.32
+2026-06-11T10:43:15.0000000Z    Compiling aws-lc-sys v0.39.0
+2026-06-11T10:43:15.0000000Z    Compiling futures-io v0.3.32
+2026-06-11T10:43:15.0000000Z    Compiling base64 v0.22.1
+2026-06-11T10:43:15.0000000Z    Compiling usdt-impl v0.6.0
+2026-06-11T10:43:15.0000000Z    Compiling terminfo v0.9.0
+2026-06-11T10:43:15.0000000Z    Compiling digest v0.10.7
+2026-06-11T10:43:15.0000000Z    Compiling thread-id v5.0.0
+2026-06-11T10:43:15.0000000Z    Compiling ahash v0.8.12
+2026-06-11T10:43:15.0000000Z    Compiling lock_api v0.4.13
+2026-06-11T10:43:15.0000000Z    Compiling rustls v0.23.40
+2026-06-11T10:43:15.0000000Z    Compiling anyhow v1.0.98
+2026-06-11T10:43:15.0000000Z    Compiling bit-vec v0.6.3
+2026-06-11T10:43:15.0000000Z    Compiling portable-atomic v1.13.1
+2026-06-11T10:43:15.0000000Z    Compiling untrusted v0.9.0
+2026-06-11T10:43:15.0000000Z    Compiling parking_lot_core v0.9.11
+2026-06-11T10:43:15.0000000Z    Compiling plain v0.2.3
+2026-06-11T10:43:15.0000000Z    Compiling cpufeatures v0.2.17
+2026-06-11T10:43:15.0000000Z    Compiling zstd-safe v7.2.4
+2026-06-11T10:43:15.0000000Z    Compiling regex v1.11.1
+2026-06-11T10:43:15.0000000Z    Compiling nextest-workspace-hack v0.1.0
+2026-06-11T10:43:15.0000000Z    Compiling unicode-linebreak v0.1.5
+2026-06-11T10:43:15.0000000Z    Compiling minimal-lexical v0.2.1
+2026-06-11T10:43:15.0000000Z    Compiling is_ci v1.2.0
+2026-06-11T10:43:15.0000000Z    Compiling unicode-segmentation v1.12.0
+2026-06-11T10:43:15.0000000Z    Compiling either v1.15.0
+2026-06-11T10:43:15.0000000Z    Compiling foldhash v0.1.5
+2026-06-11T10:43:15.0000000Z    Compiling fnv v1.0.7
+2026-06-11T10:43:15.0000000Z    Compiling scopeguard v1.2.0
+2026-06-11T10:43:15.0000000Z    Compiling lab v0.11.0
+2026-06-11T10:43:15.0000000Z    Compiling unicode-width v0.1.14
+2026-06-11T10:43:15.0000000Z    Compiling wezterm-dynamic-derive v0.1.1
+2026-06-11T10:43:15.0000000Z    Compiling supports-color v3.0.2
+2026-06-11T10:43:15.0000000Z    Compiling backtrace v0.3.75
+2026-06-11T10:43:15.0000000Z    Compiling bit-set v0.5.3
+2026-06-11T10:43:15.0000000Z    Compiling flate2 v1.1.1
+2026-06-11T10:43:15.0000000Z    Compiling sha2 v0.10.9
+2026-06-11T10:43:15.0000000Z    Compiling nom v7.1.3
+2026-06-11T10:43:15.0000000Z    Compiling hashbrown v0.15.5
+2026-06-11T10:43:15.0000000Z    Compiling textwrap v0.16.2
+2026-06-11T10:43:15.0000000Z    Compiling convert_case v0.7.1
+2026-06-11T10:43:15.0000000Z    Compiling tracing-log v0.2.0
+2026-06-11T10:43:15.0000000Z    Compiling pathdiff v0.2.3
+2026-06-11T10:43:15.0000000Z    Compiling http v1.4.0
+2026-06-11T10:43:15.0000000Z    Compiling serde_spanned v1.1.1
+2026-06-11T10:43:15.0000000Z    Compiling serde_derive v1.0.228
+2026-06-11T10:43:15.0000000Z    Compiling env_filter v0.1.3
+2026-06-11T10:43:15.0000000Z    Compiling thiserror-impl v2.0.18
+2026-06-11T10:43:15.0000000Z    Compiling zerocopy-derive v0.8.27
+2026-06-11T10:43:15.0000000Z    Compiling thiserror-impl v1.0.69
+2026-06-11T10:43:15.0000000Z    Compiling pest_generator v2.8.3
+2026-06-11T10:43:15.0000000Z    Compiling phf_macros v0.11.3
+2026-06-11T10:43:15.0000000Z    Compiling futures-macro v0.3.32
+2026-06-11T10:43:15.0000000Z    Compiling scroll_derive v0.13.1
+2026-06-11T10:43:15.0000000Z    Compiling env_logger v0.11.8
+2026-06-11T10:43:15.0000000Z    Compiling tracing-attributes v0.1.31
+2026-06-11T10:43:15.0000000Z    Compiling phf v0.11.3
+2026-06-11T10:43:15.0000000Z    Compiling toml_parser v1.1.2+spec-1.1.0
+2026-06-11T10:43:15.0000000Z    Compiling futures-util v0.3.32
+2026-06-11T10:43:15.0000000Z    Compiling miette-derive v7.6.0
+2026-06-11T10:43:15.0000000Z    Compiling tokio-macros v2.7.0
+2026-06-11T10:43:15.0000000Z    Compiling scroll v0.13.0
+2026-06-11T10:43:15.0000000Z    Compiling tracing v0.1.44
+2026-06-11T10:43:15.0000000Z    Compiling rust-script v0.36.0
+2026-06-11T10:43:15.0000000Z    Compiling pest_derive v2.8.3
+2026-06-11T10:43:15.0000000Z    Compiling csscolorparser v0.6.2
+2026-06-11T10:43:15.0000000Z    Compiling backtrace-ext v0.2.1
+2026-06-11T10:43:15.0000000Z    Compiling toml_datetime v1.1.1+spec-1.1.0
+2026-06-11T10:43:15.0000000Z    Compiling os_pipe v1.2.2
+2026-06-11T10:43:15.0000000Z    Compiling console v0.16.3
+2026-06-11T10:43:15.0000000Z    Compiling dtrace-parser v0.3.0
+2026-06-11T10:43:15.0000000Z    Compiling euclid v0.22.11
+2026-06-11T10:43:15.0000000Z    Compiling sharded-slab v0.1.7
+2026-06-11T10:43:15.0000000Z    Compiling wezterm-dynamic v0.2.1
+2026-06-11T10:43:15.0000000Z    Compiling mac_address v1.1.8
+2026-06-11T10:43:15.0000000Z    Compiling thread_local v1.1.8
+2026-06-11T10:43:15.0000000Z    Compiling goblin v0.10.3
+2026-06-11T10:43:15.0000000Z    Compiling deltae v0.3.2
+2026-06-11T10:43:15.0000000Z    Compiling supports-unicode v3.0.0
+2026-06-11T10:43:15.0000000Z    Compiling regex v1.12.3
+2026-06-11T10:43:15.0000000Z    Compiling getrandom v0.4.2
+2026-06-11T10:43:15.0000000Z    Compiling subtle v2.6.1
+2026-06-11T10:43:15.0000000Z    Compiling rand_core v0.10.0
+2026-06-11T10:43:15.0000000Z    Compiling toml_writer v1.1.1+spec-1.1.0
+2026-06-11T10:43:15.0000000Z    Compiling serde_tokenstream v0.2.2
+2026-06-11T10:43:15.0000000Z    Compiling pretty-hex v0.4.1
+2026-06-11T10:43:15.0000000Z    Compiling supports-hyperlinks v3.1.0
+2026-06-11T10:43:15.0000000Z    Compiling fixedbitset v0.5.7
+2026-06-11T10:43:15.0000000Z    Compiling option-ext v0.2.0
+2026-06-11T10:43:15.0000000Z    Compiling pulldown-cmark v0.13.3
+2026-06-11T10:43:15.0000000Z    Compiling uuid v1.18.1
+2026-06-11T10:43:15.0000000Z    Compiling cargo-platform v0.3.0
+2026-06-11T10:43:15.0000000Z    Compiling bitflags v1.3.2
+2026-06-11T10:43:15.0000000Z    Compiling debug-ignore v1.0.5
+2026-06-11T10:43:15.0000000Z    Compiling rustix v0.38.44
+2026-06-11T10:43:15.0000000Z    Compiling dirs-sys v0.5.0
+2026-06-11T10:43:15.0000000Z    Compiling miette v7.6.0
+2026-06-11T10:43:15.0000000Z    Compiling wezterm-color-types v0.3.0
+2026-06-11T10:43:15.0000000Z    Compiling wezterm-bidi v0.2.3
+2026-06-11T10:43:15.0000000Z    Compiling wezterm-input-types v0.1.0
+2026-06-11T10:43:15.0000000Z    Compiling smol_str v0.3.2
+2026-06-11T10:43:15.0000000Z    Compiling tracing-subscriber v0.3.23
+2026-06-11T10:43:15.0000000Z    Compiling sigchld v0.2.4
+2026-06-11T10:43:15.0000000Z    Compiling fancy-regex v0.11.0
+2026-06-11T10:43:15.0000000Z    Compiling filedescriptor v0.8.3
+2026-06-11T10:43:15.0000000Z    Compiling petgraph v0.8.3
+2026-06-11T10:43:15.0000000Z    Compiling cargo_metadata v0.23.1
+2026-06-11T10:43:15.0000000Z    Compiling ureq-proto v0.6.0
+2026-06-11T10:43:15.0000000Z    Compiling wezterm-blob-leases v0.1.1
+2026-06-11T10:43:15.0000000Z    Compiling dof v0.4.0
+2026-06-11T10:43:15.0000000Z    Compiling tokio v1.52.3
+2026-06-11T10:43:15.0000000Z    Compiling derive_more-impl v2.0.1
+2026-06-11T10:43:15.0000000Z    Compiling pin-project-internal v1.1.10
+2026-06-11T10:43:15.0000000Z    Compiling futures-executor v0.3.32
+2026-06-11T10:43:15.0000000Z    Compiling num-derive v0.4.2
+2026-06-11T10:43:15.0000000Z    Compiling itertools v0.14.0
+2026-06-11T10:43:15.0000000Z    Compiling webpki-roots v1.0.0
+2026-06-11T10:43:15.0000000Z    Compiling socks v0.3.4
+2026-06-11T10:43:15.0000000Z    Compiling xattr v1.5.0
+2026-06-11T10:43:15.0000000Z    Compiling vtparse v0.6.2
+2026-06-11T10:43:15.0000000Z    Compiling anstyle-parse v1.0.0
+2026-06-11T10:43:15.0000000Z    Compiling memmap2 v0.9.8
+2026-06-11T10:43:15.0000000Z    Compiling termios v0.3.3
+2026-06-11T10:43:15.0000000Z    Compiling filetime v0.2.25
+2026-06-11T10:43:15.0000000Z    Compiling vte v0.14.1
+2026-06-11T10:43:15.0000000Z    Compiling quick-xml v0.38.4
+2026-06-11T10:43:15.0000000Z    Compiling bstr v1.12.1
+2026-06-11T10:43:15.0000000Z    Compiling nix v0.31.3
+2026-06-11T10:43:15.0000000Z    Compiling encoding_rs v0.8.35
+2026-06-11T10:43:15.0000000Z    Compiling cpufeatures v0.3.0
+2026-06-11T10:43:15.0000000Z    Compiling nested v0.1.1
+2026-06-11T10:43:15.0000000Z    Compiling tinyvec_macros v0.1.1
+2026-06-11T10:43:15.0000000Z    Compiling fixedbitset v0.4.2
+2026-06-11T10:43:15.0000000Z    Compiling color-spantrace v0.3.0
+2026-06-11T10:43:15.0000000Z    Compiling litrs v0.4.1
+2026-06-11T10:43:15.0000000Z    Compiling memmem v0.1.1
+2026-06-11T10:43:15.0000000Z    Compiling iana-time-zone v0.1.63
+2026-06-11T10:43:15.0000000Z    Compiling eyre v0.6.12
+2026-06-11T10:43:15.0000000Z    Compiling finl_unicode v1.4.0
+2026-06-11T10:43:15.0000000Z    Compiling is_terminal_polyfill v1.70.1
+2026-06-11T10:43:15.0000000Z    Compiling linux-raw-sys v0.4.15
+2026-06-11T10:43:15.0000000Z    Compiling unit-prefix v0.5.1
+2026-06-11T10:43:15.0000000Z    Compiling anstyle-query v1.1.2
+2026-06-11T10:43:15.0000000Z    Compiling anstyle v1.0.14
+2026-06-11T10:43:15.0000000Z    Compiling hex v0.4.3
+2026-06-11T10:43:15.0000000Z    Compiling colorchoice v1.0.3
+2026-06-11T10:43:15.0000000Z    Compiling percent-encoding v2.3.2
+2026-06-11T10:43:15.0000000Z    Compiling unicase v2.9.0
+2026-06-11T10:43:15.0000000Z    Compiling allocator-api2 v0.2.21
+2026-06-11T10:43:15.0000000Z    Compiling static_assertions v1.1.0
+2026-06-11T10:43:15.0000000Z    Compiling self_update v0.44.0
+2026-06-11T10:43:15.0000000Z    Compiling utf8-zero v0.8.1
+2026-06-11T10:43:15.0000000Z    Compiling indicatif v0.18.4
+2026-06-11T10:43:15.0000000Z    Compiling anstream v1.0.0
+2026-06-11T10:43:15.0000000Z    Compiling globset v0.4.18
+2026-06-11T10:43:15.0000000Z    Compiling chrono v0.4.44
+2026-06-11T10:43:15.0000000Z    Compiling document-features v0.2.11
+2026-06-11T10:43:15.0000000Z    Compiling enum_dispatch v0.3.13
+2026-06-11T10:43:15.0000000Z    Compiling strip-ansi-escapes v0.2.1
+2026-06-11T10:43:15.0000000Z    Compiling tinyvec v1.9.0
+2026-06-11T10:43:15.0000000Z    Compiling tar v0.4.46
+2026-06-11T10:43:15.0000000Z    Compiling hashbrown v0.16.1
+2026-06-11T10:43:15.0000000Z    Compiling chacha20 v0.10.0
+2026-06-11T10:43:15.0000000Z    Compiling termwiz v0.23.3
+2026-06-11T10:43:15.0000000Z    Compiling guppy v0.17.26
+2026-06-11T10:43:15.0000000Z    Compiling futures v0.3.32
+2026-06-11T10:43:15.0000000Z    Compiling parking_lot v0.12.4
+2026-06-11T10:43:15.0000000Z    Compiling usdt-attr-macro v0.6.0
+2026-06-11T10:43:15.0000000Z    Compiling usdt-macro v0.6.0
+2026-06-11T10:43:15.0000000Z    Compiling nextest-metadata v0.14.1
+2026-06-11T10:43:15.0000000Z    Compiling tracing-error v0.2.1
+2026-06-11T10:43:15.0000000Z    Compiling pin-project v1.1.10
+2026-06-11T10:43:15.0000000Z    Compiling derive_more v2.0.1
+2026-06-11T10:43:15.0000000Z    Compiling newtype-uuid v1.3.2
+2026-06-11T10:43:15.0000000Z    Compiling shared_child v1.1.1
+2026-06-11T10:43:15.0000000Z    Compiling dirs v6.0.0
+2026-06-11T10:43:15.0000000Z    Compiling toml v1.1.2+spec-1.1.0
+2026-06-11T10:43:15.0000000Z    Compiling signal-hook-mio v0.2.5
+2026-06-11T10:43:15.0000000Z    Compiling self-replace v1.5.0
+2026-06-11T10:43:15.0000000Z    Compiling urlencoding v2.1.3
+2026-06-11T10:43:15.0000000Z    Compiling clap_lex v1.0.0
+2026-06-11T10:43:15.0000000Z    Compiling heck v0.5.0
+2026-06-11T10:43:15.0000000Z    Compiling recursion v0.5.4
+2026-06-11T10:43:15.0000000Z    Compiling shell-words v1.1.1
+2026-06-11T10:43:15.0000000Z    Compiling shared_thread v0.2.0
+2026-06-11T10:43:15.0000000Z    Compiling humantime v2.3.0
+2026-06-11T10:43:15.0000000Z    Compiling indenter v0.3.4
+2026-06-11T10:43:15.0000000Z    Compiling foldhash v0.2.0
+2026-06-11T10:43:15.0000000Z    Compiling vec_map v0.8.2
+2026-06-11T10:43:15.0000000Z    Compiling lru v0.16.3
+2026-06-11T10:43:15.0000000Z    Compiling cargo-nextest v0.9.137
+2026-06-11T10:43:15.0000000Z    Compiling rand v0.10.1
+2026-06-11T10:43:15.0000000Z    Compiling clap_derive v4.6.1
+2026-06-11T10:43:15.0000000Z    Compiling tokio-stream v0.1.18
+2026-06-11T10:43:15.0000000Z    Compiling duct v1.1.1
+2026-06-11T10:43:15.0000000Z    Compiling async-scoped v0.9.0
+2026-06-11T10:43:15.0000000Z    Compiling crossterm v0.29.0
+2026-06-11T10:43:15.0000000Z    Compiling clap_builder v4.6.0
+2026-06-11T10:43:15.0000000Z    Compiling quick-junit v0.6.0
+2026-06-11T10:43:15.0000000Z    Compiling iddqd v0.4.2
+2026-06-11T10:43:15.0000000Z    Compiling atomicwrites v0.4.4
+2026-06-11T10:43:15.0000000Z    Compiling humantime-serde v1.1.1
+2026-06-11T10:43:15.0000000Z    Compiling unicode-normalization v0.1.25
+2026-06-11T10:43:15.0000000Z    Compiling target-spec-miette v0.4.8
+2026-06-11T10:43:15.0000000Z    Compiling future-queue v0.4.0
+2026-06-11T10:43:15.0000000Z    Compiling toml_edit v0.25.11+spec-1.1.0
+2026-06-11T10:43:15.0000000Z    Compiling mukti-metadata v0.3.0
+2026-06-11T10:43:15.0000000Z    Compiling derive-where v1.6.1
+2026-06-11T10:43:15.0000000Z    Compiling config v0.15.23
+2026-06-11T10:43:15.0000000Z    Compiling camino-tempfile v1.4.1
+2026-06-11T10:43:15.0000000Z    Compiling usdt v0.6.0
+2026-06-11T10:43:15.0000000Z    Compiling nextest-filtering v0.21.1
+2026-06-11T10:43:15.0000000Z    Compiling serde_path_to_error v0.1.20
+2026-06-11T10:43:15.0000000Z    Compiling bytesize v2.3.1
+2026-06-11T10:43:15.0000000Z    Compiling serde_ignored v0.1.14
+2026-06-11T10:43:15.0000000Z    Compiling etcetera v0.11.0
+2026-06-11T10:43:15.0000000Z    Compiling swrite v0.1.0
+2026-06-11T10:43:15.0000000Z    Compiling xxhash-rust v0.8.15
+2026-06-11T10:43:15.0000000Z    Compiling home v0.5.12
+2026-06-11T10:43:15.0000000Z    Compiling countio v0.2.19
+2026-06-11T10:43:15.0000000Z    Compiling color-eyre v0.6.5
+2026-06-11T10:43:15.0000000Z    Compiling dialoguer v0.12.0
+2026-06-11T10:43:15.0000000Z    Compiling idna_adapter v1.0.0
+2026-06-11T10:43:15.0000000Z    Compiling sapling-streampager v0.12.0
+2026-06-11T10:43:15.0000000Z    Compiling enable-ansi-support v0.3.1
+2026-06-11T10:43:15.0000000Z    Compiling locked-tripwire v0.1.0
+2026-06-11T10:43:15.0000000Z    Compiling clap v4.6.1
+2026-06-11T10:43:15.0000000Z    Compiling zstd v0.13.3
+2026-06-11T10:43:15.0000000Z    Compiling eazip v0.2.4
+2026-06-11T10:43:15.0000000Z     Finished `release` profile [optimized] target(s) in 1m 06s
+2026-06-11T10:43:15.0000000Z   Installing /opt/mise/installs/cargo-rust-script/0.36.0/bin/rust-script
+2026-06-11T10:43:15.0000000Z    Installed package `rust-script v0.36.0` (executable `rust-script`)
+2026-06-11T10:43:15.0000000Z warning: be sure to add `/opt/mise/installs/cargo-rust-script/0.36.0/bin` to your PATH to be able to run the installed binaries
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mcargo:rust-script[0m@0.36.0 [38;5;10m✓[0m installed
+2026-06-11T10:43:15.0000000Z    Compiling rustls-webpki v0.103.13
+2026-06-11T10:43:15.0000000Z    Compiling ureq v3.3.0
+2026-06-11T10:43:15.0000000Z    Compiling nextest-runner v0.118.0
+2026-06-11T10:43:15.0000000Z     Finished `release` profile [optimized] target(s) in 1m 54s
+2026-06-11T10:43:15.0000000Z   Installing /opt/mise/installs/cargo-cargo-nextest/0.9.137/bin/cargo-nextest
+2026-06-11T10:43:15.0000000Z    Installed package `cargo-nextest v0.9.137` (executable `cargo-nextest`)
+2026-06-11T10:43:15.0000000Z warning: be sure to add `/opt/mise/installs/cargo-cargo-nextest/0.9.137/bin` to your PATH to be able to run the installed binaries
+2026-06-11T10:43:15.0000000Z [36mINFO[0m  [34mcargo:cargo-nextest[0m@0.9.137 [38;5;10m✓[0m installed
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m [vfox] Getting metadata for yarn
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m config: /__w/mise.toml
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m config: /opt/mise/config/config.toml
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m [core:rust@1.96.0] list_bin_paths: ["/github/home/.cargo/bin"]
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m [core:rust@1.96.0] exec_env: {"CARGO_HOME": "/github/home/.cargo", "RUSTUP_HOME": "/root/.rustup", "RUSTUP_TOOLCHAIN": "1.96.0"}
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m [cargo:cargo-nextest@0.9.137] list_bin_paths: ["/opt/mise/installs/cargo-cargo-nextest/0.9.137/bin"]
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m [aqua:casey/just@1.52.0] list_bin_paths: ["/opt/mise/installs/just/1.52.0"]
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m [cargo:rust-script@0.36.0] list_bin_paths: ["/opt/mise/installs/cargo-rust-script/0.36.0/bin"]
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m [aqua:protocolbuffers/protobuf/protoc@35.0] list_bin_paths: ["/opt/mise/installs/protoc/35.0/bin"]
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m [aqua:cli/cli@2.94.0] list_bin_paths: ["/opt/mise/installs/gh/2.94.0/gh_2.94.0_linux_amd64/bin"]
+2026-06-11T10:43:15.0000000Z [35mDEBUG[0m updating 2 lockfiles
+2026-06-11T10:43:15.0000000Z ##[endgroup]
+2026-06-11T10:43:15.0000000Z ##[group]Run rustup component add rustfmt clippy
+2026-06-11T10:43:15.0000000Z ##[group]Run rustup component add rustfmt clippy
+2026-06-11T10:43:15.0000000Z [36;1mrustup component add rustfmt clippy[0m
+2026-06-11T10:43:15.0000000Z shell: bash -e {0}
+2026-06-11T10:43:15.0000000Z ##[endgroup]
+2026-06-11T10:43:15.0000000Z info: component rustfmt is up to date
+2026-06-11T10:43:15.0000000Z info: component clippy is up to date
+2026-06-11T10:43:15.0000000Z ##[endgroup]
+2026-06-11T10:43:15.0000000Z ##[group]Run Swatinem/rust-cache@v2
+2026-06-11T10:43:15.0000000Z ##[group]Run Swatinem/rust-cache@v2
+2026-06-11T10:43:15.0000000Z with:
+2026-06-11T10:43:15.0000000Z   key: app-a
+2026-06-11T10:43:15.0000000Z   shared-key: fixture-velnor-Linux
+2026-06-11T10:43:15.0000000Z ##[endgroup]
+2026-06-11T10:43:15.0000000Z [33mRust cache miss for shared key 'fixture-velnor-Linux'[0m
+2026-06-11T10:43:15.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z ##[group]Run set -euo pipefail
+2026-06-11T10:43:16.0000000Z ##[group]Run set -euo pipefail
+2026-06-11T10:43:16.0000000Z [36;1mset -euo pipefail[0m
+2026-06-11T10:43:16.0000000Z [36;1mversion="$(grep '^rust-version' "crates/app-a/Cargo.toml" | sed 's/.*= *"\(.*\)"/\1/' || echo 'stable')"[0m
+2026-06-11T10:43:16.0000000Z [36;1mecho "version=${version:-stable}" >> "${GITHUB_OUTPUT}"[0m
+2026-06-11T10:43:16.0000000Z shell: bash -e {0}
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z ##[group]Run set -euo pipefail
+2026-06-11T10:43:16.0000000Z ##[group]Run set -euo pipefail
+2026-06-11T10:43:16.0000000Z [36;1mset -euo pipefail[0m
+2026-06-11T10:43:16.0000000Z [36;1mecho "FIXTURE_PACKAGE=${PACKAGE}" >> "${GITHUB_ENV}"[0m
+2026-06-11T10:43:16.0000000Z [36;1mecho "package=${PACKAGE}" >> "${GITHUB_OUTPUT}"[0m
+2026-06-11T10:43:16.0000000Z [36;1mecho "lane=${LANE}" >> "${GITHUB_OUTPUT}"[0m
+2026-06-11T10:43:16.0000000Z [36;1mecho "setup-state=complete" >> "${GITHUB_STATE}"[0m
+2026-06-11T10:43:16.0000000Z [36;1m# Multiline heredoc output — matches ChainArgos bake-targets pattern[0m
+2026-06-11T10:43:16.0000000Z [36;1mprintf 'packages<<EOF\n%s\n%s\nEOF\n' "app-a" "app-b" >> "${GITHUB_OUTPUT}"[0m
+2026-06-11T10:43:16.0000000Z [36;1mmkdir -p "${HOME}/.local/bin"[0m
+2026-06-11T10:43:16.0000000Z [36;1mprintf '%s\n' '#!/usr/bin/env bash' 'echo fixture-tool-ok' > "${HOME}/.local/bin/fixture-tool"[0m
+2026-06-11T10:43:16.0000000Z [36;1mchmod +x "${HOME}/.local/bin/fixture-tool"[0m
+2026-06-11T10:43:16.0000000Z [36;1mecho "${HOME}/.local/bin" >> "${GITHUB_PATH}"[0m
+2026-06-11T10:43:16.0000000Z [36;1mecho "### ${LANE} ${PACKAGE}" >> "${GITHUB_STEP_SUMMARY}"[0m
+2026-06-11T10:43:16.0000000Z shell: bash -e {0}
+2026-06-11T10:43:16.0000000Z env:
+2026-06-11T10:43:16.0000000Z   PACKAGE: app-a
+2026-06-11T10:43:16.0000000Z   LANE: velnor
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z ##[group]Run just fmt-check
+2026-06-11T10:43:16.0000000Z ##[group]Run just fmt-check
+2026-06-11T10:43:16.0000000Z [36;1mjust fmt-check[0m
+2026-06-11T10:43:16.0000000Z shell: bash -e {0}
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z cargo fmt --check
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z ##[group]Run just clippy "app-a"
+2026-06-11T10:43:16.0000000Z ##[group]Run just clippy "app-a"
+2026-06-11T10:43:16.0000000Z [36;1mjust clippy "app-a"[0m
+2026-06-11T10:43:16.0000000Z shell: bash -e {0}
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z cargo clippy -p "app-a" -- -D warnings
+2026-06-11T10:43:16.0000000Z     Checking shared v0.1.0 (/__w/crates/shared)
+2026-06-11T10:43:16.0000000Z     Checking app-a v0.1.0 (/__w/crates/app-a)
+2026-06-11T10:43:16.0000000Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.15s
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z ##[group]Run just test "app-a"
+2026-06-11T10:43:16.0000000Z ##[group]Run just test "app-a"
+2026-06-11T10:43:16.0000000Z [36;1mjust test "app-a"[0m
+2026-06-11T10:43:16.0000000Z shell: bash -e {0}
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z 
+2026-06-11T10:43:16.0000000Z running 1 test
+2026-06-11T10:43:16.0000000Z test tests::prints_expected_label ... ok
+2026-06-11T10:43:16.0000000Z 
+2026-06-11T10:43:16.0000000Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+2026-06-11T10:43:16.0000000Z 
+2026-06-11T10:43:16.0000000Z cargo test -p "app-a"
+2026-06-11T10:43:16.0000000Z    Compiling shared v0.1.0 (/__w/crates/shared)
+2026-06-11T10:43:16.0000000Z    Compiling app-a v0.1.0 (/__w/crates/app-a)
+2026-06-11T10:43:16.0000000Z     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+2026-06-11T10:43:16.0000000Z      Running unittests src/main.rs (target/debug/deps/app_a-9fad261e9e02d166)
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z ##[group]Run just nextest "app-a"
+2026-06-11T10:43:16.0000000Z ##[group]Run just nextest "app-a"
+2026-06-11T10:43:16.0000000Z [36;1mjust nextest "app-a"[0m
+2026-06-11T10:43:16.0000000Z shell: bash -e {0}
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:16.0000000Z cargo nextest run -p "app-a"
+2026-06-11T10:43:16.0000000Z     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+2026-06-11T10:43:16.0000000Z ────────────
+2026-06-11T10:43:16.0000000Z  Nextest run ID 99b5e66c-8e12-4763-8b97-03f0bf1c03b1 with nextest profile: default
+2026-06-11T10:43:16.0000000Z     Starting 1 test across 1 binary
+2026-06-11T10:43:16.0000000Z         PASS [   0.003s] (1/1) app-a::bin/app-a tests::prints_expected_label
+2026-06-11T10:43:16.0000000Z ────────────
+2026-06-11T10:43:16.0000000Z      Summary [   0.004s] 1 test run: 1 passed, 0 skipped
+2026-06-11T10:43:16.0000000Z ##[endgroup]
+2026-06-11T10:43:26.0000000Z ##[group]Check MSRV
+2026-06-11T10:43:26.0000000Z ##[group]Check MSRV
+2026-06-11T10:43:26.0000000Z [36;1mcargo check -p "app-a" --locked[0m
+2026-06-11T10:43:26.0000000Z shell: bash -e {0}
+2026-06-11T10:43:26.0000000Z env:
+2026-06-11T10:43:26.0000000Z   RUSTUP_TOOLCHAIN: stable
+2026-06-11T10:43:26.0000000Z ##[endgroup]
+2026-06-11T10:43:26.0000000Z info: syncing channel updates for stable-x86_64-unknown-linux-gnu
+2026-06-11T10:43:26.0000000Z info: latest update on 2026-05-28 for version 1.96.0 (ac68faa20 2026-05-25)
+2026-06-11T10:43:26.0000000Z info: downloading 6 components
+2026-06-11T10:43:26.0000000Z     Checking shared v0.1.0 (/__w/crates/shared)
+2026-06-11T10:43:26.0000000Z     Checking app-a v0.1.0 (/__w/crates/app-a)
+2026-06-11T10:43:26.0000000Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.25s
+2026-06-11T10:43:26.0000000Z ##[endgroup]
+2026-06-11T10:43:26.0000000Z ##[group]Run {
+2026-06-11T10:43:26.0000000Z ##[group]Run {
+2026-06-11T10:43:26.0000000Z [36;1m{[0m
+2026-06-11T10:43:26.0000000Z [36;1m  echo "### sccache stats (velnor app-a)"[0m
+2026-06-11T10:43:26.0000000Z [36;1m  echo '```'[0m
+2026-06-11T10:43:26.0000000Z [36;1m  sccache --show-stats 2>/dev/null || echo 'sccache not available'[0m
+2026-06-11T10:43:26.0000000Z [36;1m  echo '```'[0m
+2026-06-11T10:43:26.0000000Z [36;1m} >> "${GITHUB_STEP_SUMMARY}"[0m
+2026-06-11T10:43:26.0000000Z shell: bash -e {0}
+2026-06-11T10:43:26.0000000Z ##[endgroup]
+2026-06-11T10:43:26.0000000Z ##[endgroup]
+2026-06-11T10:43:27.0000000Z ##[group]Run ./.github/actions/check-fixture-output
+2026-06-11T10:43:27.0000000Z ##[group]Run ./.github/actions/check-fixture-output
+2026-06-11T10:43:27.0000000Z with:
+2026-06-11T10:43:27.0000000Z   package: app-a
+2026-06-11T10:43:27.0000000Z ##[endgroup]
+2026-06-11T10:43:27.0000000Z ##[group]Run set -euo pipefail
+2026-06-11T10:43:27.0000000Z [36;1mset -euo pipefail[0m
+2026-06-11T10:43:27.0000000Z [36;1mtest "app-a" = "${FIXTURE_PACKAGE}"[0m
+2026-06-11T10:43:27.0000000Z [36;1mtest "$(fixture-tool)" = "fixture-tool-ok"[0m
+2026-06-11T10:43:27.0000000Z [36;1mecho "checked=true" >> "${GITHUB_OUTPUT}"[0m
+2026-06-11T10:43:27.0000000Z shell: bash -e {0}
+2026-06-11T10:43:27.0000000Z env:
+2026-06-11T10:43:27.0000000Z   GITHUB_ACTION_PATH: /__w/.github/actions/check-fixture-output
+2026-06-11T10:43:27.0000000Z ##[endgroup]
+2026-06-11T10:43:27.0000000Z ##[group]096022aa-5926-48f1-9206-90866751c03c
+2026-06-11T10:43:27.0000000Z ##[endgroup]
+2026-06-11T10:43:27.0000000Z ##[endgroup]
+2026-06-11T10:43:27.0000000Z ##[group]Run python3 .github/scripts/write-result.py "app-a" "velnor" "out/result.json"
+2026-06-11T10:43:27.0000000Z ##[group]Run python3 .github/scripts/write-result.py "app-a" "velnor" "out/result.json"
+2026-06-11T10:43:27.0000000Z [36;1mpython3 .github/scripts/write-result.py "app-a" "velnor" "out/result.json"[0m
+2026-06-11T10:43:27.0000000Z shell: bash -e {0}
+2026-06-11T10:43:27.0000000Z ##[endgroup]
+2026-06-11T10:43:27.0000000Z ##[endgroup]
+2026-06-11T10:43:28.0000000Z ##[group]Run actions/upload-artifact@v7
+2026-06-11T10:43:28.0000000Z ##[group]Run actions/upload-artifact@v7
+2026-06-11T10:43:28.0000000Z with:
+2026-06-11T10:43:28.0000000Z   name: result-velnor-app-a
+2026-06-11T10:43:28.0000000Z   path: out/result.json
+2026-06-11T10:43:28.0000000Z ##[endgroup]
+2026-06-11T10:43:28.0000000Z Uploaded artifact 'result-velnor-app-a' with 1 path(s)
+2026-06-11T10:43:28.0000000Z ##[endgroup]
+2026-06-11T10:43:28.0000000Z ##[group]Post Run Swatinem/rust-cache@v2
+2026-06-11T10:43:28.0000000Z ##[group]Post Run Swatinem/rust-cache@v2
+2026-06-11T10:43:28.0000000Z with:
+2026-06-11T10:43:28.0000000Z   key: app-a
+2026-06-11T10:43:28.0000000Z   shared-key: fixture-velnor-Linux
+2026-06-11T10:43:28.0000000Z ##[endgroup]
+2026-06-11T10:43:28.0000000Z Cache not saved because no paths exist for key 'fixture-velnor-Linux'
+2026-06-11T10:43:28.0000000Z ##[endgroup]
+2026-06-11T10:43:28.0000000Z ##[group]Post Run mozilla-actions/sccache-action@v0.0.10
+2026-06-11T10:43:28.0000000Z ##[group]Post Run mozilla-actions/sccache-action@v0.0.10
+2026-06-11T10:43:28.0000000Z ##[endgroup]
+2026-06-11T10:43:28.0000000Z Compile requests                    905
+2026-06-11T10:43:28.0000000Z Compile requests executed           777
+2026-06-11T10:43:28.0000000Z Cache hits                            2
+2026-06-11T10:43:28.0000000Z Cache hits (Rust)                     2
+2026-06-11T10:43:28.0000000Z Cache misses                        769
+2026-06-11T10:43:28.0000000Z Cache misses (Assembler)             90
+2026-06-11T10:43:28.0000000Z Cache misses (C/C++)                293
+2026-06-11T10:43:28.0000000Z Cache misses (Rust)                 386
+2026-06-11T10:43:28.0000000Z Cache hits rate                    0.26 %
+2026-06-11T10:43:28.0000000Z Cache hits rate (Assembler)        0.00 %
+2026-06-11T10:43:28.0000000Z Cache hits rate (C/C++)            0.00 %
+2026-06-11T10:43:28.0000000Z Cache hits rate (Rust)             0.52 %
+2026-06-11T10:43:28.0000000Z Cache timeouts                        0
+2026-06-11T10:43:28.0000000Z Cache read errors                     0
+2026-06-11T10:43:28.0000000Z Forced recaches                       0
+2026-06-11T10:43:28.0000000Z Cache write errors                    0
+2026-06-11T10:43:28.0000000Z Cache errors                          0
+2026-06-11T10:43:28.0000000Z Compilations                        769
+2026-06-11T10:43:28.0000000Z Compilation failures                  6
+2026-06-11T10:43:28.0000000Z Non-cacheable compilations            0
+2026-06-11T10:43:28.0000000Z Non-cacheable calls                 122
+2026-06-11T10:43:28.0000000Z Non-compilation calls                 6
+2026-06-11T10:43:28.0000000Z Unsupported compiler calls            0
+2026-06-11T10:43:28.0000000Z Average cache write               0.002 s
+2026-06-11T10:43:28.0000000Z Average compiler                  0.919 s
+2026-06-11T10:43:28.0000000Z Average cache read hit            0.000 s
+2026-06-11T10:43:28.0000000Z Failed distributed compilations       0
+2026-06-11T10:43:28.0000000Z 
+2026-06-11T10:43:28.0000000Z Non-cacheable reasons:
+2026-06-11T10:43:28.0000000Z crate-type                           86
+2026-06-11T10:43:28.0000000Z missing input                        15
+2026-06-11T10:43:28.0000000Z -                                    11
+2026-06-11T10:43:28.0000000Z -o                                    3
+2026-06-11T10:43:28.0000000Z incremental                           3
+2026-06-11T10:43:28.0000000Z missing output_dir                    2
+2026-06-11T10:43:28.0000000Z multiple input files                  2
+2026-06-11T10:43:28.0000000Z 
+2026-06-11T10:43:28.0000000Z Cache location                  Local disk: "/var/cache/sccache"
+2026-06-11T10:43:28.0000000Z Base directories                (none)
+2026-06-11T10:43:28.0000000Z Use direct/preprocessor mode?   yes
+2026-06-11T10:43:28.0000000Z Version (client)                0.15.0
+2026-06-11T10:43:28.0000000Z Cache size                          256 MiB
+2026-06-11T10:43:28.0000000Z Max cache size                       10 GiB
+2026-06-11T10:43:28.0000000Z Stopping sccache server...
+2026-06-11T10:43:28.0000000Z Compile requests                    905
+2026-06-11T10:43:28.0000000Z Compile requests executed           777
+2026-06-11T10:43:28.0000000Z Cache hits                            2
+2026-06-11T10:43:28.0000000Z Cache hits (Rust)                     2
+2026-06-11T10:43:28.0000000Z Cache misses                        769
+2026-06-11T10:43:28.0000000Z Cache misses (Assembler)             90
+2026-06-11T10:43:28.0000000Z Cache misses (C/C++)                293
+2026-06-11T10:43:28.0000000Z Cache misses (Rust)                 386
+2026-06-11T10:43:28.0000000Z Cache hits rate                    0.26 %
+2026-06-11T10:43:28.0000000Z Cache hits rate (Assembler)        0.00 %
+2026-06-11T10:43:28.0000000Z Cache hits rate (C/C++)            0.00 %
+2026-06-11T10:43:28.0000000Z Cache hits rate (Rust)             0.52 %
+2026-06-11T10:43:28.0000000Z Cache timeouts                        0
+2026-06-11T10:43:28.0000000Z Cache read errors                     0
+2026-06-11T10:43:28.0000000Z Forced recaches                       0
+2026-06-11T10:43:28.0000000Z Cache write errors                    0
+2026-06-11T10:43:28.0000000Z Cache errors                          0
+2026-06-11T10:43:28.0000000Z Compilations                        769
+2026-06-11T10:43:28.0000000Z Compilation failures                  6
+2026-06-11T10:43:28.0000000Z Non-cacheable compilations            0
+2026-06-11T10:43:28.0000000Z Non-cacheable calls                 122
+2026-06-11T10:43:28.0000000Z Non-compilation calls                 6
+2026-06-11T10:43:28.0000000Z Unsupported compiler calls            0
+2026-06-11T10:43:28.0000000Z Average cache write               0.002 s
+2026-06-11T10:43:28.0000000Z Average compiler                  0.919 s
+2026-06-11T10:43:28.0000000Z Average cache read hit            0.000 s
+2026-06-11T10:43:28.0000000Z Failed distributed compilations       0
+2026-06-11T10:43:28.0000000Z 
+2026-06-11T10:43:28.0000000Z Non-cacheable reasons:
+2026-06-11T10:43:28.0000000Z crate-type                           86
+2026-06-11T10:43:28.0000000Z missing input                        15
+2026-06-11T10:43:28.0000000Z -                                    11
+2026-06-11T10:43:28.0000000Z -o                                    3
+2026-06-11T10:43:28.0000000Z incremental                           3
+2026-06-11T10:43:28.0000000Z missing output_dir                    2
+2026-06-11T10:43:28.0000000Z multiple input files                  2
+2026-06-11T10:43:28.0000000Z 
+2026-06-11T10:43:28.0000000Z Cache location                  Local disk: "/var/cache/sccache"
+2026-06-11T10:43:28.0000000Z Base directories                (none)
+2026-06-11T10:43:28.0000000Z Use direct/preprocessor mode?   yes
+2026-06-11T10:43:28.0000000Z Version (client)                0.15.0
+2026-06-11T10:43:28.0000000Z Cache size                          256 MiB
+2026-06-11T10:43:28.0000000Z Max cache size                       10 GiB
+2026-06-11T10:43:28.0000000Z ##[endgroup]
+2026-06-11T10:43:35.6288592Z ##[group]Post Run actions/checkout@v6
+2026-06-11T10:43:35.6288592Z [command]git -C /var/lib/velnor-fixture/work/slot-1/750e584d-3f56-5873-a86e-d5601fd97bfd/workspace/. config --local --unset-all http.https://github.com/.extraheader
+2026-06-11T10:43:35.6288592Z ##[endgroup]
+2026-06-11T10:43:35.6288776Z ##[group]Complete job
+2026-06-11T10:43:35.6288776Z ##[group]Post-job cleanup
+2026-06-11T10:43:35.6288776Z Stop job container
+2026-06-11T10:43:35.6288776Z Remove per-job network
+2026-06-11T10:43:35.6288776Z Clean work directory
+2026-06-11T10:43:35.6288776Z Recycle runner slot
+2026-06-11T10:43:35.6288776Z ##[endgroup]
+2026-06-11T10:43:35.6288776Z Finishing: Complete job
+2026-06-11T10:43:35.6288776Z ##[endgroup]
+

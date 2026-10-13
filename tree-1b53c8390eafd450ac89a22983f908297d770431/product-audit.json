@@ -1,0 +1,190 @@
+{
+  "source_repository": "tailrocks/velnor",
+  "producer_workflow": ".github/workflows/ci-runtime-products.yml",
+  "pins": [
+    {
+      "revision": "38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9",
+      "closure": "32a822a584aa93d8164fdbcb93220126ad24ac62bbfdef325d48f492146fef72",
+      "release_tag": "velnor-workflow-runtime-v1-32a822a584aa93d8",
+      "release_url": "https://github.com/tailrocks/velnor/releases/tag/velnor-workflow-runtime-v1-32a822a584aa93d8",
+      "published_at": "2026-09-20T13:33:20Z",
+      "target_commitish": "38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9",
+      "platforms": [
+        {
+          "platform": "Linux-X64",
+          "asset": "velnor-workflow-Linux-X64",
+          "sha256": "5818b737da606db0194971c1d3c939ce945276ae72a006b424b434b11d15dc52",
+          "size": 10593936
+        },
+        {
+          "platform": "Linux-ARM64",
+          "asset": "velnor-workflow-Linux-ARM64",
+          "sha256": "6aa958327f25814914a6e0f96b953db7941cab00f938fcffcc7be770b834a0ef",
+          "size": 8590248
+        },
+        {
+          "platform": "macOS-ARM64",
+          "asset": "velnor-workflow-macOS-ARM64",
+          "sha256": "51a8029c91a451ec3007dc32152c62ee171337bebba2aa27c61e4e7878ad49a9",
+          "size": 8592768,
+          "self_report": {
+            "revision": "38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9",
+            "closure": "32a822a584aa93d8164fdbcb93220126ad24ac62bbfdef325d48f492146fef72",
+            "exit_status": 0
+          }
+        }
+      ],
+      "attestations_verified": 4,
+      "attestations": [
+        {
+          "subject": "manifest.json",
+          "sha256": "187b9f9ffb3b9a1339da5b8d9d32c9d6fe9d10f8ffd0e8ea974c1e972be1cf80",
+          "workflow": "Velnor workflow runtime products",
+          "workflow_sha": "38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9",
+          "workflow_ref": "refs/heads/main",
+          "source_sha": "38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9",
+          "source_ref": "refs/heads/main",
+          "runner": "github-hosted",
+          "run": "https://github.com/tailrocks/velnor/actions/runs/35513670974/attempts/1",
+          "verified_tlog_timestamps": [
+            "2026-09-20T20:33:09+07:00"
+          ]
+        },
+        {
+          "subject": "velnor-workflow-Linux-X64",
+          "sha256": "5818b737da606db0194971c1d3c939ce945276ae72a006b424b434b11d15dc52",
+          "workflow": "Velnor workflow runtime products",
+          "workflow_sha": "38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9",
+          "workflow_ref": "refs/heads/main",
+          "source_sha": "38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9",
+          "source_ref": "refs/heads/main",
+          "runner": "github-hosted",
+          "run": "https://github.com/tailrocks/velnor/actions/runs/35513670974/attempts/1",
+          "verified_tlog_timestamps": [
+            "2026-09-20T20:31:51+07:00"
+          ]
+        },
+        {
+          "subject": "velnor-workflow-Linux-ARM64",
+          "sha256": "6aa958327f25814914a6e0f96b953db7941cab00f938fcffcc7be770b834a0ef",
+          "workflow": "Velnor workflow runtime products",
+          "workflow_sha": "38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9",
+          "workflow_ref": "refs/heads/main",
+          "source_sha": "38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9",
+          "source_ref": "refs/heads/main",
+          "runner": "github-hosted",
+          "run": "https://github.com/tailrocks/velnor/actions/runs/35513670974/attempts/1",
+          "verified_tlog_timestamps": [
+            "2026-09-20T20:31:36+07:00"
+          ]
+        },
+        {
+          "subject": "velnor-workflow-macOS-ARM64",
+          "sha256": "51a8029c91a451ec3007dc32152c62ee171337bebba2aa27c61e4e7878ad49a9",
+          "workflow": "Velnor workflow runtime products",
+          "workflow_sha": "38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9",
+          "workflow_ref": "refs/heads/main",
+          "source_sha": "38dbf85e0bbf278cee3ec39ab90a9acc9b5b67a9",
+          "source_ref": "refs/heads/main",
+          "runner": "github-hosted",
+          "run": "https://github.com/tailrocks/velnor/actions/runs/35513670974/attempts/1",
+          "verified_tlog_timestamps": [
+            "2026-09-20T20:32:53+07:00"
+          ]
+        }
+      ]
+    },
+    {
+      "revision": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+      "closure": "af140ad4d8d84326d5676f626ce4261fd7914ac41d521d851484dcb8253270e7",
+      "release_tag": "velnor-workflow-runtime-v1-af140ad4d8d84326",
+      "release_url": "https://github.com/tailrocks/velnor/releases/tag/velnor-workflow-runtime-v1-af140ad4d8d84326",
+      "published_at": "2026-09-20T09:47:38Z",
+      "target_commitish": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+      "platforms": [
+        {
+          "platform": "Linux-X64",
+          "asset": "velnor-workflow-Linux-X64",
+          "sha256": "672de6b171eba0f9e8053e96974cf361a6788af22ca2d498eabba71b1d73c236",
+          "size": 10617600
+        },
+        {
+          "platform": "Linux-ARM64",
+          "asset": "velnor-workflow-Linux-ARM64",
+          "sha256": "1df81f61fc3a654e30bd872077085892c57c74e4bfb156f8cf5dbabe8b25b97b",
+          "size": 8590248
+        },
+        {
+          "platform": "macOS-ARM64",
+          "asset": "velnor-workflow-macOS-ARM64",
+          "sha256": "7bee5aabdea114e3c7a869101b7bd951619455605addfcb896e69e229e5af49c",
+          "size": 8592768,
+          "self_report": {
+            "revision": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+            "closure": "af140ad4d8d84326d5676f626ce4261fd7914ac41d521d851484dcb8253270e7",
+            "exit_status": 0
+          }
+        }
+      ],
+      "attestations_verified": 4,
+      "attestations": [
+        {
+          "subject": "manifest.json",
+          "sha256": "1c3d1b0776d21fb6ba988064a18cbe2752639dcbde3ab58e12e615df72082f88",
+          "workflow": "Velnor workflow runtime products",
+          "workflow_sha": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+          "workflow_ref": "refs/heads/main",
+          "source_sha": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+          "source_ref": "refs/heads/main",
+          "runner": "github-hosted",
+          "run": "https://github.com/tailrocks/velnor/actions/runs/35503134829/attempts/1",
+          "verified_tlog_timestamps": [
+            "2026-09-20T16:47:25+07:00"
+          ]
+        },
+        {
+          "subject": "velnor-workflow-Linux-X64",
+          "sha256": "672de6b171eba0f9e8053e96974cf361a6788af22ca2d498eabba71b1d73c236",
+          "workflow": "Velnor workflow runtime products",
+          "workflow_sha": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+          "workflow_ref": "refs/heads/main",
+          "source_sha": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+          "source_ref": "refs/heads/main",
+          "runner": "github-hosted",
+          "run": "https://github.com/tailrocks/velnor/actions/runs/35503134829/attempts/1",
+          "verified_tlog_timestamps": [
+            "2026-09-20T16:46:26+07:00"
+          ]
+        },
+        {
+          "subject": "velnor-workflow-Linux-ARM64",
+          "sha256": "1df81f61fc3a654e30bd872077085892c57c74e4bfb156f8cf5dbabe8b25b97b",
+          "workflow": "Velnor workflow runtime products",
+          "workflow_sha": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+          "workflow_ref": "refs/heads/main",
+          "source_sha": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+          "source_ref": "refs/heads/main",
+          "runner": "github-hosted",
+          "run": "https://github.com/tailrocks/velnor/actions/runs/35503134829/attempts/1",
+          "verified_tlog_timestamps": [
+            "2026-09-20T16:46:01+07:00"
+          ]
+        },
+        {
+          "subject": "velnor-workflow-macOS-ARM64",
+          "sha256": "7bee5aabdea114e3c7a869101b7bd951619455605addfcb896e69e229e5af49c",
+          "workflow": "Velnor workflow runtime products",
+          "workflow_sha": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+          "workflow_ref": "refs/heads/main",
+          "source_sha": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+          "source_ref": "refs/heads/main",
+          "runner": "github-hosted",
+          "run": "https://github.com/tailrocks/velnor/actions/runs/35503134829/attempts/1",
+          "verified_tlog_timestamps": [
+            "2026-09-20T16:47:11+07:00"
+          ]
+        }
+      ]
+    }
+  ]
+}

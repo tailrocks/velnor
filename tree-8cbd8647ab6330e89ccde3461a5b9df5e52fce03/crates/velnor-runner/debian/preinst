@@ -1,0 +1,53 @@
+#!/bin/sh
+# Plan 010 — transactional host activation, pre-unpack gate.
+#
+# An upgrade is refused unless (a) every velnor daemon is already drained
+# (inactive) and (b) an exact prior rollback tuple exists — the active release
+# record + deployed identity, or a clearly marked `legacy-observed` bootstrap
+# tuple provisioned for the FIRST migration (per plan §4, that tuple is only
+# observed from the live host, never claimed as source-attested).
+#
+# This makes a mixed-tuple upgrade structurally impossible: the operator must
+# stop/drain and have a coherent rollback target before new bytes land.
+set -e
+
+ACTIVE_DIR=/var/lib/velnor/release/active
+LEGACY_MARKER=/var/lib/velnor/release/legacy-observed
+
+fail() {
+  echo "velnor-runner preinst: $1" >&2
+  exit 1
+}
+
+daemons_drained() {
+  # No velnor-daemon unit (base or template instance) may be active.
+  if systemctl is-active --quiet velnor-daemon.service 2>/dev/null; then
+    return 1
+  fi
+  for unit in $(systemctl list-units --no-legend --plain 'velnor-daemon@*.service' 2>/dev/null | awk '{print $1}'); do
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+rollback_tuple_present() {
+  { [ -f "$ACTIVE_DIR/record.json" ] && [ -f "$ACTIVE_DIR/deployed.json" ]; } || [ -f "$LEGACY_MARKER" ]
+}
+
+case "$1" in
+  upgrade)
+    if [ -d /run/systemd/system ]; then
+      daemons_drained || fail "refusing upgrade: velnor daemon(s) still running. Drain first: systemctl stop velnor-daemon.service (+ any velnor-daemon@<name>)."
+    fi
+    rollback_tuple_present || fail "refusing upgrade: no exact prior rollback tuple ($ACTIVE_DIR/{record,deployed}.json) and no $LEGACY_MARKER bootstrap. Stage one before upgrading."
+    ;;
+  install)
+    # Fresh install: nothing to roll back to; activation happens post-install
+    # via `velnor-runner release activate`.
+    :
+    ;;
+esac
+
+exit 0

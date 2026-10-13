@@ -1,0 +1,102 @@
+---
+title: "System"
+---
+
+# System
+
+Velnor is a self-hosted Actions runtime. It turns configured capacity into
+registered execution slots, acquires work from GitHub, runs jobs through the
+selected execution backend, and reports their outcome. The system is organized
+around explicit ownership, durable control state, and fenced process
+boundaries.
+
+> Navigation: [← Architecture](/docs/concepts/architecture) · [Index](/docs) · [Next: Execution →](/docs/guides/execution)
+
+## Responsibilities and ownership
+
+The system has four operational responsibilities:
+
+- The service boundary starts, supervises, drains, and stops the runtime.
+- The controller reconciles desired capacity with remote registration and local
+  worker state.
+- A slot owns one registered execution identity and waits for work.
+- A job worker owns one acquired job from admission through completion and
+  cleanup.
+
+The controller owns capacity and worker lifecycle. Slots own registration and
+job acquisition. Job workers own execution. These boundaries make stale
+identities and partially completed work rejectable instead of silently
+reusable.
+
+## End-to-end data flow
+
+```text
+configuration and credentials
+              ↓
+     service startup and preflight
+              ↓
+ controller reconciles capacity
+              ↓
+   registered execution slots
+              ↓
+      work acquisition and admission
+              ↓
+       job execution and reporting
+              ↓
+       completion, cleanup, and renewal
+```
+
+Startup validates configuration and execution mode, establishes the control
+state boundary, and begins controller supervision. The controller proves that
+the selected execution path is usable, applies registration intent, and
+maintains the requested number of slots. A slot polls for work; when it
+acquires a job, admission is recorded before leases, checkout, downloads,
+containers, or credentials are used.
+
+## Readiness and identity
+
+Readiness is a conjunction of valid local lifecycle state, a proven executor,
+successful remote registration, and a live slot worker. A process starting is
+not sufficient.
+
+Every slot and job carries an identity tied to its current generation and
+assignment. Heartbeats and job messages from stale, unknown, or mismatched
+identities are rejected. This fencing protects the controller across restart,
+delayed messages, duplicate delivery, and worker replacement.
+
+## Control state and telemetry
+
+Lifecycle state and event history form the durable control-state boundary.
+Telemetry is separate instance-scoped output. Control state, query projections,
+logs, and telemetry therefore have distinct durability and restart semantics;
+this document does not promise that every projection or log survives a daemon
+restart.
+
+## Scheduling and execution
+
+Production scheduling uses per-slot GitHub JIT registration and polling. Work
+acquisition distinguishes a message, an empty poll, and an error; an
+authentication or resource failure is not treated as idle capacity.
+
+Execution backend selection is explicit. Docker and microVM execution are
+separate paths, and a missing or invalid backend configuration fails closed.
+The execution guide documents the job lifecycle and backend behavior in detail:
+[Execution](/docs/guides/execution).
+
+## Drain, restart, and failure boundaries
+
+Drain moves the service through stopping states while allowing active work to
+finish within bounded limits. Idle slots deregister and exit; workers that do
+not stop are escalated according to the shutdown policy.
+
+Controller restart is separated from worker ownership. Surviving workers are
+accepted only when their fenced identity and heartbeat are current. Loss of
+remote registration shuts down dependent slots, while missing registration
+credentials fails closed.
+
+After successful work, a slot may prepare a successor before the current
+identity is consumed. Local failures use bounded retry and backoff; remote
+identity loss requires cleanup and re-registration.
+
+For the broader component boundaries, ownership rules, and system invariants,
+see [Architecture](/docs/concepts/architecture#velnor-architecture).

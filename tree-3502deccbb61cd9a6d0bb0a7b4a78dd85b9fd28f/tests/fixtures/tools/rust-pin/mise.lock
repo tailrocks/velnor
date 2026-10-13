@@ -1,0 +1,7 @@
+[[tools.rust]]
+version = "1.97.1"
+backend = "core:rust"
+
+[[tools.actionlint]]
+version = "1.7.12"
+backend = "aqua:rhysd/actionlint"

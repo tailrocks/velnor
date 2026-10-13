@@ -1,0 +1,58 @@
+name: renovate
+
+on:
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: "velnor | github | both (default: both)"
+        type: choice
+        default: both
+        options: [velnor, github, both]
+  schedule:
+    - cron: '0 4 * * 0'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: renovate-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  renovate:
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'both')) && ('[{"lane":"Velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]') || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && ('[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]') || '[{"lane":"Velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/renovate/cache
+          key: renovate-${{ matrix.config.lane }}-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: renovate-${{ matrix.config.lane }}-${{ runner.os }}-
+      - name: Prepare Renovate cache
+        run: |
+          install -d -m 0777 /tmp/renovate /tmp/renovate/cache /tmp/renovate/repos
+          chmod -R a+rwX /tmp/renovate
+      - if: matrix.config.writer
+        uses: renovatebot/github-action@39b914146caeff8cd512e61c8992f1d5913af85c # v46.2.5
+        env:
+          # The PAT named "tailrocks-renovate" (fine-grained, not classic) must be
+          # stored in the repo secret GH_RENOVATE_TOKEN.
+          RENOVATE_TOKEN: ${{ secrets.GH_RENOVATE_TOKEN }}
+          RENOVATE_REPOSITORIES: '["tailrocks/velnor-actions-fixture"]'
+          RENOVATE_REPOSITORY_CACHE: enabled
+          RENOVATE_BASE_DIR: /tmp/renovate
+          # Velnor capability validation accepts only token/renovate-version/
+          # renovate-image as action inputs; the config file is passed as the
+          # standard Renovate env var instead (identical behavior on GitHub lane).
+          RENOVATE_CONFIG_FILE: renovate.json
+      - if: ${{ !matrix.config.writer }}
+        run: echo 'Read-only comparison lane; Renovate mutation skipped.'

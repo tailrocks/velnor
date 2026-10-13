@@ -1,0 +1,76 @@
+name: Collect lane evidence
+description: >-
+  Collect a provenance-bearing evidence record for one lane. Every value in the
+  record is measured by the verifier; nothing is stated by the caller.
+inputs:
+  scenario:
+    required: true
+    description: Scenario the record belongs to.
+  evidence-id:
+    required: true
+    description: Identifier distinguishing records of the same scenario and lane.
+  lane:
+    required: true
+    description: github or velnor. Cross-checked against RUNNER_ENVIRONMENT.
+  output:
+    required: true
+    description: Path to write the evidence record to.
+  observations:
+    required: true
+    description: >-
+      Newline-separated observations, one per line, each `--observe-KIND
+      NAME=ARGUMENT`. There is deliberately no way to pass a literal value.
+runs:
+  using: composite
+  steps:
+    # Ask the runner which Velnor build it is. On the GitHub-hosted lane there
+    # is no such binary and the identity is legitimately absent; on the Velnor
+    # lane its absence is a real defect, and the comparator reports it as one
+    # rather than quietly accepting an unattributable record.
+    - name: Record the Velnor build identity
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v velnor-runner >/dev/null 2>&1; then
+          echo "velnor-runner is not on PATH; no Velnor build identity to record"
+          exit 0
+        fi
+        velnor-runner capabilities export > "${RUNNER_TEMP}/velnor-capabilities.json"
+        python3 - "${RUNNER_TEMP}/velnor-capabilities.json" <<'PY'
+        import json
+        import os
+        import sys
+
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            document = json.load(handle)
+        with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+            handle.write(f"VELNOR_MANIFEST_VERSION={document['version']}\n")
+            handle.write(f"VELNOR_SOURCE_SHA={document['source_sha']}\n")
+        PY
+    - name: Collect observations
+      shell: bash
+      env:
+        COLLECT_SCENARIO: ${{ inputs.scenario }}
+        COLLECT_EVIDENCE_ID: ${{ inputs.evidence-id }}
+        COLLECT_LANE: ${{ inputs.lane }}
+        COLLECT_OUTPUT: ${{ inputs.output }}
+        COLLECT_OBSERVATIONS: ${{ inputs.observations }}
+      run: |
+        set -euo pipefail
+        observations=()
+        while IFS= read -r line; do
+          [[ -z "${line}" ]] && continue
+          kind="${line%% *}"
+          argument="${line#* }"
+          observations+=("${kind}" "${argument}")
+        done <<<"${COLLECT_OBSERVATIONS}"
+        if [[ "${#observations[@]}" -eq 0 ]]; then
+          echo "no observations requested; a record with no observations proves nothing" >&2
+          exit 1
+        fi
+        cargo run --quiet --locked -p verifier --bin verifier -- collect \
+          --scenario "${COLLECT_SCENARIO}" \
+          --evidence-id "${COLLECT_EVIDENCE_ID}" \
+          --lane "${COLLECT_LANE}" \
+          --output "${COLLECT_OUTPUT}" \
+          "${observations[@]}"

@@ -1,0 +1,8 @@
+[Unit]
+Description=Velnor job-worker slice (transitional Docker executor; not Build L3)
+Documentation=https://github.com/tailrocks/velnor
+
+[Slice]
+CPUWeight=100
+IOWeight=100
+TasksMax=4096

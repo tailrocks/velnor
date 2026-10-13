@@ -1,0 +1,293 @@
+{
+  "source": ".github-gen/sources/actions/report-velnor-ci-outcomes/action.yml",
+  "source_sha256": "65a0bcc44ba270fdc24316e9c7b5f41a5be1bab600b7dcec2c936f4708fbfad9",
+  "script_sha256": "926ee33fb6dfd557a510c412dd29dbda05cb1d585fac47cebe060a05017c7c70",
+  "cases": [
+    {
+      "name": "false-without-matched",
+      "env": {
+        "VELNOR_CACHE_MBX_HIT": "false",
+        "VELNOR_CACHE_MBX_PRIMARY": "primary"
+      },
+      "log": null,
+      "report": {
+        "schema_version": 1,
+        "job": "unknown",
+        "log_present": false,
+        "queue_seconds": null,
+        "queue_source": null,
+        "total_source": "unusable_job_start",
+        "runner_setup_seconds": null,
+        "selection_transport_seconds": null,
+        "tool_bootstrap_seconds": null,
+        "cache_prep_seconds": null,
+        "cargo_fetch_seconds": null,
+        "checks_wall_seconds": null,
+        "checks_seconds": null,
+        "cleanup_seconds": null,
+        "total_seconds": null,
+        "cache_outcomes": {
+          "lane": null,
+          "rustup": null,
+          "mold": null,
+          "cargo": null,
+          "mbx": "unknown",
+          "docker_seed": null
+        },
+        "cache_declarations": {
+          "host_warm_layers": []
+        },
+        "origin_downloads": {
+          "updating_crates_io_index": 0,
+          "updating_git": 0,
+          "downloading_crates": 0,
+          "downloaded_lines": []
+        },
+        "compiler": {
+          "mbx_outcomes": [],
+          "finished_segments": [],
+          "compiling_lines": 0
+        }
+      }
+    },
+    {
+      "name": "explicit-prefix",
+      "env": {
+        "VELNOR_CACHE_MBX_HIT": "false",
+        "VELNOR_CACHE_MBX_PRIMARY": "primary",
+        "VELNOR_CACHE_MBX_MATCHED": "primary-prefix"
+      },
+      "log": null,
+      "report": {
+        "schema_version": 1,
+        "job": "unknown",
+        "log_present": false,
+        "queue_seconds": null,
+        "queue_source": null,
+        "total_source": "unusable_job_start",
+        "runner_setup_seconds": null,
+        "selection_transport_seconds": null,
+        "tool_bootstrap_seconds": null,
+        "cache_prep_seconds": null,
+        "cargo_fetch_seconds": null,
+        "checks_wall_seconds": null,
+        "checks_seconds": null,
+        "cleanup_seconds": null,
+        "total_seconds": null,
+        "cache_outcomes": {
+          "lane": null,
+          "rustup": null,
+          "mold": null,
+          "cargo": null,
+          "mbx": "prefix",
+          "docker_seed": null
+        },
+        "cache_declarations": {
+          "host_warm_layers": []
+        },
+        "origin_downloads": {
+          "updating_crates_io_index": 0,
+          "updating_git": 0,
+          "downloading_crates": 0,
+          "downloaded_lines": []
+        },
+        "compiler": {
+          "mbx_outcomes": [],
+          "finished_segments": [],
+          "compiling_lines": 0
+        }
+      }
+    },
+    {
+      "name": "matched-without-primary",
+      "env": {
+        "VELNOR_CACHE_MBX_HIT": "false",
+        "VELNOR_CACHE_MBX_MATCHED": "matched-only"
+      },
+      "log": null,
+      "report": {
+        "schema_version": 1,
+        "job": "unknown",
+        "log_present": false,
+        "queue_seconds": null,
+        "queue_source": null,
+        "total_source": "unusable_job_start",
+        "runner_setup_seconds": null,
+        "selection_transport_seconds": null,
+        "tool_bootstrap_seconds": null,
+        "cache_prep_seconds": null,
+        "cargo_fetch_seconds": null,
+        "checks_wall_seconds": null,
+        "checks_seconds": null,
+        "cleanup_seconds": null,
+        "total_seconds": null,
+        "cache_outcomes": {
+          "lane": null,
+          "rustup": null,
+          "mold": null,
+          "cargo": null,
+          "mbx": "unknown",
+          "docker_seed": null
+        },
+        "cache_declarations": {
+          "host_warm_layers": []
+        },
+        "origin_downloads": {
+          "updating_crates_io_index": 0,
+          "updating_git": 0,
+          "downloading_crates": 0,
+          "downloaded_lines": []
+        },
+        "compiler": {
+          "mbx_outcomes": [],
+          "finished_segments": [],
+          "compiling_lines": 0
+        }
+      }
+    },
+    {
+      "name": "explicit-exact",
+      "env": {
+        "VELNOR_CACHE_MBX_HIT": "false",
+        "VELNOR_CACHE_MBX_PRIMARY": "primary",
+        "VELNOR_CACHE_MBX_MATCHED": "primary"
+      },
+      "log": null,
+      "report": {
+        "schema_version": 1,
+        "job": "unknown",
+        "log_present": false,
+        "queue_seconds": null,
+        "queue_source": null,
+        "total_source": "unusable_job_start",
+        "runner_setup_seconds": null,
+        "selection_transport_seconds": null,
+        "tool_bootstrap_seconds": null,
+        "cache_prep_seconds": null,
+        "cargo_fetch_seconds": null,
+        "checks_wall_seconds": null,
+        "checks_seconds": null,
+        "cleanup_seconds": null,
+        "total_seconds": null,
+        "cache_outcomes": {
+          "lane": null,
+          "rustup": null,
+          "mold": null,
+          "cargo": null,
+          "mbx": "exact",
+          "docker_seed": null
+        },
+        "cache_declarations": {
+          "host_warm_layers": []
+        },
+        "origin_downloads": {
+          "updating_crates_io_index": 0,
+          "updating_git": 0,
+          "downloading_crates": 0,
+          "downloaded_lines": []
+        },
+        "compiler": {
+          "mbx_outcomes": [],
+          "finished_segments": [],
+          "compiling_lines": 0
+        }
+      }
+    },
+    {
+      "name": "compiler-wording-ignored",
+      "env": {
+        "VELNOR_CACHE_MBX_HIT": "false"
+      },
+      "log": "exact hit\nwarm start\nmiss\n",
+      "report": {
+        "schema_version": 1,
+        "job": "unknown",
+        "log_present": true,
+        "queue_seconds": null,
+        "queue_source": null,
+        "total_source": "unusable_job_start",
+        "runner_setup_seconds": null,
+        "selection_transport_seconds": null,
+        "tool_bootstrap_seconds": null,
+        "cache_prep_seconds": null,
+        "cargo_fetch_seconds": null,
+        "checks_wall_seconds": null,
+        "checks_seconds": null,
+        "cleanup_seconds": null,
+        "total_seconds": null,
+        "cache_outcomes": {
+          "lane": null,
+          "rustup": null,
+          "mold": null,
+          "cargo": null,
+          "mbx": "unknown",
+          "docker_seed": null
+        },
+        "cache_declarations": {
+          "host_warm_layers": []
+        },
+        "origin_downloads": {
+          "updating_crates_io_index": 0,
+          "updating_git": 0,
+          "downloading_crates": 0,
+          "downloaded_lines": []
+        },
+        "compiler": {
+          "mbx_outcomes": [],
+          "finished_segments": [],
+          "compiling_lines": 0
+        }
+      }
+    },
+    {
+      "name": "host-warm-declaration",
+      "env": {
+        "VELNOR_CACHE_MBX_HIT": "false",
+        "VELNOR_HOST_WARM_LAYERS": "mbx,cargo"
+      },
+      "log": null,
+      "report": {
+        "schema_version": 1,
+        "job": "unknown",
+        "log_present": false,
+        "queue_seconds": null,
+        "queue_source": null,
+        "total_source": "unusable_job_start",
+        "runner_setup_seconds": null,
+        "selection_transport_seconds": null,
+        "tool_bootstrap_seconds": null,
+        "cache_prep_seconds": null,
+        "cargo_fetch_seconds": null,
+        "checks_wall_seconds": null,
+        "checks_seconds": null,
+        "cleanup_seconds": null,
+        "total_seconds": null,
+        "cache_outcomes": {
+          "lane": null,
+          "rustup": null,
+          "mold": null,
+          "cargo": null,
+          "mbx": "unknown",
+          "docker_seed": null
+        },
+        "cache_declarations": {
+          "host_warm_layers": [
+            "mbx",
+            "cargo"
+          ]
+        },
+        "origin_downloads": {
+          "updating_crates_io_index": 0,
+          "updating_git": 0,
+          "downloading_crates": 0,
+          "downloaded_lines": []
+        },
+        "compiler": {
+          "mbx_outcomes": [],
+          "finished_segments": [],
+          "compiling_lines": 0
+        }
+      }
+    }
+  ]
+}

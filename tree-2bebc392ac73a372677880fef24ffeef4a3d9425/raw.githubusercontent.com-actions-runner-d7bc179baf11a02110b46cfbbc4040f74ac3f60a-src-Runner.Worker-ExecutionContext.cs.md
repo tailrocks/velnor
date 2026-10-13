@@ -1,0 +1,1693 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using GitHub.Actions.RunService.WebApi;
+using GitHub.DistributedTask.Expressions2;
+using GitHub.DistributedTask.ObjectTemplating.Tokens;
+using GitHub.DistributedTask.Pipelines.ContextData;
+using GitHub.DistributedTask.Pipelines.ObjectTemplating;
+using GitHub.DistributedTask.WebApi;
+using GitHub.Runner.Common;
+using GitHub.Runner.Common.Util;
+using GitHub.Runner.Sdk;
+using GitHub.Runner.Worker.Container;
+using GitHub.Runner.Worker.Handlers;
+using Newtonsoft.Json;
+using Sdk.RSWebApi.Contracts;
+using ObjectTemplating = GitHub.DistributedTask.ObjectTemplating;
+using Pipelines = GitHub.DistributedTask.Pipelines;
+
+namespace GitHub.Runner.Worker
+{
+    public static class ExecutionContextType
+    {
+        public const string Job = "Job";
+        public const string Task = "Task";
+    }
+
+    public record ExecutionContextLogOptions(bool WriteToLog, string LogMessageOverride)
+    {
+        public static readonly ExecutionContextLogOptions None = new(false, null);
+        public static readonly ExecutionContextLogOptions Default = new(true, null);
+    }
+
+    [ServiceLocator(Default = typeof(ExecutionContext))]
+    public interface IExecutionContext : IRunnerService
+    {
+        Guid Id { get; }
+        Guid EmbeddedId { get; }
+        string ScopeName { get; }
+        string SiblingScopeName { get; }
+        string ContextName { get; }
+        ActionRunStage Stage { get; }
+        Task ForceCompleted { get; }
+        TaskResult? Result { get; set; }
+        TaskResult? Outcome { get; set; }
+        string ResultCode { get; set; }
+        TaskResult? CommandResult { get; set; }
+        CancellationToken CancellationToken { get; }
+        GlobalContext Global { get; }
+
+        Dictionary<string, string> IntraActionState { get; }
+        Dictionary<string, VariableValue> JobOutputs { get; }
+        ActionsEnvironmentReference ActionsEnvironment { get; }
+        ActionsStepTelemetry StepTelemetry { get; }
+        DictionaryContextData ExpressionValues { get; }
+        IList<IFunctionInfo> ExpressionFunctions { get; }
+        JobContext JobContext { get; }
+
+        // Only job level ExecutionContext has JobSteps
+        Queue<IStep> JobSteps { get; }
+
+        // Only job level ExecutionContext has PostJobSteps
+        Stack<IStep> PostJobSteps { get; }
+        Dictionary<Guid, string> EmbeddedStepsWithPostRegistered { get; }
+
+        // Keep track of embedded steps states
+        Dictionary<Guid, Dictionary<string, string>> EmbeddedIntraActionState { get; }
+
+        bool EchoOnActionCommand { get; set; }
+
+        bool IsEmbedded { get; }
+
+        List<string> StepEnvironmentOverrides { get; }
+
+        bool IsBackground { get; }
+
+        IExecutionContext Root { get; }
+
+        // Initialize
+        void InitializeJob(Pipelines.AgentJobRequestMessage message, CancellationToken token);
+        void CancelToken();
+        IExecutionContext CreateChild(Guid recordId, string displayName, string refName, string scopeName, string contextName, ActionRunStage stage, Dictionary<string, string> intraActionState = null, int? recordOrder = null, IPagingLogger logger = null, bool isEmbedded = false, List<Issue> embeddedIssueCollector = null, CancellationTokenSource cancellationTokenSource = null, Guid embeddedId = default(Guid), string siblingScopeName = null, TimeSpan? timeout = null, bool isBackground = false, string backgroundControlType = null, string[] backgroundControlStepIds = null, string parallelGroupId = null);
+        IExecutionContext CreateEmbeddedChild(string scopeName, string contextName, Guid embeddedId, ActionRunStage stage, Dictionary<string, string> intraActionState = null, string siblingScopeName = null);
+
+
+        // Background step deferral properties
+        Dictionary<string, string> DeferredOutputs { get; set; }
+        Dictionary<string, string> DeferredEnvironmentVariables { get; set; }
+        List<string> DeferredPrependPath { get; set; }
+        bool DeferOutcomeConclusion { get; set; }
+
+        // logging
+        long Write(string tag, string message);
+        void QueueAttachFile(string type, string name, string filePath);
+        void QueueSummaryFile(string name, string filePath, Guid stepRecordId);
+        void QueueDiagnosticLogFile(string name, string filePath);
+
+        // timeline record update methods
+        void Start(string currentOperation = null);
+        TaskResult Complete(TaskResult? result = null, string currentOperation = null, string resultCode = null);
+        void SetEnvContext(string name, string value);
+        void SetRunnerContext(string name, string value);
+        string GetGitHubContext(string name);
+        void SetGitHubContext(string name, string value);
+        void SetOutput(string name, string value, out string reference);
+        void SetTimeout(TimeSpan? timeout);
+
+        // Background step deferral flush methods
+        void FlushDeferredOutputs();
+        void FlushDeferredEnvironment();
+        void FlushDeferredOutcomeConclusion();
+
+        void AddIssue(Issue issue, ExecutionContextLogOptions logOptions);
+        void Progress(int percentage, string currentOperation = null);
+        void UpdateDetailTimelineRecord(TimelineRecord record);
+
+        void UpdateTimelineRecordDisplayName(string displayName);
+
+        // matchers
+        void Add(OnMatcherChanged handler);
+        void Remove(OnMatcherChanged handler);
+        void AddMatchers(IssueMatchersConfig matcher);
+        void RemoveMatchers(IEnumerable<string> owners);
+        IEnumerable<IssueMatcherConfig> GetMatchers();
+
+        // others
+        void ForceTaskComplete();
+        void RegisterPostJobStep(IStep step);
+        void PublishStepTelemetry();
+
+        void ApplyContinueOnError(TemplateToken continueOnError);
+        void UpdateGlobalStepsContext();
+
+        void WriteWebhookPayload();
+    }
+
+    public sealed class ExecutionContext : RunnerService, IExecutionContext
+    {
+        private const int _maxCountPerIssueType = 10;
+        private const int _throttlingDelayReportThreshold = 10 * 1000; // Don't report throttling with less than 10 seconds delay
+        private const int _maxIssueMessageLength = 4096; // Don't send issue with huge message since we can't forward them from actions to check annotation.
+        private const int _maxIssueCountInTelemetry = 3; // Only send the first 3 issues to telemetry
+        private const int _maxIssueMessageLengthInTelemetry = 256; // Only send the first 256 characters of issue message to telemetry
+
+        private readonly TimelineRecord _record = new();
+        private readonly Dictionary<Guid, TimelineRecord> _detailRecords = new();
+        private readonly object _loggerLock = new();
+        private readonly object _matchersLock = new();
+        private readonly ExecutionContext _parentExecutionContext;
+
+        private event OnMatcherChanged _onMatcherChanged;
+
+        private IssueMatcherConfig[] _matchers;
+
+        private IPagingLogger _logger;
+        private IJobServerQueue _jobServerQueue;
+
+        private Guid _mainTimelineId;
+        private Guid _detailTimelineId;
+        private bool _expandedForPostJob = false;
+        private int _childTimelineRecordOrder = 0;
+        private CancellationTokenSource _cancellationTokenSource;
+        private TaskCompletionSource<int> _forceCompleted = new();
+        private bool _throttlingReported = false;
+        private List<Issue> _embeddedIssueCollector;
+
+        // only job level ExecutionContext will track throttling delay.
+        private long _totalThrottlingDelayInMilliseconds = 0;
+        private bool _stepTelemetryPublished = false;
+
+        public ExecutionContext()
+            : this(parent: null, embedded: false)
+        {
+        }
+
+        private ExecutionContext(ExecutionContext parent, bool embedded)
+        {
+            if (embedded)
+            {
+                ArgUtil.NotNull(parent, nameof(parent));
+            }
+
+            _parentExecutionContext = parent;
+            this.IsEmbedded = embedded;
+            this.StepTelemetry = new ActionsStepTelemetry
+            {
+                IsEmbedded = embedded
+            };
+
+            //Embedded Execution Contexts pseudo-inherit their parent's embeddedIssueCollector.
+            _embeddedIssueCollector = embedded ? parent._embeddedIssueCollector : new();
+        }
+
+        public Guid Id => _record.Id;
+        public Guid EmbeddedId { get; private set; }
+        public string ScopeName { get; private set; }
+        public string SiblingScopeName { get; private set; }
+        public string ContextName { get; private set; }
+        public ActionRunStage Stage { get; private set; }
+        public Task ForceCompleted => _forceCompleted.Task;
+        public CancellationToken CancellationToken => _cancellationTokenSource.Token;
+        public Dictionary<string, string> IntraActionState { get; private set; }
+        public Dictionary<string, VariableValue> JobOutputs { get; private set; }
+
+        public ActionsEnvironmentReference ActionsEnvironment { get; private set; }
+        public ActionsStepTelemetry StepTelemetry { get; private init; }
+        public DictionaryContextData ExpressionValues { get; } = new DictionaryContextData();
+        public IList<IFunctionInfo> ExpressionFunctions { get; } = new List<IFunctionInfo>();
+
+        // Shared pointer across job-level execution context and step-level execution contexts
+        public GlobalContext Global { get; private set; }
+
+        // Only job level ExecutionContext has JobSteps
+        public Queue<IStep> JobSteps { get; private set; }
+
+        // Only job level ExecutionContext has PostJobSteps
+        public Stack<IStep> PostJobSteps { get; private set; }
+
+        // Only job level ExecutionContext has StepsWithPostRegistered
+        public HashSet<Guid> StepsWithPostRegistered { get; private set; }
+
+        // Only job level ExecutionContext has EmbeddedStepsWithPostRegistered
+        public Dictionary<Guid, string> EmbeddedStepsWithPostRegistered { get; private set; }
+
+        public Dictionary<Guid, Dictionary<string, string>> EmbeddedIntraActionState { get; private set; }
+
+        public bool EchoOnActionCommand { get; set; }
+
+        // Whether this step runs in the background
+        public bool IsBackground => _record.IsBackground;
+
+        // An embedded execution context shares the same record ID, record name, and logger
+        // as its enclosing execution context.
+        public bool IsEmbedded { get; private init; }
+
+        public TaskResult? Result
+        {
+            get
+            {
+                return _record.Result;
+            }
+            set
+            {
+                _record.Result = value;
+            }
+        }
+
+        public TaskResult? Outcome { get; set; }
+
+        public TaskResult? CommandResult { get; set; }
+
+        private string ContextType => _record.RecordType;
+
+        public string ResultCode
+        {
+            get
+            {
+                return _record.ResultCode;
+            }
+            set
+            {
+                _record.ResultCode = value;
+            }
+        }
+
+        IExecutionContext IExecutionContext.Root => Root;
+
+        private ExecutionContext Root
+        {
+            get
+            {
+                var result = this;
+
+                while (result._parentExecutionContext != null)
+                {
+                    result = result._parentExecutionContext;
+                }
+
+                return result;
+            }
+        }
+
+
+
+        public JobContext JobContext
+        {
+            get
+            {
+                return ExpressionValues["job"] as JobContext;
+            }
+        }
+
+        public List<string> StepEnvironmentOverrides { get; } = new List<string>();
+
+        // Background step deferral properties
+        public Dictionary<string, string> DeferredOutputs { get; set; }
+        public Dictionary<string, string> DeferredEnvironmentVariables { get; set; }
+        public List<string> DeferredPrependPath { get; set; }
+        public bool DeferOutcomeConclusion { get; set; }
+
+        public override void Initialize(IHostContext hostContext)
+        {
+            base.Initialize(hostContext);
+
+            _jobServerQueue = HostContext.GetService<IJobServerQueue>();
+        }
+
+        public void CancelToken()
+        {
+            try
+            {
+                _cancellationTokenSource.Cancel();
+            }
+            catch (ObjectDisposedException e)
+            {
+                Trace.Info($"Attempted to cancel a disposed token, the execution is already complete: {e.ToString()}");
+            }
+        }
+
+        public void ForceTaskComplete()
+        {
+            Trace.Info("Force finish current task in 5 sec.");
+            Task.Run(async () =>
+            {
+                await Task.Delay(TimeSpan.FromSeconds(5));
+                _forceCompleted?.TrySetResult(1);
+            });
+        }
+
+        public void RegisterPostJobStep(IStep step)
+        {
+            string siblingScopeName = null;
+            if (this.IsEmbedded)
+            {
+                if (step is IActionRunner actionRunner)
+                {
+                    if (Root.EmbeddedStepsWithPostRegistered.ContainsKey(actionRunner.Action.Id))
+                    {
+                        Trace.Info($"'post' of '{actionRunner.DisplayName}' already push to child post step stack.");
+                    }
+                    else
+                    {
+                        Root.EmbeddedStepsWithPostRegistered[actionRunner.Action.Id] = actionRunner.Condition;
+                    }
+                    return;
+                }
+            }
+            else if (step is IActionRunner actionRunner && !Root.StepsWithPostRegistered.Add(actionRunner.Action.Id))
+            {
+                Trace.Info($"'post' of '{actionRunner.DisplayName}' already push to post step stack.");
+                return;
+            }
+            if (step is IActionRunner runner)
+            {
+                siblingScopeName = runner.Action.ContextName;
+            }
+
+            step.ExecutionContext = Root.CreatePostChild(step.DisplayName, IntraActionState, siblingScopeName);
+            if (step is JobExtensionRunner)
+            {
+                step.ExecutionContext.StepTelemetry.Type = "runner";
+                step.ExecutionContext.StepTelemetry.Action = step.DisplayName.ToLowerInvariant().Replace(' ', '_');
+            }
+            Root.PostJobSteps.Push(step);
+
+            if (Root.Global.Debugger?.Enabled == true)
+            {
+                try
+                {
+                    HostContext.GetService<Dap.IDapDebugger>().OnPostStepRegistered(step);
+                }
+                catch (Exception ex)
+                {
+                    Trace.Warning("Failed to notify DAP debugger about registered post job step.");
+                    Trace.Error(ex);
+                }
+            }
+        }
+
+        public IExecutionContext CreateChild(
+            Guid recordId,
+            string displayName,
+            string refName,
+            string scopeName,
+            string contextName,
+            ActionRunStage stage,
+            Dictionary<string, string> intraActionState = null,
+            int? recordOrder = null,
+            IPagingLogger logger = null,
+            bool isEmbedded = false,
+            List<Issue> embeddedIssueCollector = null,
+            CancellationTokenSource cancellationTokenSource = null,
+            Guid embeddedId = default(Guid),
+            string siblingScopeName = null,
+            TimeSpan? timeout = null,
+            bool isBackground = false,
+            string backgroundControlType = null,
+            string[] backgroundControlStepIds = null,
+            string parallelGroupId = null)
+        {
+            Trace.Entering();
+
+            var child = new ExecutionContext(this, isEmbedded);
+            child.Initialize(HostContext);
+            if ((Global.Variables.GetBoolean("RunService.FixEmbeddedIssues") ?? false) && embeddedIssueCollector != null)
+            {
+                child._embeddedIssueCollector = embeddedIssueCollector;
+            }
+            child.Global = Global;
+            child.ScopeName = scopeName;
+            child.ContextName = contextName;
+            child.Stage = stage;
+            child.EmbeddedId = embeddedId;
+            child.SiblingScopeName = siblingScopeName;
+            if (intraActionState == null)
+            {
+                child.IntraActionState = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            }
+            else
+            {
+                child.IntraActionState = intraActionState;
+            }
+            foreach (var pair in ExpressionValues)
+            {
+                child.ExpressionValues[pair.Key] = pair.Value;
+            }
+            foreach (var item in ExpressionFunctions)
+            {
+                child.ExpressionFunctions.Add(item);
+            }
+            child._cancellationTokenSource = cancellationTokenSource ?? new CancellationTokenSource();
+            if (timeout != null)
+            {
+                // composite steps inherit the timeout from the parent, set by https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idstepstimeout-minutes
+                child.SetTimeout(timeout);
+            }
+
+            child.EchoOnActionCommand = EchoOnActionCommand;
+
+            // Set background step metadata before InitializeTimelineRecord so it's included in the first update
+            if (isBackground || backgroundControlType != null || parallelGroupId != null)
+            {
+                child._record.IsBackground = isBackground;
+                child._record.BackgroundControlType = backgroundControlType;
+                child._record.BackgroundControlStepIds = backgroundControlStepIds;
+                child._record.ParallelGroupId = parallelGroupId;
+
+                // Initialize deferred state for background steps — flushed at wait/wait-all
+                if (isBackground)
+                {
+                    child.DeferredOutputs = new Dictionary<string, string>();
+                    child.DeferredEnvironmentVariables = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    child.DeferredPrependPath = new List<string>();
+                    child.DeferOutcomeConclusion = true;
+                }
+            }
+
+            if (recordOrder != null)
+            {
+                child.InitializeTimelineRecord(_mainTimelineId, recordId, _record.Id, ExecutionContextType.Task, displayName, refName, recordOrder, embedded: isEmbedded);
+            }
+            else
+            {
+                child.InitializeTimelineRecord(_mainTimelineId, recordId, _record.Id, ExecutionContextType.Task, displayName, refName, ++_childTimelineRecordOrder, embedded: isEmbedded);
+            }
+            if (logger != null)
+            {
+                child._logger = logger;
+            }
+            else
+            {
+                child._logger = HostContext.CreateService<IPagingLogger>();
+                child._logger.Setup(_mainTimelineId, recordId);
+            }
+
+            child.StepTelemetry.StepId = recordId;
+            child.StepTelemetry.Stage = stage.ToString();
+            child.StepTelemetry.StepContextName = child.GetFullyQualifiedContextName();
+
+            return child;
+        }
+
+        /// <summary>
+        /// An embedded execution context shares the same record ID, record name, logger,
+        /// but NOT the cancellation token (just like workflow steps contexts - they don't share a token)
+        /// </summary>
+        public IExecutionContext CreateEmbeddedChild(
+            string scopeName,
+            string contextName,
+            Guid embeddedId,
+            ActionRunStage stage,
+            Dictionary<string, string> intraActionState = null,
+            string siblingScopeName = null)
+        {
+            return Root.CreateChild(_record.Id, _record.Name, _record.Id.ToString("N"), scopeName, contextName, stage, logger: _logger, isEmbedded: true, embeddedIssueCollector: _embeddedIssueCollector, cancellationTokenSource: null, intraActionState: intraActionState, embeddedId: embeddedId, siblingScopeName: siblingScopeName, timeout: GetRemainingTimeout(), recordOrder: _record.Order);
+        }
+
+        public void Start(string currentOperation = null)
+        {
+            _record.CurrentOperation = currentOperation ?? _record.CurrentOperation;
+            _record.StartTime = DateTime.UtcNow;
+            _record.State = TimelineRecordState.InProgress;
+
+            _jobServerQueue.QueueTimelineRecordUpdate(_mainTimelineId, _record);
+        }
+
+        public TaskResult Complete(TaskResult? result = null, string currentOperation = null, string resultCode = null)
+        {
+            if (result != null)
+            {
+                Result = result;
+            }
+
+            // report total delay caused by server throttling.
+            if (_totalThrottlingDelayInMilliseconds > _throttlingDelayReportThreshold)
+            {
+                this.Warning($"The job has experienced {TimeSpan.FromMilliseconds(_totalThrottlingDelayInMilliseconds).TotalSeconds} seconds total delay caused by server throttling.");
+            }
+
+            DateTime now = DateTime.UtcNow;
+            _record.CurrentOperation = currentOperation ?? _record.CurrentOperation;
+            _record.ResultCode = resultCode ?? _record.ResultCode;
+            _record.FinishTime = now;
+            _record.PercentComplete = 100;
+            _record.Result = _record.Result ?? TaskResult.Succeeded;
+            _record.State = TimelineRecordState.Completed;
+
+            // Before our main timeline's final QueueTimelineRecordUpdate,
+            //    inject any issues collected by embedded ExecutionContexts.
+            if (!this.IsEmbedded)
+            {
+                foreach (var issue in _embeddedIssueCollector)
+                {
+                    AddIssue(issue, ExecutionContextLogOptions.None);
+                }
+            }
+
+            _jobServerQueue.QueueTimelineRecordUpdate(_mainTimelineId, _record);
+
+            // complete all detail timeline records.
+            if (_detailTimelineId != Guid.Empty && _detailRecords.Count > 0)
+            {
+                foreach (var record in _detailRecords)
+                {
+                    record.Value.FinishTime = record.Value.FinishTime ?? now;
+                    record.Value.PercentComplete = record.Value.PercentComplete ?? 100;
+                    record.Value.Result = record.Value.Result ?? TaskResult.Succeeded;
+                    record.Value.State = TimelineRecordState.Completed;
+
+                    _jobServerQueue.QueueTimelineRecordUpdate(_detailTimelineId, record.Value);
+                }
+            }
+
+            PublishStepTelemetry();
+
+            if (_record.RecordType == ExecutionContextType.Task)
+            {
+                var stepResult = new StepResult
+                {
+                    ExternalID = _record.Id,
+                    Conclusion = _record.Result ?? TaskResult.Succeeded,
+                    Status = _record.State,
+                    Number = _record.Order,
+                    Name = _record.Name,
+                    ActionName = StepTelemetry?.Action,
+                    Ref = StepTelemetry?.Ref,
+                    Type = StepTelemetry?.Type,
+                    StartedAt = _record.StartTime,
+                    CompletedAt = _record.FinishTime,
+                    Annotations = new List<Annotation>(),
+                    // Populate background step metadata from timeline record fields
+                    IsBackground = _record.IsBackground,
+                    BackgroundControlType = _record.BackgroundControlType,
+                    BackgroundControlStepIds = _record.BackgroundControlStepIds
+                };
+
+                _record.Issues?.ForEach(issue =>
+                {
+                    var annotation = issue.ToAnnotation();
+                    if (annotation != null)
+                    {
+                        stepResult.Annotations.Add(annotation.Value);
+                        if (annotation.Value.IsInfrastructureIssue && string.IsNullOrEmpty(Global.InfrastructureFailureCategory))
+                        {
+                            Global.InfrastructureFailureCategory = issue.Category;
+                        }
+                    }
+                });
+
+                Global.StepsResult.Add(stepResult);
+            }
+
+            if (Global.Variables.GetBoolean(Constants.Runner.Features.SendJobLevelAnnotations) ?? false)
+            {
+                if (_record.RecordType == ExecutionContextType.Job)
+                {
+                    _record.Issues?.ForEach(issue =>
+                    {
+                        var annotation = issue.ToAnnotation();
+                        if (annotation != null)
+                        {
+                            Global.JobAnnotations.Add(annotation.Value);
+                            if (annotation.Value.IsInfrastructureIssue && string.IsNullOrEmpty(Global.InfrastructureFailureCategory))
+                            {
+                                Global.InfrastructureFailureCategory = issue.Category;
+                            }
+                        }
+                    });
+                }
+            }
+
+            if (Root != this)
+            {
+                // only dispose TokenSource for step level ExecutionContext
+                _cancellationTokenSource?.Dispose();
+            }
+
+            _logger.End();
+
+            if (!DeferOutcomeConclusion)
+            {
+                UpdateGlobalStepsContext();
+            }
+
+            return Result.Value;
+        }
+
+        public void FlushDeferredOutcomeConclusion()
+        {
+            if (DeferOutcomeConclusion)
+            {
+                UpdateGlobalStepsContext();
+            }
+        }
+
+        public void UpdateGlobalStepsContext()
+        {
+            // Skip if generated context name. Generated context names start with "__". After 3.2 the server will never send an empty context name.
+            if (!string.IsNullOrEmpty(ContextName) && !ContextName.StartsWith("__", StringComparison.Ordinal))
+            {
+                Global.StepsContext.SetOutcome(ScopeName, ContextName, (Outcome ?? Result ?? TaskResult.Succeeded).ToActionResult());
+                Global.StepsContext.SetConclusion(ScopeName, ContextName, (Result ?? TaskResult.Succeeded).ToActionResult());
+            }
+        }
+
+        public void SetRunnerContext(string name, string value)
+        {
+            ArgUtil.NotNullOrEmpty(name, nameof(name));
+            var runnerContext = ExpressionValues["runner"] as RunnerContext;
+            runnerContext[name] = new StringContextData(value);
+        }
+
+        public void SetEnvContext(string name, string value)
+        {
+            ArgUtil.NotNullOrEmpty(name, nameof(name));
+
+#if OS_WINDOWS
+            var envContext = ExpressionValues["env"] as DictionaryContextData;
+            envContext[name] = new StringContextData(value);
+#else
+            var envContext = ExpressionValues["env"] as CaseSensitiveDictionaryContextData;
+            envContext[name] = new StringContextData(value);
+#endif
+
+        }
+
+        public void SetGitHubContext(string name, string value)
+        {
+            ArgUtil.NotNullOrEmpty(name, nameof(name));
+            var githubContext = ExpressionValues["github"] as GitHubContext;
+            githubContext[name] = new StringContextData(value);
+        }
+
+        public string GetGitHubContext(string name)
+        {
+            ArgUtil.NotNullOrEmpty(name, nameof(name));
+            var githubContext = ExpressionValues["github"] as GitHubContext;
+            if (githubContext.TryGetValue(name, out var value))
+            {
+                if (value is StringContextData)
+                {
+                    return value as StringContextData;
+                }
+                else
+                {
+                    return value.ToJToken().ToString(Formatting.Indented);
+                }
+            }
+            else
+            {
+                return null;
+            }
+        }
+
+        public void SetOutput(string name, string value, out string reference)
+        {
+            ArgUtil.NotNullOrEmpty(name, nameof(name));
+
+            // Skip if generated context name. Generated context names start with "__". After 3.2 the server will never send an empty context name.
+            if (string.IsNullOrEmpty(ContextName) || ContextName.StartsWith("__", StringComparison.Ordinal))
+            {
+                reference = null;
+                return;
+            }
+
+            // todo: restrict multiline?
+
+            Global.StepsContext.SetOutput(ScopeName, ContextName, name, value, out reference);
+        }
+
+        public void FlushDeferredOutputs()
+        {
+            if (DeferredOutputs == null || DeferredOutputs.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var kvp in DeferredOutputs)
+            {
+                Global.StepsContext.SetOutput(ScopeName, ContextName, kvp.Key, kvp.Value, out _);
+            }
+        }
+
+        public void FlushDeferredEnvironment()
+        {
+            if (DeferredEnvironmentVariables != null)
+            {
+                foreach (var kvp in DeferredEnvironmentVariables)
+                {
+                    Global.EnvironmentVariables[kvp.Key] = kvp.Value;
+                    SetEnvContext(kvp.Key, kvp.Value);
+                }
+            }
+
+            if (DeferredPrependPath != null)
+            {
+                foreach (var path in DeferredPrependPath)
+                {
+                    Global.PrependPath.RemoveAll(x => string.Equals(x, path, StringComparison.CurrentCulture));
+                    Global.PrependPath.Add(path);
+                }
+            }
+        }
+
+        public void SetTimeout(TimeSpan? timeout)
+        {
+            if (timeout != null)
+            {
+                _cancellationTokenSource.CancelAfter(timeout.Value);
+                m_timeoutStartedAt = DateTime.UtcNow;
+                m_timeout = timeout.Value;
+            }
+        }
+
+        DateTime? m_timeoutStartedAt;
+        TimeSpan? m_timeout;
+        public TimeSpan? GetRemainingTimeout()
+        {
+            if (m_timeoutStartedAt != null && m_timeout != null)
+            {
+                var elapsedSinceTimeoutSet = DateTime.UtcNow - m_timeoutStartedAt.Value;
+                var remainingTimeout = m_timeout.Value - elapsedSinceTimeoutSet;
+                if (remainingTimeout.Ticks > 0)
+                {
+                    return remainingTimeout;
+                }
+                else
+                {
+                    // there was a timeout and it has expired
+                    return TimeSpan.Zero;
+                }
+            }
+            // no timeout was ever set
+            return null;
+        }
+
+        public void Progress(int percentage, string currentOperation = null)
+        {
+            if (percentage > 100 || percentage < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(percentage));
+            }
+
+            _record.CurrentOperation = currentOperation ?? _record.CurrentOperation;
+            _record.PercentComplete = Math.Max(percentage, _record.PercentComplete.Value);
+
+            _jobServerQueue.QueueTimelineRecordUpdate(_mainTimelineId, _record);
+        }
+
+        // This is not thread safe, the caller need to take lock before calling issue()
+        public void AddIssue(Issue issue, ExecutionContextLogOptions logOptions)
+        {
+            ArgUtil.NotNull(issue, nameof(issue));
+            ArgUtil.NotNull(logOptions, nameof(logOptions));
+
+            issue.Message = HostContext.SecretMasker.MaskSecrets(issue.Message);
+            if (issue.Message.Length > _maxIssueMessageLength)
+            {
+                issue.Message = issue.Message[.._maxIssueMessageLength];
+            }
+
+            // Tracking the line number (logFileLineNumber) and step number (stepNumber) for each issue that gets created
+            // Actions UI from the run summary page use both values to easily link to an exact locations in logs where annotations originate from
+            if (_record.Order != null)
+            {
+                issue.Data["stepNumber"] = _record.Order.ToString();
+            }
+
+            string wellKnownTag = null;
+            Int32 previousCountForIssueType = 0;
+            Action incrementIssueTypeCount = NoOp;
+            switch (issue.Type)
+            {
+                case IssueType.Error:
+                    wellKnownTag = WellKnownTags.Error;
+                    previousCountForIssueType = _record.ErrorCount;
+                    incrementIssueTypeCount = () => { _record.ErrorCount++; };
+                    break;
+                case IssueType.Warning:
+                    wellKnownTag = WellKnownTags.Warning;
+                    previousCountForIssueType = _record.WarningCount;
+                    incrementIssueTypeCount = () => { _record.WarningCount++; };
+                    break;
+                case IssueType.Notice:
+                    wellKnownTag = WellKnownTags.Notice;
+                    previousCountForIssueType = _record.NoticeCount;
+                    incrementIssueTypeCount = () => { _record.NoticeCount++; };
+                    break;
+            }
+
+            if (!string.IsNullOrEmpty(wellKnownTag))
+            {
+                if (!this.IsEmbedded && previousCountForIssueType < _maxCountPerIssueType)
+                {
+                    incrementIssueTypeCount();
+                    _record.Issues.Add(issue);
+                }
+
+                if (logOptions.WriteToLog)
+                {
+                    string logMessage = issue.Message;
+                    if (!string.IsNullOrEmpty(logOptions.LogMessageOverride))
+                    {
+                        logMessage = logOptions.LogMessageOverride;
+                    }
+
+                    if (!string.IsNullOrEmpty(logMessage))
+                    {
+                        // Note that ::Write() has its own secret-masking logic.
+                        long logLineNumber = Write(wellKnownTag, logMessage);
+                        issue.Data["logFileLineNumber"] = logLineNumber.ToString();
+                    }
+                }
+            }
+
+            // Embedded ExecutionContexts (a.k.a. Composite actions) should never upload a timeline record to the server.
+            //    Instead, we store processed issues on a shared (psuedo-inherited) list (belonging to the closest
+            //    non-embedded ancestor ExecutionContext) so that they can be processed when that ancestor completes.
+            if (this.IsEmbedded)
+            {
+                _embeddedIssueCollector.Add(issue);
+            }
+            else
+            {
+                _jobServerQueue.QueueTimelineRecordUpdate(_mainTimelineId, _record);
+            }
+        }
+
+        public void UpdateDetailTimelineRecord(TimelineRecord record)
+        {
+            ArgUtil.NotNull(record, nameof(record));
+
+            if (record.RecordType == ExecutionContextType.Job)
+            {
+                throw new ArgumentOutOfRangeException(nameof(record));
+            }
+
+            if (_detailTimelineId == Guid.Empty)
+            {
+                // create detail timeline
+                _detailTimelineId = Guid.NewGuid();
+                _record.Details = new Timeline(_detailTimelineId);
+
+                _jobServerQueue.QueueTimelineRecordUpdate(_mainTimelineId, _record);
+            }
+
+            TimelineRecord existRecord;
+            if (_detailRecords.TryGetValue(record.Id, out existRecord))
+            {
+                existRecord.Name = record.Name ?? existRecord.Name;
+                existRecord.RecordType = record.RecordType ?? existRecord.RecordType;
+                existRecord.Order = record.Order ?? existRecord.Order;
+                existRecord.ParentId = record.ParentId ?? existRecord.ParentId;
+                existRecord.StartTime = record.StartTime ?? existRecord.StartTime;
+                existRecord.FinishTime = record.FinishTime ?? existRecord.FinishTime;
+                existRecord.PercentComplete = record.PercentComplete ?? existRecord.PercentComplete;
+                existRecord.CurrentOperation = record.CurrentOperation ?? existRecord.CurrentOperation;
+                existRecord.Result = record.Result ?? existRecord.Result;
+                existRecord.ResultCode = record.ResultCode ?? existRecord.ResultCode;
+                existRecord.State = record.State ?? existRecord.State;
+
+                _jobServerQueue.QueueTimelineRecordUpdate(_detailTimelineId, existRecord);
+            }
+            else
+            {
+                _detailRecords[record.Id] = record;
+                _jobServerQueue.QueueTimelineRecordUpdate(_detailTimelineId, record);
+            }
+        }
+
+        public void UpdateTimelineRecordDisplayName(string displayName)
+        {
+            ArgUtil.NotNull(displayName, nameof(displayName));
+            _record.Name = displayName;
+            _jobServerQueue.QueueTimelineRecordUpdate(_mainTimelineId, _record);
+        }
+
+        public void InitializeJob(Pipelines.AgentJobRequestMessage message, CancellationToken token)
+        {
+            // Validation
+            Trace.Entering();
+            ArgUtil.NotNull(message, nameof(message));
+            ArgUtil.NotNull(message.Resources, nameof(message.Resources));
+            ArgUtil.NotNull(message.Variables, nameof(message.Variables));
+            ArgUtil.NotNull(message.Plan, nameof(message.Plan));
+
+            _cancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(token);
+
+            Global = new GlobalContext();
+
+            // Plan
+            Global.Plan = message.Plan;
+            Global.Features = PlanUtil.GetFeatures(message.Plan);
+
+            // Endpoints
+            Global.Endpoints = message.Resources.Endpoints;
+
+            // Ser debug using vars context if debug variables are not already present.
+            var variables = message.Variables;
+            SetDebugUsingVars(variables, message.ContextData);
+
+            Global.Variables = new Variables(HostContext, variables);
+
+            // Environment variables shared across all actions
+            Global.EnvironmentVariables = new Dictionary<string, string>(VarUtil.EnvironmentVariableKeyComparer);
+
+            // Job defaults shared across all actions
+            Global.JobDefaults = new Dictionary<string, IDictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+
+            // Job Telemetry
+            Global.JobTelemetry = new List<JobTelemetry>();
+
+            // ActionsStepTelemetry for entire job
+            Global.StepsTelemetry = new List<ActionsStepTelemetry>();
+
+            // Steps results for entire job
+            Global.StepsResult = new List<StepResult>();
+
+            // Job level annotations
+            Global.JobAnnotations = new List<Annotation>();
+
+            // Track Node.js 20 actions for deprecation warning
+            Global.DeprecatedNode20Actions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            // Track actions upgraded from Node.js 20 to Node.js 24
+            Global.UpgradedToNode24Actions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            // Track actions stuck on Node.js 20 due to ARM32 (separate from general deprecation)
+            Global.Arm32Node20Actions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            // Job-scoped aggregate of artifact subjects declared via $GITHUB_ARTIFACTS.
+            Global.ArtifactSubjects = new Dictionary<string, ArtifactSubject>(StringComparer.Ordinal);
+
+            // Job Outputs
+            JobOutputs = new Dictionary<string, VariableValue>(StringComparer.OrdinalIgnoreCase);
+
+            // Actions environment
+            ActionsEnvironment = message.ActionsEnvironment;
+
+            // Service container info
+            Global.ServiceContainers = new List<ContainerInfo>();
+
+            // Steps context (StepsRunner manages adding the scoped steps context)
+            Global.StepsContext = new StepsContext();
+
+            // File table
+            Global.FileTable = new List<String>(message.FileTable ?? new string[0]);
+
+            // Workflow dependencies (lockfile pins)
+            Global.ActionsDependencies = message.ActionsDependencies;
+
+            // What type of job request is running (i.e. Run Service vs. pipelines)
+            Global.Variables.Set(Constants.Variables.System.JobRequestType, message.MessageType);
+
+            // Expression values
+            if (message.ContextData?.Count > 0)
+            {
+                foreach (var pair in message.ContextData)
+                {
+                    ExpressionValues[pair.Key] = pair.Value;
+                }
+            }
+
+            ExpressionValues["secrets"] = Global.Variables.ToSecretsContext();
+            ExpressionValues["runner"] = new RunnerContext();
+
+            Trace.Info("Initializing Job context");
+            var jobContext = new JobContext();
+            ExpressionValues.TryGetValue("job", out var jobDictionary);
+            if (jobDictionary != null)
+            {
+                foreach (var pair in jobDictionary.AssertDictionary("job"))
+                {
+                    jobContext[pair.Key] = pair.Value;
+                }
+            }
+            ExpressionValues["job"] = jobContext;
+
+            Trace.Info("Initialize GitHub context");
+            var githubAccessToken = new StringContextData(Global.Variables.Get("system.github.token"));
+            var base64EncodedToken = Convert.ToBase64String(Encoding.UTF8.GetBytes($"x-access-token:{githubAccessToken}"));
+            HostContext.SecretMasker.AddValue(base64EncodedToken);
+            var githubJob = Global.Variables.Get("system.github.job");
+            var githubContext = new GitHubContext();
+            githubContext["token"] = githubAccessToken;
+            if (!string.IsNullOrEmpty(githubJob))
+            {
+                githubContext["job"] = new StringContextData(githubJob);
+            }
+            var githubDictionary = ExpressionValues["github"].AssertDictionary("github");
+            foreach (var pair in githubDictionary)
+            {
+                githubContext[pair.Key] = pair.Value;
+            }
+            ExpressionValues["github"] = githubContext;
+
+            Trace.Info("Initialize Env context");
+#if OS_WINDOWS
+            ExpressionValues["env"] = new DictionaryContextData();
+#else
+
+            ExpressionValues["env"] = new CaseSensitiveDictionaryContextData();
+#endif
+
+            // Prepend Path
+            Global.PrependPath = new List<string>();
+
+            // JobSteps for job ExecutionContext
+            JobSteps = new Queue<IStep>();
+
+            // PostJobSteps for job ExecutionContext
+            PostJobSteps = new Stack<IStep>();
+
+            // StepsWithPostRegistered for job ExecutionContext
+            StepsWithPostRegistered = new HashSet<Guid>();
+
+            // EmbeddedStepsWithPostRegistered for job ExecutionContext
+            EmbeddedStepsWithPostRegistered = new Dictionary<Guid, string>();
+
+            // EmbeddedIntraActionState for job ExecutionContext
+            EmbeddedIntraActionState = new Dictionary<Guid, Dictionary<string, string>>();
+
+            // Job timeline record.
+            InitializeTimelineRecord(
+                timelineId: message.Timeline.Id,
+                timelineRecordId: message.JobId,
+                parentTimelineRecordId: null,
+                recordType: ExecutionContextType.Job,
+                displayName: message.JobDisplayName,
+                refName: message.JobName,
+                order: null); // The job timeline record's order is set by server.
+
+            // Logger (must be initialized before writing warnings).
+            _logger = HostContext.CreateService<IPagingLogger>();
+            _logger.Setup(_mainTimelineId, _record.Id);
+
+            // Initialize 'echo on action command success' property, default to false, unless Step_Debug is set
+            EchoOnActionCommand = Global.Variables.Step_Debug ?? false;
+
+            // Verbosity (from GitHub.Step_Debug).
+            Global.WriteDebug = Global.Variables.Step_Debug ?? false;
+
+            // Debugger enabled flag (from acquire response).
+            var overrideDebuggerWelcomeMessage = Global.Variables.GetBoolean(Constants.Runner.Features.OverrideDebuggerWelcomeMessage) ?? false;
+            Global.Debugger = new Dap.DebuggerConfig(message.EnableDebugger, message.DebuggerTunnel, overrideDebuggerWelcomeMessage, message.DebuggerWelcomeMessage);
+
+            // Hook up JobServerQueueThrottling event, we will log warning on server tarpit.
+            _jobServerQueue.JobServerQueueThrottling += JobServerQueueThrottling_EventReceived;
+        }
+
+        // Do not add a format string overload. In general, execution context messages are user facing and
+        // therefore should be localized. Use the Loc methods from the StringUtil class. The exception to
+        // the rule is command messages - which should be crafted using strongly typed wrapper methods.
+        public long Write(string tag, string message)
+        {
+            string msg = HostContext.SecretMasker.MaskSecrets($"{tag}{message}");
+            long totalLines;
+            lock (_loggerLock)
+            {
+                totalLines = _logger.TotalLines + 1;
+                _logger.Write(msg);
+            }
+
+            // write to job level execution context's log file.
+            if (_parentExecutionContext != null)
+            {
+                lock (_parentExecutionContext._loggerLock)
+                {
+                    _parentExecutionContext._logger.Write(msg);
+                }
+            }
+
+            _jobServerQueue.QueueWebConsoleLine(_record.Id, msg, totalLines);
+            return totalLines;
+        }
+
+        public void QueueAttachFile(string type, string name, string filePath)
+        {
+            ArgUtil.NotNullOrEmpty(type, nameof(type));
+            ArgUtil.NotNullOrEmpty(name, nameof(name));
+            ArgUtil.NotNullOrEmpty(filePath, nameof(filePath));
+
+            if (!File.Exists(filePath))
+            {
+                throw new FileNotFoundException($"Can't attach (type:{type} name:{name}) file: {filePath}. File does not exist.");
+            }
+
+            _jobServerQueue.QueueFileUpload(_mainTimelineId, _record.Id, type, name, filePath, deleteSource: false);
+        }
+
+        public void QueueSummaryFile(string name, string filePath, Guid stepRecordId)
+        {
+            ArgUtil.NotNullOrEmpty(name, nameof(name));
+            ArgUtil.NotNullOrEmpty(filePath, nameof(filePath));
+
+            if (!File.Exists(filePath))
+            {
+                throw new FileNotFoundException($"Can't upload (name:{name}) file: {filePath}. File does not exist.");
+            }
+            _jobServerQueue.QueueResultsUpload(stepRecordId, name, filePath, ChecksAttachmentType.StepSummary, deleteSource: false, finalize: true, firstBlock: true, totalLines: 0);
+        }
+
+        public void QueueDiagnosticLogFile(string name, string filePath)
+        {
+            ArgUtil.NotNullOrEmpty(name, nameof(name));
+            ArgUtil.NotNullOrEmpty(filePath, nameof(filePath));
+
+            if (!File.Exists(filePath))
+            {
+                throw new FileNotFoundException($"Can't upload diagnostic log file: {filePath}. File does not exist.");
+            }
+            _jobServerQueue.QueueResultsUpload(_record.Id, name, filePath, CoreAttachmentType.ResultsDiagnosticLog, deleteSource: false, finalize: true, firstBlock: true, totalLines: 0);
+        }
+
+        // Add OnMatcherChanged
+        public void Add(OnMatcherChanged handler)
+        {
+            Root._onMatcherChanged += handler;
+        }
+
+        // Remove OnMatcherChanged
+        public void Remove(OnMatcherChanged handler)
+        {
+            Root._onMatcherChanged -= handler;
+        }
+
+        // Add Issue matchers
+        public void AddMatchers(IssueMatchersConfig config)
+        {
+            var root = Root;
+
+            // Lock
+            lock (root._matchersLock)
+            {
+                var newMatchers = new List<IssueMatcherConfig>();
+
+                // Prepend
+                var newOwners = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var matcher in config.Matchers)
+                {
+                    newOwners.Add(matcher.Owner);
+                    newMatchers.Add(matcher);
+                }
+
+                // Add existing non-matching
+                var existingMatchers = root._matchers ?? Array.Empty<IssueMatcherConfig>();
+                newMatchers.AddRange(existingMatchers.Where(x => !newOwners.Contains(x.Owner)));
+
+                // Store
+                root._matchers = newMatchers.ToArray();
+
+                // Fire events
+                foreach (var matcher in config.Matchers)
+                {
+                    root._onMatcherChanged(null, new MatcherChangedEventArgs(matcher));
+                }
+
+                // Output
+                var owners = config.Matchers.Select(x => $"'{x.Owner}'");
+                var joinedOwners = string.Join(", ", owners);
+                // todo: loc
+                this.Debug($"Added matchers: {joinedOwners}. Problem matchers scan action output for known warning or error strings and report these inline.");
+            }
+        }
+
+        // Remove issue matcher
+        public void RemoveMatchers(IEnumerable<string> owners)
+        {
+            var root = Root;
+            var distinctOwners = new HashSet<string>(owners, StringComparer.OrdinalIgnoreCase);
+            var removedMatchers = new List<IssueMatcherConfig>();
+            var newMatchers = new List<IssueMatcherConfig>();
+
+            // Lock
+            lock (root._matchersLock)
+            {
+                // Remove
+                var existingMatchers = root._matchers ?? Array.Empty<IssueMatcherConfig>();
+                foreach (var matcher in existingMatchers)
+                {
+                    if (distinctOwners.Contains(matcher.Owner))
+                    {
+                        removedMatchers.Add(matcher);
+                    }
+                    else
+                    {
+                        newMatchers.Add(matcher);
+                    }
+                }
+
+                // Store
+                root._matchers = newMatchers.ToArray();
+
+                // Fire events
+                foreach (var removedMatcher in removedMatchers)
+                {
+                    root._onMatcherChanged(null, new MatcherChangedEventArgs(new IssueMatcherConfig { Owner = removedMatcher.Owner }));
+                }
+
+                // Output
+                owners = removedMatchers.Select(x => $"'{x.Owner}'");
+                var joinedOwners = string.Join(", ", owners);
+                // todo: loc
+                this.Debug($"Removed matchers: {joinedOwners}");
+            }
+        }
+
+        // Get issue matchers
+        public IEnumerable<IssueMatcherConfig> GetMatchers()
+        {
+            // Lock not required since the list is immutable
+            return Root._matchers ?? Array.Empty<IssueMatcherConfig>();
+        }
+
+        public void PublishStepTelemetry()
+        {
+            if (!_stepTelemetryPublished)
+            {
+                // Add to the global steps telemetry only if we have something to log.
+                if (!string.IsNullOrEmpty(StepTelemetry?.Type))
+                {
+                    if (!IsEmbedded)
+                    {
+                        StepTelemetry.Result = _record.Result;
+                    }
+
+                    if (!IsEmbedded &&
+                        _record.FinishTime != null &&
+                        _record.StartTime != null)
+                    {
+                        StepTelemetry.ExecutionTimeInSeconds = (int)Math.Ceiling((_record.FinishTime - _record.StartTime)?.TotalSeconds ?? 0);
+                        StepTelemetry.StartTime = _record.StartTime;
+                        StepTelemetry.FinishTime = _record.FinishTime;
+                    }
+
+                    if (!IsEmbedded)
+                    {
+                        foreach (var issue in _record.Issues)
+                        {
+                            if ((issue.Type == IssueType.Error || issue.Type == IssueType.Warning) &&
+                                !string.IsNullOrEmpty(issue.Message))
+                            {
+                                string issueTelemetry;
+                                if (issue.Message.Length > _maxIssueMessageLengthInTelemetry)
+                                {
+                                    issueTelemetry = $"{issue.Message[.._maxIssueMessageLengthInTelemetry]}";
+                                }
+                                else
+                                {
+                                    issueTelemetry = issue.Message;
+                                }
+
+                                StepTelemetry.ErrorMessages.Add(issueTelemetry);
+
+                                // Only send over the first 3 issues to avoid sending too much data.
+                                if (StepTelemetry.ErrorMessages.Count >= _maxIssueCountInTelemetry)
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    Trace.Info($"Publish step telemetry for current step {StringUtil.ConvertToJson(StepTelemetry)}.");
+                    Global.StepsTelemetry.Add(StepTelemetry);
+                    _stepTelemetryPublished = true;
+                }
+            }
+            else
+            {
+                Trace.Info($"Step telemetry has already been published.");
+            }
+        }
+
+        public void WriteWebhookPayload()
+        {
+            // Makes directory for event_path data
+            var tempDirectory = HostContext.GetDirectory(WellKnownDirectory.Temp);
+            var workflowDirectory = Path.Combine(tempDirectory, "_github_workflow");
+            Directory.CreateDirectory(workflowDirectory);
+            var gitHubEvent = GetGitHubContext("event");
+
+            // adds the GitHub event path/file if the event exists
+            if (gitHubEvent != null)
+            {
+                var workflowFile = Path.Combine(workflowDirectory, "event.json");
+                Trace.Info($"Write event payload to {workflowFile}");
+                File.WriteAllText(workflowFile, gitHubEvent, new UTF8Encoding(false));
+                SetGitHubContext("event_path", workflowFile);
+            }
+        }
+
+        private void InitializeTimelineRecord(Guid timelineId, Guid timelineRecordId, Guid? parentTimelineRecordId, string recordType, string displayName, string refName, int? order, bool embedded = false)
+        {
+            _mainTimelineId = timelineId;
+            _record.Id = timelineRecordId;
+            _record.RecordType = recordType;
+            _record.Name = displayName;
+            _record.RefName = refName;
+            _record.Order = order;
+            _record.PercentComplete = 0;
+            _record.State = TimelineRecordState.Pending;
+            _record.ErrorCount = 0;
+            _record.WarningCount = 0;
+            _record.NoticeCount = 0;
+
+            if (parentTimelineRecordId != null && parentTimelineRecordId.Value != Guid.Empty)
+            {
+                _record.ParentId = parentTimelineRecordId;
+            }
+            else if (parentTimelineRecordId == null)
+            {
+                _record.AgentPlatform = VarUtil.OS;
+            }
+
+            var configuration = HostContext.GetService<IConfigurationStore>();
+            _record.WorkerName = configuration.GetSettings().AgentName;
+
+            // We don't want to update the timeline record for embedded steps since they are not really represented in the UI.
+            if (!embedded)
+            {
+                _jobServerQueue.QueueTimelineRecordUpdate(_mainTimelineId, _record);
+            }
+        }
+
+        private void JobServerQueueThrottling_EventReceived(object sender, ThrottlingEventArgs data)
+        {
+            Interlocked.Add(ref _totalThrottlingDelayInMilliseconds, Convert.ToInt64(data.Delay.TotalMilliseconds));
+
+            if (!_throttlingReported &&
+                _totalThrottlingDelayInMilliseconds > _throttlingDelayReportThreshold)
+            {
+                this.Warning(string.Format("The job is currently being throttled by the server. You may experience delays in console line output, job status reporting, and action log uploads."));
+
+                _throttlingReported = true;
+            }
+        }
+
+        private IExecutionContext CreatePostChild(string displayName, Dictionary<string, string> intraActionState, string siblingScopeName = null)
+        {
+            if (!_expandedForPostJob)
+            {
+                Trace.Info($"Reserve record order {_childTimelineRecordOrder + 1} to {_childTimelineRecordOrder * 2} for post job actions.");
+                _expandedForPostJob = true;
+                _childTimelineRecordOrder = _childTimelineRecordOrder * 2;
+            }
+
+            var newGuid = Guid.NewGuid();
+            return CreateChild(newGuid, displayName, newGuid.ToString("N"), null, null, ActionRunStage.Post, intraActionState, _childTimelineRecordOrder - Root.PostJobSteps.Count, siblingScopeName: siblingScopeName);
+        }
+
+        // Sets debug using vars context in case debug variables are not present.
+        private static void SetDebugUsingVars(IDictionary<string, VariableValue> variables, IDictionary<string, PipelineContextData> contextData)
+        {
+            if (contextData != null &&
+                contextData.TryGetValue(PipelineTemplateConstants.Vars, out var varsPipelineContextData) &&
+                varsPipelineContextData != null &&
+                varsPipelineContextData is DictionaryContextData varsContextData)
+            {
+                // Set debug variables only when StepDebug/RunnerDebug variables are not present.
+                if (!variables.ContainsKey(Constants.Variables.Actions.StepDebug) &&
+                    varsContextData.TryGetValue(Constants.Variables.Actions.StepDebug, out var stepDebugValue) &&
+                    stepDebugValue is StringContextData)
+                {
+                    variables[Constants.Variables.Actions.StepDebug] = stepDebugValue.ToString();
+                }
+
+                if (!variables.ContainsKey(Constants.Variables.Actions.RunnerDebug) &&
+                    varsContextData.TryGetValue(Constants.Variables.Actions.RunnerDebug, out var runDebugValue) &&
+                    runDebugValue is StringContextData)
+                {
+                    variables[Constants.Variables.Actions.RunnerDebug] = runDebugValue.ToString();
+                }
+            }
+        }
+
+        public void ApplyContinueOnError(TemplateToken continueOnErrorToken)
+        {
+            if (Result != TaskResult.Failed)
+            {
+                return;
+            }
+            var continueOnError = false;
+            try
+            {
+                var templateEvaluator = this.ToPipelineTemplateEvaluator();
+                continueOnError = templateEvaluator.EvaluateStepContinueOnError(continueOnErrorToken, ExpressionValues, ExpressionFunctions);
+            }
+            catch (Exception ex)
+            {
+                Trace.Info("The step failed and an error occurred when attempting to determine whether to continue on error.");
+                Trace.Error(ex);
+                this.Error("The step failed and an error occurred when attempting to determine whether to continue on error.");
+                this.Error(ex);
+            }
+
+            if (continueOnError)
+            {
+                Outcome = Result;
+                Result = TaskResult.Succeeded;
+                Trace.Info($"Updated step result (continue on error)");
+            }
+
+            if (!DeferOutcomeConclusion)
+            {
+                UpdateGlobalStepsContext();
+            }
+        }
+
+        internal IPipelineTemplateEvaluator ToPipelineTemplateEvaluatorInternal(bool allowServiceContainerCommand, ObjectTemplating.ITraceWriter traceWriter = null)
+        {
+            return new PipelineTemplateEvaluatorWrapper(HostContext, this, allowServiceContainerCommand, traceWriter);
+        }
+
+        private static void NoOp()
+        {
+        }
+    }
+
+    // The Error/Warning/etc methods are created as extension methods to simplify unit testing.
+    // Otherwise individual overloads would need to be implemented (depending on the unit test).
+    public static class ExecutionContextExtension
+    {
+        public static string GetFullyQualifiedContextName(this IExecutionContext context)
+        {
+            if (!string.IsNullOrEmpty(context.ScopeName))
+            {
+                return $"{context.ScopeName}.{context.ContextName}";
+            }
+
+            return context.ContextName;
+        }
+
+        public static void Error(this IExecutionContext context, Exception ex)
+        {
+            context.Error(ex.Message);
+            context.Debug(ex.ToString());
+        }
+        // Do not add a format string overload. See comment on ExecutionContext.Write().
+        public static void Error(this IExecutionContext context, string message)
+        {
+            var issue = new Issue() { Type = IssueType.Error, Message = message };
+            context.AddIssue(issue, ExecutionContextLogOptions.Default);
+        }
+
+        // Do not add a format string overload. See comment on ExecutionContext.Write().
+        public static void InfrastructureError(this IExecutionContext context, string message, string category = null)
+        {
+            var issue = new Issue() { Type = IssueType.Error, Message = message, IsInfrastructureIssue = true, Category = category };
+            context.AddIssue(issue, ExecutionContextLogOptions.Default);
+        }
+
+        // Do not add a format string overload. See comment on ExecutionContext.Write().
+        public static void Warning(this IExecutionContext context, string message)
+        {
+            var issue = new Issue() { Type = IssueType.Warning, Message = message };
+            context.AddIssue(issue, ExecutionContextLogOptions.Default);
+        }
+
+        // Do not add a format string overload. See comment on ExecutionContext.Write().
+        public static void Output(this IExecutionContext context, string message)
+        {
+            context.Write(null, message);
+        }
+
+        // Do not add a format string overload. See comment on ExecutionContext.Write().
+        public static void Command(this IExecutionContext context, string message)
+        {
+            context.Write(WellKnownTags.Command, message);
+        }
+
+        //
+        // Verbose output is enabled by setting ACTIONS_STEP_DEBUG
+        // It's meant to help the end user debug their definitions.
+        // Why are my inputs not working?  It's not meant for dev debugging which is diag
+        //
+        // Do not add a format string overload. See comment on ExecutionContext.Write().
+        public static void Debug(this IExecutionContext context, string message)
+        {
+            if (context.Global.WriteDebug)
+            {
+                var multilines = message?.Replace("\r\n", "\n")?.Split("\n");
+                if (multilines != null)
+                {
+                    foreach (var line in multilines)
+                    {
+                        context.Write(WellKnownTags.Debug, line);
+                    }
+                }
+            }
+        }
+
+        public static IEnumerable<KeyValuePair<string, object>> ToExpressionState(this IExecutionContext context)
+        {
+            return new[] { new KeyValuePair<string, object>(nameof(IExecutionContext), context) };
+        }
+
+        public static IPipelineTemplateEvaluator ToPipelineTemplateEvaluator(this IExecutionContext context, ObjectTemplating.ITraceWriter traceWriter = null)
+        {
+            var allowServiceContainerCommand = (context.Global.Variables.GetBoolean(Constants.Runner.Features.ServiceContainerCommand) ?? false)
+                || StringUtil.ConvertToBoolean(Environment.GetEnvironmentVariable("ACTIONS_SERVICE_CONTAINER_COMMAND"));
+
+            // Create wrapper?
+            if ((context.Global.Variables.GetBoolean(Constants.Runner.Features.CompareWorkflowParser) ?? false) || StringUtil.ConvertToBoolean(Environment.GetEnvironmentVariable("ACTIONS_RUNNER_COMPARE_WORKFLOW_PARSER")))
+            {
+                return (context as ExecutionContext).ToPipelineTemplateEvaluatorInternal(allowServiceContainerCommand, traceWriter);
+            }
+
+            // Legacy
+            if (traceWriter == null)
+            {
+                traceWriter = context.ToTemplateTraceWriter();
+            }
+            var schema = PipelineTemplateSchemaFactory.GetSchema();
+            return new PipelineTemplateEvaluator(traceWriter, schema, context.Global.FileTable)
+            {
+                MaxErrorMessageLength = int.MaxValue, // Don't truncate error messages otherwise we might not scrub secrets correctly
+                AllowServiceContainerCommand = allowServiceContainerCommand,
+            };
+        }
+
+        public static ObjectTemplating.ITraceWriter ToTemplateTraceWriter(this IExecutionContext context)
+        {
+            return new TemplateTraceWriter(context);
+        }
+
+        public static DictionaryContextData GetExpressionValues(this IExecutionContext context, IStepHost stepHost)
+        {
+            if (stepHost is ContainerStepHost)
+            {
+
+                var expressionValues = context.ExpressionValues.Clone() as DictionaryContextData;
+                context.UpdatePathsInExpressionValues("github", expressionValues, stepHost);
+                context.UpdatePathsInExpressionValues("runner", expressionValues, stepHost);
+                return expressionValues;
+            }
+            else
+            {
+                return context.ExpressionValues.Clone() as DictionaryContextData;
+            }
+        }
+
+        private static void UpdatePathsInExpressionValues(this IExecutionContext context, string contextName, DictionaryContextData expressionValues, IStepHost stepHost)
+        {
+            var dict = expressionValues[contextName].AssertDictionary($"expected context {contextName} to be a dictionary");
+            context.ResolvePathsInExpressionValuesDictionary(dict, stepHost);
+            expressionValues[contextName] = dict;
+        }
+
+        private static void ResolvePathsInExpressionValuesDictionary(this IExecutionContext context, DictionaryContextData dict, IStepHost stepHost)
+        {
+            foreach (var key in dict.Keys.ToList())
+            {
+                if (key == PipelineTemplateConstants.HostWorkspace)
+                {
+                    // The HostWorkspace context var is excluded so that there is a var that always points to the host path.
+                    // This var can be used to translate back from container paths, e.g. in HashFilesFunction, which always runs on the host machine
+                    continue;
+                }
+                if (dict[key] is StringContextData)
+                {
+                    var value = dict[key].ToString();
+                    if (!string.IsNullOrEmpty(value))
+                    {
+                        dict[key] = new StringContextData(stepHost.ResolvePathForStepHost(context, value));
+                    }
+                }
+                else if (dict[key] is DictionaryContextData)
+                {
+                    var innerDict = dict[key].AssertDictionary("expected dictionary");
+                    context.ResolvePathsInExpressionValuesDictionary(innerDict, stepHost);
+                    var updatedDict = new DictionaryContextData();
+                    foreach (var k in innerDict.Keys.ToList())
+                    {
+                        updatedDict[k] = innerDict[k];
+                    }
+                    dict[key] = updatedDict;
+                }
+                else if (dict[key] is CaseSensitiveDictionaryContextData)
+                {
+                    var innerDict = dict[key].AssertDictionary("expected dictionary");
+                    context.ResolvePathsInExpressionValuesDictionary(innerDict, stepHost);
+                    var updatedDict = new CaseSensitiveDictionaryContextData();
+                    foreach (var k in innerDict.Keys.ToList())
+                    {
+                        updatedDict[k] = innerDict[k];
+                    }
+                    dict[key] = updatedDict;
+                }
+            }
+        }
+    }
+
+    internal sealed class TemplateTraceWriter : ObjectTemplating.ITraceWriter
+    {
+        private readonly IExecutionContext _executionContext;
+
+        internal TemplateTraceWriter(IExecutionContext executionContext)
+        {
+            ArgUtil.NotNull(executionContext, nameof(executionContext));
+            _executionContext = executionContext;
+        }
+
+        public void Error(string format, params Object[] args)
+        {
+            /* TraceWriter should be used for logging and not creating erros. */
+            if (logTemplateErrorsAsDebugMessages())
+            {
+                _executionContext.Debug(string.Format(CultureInfo.CurrentCulture, format, args));
+            }
+            else
+            {
+                _executionContext.Error(string.Format(CultureInfo.CurrentCulture, format, args));
+            }
+        }
+
+        public void Info(string format, params Object[] args)
+        {
+            _executionContext.Debug(string.Format(CultureInfo.CurrentCulture, $"{format}", args));
+        }
+
+        public void Verbose(string format, params Object[] args)
+        {
+            // todo: switch to verbose?
+            _executionContext.Debug(string.Format(CultureInfo.CurrentCulture, $"{format}", args));
+        }
+
+        private bool logTemplateErrorsAsDebugMessages()
+        {
+            if (_executionContext.Global.Variables.TryGetValue(Constants.Runner.Features.LogTemplateErrorsAsDebugMessages, out var logErrorsAsDebug))
+            {
+                return StringUtil.ConvertToBoolean(logErrorsAsDebug, defaultValue: false);
+            }
+            return false;
+        }
+    }
+
+
+    public static class WellKnownTags
+    {
+        public static readonly string Section = "##[section]";
+        public static readonly string Command = "##[command]";
+        public static readonly string Error = "##[error]";
+        public static readonly string Warning = "##[warning]";
+        public static readonly string Notice = "##[notice]";
+        public static readonly string Debug = "##[debug]";
+    }
+}

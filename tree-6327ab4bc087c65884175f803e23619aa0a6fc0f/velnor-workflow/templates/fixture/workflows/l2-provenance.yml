@@ -1,0 +1,220 @@
+name: l2-provenance
+
+on:
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: "velnor | github | both (default: both)"
+        type: choice
+        default: both
+        options: [velnor, github, both]
+  workflow_call:
+    inputs:
+      lane: {type: string, required: false, default: both}
+      signer-workflow: {type: string, required: false, default: github.com/tailrocks/velnor-actions-fixture/.github/workflows/l2-provenance.yml}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: l2-provenance-${{ github.ref }}-${{ inputs.lanes || inputs.lane }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  admit-default-head:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Require current default-branch head
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "${GITHUB_REF}" = refs/heads/main
+          default_head="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+          test "${GITHUB_SHA}" = "${default_head}"
+
+  produce:
+    needs: admit-default-head
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON((inputs.lanes || inputs.lane) == 'both' && '["github","velnor"]' || format('["{0}"]', inputs.lanes || inputs.lane)) }}
+    runs-on: ${{ matrix.lane == 'velnor' && fromJSON('{"group":"velnor-trusted","labels":"velnor-target-mvp"}') || 'ubuntu-26.04' }}
+    timeout-minutes: 25
+    env:
+      SCCACHE_GHA_ENABLED: "false"
+      SCCACHE_CACHE_SIZE: 20G
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: "false"
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
+          save-on-workflow-dispatch: true
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+          disable_annotations: "false"
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - name: Cache Cargo target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: l2-provenance-target-${{ matrix.lane }}-${{ runner.os }}-${{ hashFiles('mise.toml', '**/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: l2-provenance-target-${{ matrix.lane }}-${{ runner.os }}-${{ hashFiles('mise.toml', '**/Cargo.toml', 'Cargo.lock') }}-
+      - name: Prove log masking
+        if: env.MASK_SENTINEL != ''
+        env:
+          MASK_SENTINEL: ${{ secrets.FIXTURE_MASK_SENTINEL }}
+        run: |
+          test -n "${MASK_SENTINEL}"
+          echo "::add-mask::${MASK_SENTINEL}"
+          echo "masking-marker-${{ matrix.lane }}-begin"
+          printf 'masked-sentinel=%s\n' "${MASK_SENTINEL}"
+          echo "masking-marker-${{ matrix.lane }}-end"
+      - name: Record missing masking prerequisite
+        if: env.MASK_SENTINEL == ''
+        env:
+          MASK_SENTINEL: ${{ secrets.FIXTURE_MASK_SENTINEL }}
+        run: echo "L2P_MASKING prerequisite=missing status=not-run lane=${{ matrix.lane }}"
+      - name: Build and test exact subject
+        run: |
+          mbx nextest run --workspace --locked
+          mkdir -p dist
+          mbx run --locked -p l2-contract -- subject "${GITHUB_SHA}" > dist/l2-subject.json
+          (cd dist && sha256sum l2-subject.json > l2-subject.json.sha256)
+      - id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/l2-subject.json
+      - name: Bind exact producer evidence
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+          ATTESTATION_ID: ${{ steps.attest.outputs.attestation-id }}
+        run: |
+          test -s "${BUNDLE_PATH}"
+          cp -- "${BUNDLE_PATH}" "dist/l2-${{ matrix.lane }}.bundle.jsonl"
+          jq -cn \
+            --arg lane "${{ matrix.lane }}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg job "${GITHUB_JOB}" \
+            --arg runner_environment "${RUNNER_ENVIRONMENT}" \
+            --arg attestation_id "${ATTESTATION_ID}" \
+            '{schema:"velnor.fixture.l2-producer.v1",lane:$lane,run_id:$run_id,run_attempt:$run_attempt,job:$job,runner_environment:$runner_environment,attestation_id:$attestation_id}' \
+            > "dist/l2-${{ matrix.lane }}.producer.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: l2-${{ matrix.lane }}
+          path: dist
+          if-no-files-found: error
+
+  consume:
+    if: always() && needs.produce.result == 'success'
+    needs: produce
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: l2-*
+          path: evidence
+      - name: Reconstruct and compare exact subjects before attestation
+        run: |
+          mapfile -t subjects < <(find evidence -name l2-subject.json -type f | sort)
+          if [ "${{ inputs.lanes || inputs.lane }}" = both ]; then
+            expected_lanes='["github","velnor"]'
+          else
+            expected_lanes='["${{ inputs.lanes || inputs.lane }}"]'
+          fi
+          mapfile -t producers < <(find evidence -name 'l2-*.producer.json' -type f | sort)
+          test "${#producers[@]}" -eq "${#subjects[@]}"
+          observed_lanes="$(jq -sc 'map(.lane) | sort' "${producers[@]}")"
+          test "${observed_lanes}" = "$(jq -cS . <<< "${expected_lanes}")"
+          expected="$(mktemp)"
+          expected_checksum="$(mktemp)"
+          trap 'rm -f "${expected}" "${expected_checksum}"' EXIT
+          jq -cn --arg source_sha "${GITHUB_SHA}" \
+            '{schema:"velnor.fixture.l2-subject.v1",source_sha:($source_sha|ascii_downcase),workload:"cargo-nextest-workspace-locked"}' \
+            > "${expected}"
+          expected_sha="$(sha256sum "${expected}" | awk '{print $1}')"
+          printf '%s  l2-subject.json\n' "${expected_sha}" > "${expected_checksum}"
+          for subject in "${subjects[@]}"; do
+            lane="$(jq -er .lane "$(find "$(dirname "${subject}")" -maxdepth 1 -name 'l2-*.producer.json' -type f)")"
+            cp -- "${expected_checksum}" "consumer-l2-${lane}-subject.json.sha256"
+            cp -- "${expected_checksum}" "$(dirname "${subject}")/consumer-l2-subject.json.sha256"
+            (cd "$(dirname "${subject}")" && sha256sum --check --strict consumer-l2-subject.json.sha256)
+            cmp -- "${expected}" "${subject}"
+          done
+      - name: Verify exact source and signer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNER_WORKFLOW: ${{ inputs.signer-workflow || format('github.com/{0}/.github/workflows/l2-provenance.yml', github.repository) }}
+        run: |
+          while IFS= read -r producer; do
+            lane="$(jq -er .lane "${producer}")"
+            artifact_root="$(dirname "${producer}")"
+            subject="${artifact_root}/l2-subject.json"
+            bundle="${artifact_root}/l2-${lane}.bundle.jsonl"
+            test -s "${bundle}"
+            test -s "${producer}"
+            args=()
+            if [ "${lane}" = github ]; then
+              args+=(--deny-self-hosted-runners)
+              expected_environment=github-hosted
+              expected_job=produce
+            elif [ "${lane}" = velnor ]; then
+              expected_environment=self-hosted
+              expected_job=produce
+            else
+              echo "unexpected producer artifact ${lane}" >&2
+              exit 1
+            fi
+            gh attestation verify "${subject}" --bundle "${bundle}" "${args[@]}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --source-ref "${GITHUB_REF}" \
+              --source-digest "${GITHUB_SHA}" \
+              --signer-workflow "${SIGNER_WORKFLOW}" \
+              --signer-digest "${GITHUB_SHA}" \
+              --predicate-type https://slsa.dev/provenance/v1 \
+              --format json > "verification-${lane}.json"
+            jq -e \
+              --arg environment "${expected_environment}" \
+              --arg invocation "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}" \
+              'length == 1 and .[0].verificationResult.signature.certificate.runnerEnvironment == $environment and .[0].verificationResult.signature.certificate.runInvocationURI == $invocation' \
+              "verification-${lane}.json" >/dev/null
+            jq -e \
+              --arg lane "${lane}" \
+              --arg run_id "${GITHUB_RUN_ID}" \
+              --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
+              --arg environment "${expected_environment}" \
+              --arg job "${expected_job}" \
+              '.schema == "velnor.fixture.l2-producer.v1" and .lane == $lane and .run_id == $run_id and .run_attempt == $run_attempt and .job == $job and .runner_environment == $environment and (.attestation_id | length > 0)' \
+              "${producer}" >/dev/null
+          done < <(find evidence -name 'l2-*.producer.json' -type f | sort)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: l2-verification-${{ inputs.lanes || inputs.lane }}
+          path: |
+            verification-*.json
+            consumer-l2-*-subject.json.sha256
+          if-no-files-found: error

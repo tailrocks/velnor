@@ -1,0 +1,88 @@
+[workspace]
+members = [
+  "crates/velnor-model",
+  "crates/velnor-control",
+  "crates/velnor-client",
+  "crates/velnor-render",
+  "crates/velnorctl",
+  "crates/velnor-runner",
+  "crates/velnor-workflow",
+  "crates/velnor-bench",
+  "crates/velnor-tools",
+  "tools/unit-collector",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/tailrocks/velnor"
+
+# Strip at link time: cross-built .debs cannot run the host `strip` on a
+# foreign-arch ELF (cargo deb is invoked with --no-strip).
+[profile.release]
+strip = "symbols"
+# Release and debug `velnor-workflow` binaries are interchangeable renderers
+# for the same source closure (the D19 guard accepts either profile), so
+# release must trap on overflow exactly like debug instead of wrapping.
+overflow-checks = true
+
+[workspace.dependencies]
+anyhow = "1.0.98"
+aho-corasick = "1.1.3"
+blake3 = "1.8.2"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
+libc = "0.2.189"
+rustix = { version = "1.1.4", features = ["fs"] }
+base64 = "0.23.0"
+clap = { version = "4.6.6", features = ["derive", "env"] }
+clap_complete = "4.6.9"
+clap_mangen = "0.3.3"
+# rust_crypto: jsonwebtoken >=10.4 requires exactly one crypto-provider feature
+# or OAuth assertion signing panics at runtime.
+jsonwebtoken = { version = "11.0.0", default-features = false, features = ["rust_crypto", "use_pem"] }
+# native-tls-vendored: build OpenSSL from source so zigbuild cross/deb builds are
+# hermetic (no host multiarch openssl headers; also unblocks the aarch64 deb leg).
+reqwest = { version = "0.13.0", default-features = false, features = ["json", "native-tls", "native-tls-vendored", "blocking"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
+rsa = { version = "0.9.8", features = ["pem"] }
+# bundled: compile SQLite from source so cross/deb release legs stay hermetic.
+rusqlite = { version = "0.40.2", features = ["bundled", "hooks"] }
+serde = { version = "1.0.219", features = ["derive"] }
+# float_roundtrip: serde_json's default float parser is correctly-rounded only
+# to 16 significant digits; the 17th digit can come back one ulp off, which
+# breaks bit-exact round trips of Summary mean/variance through NDJSON records
+# (observed live: 434.15526315789475 parsed back ...8947). Exact parsing keeps
+# record validation sound across a write/read cycle.
+serde_json = { version = "1.0.140", features = ["float_roundtrip"] }
+serde_yaml = { package = "noyalib", version = "0.0.28", features = ["compat-serde-yaml"] }
+globset = "0.4.16"
+rayon = "1.12.0"
+sha2 = "0.11"
+tar = "0.4.46"
+sigstore-sign = { version = "0.11.0", default-features = false, features = ["native-tls"] }
+thiserror = "2.0.12"
+time = { version = "0.3.41", features = ["formatting", "parsing"] }
+# Strict, non-regex parsing of mise config/lock TOML for the fail-closed mise
+# policy (crates/velnor-runner/src/mise.rs). Never hand-parse lock TOML.
+toml = "1.0"
+# fs: crates/velnor-runner/src/gha_cache.rs uses tokio::fs directly. Declare it
+# rather than relying on transitive feature unification, which any dependency
+# change can withdraw. `process` was dropped: every child process in the tree is
+# spawned through std::process.
+tokio = { version = "1.45.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+url = "2.5.4"
+uuid = { version = "1.18.1", features = ["v4"] }
+unicode-normalization = "0.1.24"
+regex = "1.11.1"
+tokio-tungstenite = { version = "0.30", features = ["native-tls", "native-tls-vendored"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# Structured spans/events for performance analysis (see content/docs/operations/security-and-data.mdx): JSON
+# span-close events with busy/idle timings land in <config>/logs/trace.jsonl;
+# the `otel` feature adds an OTLP exporter gated on VELNOR_OTLP_ENDPOINT.
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json", "fmt"] }
+tracing-opentelemetry = "0.33"
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-client"] }

@@ -1,0 +1,75 @@
+---
+title: "Velnor"
+---
+
+# Velnor
+
+Velnor is a Linux GitHub Actions control plane with two local execution lanes.
+The native lane uses Velnor runner slots and an explicitly selected Docker or
+Firecracker microVM backend. The optional Scale Set lane runs an official
+one-job Actions runner container with its own private Docker-in-Docker (DinD)
+daemon. Both lanes share one host-wide permit ledger; GitHub remains the
+scheduler and source of truth.
+
+Velnor supplies registration, admission, lifecycle supervision, execution,
+and bounded local operational state.
+
+Velnor is a research project. Expect breaking changes. Current documentation
+describes implemented behavior; it is not a production-readiness claim.
+
+## Start here
+
+New to Velnor? Follow this path:
+
+1. [Install and run the first job](/getting-started)
+2. [Operate a node](/guides/operator)
+3. [Observe health, jobs, logs, events, and telemetry](/operations/observability)
+4. [Diagnose failures by lifecycle stage](/getting-started#if-the-first-job-does-not-run)
+5. [Understand the architecture and job flow](/concepts/architecture)
+6. [Check supported interfaces and known limits](/reference/interface)
+
+## Choose by task
+
+| Need | Read |
+| --- | --- |
+| Install, configure, register, and run a first workflow | [Getting started](/getting-started) |
+| Configure labels, scope, slots, the native backend, or the Scale Set lane | [Operator guide](/guides/operator), [Configuration](/reference/configuration) |
+| Run an on-demand host from a Mac | [macOS on-demand host](/guides/macos-host) |
+| Understand GitHub communication and execution | [Architecture](/concepts/architecture), [Execution](/guides/execution), [Integrations](/reference/integrations) |
+| Inspect a running node | [Observability](/operations/observability), [CLI/interface reference](/reference/interface) |
+| Investigate a failed or stuck job | [Getting started diagnosis](/getting-started#if-the-first-job-does-not-run), [Execution](/guides/execution) |
+| Understand credentials, isolation, and persisted data | [Security and data](/operations/security-and-data) |
+| Look up commands and protocol details | [Interface reference](/reference/interface), [Runner protocol](/reference/runner-protocol) |
+| Build, test, or maintain Velnor | [Development](/guides/development), [Contributing](/guides/contributing) |
+
+## Current boundaries
+
+- The packaged runtime targets Debian hosts and systemd.
+- The native lane selects Docker or microVM explicitly; neither falls back to
+  the other. The optional Scale Set lane uses its official runner and private
+  DinD worker profile.
+- Native action and capability admission is strict and cannot be bypassed.
+  Scale Set offer classification uses the event plus owner and repository:
+  unparseable events, missing owner/repository, `pull_request`-family events,
+  and `workflow_run` stay `unknown`; other parseable events with both nonempty
+  owner and repository fields are `trusted`.
+- Native registration uses an operator PAT; Scale Set administration uses a
+  separately configured GitHub App or PAT reference. Native job credentials
+  come from the acquired GitHub payload; Scale Set job credentials come through
+  the official runner's GitHub session. Neither admin credential replaces job
+  credentials.
+- The control socket exposes reads, events, logs, and telemetry. Lifecycle
+  mutation routes, reconciliation actions, and diagnostics bundles are not
+  currently available through the public control interface.
+- Local query and log projections are bounded and some projections are not
+  rebuilt after reopening the service. Treat GitHub as authoritative for job
+  state and use local events, files, and service logs as operational evidence.
+
+## Documentation map
+
+The remaining pages are organized for operators and maintainers:
+
+- [Concepts](concepts/): architecture, system behavior, and vocabulary.
+- [Guides](guides/): execution, operations, development, and contribution.
+- [Operations](operations/): observability and security/data boundaries.
+- [Reference](reference/): integrations, interfaces, and runner protocol.

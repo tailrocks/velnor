@@ -1,0 +1,1283 @@
+//! One derived resource budget for the whole machine, and the share of it that
+//! belongs to a single runner slot.
+//!
+//! Velnor, Cargo, `mbx`, Docker and BuildKit each default to "I own this
+//! machine". Four slots on a sixteen-core host therefore run four Cargo builds
+//! that each pick `-j16`, inside one `velnor-jobs.slice` whose aggregate quota
+//! is 15.2 cores. Everything is runnable and nothing progresses.
+//!
+//! The fix is a single budget that is *derived* rather than assumed:
+//!
+//! * the machine's real CPU capacity is the smallest of the constraints that
+//!   actually apply — `available_parallelism`, every cgroup v2 `cpu.max` on the
+//!   path from the cgroup root to this process, the effective cpuset, and the
+//!   aggregate quota on the job slice;
+//! * memory is the smallest of `MemTotal` and every applicable `memory.max`;
+//! * the slot's share is that budget divided by the number of provisioned
+//!   slots, and it is what the job is told.
+//!
+//! A value that cannot be read is [`Observation::Unobservable`] and carries the
+//! reason. It is never cached and never replaced by a guess — the same rule
+//! [`crate::docker::facts`] applies to host facts. A budget with an
+//! unobservable CPU capacity produces no `CARGO_BUILD_JOBS`, no `--cpus`, and
+//! no scheduler sizing at all, because sizing to an invented number is how the
+//! defect got here in the first place.
+//!
+//! BuildKit sizing follows the same budget. A shared builder daemon does the
+//! compiling for every job holding it, so its ceiling is the aggregate
+//! entitlement of its current holders — the *sum* of what each holder
+//! recorded for itself at claim time — capped at the host budget:
+//!
+//! * one holder gets exactly its slot's share, the same ceiling as its job
+//!   container, so a lone build cannot eat the machine;
+//! * every slot holding one builder converges on the whole host budget, which
+//!   is correct: the daemon is doing the work of the whole machine;
+//! * a holder's declared workflow limits narrow only its own entitlement:
+//!   the sizing job never multiplies its own limits by the holder count,
+//!   which would let one workflow's policy throttle (or widen) strangers;
+//! * an unobservable dimension sizes nothing in that dimension, and setup
+//!   falls back to the static `resource_options` spelling of operator policy
+//!   per dimension rather than inventing a ceiling.
+//!
+//! See [`SlotBudget::own_buildkit_entitlement`] and
+//! [`SlotBudget::buildkit_size_summed`]. The entitlements come from the claim
+//! file ([`crate::buildkit`]); creation sizes the daemon, every setup resizes
+//! it for the current holders, and every post-action release shrinks it for
+//! the holders that remain, so the ceiling tracks sharing instead of being
+//! fixed at whatever the first job happened to need. The teardown backstop
+//! release resizes nothing; the next setup converges it.
+
+use std::num::NonZeroU32;
+use std::path::{Path, PathBuf};
+
+/// Where the job slice's aggregate quota lives once systemd has created it.
+/// The unit is packaged (`debian/velnor-jobs.slice`) with a drop-in that pins
+/// the quota to 95% of the host's online CPUs; that is an *aggregate* ceiling
+/// shared by every slot, so it bounds the machine budget but is never divided
+/// into it twice.
+const JOB_SLICE_CGROUP: &str = "velnor-jobs.slice";
+
+/// Headroom mbx documents for its own default memory budget (85% of physical
+/// memory, "leaving headroom for everything that is not a compiler"). Velnor
+/// has to state the budget explicitly, so it states it with the same headroom
+/// rather than inventing a different one.
+const SCHEDULER_MEMORY_PERCENT: u64 = 85;
+
+/// A fact that was either read from this machine or provably could not be.
+///
+/// The `Unobservable` arm carries why. Nothing in this module converts it into
+/// a number: a caller either has a measurement or has nothing to say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Observation<T> {
+    Observed(T),
+    Unobservable(String),
+}
+
+impl<T> Observation<T> {
+    pub(crate) fn value(&self) -> Option<&T> {
+        match self {
+            Self::Observed(value) => Some(value),
+            Self::Unobservable(_) => None,
+        }
+    }
+}
+
+/// One constraint that was read, kept so the derivation can explain itself in
+/// the job log instead of appearing as an unexplained number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Constraint {
+    pub(crate) source: String,
+    /// Milli-CPUs, so a fractional quota such as 15.2 cores survives.
+    pub(crate) cpu_milli: Option<u64>,
+    pub(crate) memory_bytes: Option<u64>,
+}
+
+/// The machine's capacity as actually constrained, not as advertised.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostBudget {
+    pub(crate) cpu_milli: Observation<u64>,
+    pub(crate) memory_bytes: Observation<u64>,
+    pub(crate) constraints: Vec<Constraint>,
+}
+
+/// The part of [`HostBudget`] that belongs to one runner slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SlotBudget {
+    pub(crate) slots: NonZeroU32,
+    /// Whole CPUs this slot may advertise to integer-only compiler drivers.
+    /// The value is floored and may be zero when the slot has a fractional
+    /// share; zero means no integer concurrency claim is emitted.
+    pub(crate) cpus: Observation<u64>,
+    /// Fractional CPU share for Docker, in milli-CPUs. Unlike `cpus`, this may
+    /// be below one: Docker accepts `--cpus 0.5`, while Cargo still needs an
+    /// integer `CARGO_BUILD_JOBS` value.
+    pub(crate) docker_cpu_milli: Observation<u64>,
+    pub(crate) memory_bytes: Observation<u64>,
+    pub(crate) host: HostBudget,
+}
+
+impl HostBudget {
+    /// Read the budget from a filesystem root.
+    ///
+    /// `root` is `/` in production and a synthetic tree in tests. `parallelism`
+    /// is `std::thread::available_parallelism`, injected so the derivation is
+    /// testable without owning the machine it runs on.
+    pub(crate) fn observe(root: &Path, parallelism: Option<u32>) -> Self {
+        let mut constraints = Vec::new();
+
+        if let Some(cpus) = parallelism {
+            constraints.push(Constraint {
+                source: "available_parallelism".to_owned(),
+                cpu_milli: Some(u64::from(cpus) * 1000),
+                memory_bytes: None,
+            });
+        }
+
+        if let Some((total, source)) = read_host_memory_bytes(root) {
+            constraints.push(Constraint {
+                source: source.to_owned(),
+                cpu_milli: None,
+                memory_bytes: Some(total),
+            });
+        }
+
+        // Every cgroup between the v2 root and this process can carry a quota,
+        // and the effective limit is the tightest of them. Reading only the
+        // leaf is how a container-hosted daemon ends up believing it owns the
+        // host.
+        for cgroup in self_cgroup_chain(root) {
+            constraints.extend(read_cgroup_constraints(root, &cgroup));
+        }
+
+        // The job slice is the aggregate ceiling every job container lives
+        // under, whether or not this process is inside it.
+        constraints.extend(read_cgroup_constraints(
+            root,
+            &PathBuf::from(JOB_SLICE_CGROUP),
+        ));
+
+        let cpu_milli = min_constraint(&constraints, |constraint| constraint.cpu_milli).map_or_else(
+            || {
+                Observation::Unobservable(
+                    "no CPU capacity source could be read (available_parallelism, cgroup cpu.max, cpuset.cpus.effective)"
+                        .to_owned(),
+                )
+            },
+            Observation::Observed,
+        );
+        let memory_bytes = min_constraint(&constraints, |constraint| constraint.memory_bytes)
+            .map_or_else(
+                || {
+                    Observation::Unobservable(
+                        "no memory capacity source could be read (/proc/meminfo, sysctl hw.memsize, cgroup memory.max)".to_owned(),
+                    )
+                },
+                Observation::Observed,
+            );
+
+        Self {
+            cpu_milli,
+            memory_bytes,
+            constraints,
+        }
+    }
+
+    /// Observe the budget of the host this process is running on.
+    pub(crate) fn observe_host() -> Self {
+        #[cfg(test)]
+        #[allow(
+            clippy::unwrap_used,
+            clippy::expect_used,
+            clippy::panic,
+            clippy::unreachable,
+            clippy::todo,
+            clippy::unimplemented,
+            reason = "tests may panic"
+        )]
+        if let Some((root, parallelism)) = TEST_BUDGET_SOURCE.with(|slot| slot.borrow().clone()) {
+            return Self::observe(&root, parallelism);
+        }
+        let parallelism = std::thread::available_parallelism()
+            .ok()
+            .and_then(|value| u32::try_from(value.get()).ok());
+        Self::observe(Path::new("/"), parallelism)
+    }
+
+    /// Divide the budget between `slots`.
+    ///
+    /// This is the whole point of the type: the slice quota is an aggregate,
+    /// so a slot gets `budget / slots`, not `budget`. Keep the fractional share
+    /// for Docker, and floor only the separate compiler-job count.
+    pub(crate) fn per_slot(&self, slots: NonZeroU32) -> SlotBudget {
+        let docker_cpu_milli = match &self.cpu_milli {
+            Observation::Observed(milli) => Observation::Observed(milli / u64::from(slots.get())),
+            Observation::Unobservable(reason) => Observation::Unobservable(reason.clone()),
+        };
+        let cpus = match &docker_cpu_milli {
+            Observation::Observed(milli) => {
+                let share = milli / 1000;
+                Observation::Observed(share)
+            }
+            Observation::Unobservable(reason) => Observation::Unobservable(reason.clone()),
+        };
+        let memory_bytes = match &self.memory_bytes {
+            Observation::Observed(bytes) => Observation::Observed(
+                bytes / 100 * SCHEDULER_MEMORY_PERCENT / u64::from(slots.get()),
+            ),
+            Observation::Unobservable(reason) => Observation::Unobservable(reason.clone()),
+        };
+        SlotBudget {
+            slots,
+            cpus,
+            docker_cpu_milli,
+            memory_bytes,
+            host: self.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_BUDGET_SOURCE: std::cell::RefCell<Option<(PathBuf, Option<u32>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Pin [`HostBudget::observe_host`] to a synthetic tree for the current test
+/// thread, so executor argv tests assert exact derived ceilings instead of
+/// recomputing them from the machine they happen to run on. Holding the
+/// guard pins; dropping it unpins, including on unwind. Thread-local, so
+/// parallel tests on other threads keep observing the real host — but a
+/// test that observes from a spawned thread observes the host, not the pin.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
+pub(crate) struct TestBudgetGuard {
+    _sealed: (),
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
+impl TestBudgetGuard {
+    pub(crate) fn pin(root: &Path, parallelism: Option<u32>) -> Self {
+        TEST_BUDGET_SOURCE.with(|slot| {
+            *slot.borrow_mut() = Some((root.to_path_buf(), parallelism));
+        });
+        Self { _sealed: () }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
+impl Drop for TestBudgetGuard {
+    fn drop(&mut self) {
+        TEST_BUDGET_SOURCE.with(|slot| slot.borrow_mut().take());
+    }
+}
+
+impl SlotBudget {
+    /// Cap the slot's share by a limit the operator already set on the job
+    /// container (`--cpus`, from `VELNOR_JOB_CPUS`). An explicit operator
+    /// limit is policy and is never widened; it only ever narrows the share.
+    pub(crate) fn capped_by_container_cpus(mut self, container_cpus: Option<f64>) -> Self {
+        let Some(container_cpus) = container_cpus else {
+            return self;
+        };
+        let Some(cap_milli) = cpu_milli_from_cpus(container_cpus) else {
+            return self;
+        };
+        if let Observation::Observed(cpus) = &mut self.docker_cpu_milli {
+            *cpus = (*cpus).min(cap_milli);
+        }
+        if let Observation::Observed(cpus) = &mut self.cpus {
+            *cpus = (*cpus).min(cap_milli / 1000);
+        }
+        self
+    }
+
+    /// `--cpus` for this job's container, when the budget is known.
+    ///
+    /// Without it the container inherits the whole aggregate slice quota, so
+    /// four slots each believe they may use 95% of the host.
+    pub(crate) fn docker_cpu_option(&self) -> Option<[String; 2]> {
+        self.docker_cpu_milli
+            .value()
+            .filter(|milli| **milli > 0)
+            .map(|milli| ["--cpus".to_owned(), format_cpu_milli(*milli)])
+    }
+
+    /// `--memory` for this job's container, when the budget is known.
+    ///
+    /// The environment value below sizes mbx, but it cannot stop a compiler,
+    /// linker, service, or nested Docker container from consuming the whole
+    /// aggregate cgroup. Keep the Docker limit in exact bytes so rounding
+    /// never widens the slot's share.
+    pub(crate) fn docker_memory_option(&self) -> Option<[String; 2]> {
+        self.memory_bytes
+            .value()
+            .filter(|bytes| **bytes > 0)
+            .map(|bytes| ["--memory".to_owned(), bytes.to_string()])
+    }
+
+    /// The environment that makes the budget real inside the job.
+    ///
+    /// * `CARGO_BUILD_JOBS` is Cargo's own job cap, and mbx documents it as the
+    ///   way to cap how many weighted permits one build holds without shrinking
+    ///   the machine-wide pool other builds share.
+    /// * `MAKEFLAGS` carries the same number to the `make` invoked by `-sys`
+    ///   build scripts, which otherwise pick their own `-j`.
+    /// * `MBX_SCHEDULER_CPUS` / `MBX_SCHEDULER_MEMORY` are mbx's documented
+    ///   environment contract for its scheduler pool (`crates/mbx/src/config.rs`
+    ///   in `jdx/mr-boxington`, v1.8.3, the version this image pins). Their
+    ///   defaults are "logical CPUs" and "85% of physical memory", neither of
+    ///   which sees the slice quota, so both are stated explicitly.
+    pub(crate) fn job_env(&self) -> Vec<(String, String)> {
+        let mut env = Vec::new();
+        if let Some(cpus) = self.cpus.value().filter(|cpus| **cpus > 0) {
+            env.push(("CARGO_BUILD_JOBS".to_owned(), cpus.to_string()));
+            env.push(("MAKEFLAGS".to_owned(), format!("-j{cpus}")));
+            env.push(("MBX_SCHEDULER_CPUS".to_owned(), cpus.to_string()));
+        }
+        if let Some(bytes) = self.memory_bytes.value() {
+            let mib = (bytes / (1024 * 1024)).max(1);
+            env.push(("MBX_SCHEDULER_MEMORY".to_owned(), format!("{mib}MiB")));
+        }
+        env
+    }
+
+    /// This job's own BuildKit entitlement: its slot share narrowed by its
+    /// own declared limits, uncapped and unmultiplied. `declared_memory` is
+    /// the tightest explicit operator/workflow `--memory` limit, if any; it
+    /// narrows this job's entitlement the same way it narrows its job
+    /// container, never widens it. (Declared `--cpus` needs no parameter:
+    /// [`Self::capped_by_container_cpus`] already narrowed this share before
+    /// sizing.) Recorded in the claim file at claim time, so the daemon
+    /// ceiling is summed from what each holder measured for itself instead
+    /// of multiplying one job's limits across strangers. A zero or
+    /// unobservable share entitles nothing — a daemon ceiling of zero would
+    /// refuse to run, and an invented ceiling is the defect this module
+    /// exists to remove.
+    pub(crate) fn own_buildkit_entitlement(&self, declared_memory: Option<u64>) -> BuildkitSize {
+        let cpu_milli = self
+            .docker_cpu_milli
+            .value()
+            .copied()
+            .filter(|milli| *milli > 0);
+        let memory_bytes = self
+            .memory_bytes
+            .value()
+            .copied()
+            .map(|share| match declared_memory {
+                Some(declared) => share.min(declared),
+                None => share,
+            })
+            .filter(|bytes| *bytes > 0);
+        BuildkitSize {
+            cpu_milli,
+            memory_bytes,
+        }
+    }
+
+    /// CPU/memory ceiling for one shared buildkitd doing the compiling for
+    /// its current holders: the sum of their recorded
+    /// [`Self::own_buildkit_entitlement`] values, capped at the host budget
+    /// (host CPU, scheduler memory pool). A holder whose dimension is
+    /// unknown — unobservable at its claim time, or recorded before
+    /// entitlements were tracked — contributes nothing in that dimension; a
+    /// dimension with no known contribution sizes nothing, and the caller
+    /// falls back to the static operator policy for it. An unobservable
+    /// host budget sizes nothing at all: an uncapped sum is an invented
+    /// ceiling. Observability is host-wide in practice, so mixed
+    /// known/unknown holders only meet across an upgrade window or a
+    /// mid-run observability flap.
+    pub(crate) fn buildkit_size_summed(&self, entitlements: &[BuildkitSize]) -> BuildkitSize {
+        let mut cpu_sum = 0u64;
+        let mut cpu_known = false;
+        let mut memory_sum = 0u64;
+        let mut memory_known = false;
+        for entitlement in entitlements {
+            if let Some(milli) = entitlement.cpu_milli {
+                cpu_sum = cpu_sum.saturating_add(milli);
+                cpu_known = true;
+            }
+            if let Some(bytes) = entitlement.memory_bytes {
+                memory_sum = memory_sum.saturating_add(bytes);
+                memory_known = true;
+            }
+        }
+        let cpu_milli = match (&self.host.cpu_milli, cpu_known) {
+            (Observation::Observed(host), true) => {
+                let sized = cpu_sum.min(*host);
+                (sized > 0).then_some(sized)
+            }
+            _ => None,
+        };
+        let memory_bytes = match (&self.host.memory_bytes, memory_known) {
+            (Observation::Observed(host), true) => {
+                // The pool every slot divides; summed slot shares land back
+                // here (modulo the floor), so the cap only ever binds a
+                // holder set the slot model cannot explain.
+                let pool = host / 100 * SCHEDULER_MEMORY_PERCENT;
+                let sized = memory_sum.min(pool);
+                (sized > 0).then_some(sized)
+            }
+            _ => None,
+        };
+        BuildkitSize {
+            cpu_milli,
+            memory_bytes,
+        }
+    }
+
+    /// One line explaining the budget, its division, and any workflow value it
+    /// overrode. Silent resource policy is indistinguishable from a bug, so
+    /// this is meant to be printed, not inspected.
+    pub(crate) fn notice(&self, overridden: &[String]) -> String {
+        let cpus = match &self.cpus {
+            Observation::Observed(cpus) => format!("{cpus} CPU(s)"),
+            Observation::Unobservable(reason) => format!("unobservable ({reason})"),
+        };
+        let memory = match &self.memory_bytes {
+            Observation::Observed(bytes) => format!("{}MiB", bytes / (1024 * 1024)),
+            Observation::Unobservable(reason) => format!("unobservable ({reason})"),
+        };
+        let docker_cpus = match &self.docker_cpu_milli {
+            Observation::Observed(milli) if *milli > 0 => format_cpu_milli(*milli),
+            Observation::Observed(_) => "0".to_owned(),
+            Observation::Unobservable(reason) => format!("unobservable ({reason})"),
+        };
+        let host = match &self.host.cpu_milli {
+            Observation::Observed(milli) => {
+                format!("{}.{} CPU(s)", milli / 1000, milli % 1000 / 100)
+            }
+            Observation::Unobservable(reason) => format!("unobservable ({reason})"),
+        };
+        let sources = self
+            .host
+            .constraints
+            .iter()
+            .map(|constraint| constraint.source.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut notice = format!(
+            "velnor: host budget {host} from [{sources}]; {} slot(s); this job gets {cpus} compiler job(s), Docker cap {docker_cpus} CPU(s), and {memory}",
+            self.slots
+        );
+        if !overridden.is_empty() {
+            notice.push_str(&format!(
+                "; daemon budget overrides workflow-set {}",
+                overridden.join(", ")
+            ));
+        }
+        notice
+    }
+}
+
+/// CPU/memory ceiling for one shared buildkitd, derived from summed
+/// holder entitlements by [`SlotBudget::buildkit_size_summed`]. `None` is
+/// "this dimension is unknown": the caller sizes nothing there rather than
+/// guessing. The same shape records one holder's own
+/// [`SlotBudget::own_buildkit_entitlement`] in the claim file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BuildkitSize {
+    pub(crate) cpu_milli: Option<u64>,
+    pub(crate) memory_bytes: Option<u64>,
+}
+
+impl BuildkitSize {
+    /// True when neither dimension is known: there is no derived ceiling at
+    /// all, and the caller falls back to the static operator policy.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.cpu_milli.is_none() && self.memory_bytes.is_none()
+    }
+
+    /// Fill unknown dimensions from the static operator policy, so partial
+    /// observability degrades per dimension: a known derived ceiling always
+    /// wins, and only the unknown dimension inherits the static value. The
+    /// caller parses the static `resource_options` spelling; `None` there
+    /// means undeclared, and the dimension stays unknown.
+    pub(crate) fn with_fallback(&self, cpu_milli: Option<u64>, memory_bytes: Option<u64>) -> Self {
+        Self {
+            cpu_milli: self.cpu_milli.or(cpu_milli),
+            memory_bytes: self.memory_bytes.or(memory_bytes),
+        }
+    }
+
+    /// Render as docker-container `--driver-opt` entries: the cgroup v1
+    /// `cpu-period`/`cpu-quota` pair buildx documents for CPU, exact bytes
+    /// for memory so rounding never widens the share.
+    pub(crate) fn driver_opts(&self) -> Vec<String> {
+        let mut opts = Vec::new();
+        if let Some(milli) = self.cpu_milli.filter(|milli| *milli > 0) {
+            opts.push("cpu-period=100000".to_owned());
+            opts.push(format!("cpu-quota={}", milli.saturating_mul(100)));
+        }
+        if let Some(bytes) = self.memory_bytes.filter(|bytes| *bytes > 0) {
+            opts.push(format!("memory={bytes}"));
+        }
+        opts
+    }
+}
+
+/// Whole `--cpus` decimals as milli-CPUs, floored. Shared with the static
+/// daemon fallback, which parses the same spelling from `resource_options`.
+pub(crate) fn cpu_milli_from_cpus(cpus: f64) -> Option<u64> {
+    if !cpus.is_finite() || cpus <= 0.0 {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let milli = (cpus * 1000.0).floor() as u64;
+    Some(milli)
+}
+
+/// Milli-CPUs as the decimal Docker flags accept (`3800` becomes `3.8`).
+/// Shared with the BuildKit daemon resize, which speaks `docker update`.
+pub(crate) fn format_cpu_milli(milli: u64) -> String {
+    let whole = milli / 1000;
+    let fraction = milli % 1000;
+    if fraction == 0 {
+        return whole.to_string();
+    }
+    let fraction = format!("{fraction:03}").trim_end_matches('0').to_owned();
+    format!("{whole}.{fraction}")
+}
+
+/// Test-only legacy discovery. Production receives the validated slot count
+/// through the typed run/job context; it must not infer topology from paths or
+/// ambient environment.
+///
+/// `slot_dir` is this job's `…/work/slot-N` directory when the daemon runs more
+/// than one slot; every slot is a separate OS process, so the only shared
+/// evidence of how many there are is the set of sibling slot directories under
+/// the daemon work root. `env_hint` is `VELNOR_SLOTS`, which the packaged units
+/// pass to `--slots`. The larger of the two wins, because a slot whose
+/// directory has not been created yet still competes for the machine.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
+pub(crate) fn observe_slots(
+    slot_dir: Option<&Path>,
+    env_hint: Option<&str>,
+) -> Observation<NonZeroU32> {
+    let from_hint = env_hint
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .and_then(NonZeroU32::new);
+    let from_dirs = slot_dir.and_then(count_sibling_slots);
+    match (from_dirs, from_hint) {
+        (Some(dirs), Some(hint)) => Observation::Observed(dirs.max(hint)),
+        (Some(dirs), None) => Observation::Observed(dirs),
+        (None, Some(hint)) => Observation::Observed(hint),
+        // A daemon running one slot does not create a `slot-N` directory at
+        // all, so "no slot directory and no hint" is a single slot, observed.
+        (None, None) if slot_dir.is_none() => Observation::Observed(NonZeroU32::MIN),
+        (None, None) => {
+            Observation::Unobservable("no sibling slot directories and no VELNOR_SLOTS".to_owned())
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
+fn count_sibling_slots(slot_dir: &Path) -> Option<NonZeroU32> {
+    if !is_slot_dir_name(slot_dir) {
+        return None;
+    }
+    let parent = slot_dir.parent()?;
+    let mut count = 0u32;
+    for entry in std::fs::read_dir(parent).ok()? {
+        let Ok(entry) = entry else { continue };
+        if is_slot_dir_name(&entry.path()) && entry.path().is_dir() {
+            count = count.saturating_add(1);
+        }
+    }
+    NonZeroU32::new(count)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
+fn is_slot_dir_name(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("slot-"))
+        .is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
+fn min_constraint(
+    constraints: &[Constraint],
+    pick: impl Fn(&Constraint) -> Option<u64>,
+) -> Option<u64> {
+    constraints.iter().filter_map(pick).min()
+}
+
+/// The cgroup v2 path of this process and every ancestor up to the root.
+fn self_cgroup_chain(root: &Path) -> Vec<PathBuf> {
+    let Ok(content) = std::fs::read_to_string(root.join("proc/self/cgroup")) else {
+        return Vec::new();
+    };
+    // cgroup v2 has exactly one unified line, `0::<path>`.
+    let Some(path) = content
+        .lines()
+        .find_map(|line| line.strip_prefix("0::").map(str::trim))
+    else {
+        return Vec::new();
+    };
+    let mut chain = Vec::new();
+    let mut current = PathBuf::new();
+    chain.push(current.clone());
+    for segment in path.split('/').filter(|segment| !segment.is_empty()) {
+        current = current.join(segment);
+        chain.push(current.clone());
+    }
+    chain
+}
+
+fn read_cgroup_constraints(root: &Path, cgroup: &Path) -> Vec<Constraint> {
+    let dir = root.join("sys/fs/cgroup").join(cgroup);
+    let label = if cgroup.as_os_str().is_empty() {
+        "/".to_owned()
+    } else {
+        format!("/{}", cgroup.display())
+    };
+    let mut constraints = Vec::new();
+
+    if let Some(milli) = read_trimmed(&dir.join("cpu.max")).and_then(|value| parse_cpu_max(&value))
+    {
+        constraints.push(Constraint {
+            source: format!("cgroup {label} cpu.max"),
+            cpu_milli: Some(milli),
+            memory_bytes: None,
+        });
+    }
+    if let Some(count) =
+        read_trimmed(&dir.join("cpuset.cpus.effective")).and_then(|value| parse_cpu_list(&value))
+    {
+        constraints.push(Constraint {
+            source: format!("cgroup {label} cpuset.cpus.effective"),
+            cpu_milli: Some(u64::from(count) * 1000),
+            memory_bytes: None,
+        });
+    }
+    if let Some(bytes) =
+        read_trimmed(&dir.join("memory.max")).and_then(|value| value.parse::<u64>().ok())
+    {
+        constraints.push(Constraint {
+            source: format!("cgroup {label} memory.max"),
+            cpu_milli: None,
+            memory_bytes: Some(bytes),
+        });
+    }
+    constraints
+}
+
+fn read_trimmed(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_owned())
+}
+
+/// `cpu.max` is `<quota> <period>` in microseconds, or `max <period>`.
+fn parse_cpu_max(value: &str) -> Option<u64> {
+    let mut fields = value.split_whitespace();
+    let quota = fields.next()?;
+    if quota == "max" {
+        return None;
+    }
+    let quota = quota.parse::<u64>().ok()?;
+    let period = fields.next().unwrap_or("100000").parse::<u64>().ok()?;
+    if period == 0 {
+        return None;
+    }
+    Some(quota.checked_mul(1000)? / period)
+}
+
+/// `cpuset.cpus.effective` is a comma-separated list of ids and inclusive
+/// ranges, e.g. `0-3,8,12-13`. An empty value means "inherit", not "none".
+fn parse_cpu_list(value: &str) -> Option<u32> {
+    if value.is_empty() {
+        return None;
+    }
+    let mut count = 0u32;
+    for part in value.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let range = match part.split_once('-') {
+            Some((start, end)) => {
+                let start = start.parse::<u32>().ok()?;
+                let end = end.parse::<u32>().ok()?;
+                if end < start {
+                    return None;
+                }
+                end - start + 1
+            }
+            None => {
+                part.parse::<u32>().ok()?;
+                1
+            }
+        };
+        count = count.checked_add(range)?;
+    }
+    (count > 0).then_some(count)
+}
+
+fn read_host_memory_bytes(root: &Path) -> Option<(u64, &'static str)> {
+    if let Some(total) = read_mem_total_bytes(root) {
+        return Some((total, "/proc/meminfo MemTotal"));
+    }
+    if let Some(total) = read_sysctl_memsize_file(root) {
+        return Some((total, "sysctl hw.memsize"));
+    }
+    #[cfg(target_os = "macos")]
+    if root == Path::new("/")
+        && let Some(total) = read_macos_memsize()
+    {
+        return Some((total, "sysctl hw.memsize"));
+    }
+    None
+}
+
+fn read_mem_total_bytes(root: &Path) -> Option<u64> {
+    let content = std::fs::read_to_string(root.join("proc/meminfo")).ok()?;
+    let line = content.lines().find(|line| line.starts_with("MemTotal:"))?;
+    let kib = line.split_whitespace().nth(1)?.parse::<u64>().ok()?;
+    kib.checked_mul(1024)
+}
+
+/// Synthetic-root equivalent of `sysctl -n hw.memsize`. Keeping the probe as
+/// a file makes the platform branch testable without replacing the process's
+/// environment or executing a host command from budget derivation.
+fn read_sysctl_memsize_file(root: &Path) -> Option<u64> {
+    read_trimmed(&root.join("sysctl/hw.memsize"))?
+        .parse::<u64>()
+        .ok()
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_memsize() -> Option<u64> {
+    let mut value = 0_u64;
+    let mut length = std::mem::size_of::<u64>();
+    let name = b"hw.memsize\0";
+    // SAFETY: `name` is a nul-terminated sysctl name, `value` and `length`
+    // are valid writable buffers of the advertised size, and no new value is
+    // supplied.
+    let result = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr().cast(),
+            (&mut value as *mut u64).cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (result == 0 && length == std::mem::size_of::<u64>() && value > 0).then_some(value)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn write(root: &Path, relative: &str, content: &str) {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+
+    /// A throwaway filesystem root holding synthetic `/proc` and
+    /// `/sys/fs/cgroup` inputs. The crate's other unit tests build temp trees
+    /// the same way rather than taking a dependency for it.
+    struct SyntheticRoot(PathBuf);
+
+    impl SyntheticRoot {
+        fn new(label: &str) -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let nonce = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "velnor-host-budget-{label}-{}-{nonce}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for SyntheticRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn quota_smaller_than_the_core_count_wins() {
+        let root = SyntheticRoot::new("quota_smaller_than_the_core_count_wins");
+        write(root.path(), "proc/self/cgroup", "0::/velnor.slice/daemon\n");
+        // Four CPUs of quota on a sixteen-CPU machine.
+        write(
+            root.path(),
+            "sys/fs/cgroup/velnor.slice/daemon/cpu.max",
+            "400000 100000\n",
+        );
+        let budget = HostBudget::observe(root.path(), Some(16));
+        assert_eq!(budget.cpu_milli, Observation::Observed(4000));
+    }
+
+    #[test]
+    fn a_cpuset_narrower_than_the_quota_wins() {
+        let root = SyntheticRoot::new("a_cpuset_narrower_than_the_quota_wins");
+        write(root.path(), "proc/self/cgroup", "0::/jobs\n");
+        write(root.path(), "sys/fs/cgroup/jobs/cpu.max", "800000 100000\n");
+        write(
+            root.path(),
+            "sys/fs/cgroup/jobs/cpuset.cpus.effective",
+            "0-1\n",
+        );
+        let budget = HostBudget::observe(root.path(), Some(16));
+        assert_eq!(budget.cpu_milli, Observation::Observed(2000));
+    }
+
+    #[test]
+    fn an_ancestor_quota_is_not_missed() {
+        let root = SyntheticRoot::new("an_ancestor_quota_is_not_missed");
+        write(root.path(), "proc/self/cgroup", "0::/outer/inner\n");
+        write(
+            root.path(),
+            "sys/fs/cgroup/outer/cpu.max",
+            "200000 100000\n",
+        );
+        write(
+            root.path(),
+            "sys/fs/cgroup/outer/inner/cpu.max",
+            "max 100000\n",
+        );
+        let budget = HostBudget::observe(root.path(), Some(64));
+        assert_eq!(budget.cpu_milli, Observation::Observed(2000));
+    }
+
+    #[test]
+    fn the_job_slice_quota_bounds_the_machine() {
+        let root = SyntheticRoot::new("the_job_slice_quota_bounds_the_machine");
+        // 95% of sixteen CPUs, exactly what the packaged drop-in installs.
+        write(
+            root.path(),
+            "sys/fs/cgroup/velnor-jobs.slice/cpu.max",
+            "1520000 100000\n",
+        );
+        let budget = HostBudget::observe(root.path(), Some(16));
+        assert_eq!(budget.cpu_milli, Observation::Observed(15_200));
+    }
+
+    #[test]
+    fn an_unobservable_value_says_so_instead_of_guessing() {
+        let root = SyntheticRoot::new("an_unobservable_value_says_so_instead_of_guessing");
+        let budget = HostBudget::observe(root.path(), None);
+        assert!(
+            matches!(budget.cpu_milli, Observation::Unobservable(ref reason) if !reason.is_empty())
+        );
+        assert!(matches!(budget.memory_bytes, Observation::Unobservable(_)));
+        // And nothing downstream invents a number from it.
+        let slot = budget.per_slot(NonZeroU32::new(4).unwrap());
+        assert!(slot.docker_cpu_option().is_none());
+        assert!(slot.job_env().is_empty());
+        assert!(slot.notice(&[]).contains("unobservable"));
+    }
+
+    #[test]
+    fn memory_takes_the_tightest_of_meminfo_and_cgroup() {
+        let root = SyntheticRoot::new("memory_takes_the_tightest_of_meminfo_and_cgroup");
+        write(root.path(), "proc/meminfo", "MemTotal:       16777216 kB\n");
+        write(root.path(), "proc/self/cgroup", "0::/jobs\n");
+        write(
+            root.path(),
+            "sys/fs/cgroup/jobs/memory.max",
+            &format!("{}\n", 4u64 * 1024 * 1024 * 1024),
+        );
+        let budget = HostBudget::observe(root.path(), Some(4));
+        assert_eq!(
+            budget.memory_bytes,
+            Observation::Observed(4 * 1024 * 1024 * 1024)
+        );
+    }
+
+    #[test]
+    fn macos_sysctl_memory_source_fills_the_host_budget_without_proc() {
+        let root = SyntheticRoot::new("macos_sysctl_memory_source");
+        write(root.path(), "sysctl/hw.memsize", "17179869184\n");
+        let budget = HostBudget::observe(root.path(), Some(8));
+        assert_eq!(
+            budget.memory_bytes,
+            Observation::Observed(16 * 1024 * 1024 * 1024)
+        );
+        assert!(budget
+            .constraints
+            .iter()
+            .any(|constraint| constraint.source == "sysctl hw.memsize"));
+    }
+
+    #[test]
+    fn slots_divide_the_budget_instead_of_each_claiming_the_host() {
+        let root = SyntheticRoot::new("slots_divide_the_budget_instead_of_each_claiming_the_host");
+        write(
+            root.path(),
+            "sys/fs/cgroup/velnor-jobs.slice/cpu.max",
+            "1520000 100000\n",
+        );
+        let budget = HostBudget::observe(root.path(), Some(16));
+        let host_milli = *budget.cpu_milli.value().unwrap();
+
+        let slots = NonZeroU32::new(4).unwrap();
+        let slot = budget.per_slot(slots);
+        let share = *slot.docker_cpu_milli.value().unwrap();
+
+        assert_eq!(share, 3800, "15.2 cores over four slots is 3.8 CPUs");
+        assert!(
+            share * u64::from(slots.get()) <= host_milli,
+            "four slots must fit inside the budget, not claim it four times"
+        );
+        assert_ne!(
+            share, host_milli,
+            "a slot must not be handed the whole machine"
+        );
+        assert_eq!(
+            slot.job_env(),
+            vec![
+                ("CARGO_BUILD_JOBS".to_owned(), "3".to_owned()),
+                ("MAKEFLAGS".to_owned(), "-j3".to_owned()),
+                ("MBX_SCHEDULER_CPUS".to_owned(), "3".to_owned()),
+            ]
+        );
+        assert_eq!(
+            slot.docker_cpu_option(),
+            Some(["--cpus".to_owned(), "3.8".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_single_slot_keeps_the_whole_budget() {
+        let root = SyntheticRoot::new("a_single_slot_keeps_the_whole_budget");
+        write(
+            root.path(),
+            "sys/fs/cgroup/velnor-jobs.slice/cpu.max",
+            "1520000 100000\n",
+        );
+        let budget = HostBudget::observe(root.path(), Some(16));
+        let slot = budget.per_slot(NonZeroU32::MIN);
+        assert_eq!(slot.cpus, Observation::Observed(15));
+        assert_eq!(slot.docker_cpu_milli, Observation::Observed(15_200));
+        assert_eq!(
+            slot.docker_cpu_option(),
+            Some(["--cpus".to_owned(), "15.2".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_sub_cpu_slot_does_not_advertise_integer_capacity() {
+        let root = SyntheticRoot::new("a_sub_cpu_slot_keeps_one_compiler_job");
+        write(
+            root.path(),
+            "sys/fs/cgroup/velnor-jobs.slice/cpu.max",
+            "200000 100000\n",
+        );
+        let budget = HostBudget::observe(root.path(), Some(2));
+        let slots = NonZeroU32::new(4).unwrap();
+        let slot = budget.per_slot(slots);
+        assert_eq!(slot.cpus, Observation::Observed(0));
+        assert_eq!(slot.docker_cpu_milli, Observation::Observed(500));
+        assert!(slot.job_env().is_empty());
+        assert_eq!(
+            slot.docker_cpu_option(),
+            Some(["--cpus".to_owned(), "0.5".to_owned()])
+        );
+        assert!(
+            500 * u64::from(slots.get()) <= 2000,
+            "fractional slot caps must fit in 2 CPUs"
+        );
+    }
+
+    #[test]
+    fn an_operator_container_cap_narrows_but_never_widens_the_share() {
+        let root =
+            SyntheticRoot::new("an_operator_container_cap_narrows_but_never_widens_the_share");
+        write(
+            root.path(),
+            "sys/fs/cgroup/velnor-jobs.slice/cpu.max",
+            "1600000 100000\n",
+        );
+        let budget = HostBudget::observe(root.path(), Some(16));
+        let slot = budget.per_slot(NonZeroU32::new(2).unwrap());
+        assert_eq!(slot.cpus, Observation::Observed(8));
+
+        let narrowed = slot.clone().capped_by_container_cpus(Some(2.0));
+        assert_eq!(narrowed.cpus, Observation::Observed(2));
+        assert_eq!(narrowed.docker_cpu_milli, Observation::Observed(2000));
+        assert_eq!(
+            narrowed.docker_cpu_option(),
+            Some(["--cpus".to_owned(), "2".to_owned()])
+        );
+
+        let fractional = slot.clone().capped_by_container_cpus(Some(0.5));
+        assert_eq!(fractional.cpus, Observation::Observed(0));
+        assert_eq!(fractional.docker_cpu_milli, Observation::Observed(500));
+        assert!(fractional.job_env().is_empty());
+        assert_eq!(
+            fractional.docker_cpu_option(),
+            Some(["--cpus".to_owned(), "0.5".to_owned()])
+        );
+
+        let widened = slot.capped_by_container_cpus(Some(64.0));
+        assert_eq!(widened.cpus, Observation::Observed(8));
+        assert_eq!(widened.docker_cpu_milli, Observation::Observed(8000));
+    }
+
+    #[test]
+    fn memory_share_is_stated_in_mbx_units() {
+        let root = SyntheticRoot::new("memory_share_is_stated_in_mbx_units");
+        write(root.path(), "proc/meminfo", "MemTotal:       16777216 kB\n");
+        let budget = HostBudget::observe(root.path(), Some(8));
+        let slot = budget.per_slot(NonZeroU32::new(4).unwrap());
+        // 16GiB * 85% / 4 slots = 3481MiB.
+        assert_eq!(
+            slot.job_env()
+                .into_iter()
+                .find(|(name, _)| name == "MBX_SCHEDULER_MEMORY"),
+            Some(("MBX_SCHEDULER_MEMORY".to_owned(), "3481MiB".to_owned()))
+        );
+    }
+
+    #[test]
+    fn memory_share_has_an_exact_docker_limit() {
+        let root = SyntheticRoot::new("memory_share_has_an_exact_docker_limit");
+        write(root.path(), "proc/meminfo", "MemTotal:       16777216 kB\n");
+        let budget = HostBudget::observe(root.path(), Some(8));
+        let slot = budget.per_slot(NonZeroU32::new(4).unwrap());
+        let expected = (16_777_216_u64 * 1024 / 100 * 85) / 4;
+        assert_eq!(
+            slot.docker_memory_option(),
+            Some(["--memory".to_owned(), expected.to_string()])
+        );
+    }
+
+    #[test]
+    fn slot_count_comes_from_sibling_directories() {
+        let work = SyntheticRoot::new("slot_count_comes_from_sibling_directories");
+        for index in 1..=4 {
+            fs::create_dir_all(work.path().join(format!("slot-{index}"))).unwrap();
+        }
+        fs::create_dir_all(work.path().join("_velnor_mbx")).unwrap();
+        let observed = observe_slots(Some(&work.path().join("slot-2")), None);
+        assert_eq!(observed.value().unwrap().get(), 4);
+    }
+
+    #[test]
+    fn a_slot_directory_that_does_not_exist_yet_still_counts_via_the_hint() {
+        let work = SyntheticRoot::new(
+            "a_slot_directory_that_does_not_exist_yet_still_counts_via_the_hint",
+        );
+        fs::create_dir_all(work.path().join("slot-1")).unwrap();
+        let observed = observe_slots(Some(&work.path().join("slot-1")), Some("4"));
+        assert_eq!(observed.value().unwrap().get(), 4);
+    }
+
+    #[test]
+    fn no_slot_directory_is_one_slot() {
+        assert_eq!(observe_slots(None, None).value().unwrap().get(), 1);
+    }
+
+    #[test]
+    fn cpu_list_parsing_covers_ranges_and_singletons() {
+        assert_eq!(parse_cpu_list("0-3,8,12-13"), Some(7));
+        assert_eq!(parse_cpu_list("5"), Some(1));
+        assert_eq!(parse_cpu_list(""), None);
+        assert_eq!(parse_cpu_list("3-1"), None);
+    }
+
+    #[test]
+    fn cpu_max_parsing_handles_max_and_fractions() {
+        assert_eq!(parse_cpu_max("max 100000"), None);
+        assert_eq!(parse_cpu_max("50000 100000"), Some(500));
+        assert_eq!(parse_cpu_max("1520000 100000"), Some(15_200));
+    }
+
+    /// 16 CPUs and 16 GiB with a 4-slot daemon: the tree every BuildKit
+    /// sizing test shares.
+    fn sixteen_cpu_four_slot_tree(label: &str) -> (SyntheticRoot, SlotBudget) {
+        let root = SyntheticRoot::new(label);
+        write(root.path(), "proc/meminfo", "MemTotal:       16777216 kB\n");
+        write(
+            root.path(),
+            "sys/fs/cgroup/velnor-jobs.slice/cpu.max",
+            "1600000 100000\n",
+        );
+        let budget = HostBudget::observe(root.path(), Some(16));
+        let slot = budget.per_slot(NonZeroU32::new(4).unwrap());
+        assert_eq!(slot.docker_cpu_milli, Observation::Observed(4000));
+        (root, slot)
+    }
+
+    #[test]
+    fn a_lone_builder_holder_gets_exactly_its_slot_share() {
+        let (_root, slot) = sixteen_cpu_four_slot_tree("a_lone_builder_holder");
+        let own = slot.own_buildkit_entitlement(None);
+        assert_eq!(own.cpu_milli, Some(4000));
+        let slot_mem = *slot.memory_bytes.value().unwrap();
+        assert_eq!(own.memory_bytes, Some(slot_mem));
+        let size = slot.buildkit_size_summed(std::slice::from_ref(&own));
+        assert_eq!(size, own);
+        assert_eq!(
+            size.driver_opts(),
+            vec![
+                "cpu-period=100000".to_owned(),
+                "cpu-quota=400000".to_owned(),
+                format!("memory={slot_mem}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn shared_builder_size_sums_entitlements_and_stops_at_the_host() {
+        let (_root, slot) = sixteen_cpu_four_slot_tree("shared_builder_sums");
+        let host_mem = *slot.host.memory_bytes.value().unwrap();
+        let pool = host_mem / 100 * 85;
+        let own = slot.own_buildkit_entitlement(None);
+
+        let two = slot.buildkit_size_summed(&[own, own]);
+        assert_eq!(two.cpu_milli, Some(8000));
+        assert_eq!(two.memory_bytes, Some(pool / 4 * 2));
+
+        // All four slots on one builder: the whole machine, which is
+        // correct — the daemon is doing the whole machine's compiling.
+        let four = slot.buildkit_size_summed(&[own, own, own, own]);
+        assert_eq!(four.cpu_milli, Some(16_000));
+        assert_eq!(four.memory_bytes, Some(pool / 4 * 4));
+
+        // A holder set the slot model cannot explain still never exceeds
+        // the host: the caps bind, the sum does not escape.
+        let absurd = slot.buildkit_size_summed(&[own; 64]);
+        assert_eq!(absurd.cpu_milli, Some(16_000));
+        assert_eq!(absurd.memory_bytes, Some(pool));
+    }
+
+    #[test]
+    fn a_declared_limit_narrows_only_its_own_holders_entitlement() {
+        let (_root, slot) = sixteen_cpu_four_slot_tree("declared_narrows_own");
+        let one_gb = 1024 * 1024 * 1024;
+        let slot_mem = *slot.memory_bytes.value().unwrap();
+        // One holder declared 1 GiB, the other declared nothing: the sum is
+        // 1 GiB plus a full share — not the declared limit times two, and
+        // not two full shares.
+        let declared = slot.own_buildkit_entitlement(Some(one_gb));
+        assert_eq!(declared.memory_bytes, Some(one_gb));
+        let open = slot.own_buildkit_entitlement(None);
+        let size = slot.buildkit_size_summed(&[declared, open]);
+        assert_eq!(size.memory_bytes, Some(one_gb + slot_mem));
+        assert_eq!(size.cpu_milli, Some(8000));
+        // A declared limit above the derived share changes nothing.
+        let loose = slot.own_buildkit_entitlement(Some(64 * one_gb));
+        assert_eq!(loose.memory_bytes, Some(slot_mem));
+    }
+
+    #[test]
+    fn unknown_holder_dimensions_contribute_nothing() {
+        let (_root, slot) = sixteen_cpu_four_slot_tree("unknown_contributes_nothing");
+        let own = slot.own_buildkit_entitlement(None);
+        let unknown = BuildkitSize {
+            cpu_milli: None,
+            memory_bytes: None,
+        };
+        // A legacy holder beside a known one: the sum is the known share.
+        let size = slot.buildkit_size_summed(&[own, unknown]);
+        assert_eq!(size, own);
+        // Nobody known: nothing derived, and the caller falls back to the
+        // static operator policy instead of inventing a ceiling.
+        let size = slot.buildkit_size_summed(&[unknown, unknown]);
+        assert!(size.is_empty());
+        assert!(size.driver_opts().is_empty());
+        // Same when the sizing job itself cannot observe the host: an
+        // uncapped sum is an invented ceiling.
+        let root = SyntheticRoot::new("unknown_holder_unobservable_host");
+        let budget = HostBudget::observe(root.path(), None);
+        let slot = budget.per_slot(NonZeroU32::new(4).unwrap());
+        let size = slot.buildkit_size_summed(&[own, own]);
+        assert!(size.is_empty());
+    }
+
+    #[test]
+    fn static_fallback_fills_only_unknown_dimensions() {
+        let derived = BuildkitSize {
+            cpu_milli: Some(4000),
+            memory_bytes: None,
+        };
+        let effective = derived.with_fallback(Some(1000), Some(1024));
+        // Derived CPU wins over the static value; unknown memory inherits it.
+        assert_eq!(
+            effective,
+            BuildkitSize {
+                cpu_milli: Some(4000),
+                memory_bytes: Some(1024),
+            }
+        );
+        let undeclared = derived.with_fallback(None, None);
+        assert_eq!(undeclared, derived);
+    }
+}

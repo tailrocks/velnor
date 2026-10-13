@@ -1,0 +1,59 @@
+# Class contracts — the shared model each repository class executes. This file is
+# DATA. Every class declares the same five ordered gates (install, build, test,
+# lint, format), each with an explicit non-empty command and an explicit
+# applicability, plus whether the class carries a genuinely platform-only gate.
+#
+# Applicability is explicit for every gate; there is no implicit default:
+#   both   — lane-portable: runs on the Velnor lane and the GitHub-hosted lane.
+#   github — platform-only: runs only on the GitHub-hosted lane (e.g. macOS cask
+#            validation). It is NOT run on the Velnor lane and is never
+#            misreported there as an equivalent Velnor check.
+#
+# The code class's standard repository-owned project command is `mise run ci`
+# (see CODE_STANDARD_COMMAND in src/model.rs). Repository-specific work composes
+# beneath that checked-in task; the shared workflow never branches on repository
+# slug. The five gates below decompose that contract into independently
+# attributable required checks with identical names on both lanes.
+
+[code]
+platform_only = false
+install = { command = "mise install --locked", applicability = "both" }
+build = { command = "mise run build", applicability = "both" }
+test = { command = "mise run test", applicability = "both" }
+lint = { command = "mise run lint", applicability = "both" }
+format = { command = "mise run fmt", applicability = "both" }
+
+[tap]
+# Homebrew taps carry a genuinely platform-only gate: macOS cask/bottle
+# validation cannot run on the Linux Velnor lane, so `test` is declared
+# github-only and is legitimately not applicable on the Velnor lane.
+platform_only = true
+install = { command = "mise install --locked", applicability = "both" }
+build = { command = "mise run build", applicability = "both" }
+test = { command = "mise run test", applicability = "github" }
+lint = { command = "mise run lint", applicability = "both" }
+format = { command = "mise run fmt", applicability = "both" }
+
+[apt]
+platform_only = false
+install = { command = "mise install --locked", applicability = "both" }
+build = { command = "mise run build", applicability = "both" }
+test = { command = "mise run test", applicability = "both" }
+lint = { command = "mise run lint", applicability = "both" }
+format = { command = "mise run fmt", applicability = "both" }
+
+[infra]
+platform_only = false
+install = { command = "mise install --locked", applicability = "both" }
+build = { command = "mise run build", applicability = "both" }
+test = { command = "mise run test", applicability = "both" }
+lint = { command = "mise run lint", applicability = "both" }
+format = { command = "mise run fmt", applicability = "both" }
+
+[fixture]
+platform_only = false
+install = { command = "mise install --locked", applicability = "both" }
+build = { command = "mise run build", applicability = "both" }
+test = { command = "mise run test", applicability = "both" }
+lint = { command = "mise run lint", applicability = "both" }
+format = { command = "mise run fmt", applicability = "both" }

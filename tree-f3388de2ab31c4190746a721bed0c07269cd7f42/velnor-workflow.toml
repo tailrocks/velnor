@@ -1,0 +1,11 @@
+schema = 2
+
+[generator]
+repository = "example/action-consumer-fixture"
+
+[[declare]]
+primitive = "github-action-fixtures"
+
+[declare.args]
+consumer_workflows = ["tests/fixtures/github-action-consumer/workflow.yml"]
+

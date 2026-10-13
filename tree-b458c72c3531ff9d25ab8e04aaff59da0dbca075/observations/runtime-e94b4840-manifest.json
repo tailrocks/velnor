@@ -1,0 +1,20 @@
+{
+  "closure": "8f88f2905f853bd9c86b84c1ca308758010270fe5c01a77b2a4eb729824e4999",
+  "revision": "e94b48406c4ed206fce2bbf39b788264e72cf39c",
+  "profile": "release",
+  "features": "",
+  "products": {
+    "Linux-X64": {
+      "binary": "e247f823eaf99ead679c9aa62285b8019a55bfac97d1ecc307a40f477c9debfa",
+      "asset": "velnor-workflow-Linux-X64"
+    },
+    "Linux-ARM64": {
+      "binary": "55b48470de047257b23a7dac14518315e2d54f33dbe69b6ab11fc076167200b5",
+      "asset": "velnor-workflow-Linux-ARM64"
+    },
+    "macOS-ARM64": {
+      "binary": "c11066244c0e9442fc51ac73f7bb580d74b338eef1059e84e20781e0c545b1e8",
+      "asset": "velnor-workflow-macOS-ARM64"
+    }
+  }
+}

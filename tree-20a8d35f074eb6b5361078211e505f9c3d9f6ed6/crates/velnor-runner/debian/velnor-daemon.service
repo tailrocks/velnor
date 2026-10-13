@@ -1,0 +1,74 @@
+[Unit]
+Description=Velnor self-hosted GitHub Actions runner daemon
+Documentation=https://github.com/tailrocks/velnor
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+# Type=notify + WatchdogSec: the daemon reports READY/STATUS over sd_notify and
+# pings the watchdog; a hung process is restarted by systemd. The daemon itself
+# never exits on registration/network/credential failures (it retries forever
+# with backoff), so Restart=always is a backstop, not the recovery mechanism.
+Type=notify
+WatchdogSec=180
+# Registration intentionally retries through transient GitHub/network failures
+# and large fleets provision slots before READY=1. The systemd default 90s
+# startup timeout can therefore kill a healthy daemon mid-registration.
+TimeoutStartSec=0
+# Config lives in velnor.env; the token lives in secrets.env (0600, never
+# shipped or touched by the package) so config tooling cannot wipe it.
+# velnor.env is still read first for backward compatibility — values in
+# secrets.env win. The token is read from the GITHUB_TOKEN env var, never argv.
+Environment=VELNOR_JOB_CPUS=4
+Environment=VELNOR_JOB_MEMORY=12g
+Environment=VELNOR_STORAGE_ROOT=/var
+# Strict capability admission is the only supported mode. The daemon refuses to
+# start if this is unset to anything else or if a removed bypass variable is
+# present. Do not override this in velnor.env.
+Environment=VELNOR_CAPABILITY_VALIDATION=strict
+EnvironmentFile=/etc/velnor/velnor.env
+EnvironmentFile=-/etc/velnor/secrets.env
+# Plan 010: prove the installed binary/package/manifest are coherent with the
+# atomically activated release record BEFORE the daemon starts. A missing or
+# mismatched tuple fails closed here, so a mixed old/new tuple never runs.
+ExecStartPre=/usr/bin/velnorctl release verify-installed
+ExecStart=/usr/bin/velnorctl daemon \
+  --url ${VELNOR_URL} \
+  --name ${VELNOR_NAME} \
+  --labels ${VELNOR_LABELS} \
+  --slots ${VELNOR_SLOTS} \
+  --work-dir ${VELNOR_WORK_DIR} \
+  --replace \
+  --require-docker-socket
+Restart=always
+RestartSec=5
+# Graceful drain: on stop/restart (including apt upgrades) the daemon finishes
+# running jobs and deregisters idle slots instead of dying mid-job (incident
+# 2026-06-11: an upgrade restart killed 7 in-flight jobs). The stop timeout
+# bounds the longest job we wait for (3h, matching the estate's largest
+# timeout-minutes); systemd escalates to SIGKILL after that.
+TimeoutStopSec=10800
+# Manages Docker containers + the daemon socket; runs as root (matches a typical
+# self-hosted CI runner host). Harden to a docker-group user later if desired.
+User=root
+StateDirectory=velnor
+CacheDirectory=velnor
+RuntimeDirectory=velnor
+LogsDirectory=velnor
+WorkingDirectory=/var/lib/velnor
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# State, work, and forensic logs all live below this root. Docker remains
+# reachable through /var/run/docker.sock; ProtectSystem=full leaves /var writable.
+# JIT slot credentials remain under the root user's configured runner state.
+ReadWritePaths=/var/lib/velnor /var/cache/velnor /run/velnor /var/log/velnor /root/.velnor/runner
+
+[Install]
+WantedBy=multi-user.target

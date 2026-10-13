@@ -1,0 +1,163 @@
+# Composite action for post-check telemetry. Classifies phased timings,
+# package-origin downloads, and compiler-cache outcomes, then emits one
+# machine-readable VELNOR_CI_REPORT line plus a step-summary table.
+name: Report Velnor CI outcomes
+description: Emit VELNOR_CI_REPORT telemetry and a step summary from the unit log
+
+inputs:
+  job_label:
+    description: Actions API job name for queue-time lookup
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Report phase timings and cache outcomes
+      shell: bash
+      env:
+        VELNOR_JOB_NAME: ${{ inputs.job_label }}
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+      run: |
+        set -uo pipefail
+        echo "VELNOR_JOB_ENDED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+        log="$RUNNER_TEMP/velnor-unit-log.txt"
+        log_present=false
+        if [[ -s "$log" ]]; then log_present=true; fi
+        phase_seconds() {
+          local start="${1:-}" end="${2:-}"
+          if [[ "$start" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ && "$end" -ge "$start" ]]; then
+            echo $((end - start))
+          fi
+        }
+        job_started="${VELNOR_JOB_STARTED_EPOCH:-}"
+        runner_setup_end="${VELNOR_RUNNER_SETUP_ENDED_EPOCH:-}"
+        selection_end="${VELNOR_SELECTION_ENDED_EPOCH:-}"
+        tool_bootstrap_end="${VELNOR_TOOL_BOOTSTRAP_ENDED_EPOCH:-}"
+        cache_prep_end="${VELNOR_CACHE_PREP_ENDED_EPOCH:-}"
+        cargo_fetch_end="${VELNOR_CARGO_FETCH_ENDED_EPOCH:-}"
+        checks_started="${VELNOR_CHECKS_STARTED_EPOCH:-}"
+        checks_ended="${VELNOR_CHECKS_ENDED_EPOCH:-}"
+        cleanup_end="${VELNOR_CLEANUP_ENDED_EPOCH:-}"
+        job_ended="${VELNOR_JOB_ENDED_EPOCH:-}"
+        runner_setup="$(phase_seconds "$job_started" "$runner_setup_end")"
+        selection_transport="$(phase_seconds "$runner_setup_end" "$selection_end")"
+        tool_bootstrap="$(phase_seconds "$selection_end" "$tool_bootstrap_end")"
+        cache_prep="$(phase_seconds "$tool_bootstrap_end" "$cache_prep_end")"
+        cargo_fetch="$(phase_seconds "$cache_prep_end" "$cargo_fetch_end")"
+        checks_wall="$(phase_seconds "$checks_started" "$checks_ended")"
+        cleanup="$(phase_seconds "$checks_ended" "$cleanup_end")"
+        total="$(phase_seconds "$job_started" "$job_ended")"
+        queue=""
+        job_name="${VELNOR_JOB_NAME:-}"
+        if command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+          run_started="$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID" --jq '.run_started_at // empty' 2>/dev/null || true)"
+          jobs_json="$(gh api --paginate "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" 2>/dev/null || true)"
+          if [[ -n "$job_name" && -n "$run_started" ]]; then
+            job_started_at="$(printf '%s' "$jobs_json" | jq -r --arg name "$job_name" '.jobs[]? | select(.name == $name) | .started_at' 2>/dev/null | head -n1 || true)"
+            if [[ -n "$job_started_at" ]]; then
+              queue="$(jq -n --arg job "$job_started_at" --arg run "$run_started" '($job | fromdateiso8601) - ($run | fromdateiso8601)' 2>/dev/null || true)"
+            fi
+          fi
+          if [[ -z "$queue" && -n "$run_started" && "$job_started" =~ ^[0-9]+$ ]]; then
+            queue="$(jq -n --argjson job "$job_started" --arg run "$run_started" '($job - ($run | fromdateiso8601))' 2>/dev/null || true)"
+          fi
+        fi
+        if [[ -z "$job_name" ]]; then
+          job_name="unknown"
+        fi
+        updating_index=0
+        updating_git=0
+        downloading_crates=0
+        compiling_count=0
+        downloaded_lines=""
+        mbx_lines=""
+        finished_lines=""
+        if [[ -s "$log" ]]; then
+          updating_index="$(grep -c 'Updating crates.io index' "$log" || true)"
+          updating_git="$(grep -cE 'Updating git (repository|submodule)' "$log" || true)"
+          downloading_crates="$(grep -c 'Downloading crates' "$log" || true)"
+          compiling_count="$(grep -c 'Compiling ' "$log" || true)"
+          downloaded_lines="$(grep -E 'Downloaded [0-9]+ crate' "$log" || true)"
+          mbx_lines="$(grep -E 'mbx(\[cache\])?:' "$log" | grep -E 'hits|misses' || true)"
+          finished_lines="$(grep -E 'Finished .* in ' "$log" || true)"
+        fi
+        positive_int() {
+          local value="$1"
+          [[ "$value" =~ ^[0-9]+$ ]] || value=0
+          printf '%s' "$value"
+        }
+        report_json="$(jq -nc \
+          --arg job "$job_name" \
+          --arg queue "$queue" \
+          --arg runner_setup "$runner_setup" \
+          --arg selection_transport "$selection_transport" \
+          --arg tool_bootstrap "$tool_bootstrap" \
+          --arg cache_prep "$cache_prep" \
+          --arg cargo_fetch "$cargo_fetch" \
+          --arg checks_wall "$checks_wall" \
+          --arg cleanup "$cleanup" \
+          --arg total "$total" \
+          --argjson log_present "$log_present" \
+          --argjson updating_index "$(positive_int "$updating_index")" \
+          --argjson updating_git "$(positive_int "$updating_git")" \
+          --argjson downloading_crates "$(positive_int "$downloading_crates")" \
+          --argjson compiling_count "$(positive_int "$compiling_count")" \
+          --argjson downloaded_lines "$(printf '%s' "$downloaded_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \
+          --argjson mbx "$(printf '%s' "$mbx_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \
+          --argjson finished "$(printf '%s' "$finished_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \
+          '{
+            schema_version: 1,
+            job: $job,
+            log_present: $log_present,
+            queue_seconds: ($queue | if test("^[0-9]+$") then tonumber else null end),
+            runner_setup_seconds: ($runner_setup | if test("^[0-9]+$") then tonumber else null end),
+            selection_transport_seconds: ($selection_transport | if test("^[0-9]+$") then tonumber else null end),
+            tool_bootstrap_seconds: ($tool_bootstrap | if test("^[0-9]+$") then tonumber else null end),
+            cache_prep_seconds: ($cache_prep | if test("^[0-9]+$") then tonumber else null end),
+            cargo_fetch_seconds: ($cargo_fetch | if test("^[0-9]+$") then tonumber else null end),
+            checks_wall_seconds: ($checks_wall | if test("^[0-9]+$") then tonumber else null end),
+            checks_seconds: ($checks_wall | if test("^[0-9]+$") then tonumber else null end),
+            cleanup_seconds: ($cleanup | if test("^[0-9]+$") then tonumber else null end),
+            total_seconds: ($total | if test("^[0-9]+$") then tonumber else null end),
+            origin_downloads: {
+              updating_crates_io_index: $updating_index,
+              updating_git: $updating_git,
+              downloading_crates: $downloading_crates,
+              downloaded_lines: $downloaded_lines
+            },
+            compiler: {
+              mbx_outcomes: $mbx,
+              finished_segments: $finished,
+              compiling_lines: $compiling_count
+            }
+          }' 2>/dev/null || true)"
+        if [[ -z "$report_json" ]]; then
+          report_json="VELNOR_CI_REPORT_FALLBACK job=$job_name"
+        fi
+        echo "VELNOR_CI_REPORT $report_json"
+        {
+          echo ""
+          echo '### Phase timings and cache outcomes'
+          echo ""
+          echo '```json'
+          echo "$report_json"
+          echo '```'
+          echo ""
+          echo "| metric | value |"
+          echo "| --- | --- |"
+          echo "| queue_seconds | ${queue:-unknown} |"
+          echo "| runner_setup_seconds | ${runner_setup:-unknown} |"
+          echo "| selection_transport_seconds | ${selection_transport:-unknown} |"
+          echo "| tool_bootstrap_seconds | ${tool_bootstrap:-unknown} |"
+          echo "| cache_prep_seconds | ${cache_prep:-unknown} |"
+          echo "| cargo_fetch_seconds | ${cargo_fetch:-unknown} |"
+          echo "| checks_wall_seconds | ${checks_wall:-unknown} |"
+          echo "| cleanup_seconds | ${cleanup:-unknown} |"
+          echo "| total_seconds | ${total:-unknown} |"
+          echo "| updating_crates_io_index | $updating_index |"
+          echo "| updating_git | $updating_git |"
+          echo "| downloading_crates | $downloading_crates |"
+          echo "| compiling_lines | $compiling_count |"
+        } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+        exit 0

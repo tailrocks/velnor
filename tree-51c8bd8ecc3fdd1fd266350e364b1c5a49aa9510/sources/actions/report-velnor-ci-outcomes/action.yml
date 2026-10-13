@@ -1,0 +1,521 @@
+# Composite action for post-check telemetry. Classifies phased timings,
+# package-origin downloads, and compiler-cache outcomes, then emits one
+# machine-readable VELNOR_CI_REPORT line plus a step-summary table.
+name: Report Velnor CI outcomes
+description: Emit VELNOR_CI_REPORT telemetry and a step summary from the unit log
+
+inputs:
+  job_label:
+    description: Stable Actions job label included in the telemetry record
+    required: true
+  ci_lane:
+    description: Lane label (`github` or `velnor`) for cache-outcome classification
+    required: false
+    default: ""
+  host_warm_layers:
+    description: Comma-separated Velnor host-warm cache layers
+    required: false
+    default: ""
+  cache_declared_layers:
+    description: Comma-separated cache layers the generator declared for this job
+    required: false
+    default: ""
+  cache_rustup_outcome:
+    description: Restore step outcome (success, skipped, failure, cancelled)
+    required: false
+    default: ""
+  cache_rustup_primary:
+    required: false
+    default: ""
+  cache_rustup_matched:
+    required: false
+    default: ""
+  cache_mold_outcome:
+    description: Restore step outcome (success, skipped, failure, cancelled)
+    required: false
+    default: ""
+  cache_mold_primary:
+    required: false
+    default: ""
+  cache_mold_matched:
+    required: false
+    default: ""
+  cache_cargo_outcome:
+    description: Restore step outcome (success, skipped, failure, cancelled)
+    required: false
+    default: ""
+  cache_cargo_primary:
+    required: false
+    default: ""
+  cache_cargo_matched:
+    required: false
+    default: ""
+  cache_mbx_outcome:
+    description: Restore step outcome (success, skipped, failure, cancelled)
+    required: false
+    default: ""
+  cache_mbx_hit:
+    required: false
+    default: ""
+  cache_mbx_primary:
+    required: false
+    default: ""
+  cache_mbx_matched:
+    description: Matched archive key, only when the cache producer explicitly exposes it
+    required: false
+    default: ""
+  cache_docker_seed_outcome:
+    description: Restore step outcome (success, skipped, failure, cancelled)
+    required: false
+    default: ""
+  cache_docker_seed_primary:
+    required: false
+    default: ""
+  cache_docker_seed_matched:
+    required: false
+    default: ""
+  # Verification/save signals. No generator step renders these yet; they stay
+  # empty until a verification/save producer exists, and the classifier treats
+  # empty as unobserved rather than as a negative.
+  cache_rustup_verified:
+    required: false
+    default: ""
+  cache_rustup_saved:
+    required: false
+    default: ""
+  cache_mold_verified:
+    required: false
+    default: ""
+  cache_mold_saved:
+    required: false
+    default: ""
+  cache_cargo_verified:
+    required: false
+    default: ""
+  cache_cargo_saved:
+    required: false
+    default: ""
+  cache_mbx_verified:
+    required: false
+    default: ""
+  cache_mbx_saved:
+    required: false
+    default: ""
+  cache_docker_seed_verified:
+    required: false
+    default: ""
+  cache_docker_seed_saved:
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Report phase timings and cache outcomes
+      shell: bash
+      env:
+        VELNOR_JOB_NAME: ${{ inputs.job_label }}
+        # Hosted Actions supplies this context value. Velnor supplies the
+        # runner-owned VELNOR_* timing env instead; keep this name distinct so
+        # an empty hosted expression cannot overwrite it.
+        VELNOR_CONTEXT_RUN_STARTED_AT: ${{ github.run_started_at }}
+        VELNOR_CI_LANE: ${{ inputs.ci_lane }}
+        VELNOR_HOST_WARM_LAYERS: ${{ inputs.host_warm_layers }}
+        VELNOR_RUN_STARTED_AT: ${{ env.VELNOR_RUN_STARTED_AT }}
+        VELNOR_JOB_QUEUED_AT: ${{ env.VELNOR_JOB_QUEUED_AT }}
+        VELNOR_CACHE_DECLARED_LAYERS: ${{ inputs.cache_declared_layers }}
+        VELNOR_CACHE_RUSTUP_OUTCOME: ${{ inputs.cache_rustup_outcome }}
+        VELNOR_CACHE_RUSTUP_PRIMARY: ${{ inputs.cache_rustup_primary }}
+        VELNOR_CACHE_RUSTUP_MATCHED: ${{ inputs.cache_rustup_matched }}
+        VELNOR_CACHE_RUSTUP_VERIFIED: ${{ inputs.cache_rustup_verified }}
+        VELNOR_CACHE_RUSTUP_SAVED: ${{ inputs.cache_rustup_saved }}
+        VELNOR_CACHE_MOLD_OUTCOME: ${{ inputs.cache_mold_outcome }}
+        VELNOR_CACHE_MOLD_PRIMARY: ${{ inputs.cache_mold_primary }}
+        VELNOR_CACHE_MOLD_MATCHED: ${{ inputs.cache_mold_matched }}
+        VELNOR_CACHE_MOLD_VERIFIED: ${{ inputs.cache_mold_verified }}
+        VELNOR_CACHE_MOLD_SAVED: ${{ inputs.cache_mold_saved }}
+        VELNOR_CACHE_CARGO_OUTCOME: ${{ inputs.cache_cargo_outcome }}
+        VELNOR_CACHE_CARGO_PRIMARY: ${{ inputs.cache_cargo_primary }}
+        VELNOR_CACHE_CARGO_MATCHED: ${{ inputs.cache_cargo_matched }}
+        VELNOR_CACHE_CARGO_VERIFIED: ${{ inputs.cache_cargo_verified }}
+        VELNOR_CACHE_CARGO_SAVED: ${{ inputs.cache_cargo_saved }}
+        VELNOR_CACHE_MBX_OUTCOME: ${{ inputs.cache_mbx_outcome }}
+        VELNOR_CACHE_MBX_HIT: ${{ inputs.cache_mbx_hit }}
+        VELNOR_CACHE_MBX_PRIMARY: ${{ inputs.cache_mbx_primary }}
+        VELNOR_CACHE_MBX_MATCHED: ${{ inputs.cache_mbx_matched }}
+        VELNOR_CACHE_MBX_VERIFIED: ${{ inputs.cache_mbx_verified }}
+        VELNOR_CACHE_MBX_SAVED: ${{ inputs.cache_mbx_saved }}
+        VELNOR_CACHE_DOCKER_SEED_OUTCOME: ${{ inputs.cache_docker_seed_outcome }}
+        VELNOR_CACHE_DOCKER_SEED_PRIMARY: ${{ inputs.cache_docker_seed_primary }}
+        VELNOR_CACHE_DOCKER_SEED_MATCHED: ${{ inputs.cache_docker_seed_matched }}
+        VELNOR_CACHE_DOCKER_SEED_VERIFIED: ${{ inputs.cache_docker_seed_verified }}
+        VELNOR_CACHE_DOCKER_SEED_SAVED: ${{ inputs.cache_docker_seed_saved }}
+      run: |
+        set -uo pipefail
+        max_telemetry_seconds=$((7 * 24 * 60 * 60))
+        timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+        job_ended="$(date +%s)"
+        log="$RUNNER_TEMP/velnor-unit-log.txt"
+        log_present=false
+        if [[ -s "$log" ]]; then log_present=true; fi
+        read_marker() {
+          local marker="$1"
+          local value=""
+          if [[ -r "$timing_dir/$marker" ]]; then
+            IFS= read -r value < "$timing_dir/$marker" || true
+          fi
+          printf '%s' "$value"
+        }
+        valid_epoch() {
+          [[ "${1:-}" =~ ^[1-9][0-9]{9}$ ]]
+        }
+        bounded_duration() {
+          local duration="${1:-}"
+          [[ "$duration" =~ ^[0-9]+$ ]] || return 1
+          [[ "${#duration}" -le 6 ]] || return 1
+          (( 10#$duration <= max_telemetry_seconds ))
+        }
+        phase_seconds() {
+          local start="${1:-}" end="${2:-}"
+          if valid_epoch "$start" && valid_epoch "$end" && valid_epoch "$job_ended" \
+            && (( 10#$end >= 10#$start && 10#$end <= 10#$job_ended \
+              && 10#$job_ended - 10#$start <= max_telemetry_seconds )); then
+            local duration=$((10#$end - 10#$start))
+            if bounded_duration "$duration"; then
+              echo "$duration"
+              return 0
+            fi
+          fi
+          return 1
+        }
+        job_started="$(read_marker JOB_STARTED)"
+        job_started_usable=false
+        total_source="unusable_job_start"
+        total=""
+        if valid_epoch "$job_started"; then
+          total_candidate="$(phase_seconds "$job_started" "$job_ended" || true)"
+          if [[ -n "$total_candidate" ]]; then
+            total="$total_candidate"
+            job_started_usable=true
+            total_source="job_markers"
+          fi
+        fi
+        runner_setup_end="$(read_marker RUNNER_SETUP_ENDED)"
+        selection_end="$(read_marker SELECTION_ENDED)"
+        tool_bootstrap_end="$(read_marker TOOL_BOOTSTRAP_ENDED)"
+        cache_prep_end="$(read_marker CACHE_PREP_ENDED)"
+        cargo_fetch_end="$(read_marker CARGO_FETCH_ENDED)"
+        checks_started="$(read_marker CHECKS_STARTED)"
+        checks_ended="$(read_marker CHECKS_ENDED)"
+        cleanup_end="$(read_marker CLEANUP_ENDED)"
+        runner_setup="$(phase_seconds "$job_started" "$runner_setup_end" || true)"
+        selection_transport="$(phase_seconds "$runner_setup_end" "$selection_end" || true)"
+        tool_bootstrap="$(phase_seconds "$selection_end" "$tool_bootstrap_end" || true)"
+        cache_prep="$(phase_seconds "$tool_bootstrap_end" "$cache_prep_end" || true)"
+        cargo_fetch="$(phase_seconds "$cache_prep_end" "$cargo_fetch_end" || true)"
+        checks_wall="$(phase_seconds "$checks_started" "$checks_ended" || true)"
+        cleanup="$(phase_seconds "$checks_ended" "$cleanup_end" || true)"
+        queue=""
+        queue_source=""
+        job_name="${VELNOR_JOB_NAME:-}"
+        run_started="${VELNOR_CONTEXT_RUN_STARTED_AT:-${VELNOR_RUN_STARTED_AT:-}}"
+        queue_at="${VELNOR_JOB_QUEUED_AT:-}"
+        rfc3339_epoch() {
+          local value="${1:-}"
+          [[ -n "$value" ]] || return 1
+          jq -nr --arg value "$value" '
+            try ($value | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)
+            catch empty
+          ' 2>/dev/null
+        }
+        queue_seconds_from_timestamp() {
+          local timestamp="${1:-}"
+          local queued_epoch=""
+          local queue_candidate=""
+          queued_epoch="$(rfc3339_epoch "$timestamp" || true)"
+          if valid_epoch "$queued_epoch" && [[ "$job_started_usable" == true ]] \
+            && (( 10#$job_started >= 10#$queued_epoch )); then
+            queue_candidate=$((10#$job_started - 10#$queued_epoch))
+            if bounded_duration "$queue_candidate"; then
+              echo "$queue_candidate"
+              return 0
+            fi
+          fi
+          return 1
+        }
+        if command -v jq >/dev/null 2>&1 && [[ "$job_started_usable" == true ]]; then
+          if [[ -n "$queue_at" ]]; then
+            queue_candidate="$(queue_seconds_from_timestamp "$queue_at" || true)"
+            if bounded_duration "$queue_candidate"; then
+              queue="$queue_candidate"
+              queue_source="job_queue_time"
+            fi
+          fi
+          if [[ -z "$queue" && -n "$run_started" ]]; then
+            queue_candidate="$(queue_seconds_from_timestamp "$run_started" || true)"
+            if bounded_duration "$queue_candidate"; then
+              queue="$queue_candidate"
+              queue_source="workflow_run_started_at"
+            fi
+          fi
+        fi
+        if [[ -z "$job_name" ]]; then
+          job_name="unknown"
+        fi
+        # Whether the generator declared this layer for the job. An undeclared
+        # layer with any evidence contradicts the plan; an undeclared layer
+        # without evidence is disabled, not cold.
+        layer_declared() {
+          local layer="$1"
+          local declared="${VELNOR_CACHE_DECLARED_LAYERS:-}"
+          [[ ",$declared," == *",$layer,"* ]]
+        }
+        # One layer's restore/save lifecycle state. Mirrors the
+        # CacheLayerEvidence decision table in snapshot.rs: declaration,
+        # step completion, verification, key comparison, then save
+        # evidence. Contradictory evidence always yields unknown.
+        cache_outcome_for() {
+          local layer="$1"
+          local outcome="${2:-}" hit="${3:-}" primary="${4:-}" matched="${5:-}"
+          local verified="${6:-}" saved="${7:-}"
+          if ! layer_declared "$layer"; then
+            if [[ -n "$outcome$hit$primary$matched$verified$saved" ]]; then
+              echo unknown
+            else
+              echo disabled
+            fi
+            return
+          fi
+          case "$outcome" in
+            skipped|failure|cancelled)
+              # The restore never completed, so it emitted no outputs. Any
+              # key evidence contradicts the outcome.
+              if [[ -n "$primary$matched$hit" ]]; then
+                echo unknown
+              else
+                echo not_run
+              fi
+              return
+              ;;
+            success|"") ;;
+            *) echo unknown; return ;;
+          esac
+          # Only a lowercase boolean is a hit signal; anything else is a
+          # corrupt producer output, not a miss.
+          case "$hit" in
+            ""|true|false) ;;
+            *) echo unknown; return ;;
+          esac
+          if [[ "$verified" == false ]]; then
+            echo invalid
+            return
+          fi
+          if [[ -n "$primary" && -n "$matched" ]]; then
+            if [[ "$primary" == "$matched" ]]; then
+              # Equal keys contradict an explicit not-exact bit.
+              if [[ "$hit" == false ]]; then
+                echo unknown
+              else
+                echo exact
+              fi
+            elif [[ "$hit" == true ]]; then
+              # Differing keys contradict an explicit exact-hit bit.
+              echo unknown
+            else
+              echo compatible_seed
+            fi
+            return
+          fi
+          if [[ -n "$primary" ]]; then
+            # Mr. Boxington defines hit=true as an exact-key match and
+            # exposes the primary key, but not always a matched key.
+            # hit=false without a matched key is ambiguous: a seed the
+            # producer did not expose is indistinguishable from a miss.
+            case "$hit" in
+              true) echo exact; return ;;
+              false) echo unknown; return ;;
+            esac
+            # A miss that saved populates the cache for later runs; a miss
+            # without a save (an untrusted writer) leaves it cold.
+            if [[ "$saved" == true ]]; then
+              echo saved
+            else
+              echo miss
+            fi
+            return
+          fi
+          # A matched key without its primary key is incomplete producer
+          # evidence. Do not manufacture a seed result from it.
+          if [[ -n "$matched" ]]; then
+            echo unknown
+            return
+          fi
+          if [[ "$saved" == true ]]; then
+            echo saved
+          else
+            echo unknown
+          fi
+        }
+        cache_declarations_json='{"host_warm_layers":[]}'
+        if command -v jq >/dev/null 2>&1; then
+          cache_declarations_json="$(printf '%s' "${VELNOR_HOST_WARM_LAYERS:-}" | jq -Rsc \
+            'split(",") | map(gsub("^ +| +$"; "")) | map(select(length > 0)) | {host_warm_layers: .}' \
+            2>/dev/null || echo '{"host_warm_layers":[]}')"
+        fi
+        rustup_outcome="$(cache_outcome_for rustup "${VELNOR_CACHE_RUSTUP_OUTCOME:-}" "" "${VELNOR_CACHE_RUSTUP_PRIMARY:-}" "${VELNOR_CACHE_RUSTUP_MATCHED:-}" "${VELNOR_CACHE_RUSTUP_VERIFIED:-}" "${VELNOR_CACHE_RUSTUP_SAVED:-}")"
+        mold_outcome="$(cache_outcome_for mold "${VELNOR_CACHE_MOLD_OUTCOME:-}" "" "${VELNOR_CACHE_MOLD_PRIMARY:-}" "${VELNOR_CACHE_MOLD_MATCHED:-}" "${VELNOR_CACHE_MOLD_VERIFIED:-}" "${VELNOR_CACHE_MOLD_SAVED:-}")"
+        cargo_outcome="$(cache_outcome_for cargo "${VELNOR_CACHE_CARGO_OUTCOME:-}" "" "${VELNOR_CACHE_CARGO_PRIMARY:-}" "${VELNOR_CACHE_CARGO_MATCHED:-}" "${VELNOR_CACHE_CARGO_VERIFIED:-}" "${VELNOR_CACHE_CARGO_SAVED:-}")"
+        mbx_outcome="$(cache_outcome_for mbx "${VELNOR_CACHE_MBX_OUTCOME:-}" "${VELNOR_CACHE_MBX_HIT:-}" "${VELNOR_CACHE_MBX_PRIMARY:-}" "${VELNOR_CACHE_MBX_MATCHED:-}" "${VELNOR_CACHE_MBX_VERIFIED:-}" "${VELNOR_CACHE_MBX_SAVED:-}")"
+        docker_seed_outcome="$(cache_outcome_for docker_seed "${VELNOR_CACHE_DOCKER_SEED_OUTCOME:-}" "" "${VELNOR_CACHE_DOCKER_SEED_PRIMARY:-}" "${VELNOR_CACHE_DOCKER_SEED_MATCHED:-}" "${VELNOR_CACHE_DOCKER_SEED_VERIFIED:-}" "${VELNOR_CACHE_DOCKER_SEED_SAVED:-}")"
+        updating_index=0
+        updating_git=0
+        downloading_crates=0
+        compiling_count=0
+        downloaded_lines=""
+        mbx_lines=""
+        finished_lines=""
+        if [[ -s "$log" ]]; then
+          updating_index="$(grep -c 'Updating crates.io index' "$log" || true)"
+          updating_git="$(grep -cE 'Updating git (repository|submodule)' "$log" || true)"
+          downloading_crates="$(grep -c 'Downloading crates' "$log" || true)"
+          compiling_count="$(grep -c 'Compiling ' "$log" || true)"
+          downloaded_lines="$(grep -E 'Downloaded [0-9]+ crate' "$log" || true)"
+          mbx_lines="$(grep -E 'mbx(\[cache\])?:' "$log" | grep -E 'hits|misses' || true)"
+          finished_lines="$(grep -E 'Finished .* in ' "$log" || true)"
+        fi
+        positive_int() {
+          local value="$1"
+          [[ "$value" =~ ^[0-9]+$ ]] || value=0
+          printf '%s' "$value"
+        }
+        cache_outcomes_json='{}'
+        if command -v jq >/dev/null 2>&1; then
+          cache_outcomes_json="$(jq -nc \
+            --arg lane "${VELNOR_CI_LANE:-}" \
+            --arg rustup "$rustup_outcome" \
+            --arg mold "$mold_outcome" \
+            --arg cargo "$cargo_outcome" \
+            --arg mbx "$mbx_outcome" \
+            --arg docker_seed "$docker_seed_outcome" \
+            '{
+              lane: ($lane | if length > 0 then . else null end),
+              rustup: ($rustup | if length > 0 then . else null end),
+              mold: ($mold | if length > 0 then . else null end),
+              cargo: ($cargo | if length > 0 then . else null end),
+              mbx: ($mbx | if length > 0 then . else null end),
+              docker_seed: ($docker_seed | if length > 0 then . else null end)
+            }' 2>/dev/null || echo '{}')"
+        fi
+        miss_layers=()
+        invalid_layers=()
+        for layer in rustup mold cargo mbx docker_seed; do
+          outcome=""
+          case "$layer" in
+            rustup) outcome="$rustup_outcome" ;;
+            mold) outcome="$mold_outcome" ;;
+            cargo) outcome="$cargo_outcome" ;;
+            mbx) outcome="$mbx_outcome" ;;
+            docker_seed) outcome="$docker_seed_outcome" ;;
+          esac
+          if [[ "$outcome" == miss ]]; then
+            miss_layers+=("$layer")
+          fi
+          if [[ "$outcome" == invalid ]]; then
+            invalid_layers+=("$layer")
+          fi
+        done
+        report_json="$(jq -nc \
+          --arg job "$job_name" \
+          --arg queue "$queue" \
+          --arg queue_source "$queue_source" \
+          --arg total_source "$total_source" \
+          --arg runner_setup "$runner_setup" \
+          --arg selection_transport "$selection_transport" \
+          --arg tool_bootstrap "$tool_bootstrap" \
+          --arg cache_prep "$cache_prep" \
+          --arg cargo_fetch "$cargo_fetch" \
+          --arg checks_wall "$checks_wall" \
+          --arg cleanup "$cleanup" \
+          --arg total "$total" \
+          --argjson log_present "$log_present" \
+          --argjson updating_index "$(positive_int "$updating_index")" \
+          --argjson updating_git "$(positive_int "$updating_git")" \
+          --argjson downloading_crates "$(positive_int "$downloading_crates")" \
+          --argjson compiling_count "$(positive_int "$compiling_count")" \
+          --argjson downloaded_lines "$(printf '%s' "$downloaded_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \
+          --argjson mbx "$(printf '%s' "$mbx_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \
+          --argjson finished "$(printf '%s' "$finished_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \
+          --argjson cache_outcomes "$cache_outcomes_json" \
+          --argjson cache_declarations "$cache_declarations_json" \
+          '{
+            schema_version: 3,
+            job: $job,
+            log_present: $log_present,
+            queue_seconds: ($queue | if test("^[0-9]+$") then tonumber else null end),
+            queue_source: ($queue_source | if length > 0 then . else null end),
+            total_source: $total_source,
+            runner_setup_seconds: ($runner_setup | if test("^[0-9]+$") then tonumber else null end),
+            selection_transport_seconds: ($selection_transport | if test("^[0-9]+$") then tonumber else null end),
+            tool_bootstrap_seconds: ($tool_bootstrap | if test("^[0-9]+$") then tonumber else null end),
+            cache_prep_seconds: ($cache_prep | if test("^[0-9]+$") then tonumber else null end),
+            cargo_fetch_seconds: ($cargo_fetch | if test("^[0-9]+$") then tonumber else null end),
+            checks_wall_seconds: ($checks_wall | if test("^[0-9]+$") then tonumber else null end),
+            checks_seconds: ($checks_wall | if test("^[0-9]+$") then tonumber else null end),
+            cleanup_seconds: ($cleanup | if test("^[0-9]+$") then tonumber else null end),
+            total_seconds: ($total | if test("^[0-9]+$") then tonumber else null end),
+            cache_outcomes: $cache_outcomes,
+            cache_declarations: $cache_declarations,
+            origin_downloads: {
+              updating_crates_io_index: $updating_index,
+              updating_git: $updating_git,
+              downloading_crates: $downloading_crates,
+              downloaded_lines: $downloaded_lines
+            },
+            compiler: {
+              mbx_outcomes: $mbx,
+              finished_segments: $finished,
+              compiling_lines: $compiling_count
+            }
+          }' 2>/dev/null || true)"
+        if [[ -z "$report_json" ]]; then
+          report_json="VELNOR_CI_REPORT_FALLBACK job=$job_name"
+        fi
+        echo "VELNOR_CI_REPORT $report_json"
+        {
+          echo ""
+          echo '### Phase timings and cache outcomes'
+          echo ""
+          echo '```json'
+          echo "$report_json"
+          echo '```'
+          echo ""
+          echo "| metric | value |"
+          echo "| --- | --- |"
+          echo "| lane | ${VELNOR_CI_LANE:-unknown} |"
+          echo "| cache_outcomes.rustup | ${rustup_outcome:-n/a} |"
+          echo "| cache_outcomes.mold | ${mold_outcome:-n/a} |"
+          echo "| cache_outcomes.cargo | ${cargo_outcome:-n/a} |"
+          echo "| cache_outcomes.mbx | ${mbx_outcome:-n/a} |"
+          echo "| cache_outcomes.docker_seed | ${docker_seed_outcome:-n/a} |"
+          echo "| cache_declarations.host_warm_layers | ${VELNOR_HOST_WARM_LAYERS:-none} |"
+          echo "| queue_seconds | ${queue:-unknown} |"
+          echo "| runner_setup_seconds | ${runner_setup:-unknown} |"
+          echo "| selection_transport_seconds | ${selection_transport:-unknown} |"
+          echo "| tool_bootstrap_seconds | ${tool_bootstrap:-unknown} |"
+          echo "| cache_prep_seconds | ${cache_prep:-unknown} |"
+          echo "| cargo_fetch_seconds | ${cargo_fetch:-unknown} |"
+          echo "| checks_wall_seconds | ${checks_wall:-unknown} |"
+          echo "| cleanup_seconds | ${cleanup:-unknown} |"
+          echo "| total_seconds | ${total:-unknown} |"
+          echo "| updating_crates_io_index | $updating_index |"
+          echo "| updating_git | $updating_git |"
+          echo "| downloading_crates | $downloading_crates |"
+          echo "| compiling_lines | $compiling_count |"
+        } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+        if ((${#miss_layers[@]} > 0)); then
+          echo "::warning::Cache miss layer(s): ${miss_layers[*]} (lane=${VELNOR_CI_LANE:-unknown})"
+        fi
+        if ((${#invalid_layers[@]} > 0)); then
+          echo "::warning::Invalid cache layer(s): ${invalid_layers[*]} (lane=${VELNOR_CI_LANE:-unknown})"
+        fi
+        exit 0

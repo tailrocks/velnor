@@ -1,0 +1,13 @@
+[Unit]
+Description=Velnor fleet health probe
+Documentation=https://github.com/tailrocks/velnor
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/velnor/velnor.env
+EnvironmentFile=-/etc/velnor/secrets.env
+ExecStart=/usr/bin/velnor-runner doctor \
+  --url ${VELNOR_URL} \
+  --name ${VELNOR_NAME} \
+  --slots ${VELNOR_SLOTS}

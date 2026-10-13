@@ -1,0 +1,9 @@
+[tools]
+actionlint = "1.7.12"
+"cargo:cargo-nextest" = "0.9.137"
+"cargo:cargo-zigbuild" = "0.22.3"
+"cargo:cargo-deb" = "3.7.0"
+zig = "0.16.0"
+
+[settings]
+idiomatic_version_file_enable_tools = ["rust"]

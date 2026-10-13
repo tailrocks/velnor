@@ -1,0 +1,108 @@
+# Velnor
+
+Codename for a unified workflow engine for CI/CD and general-purpose pipelines.
+
+## Idea
+
+Velnor aims to combine CI/CD orchestration with broader workflow automation.
+
+The user experience should feel close to GitHub Actions: workflows, triggers, jobs, steps, matrices, environments, secrets, artifacts, caches, reusable workflow modules, and runner labels should all feel familiar.
+
+The first implementation target:
+
+- existing `.github/workflows/*.yml` files keep working
+- Velnor registers as a GitHub self-hosted runner replacement
+- jobs run inside Docker-isolated environments
+- the initial scope is the workflows used by `jackin-project/jackin` and `ChainArgos/java-monorepo`
+
+The later typed workflow model:
+
+- workflow definitions are written in Pkl instead of YAML
+- workflow primitives are strongly typed
+- validation happens before execution
+- the engine and runner are implemented in Rust
+- custom building blocks expose typed interfaces instead of unconstrained JavaScript actions
+
+## Direction
+
+See [docs/vision.md](docs/vision.md).
+
+## Current Runner State
+
+The first Rust crate is `velnor-runner`. It can register as a GitHub
+self-hosted runner, requires the current V2 broker/run-service flow, and runs
+supported target jobs in Docker with Rust-native adapters for the marketplace
+actions used by the target repositories.
+
+```sh
+cargo run --bin velnor-runner -- configure \
+  --url https://github.com/OWNER/REPO \
+  --pat "$GITHUB_TOKEN" \
+  --labels velnor,hetzner-sentry-ci \
+  --replace
+
+cargo run --bin velnor-runner -- configure \
+  --url https://github.com/OWNER/REPO \
+  --token fake \
+  --labels velnor \
+  --dry-run
+
+cargo run --bin velnor-runner -- status
+cargo run --bin velnor-runner -- run
+cargo run --bin velnor-runner -- remove --pat "$GITHUB_TOKEN"
+```
+
+`configure` validates runner scope URLs, can request a short-lived GitHub runner
+token from `--pat`, exchanges that runner token for tenant credentials, and can
+add/replace a runner agent in the selected pool. `run` exchanges stored OAuth
+runner credentials, requires GitHub's current V2 broker settings, creates a
+broker session, polls broker messages, acquires jobs from run-service, renews
+locks, executes supported jobs, and completes them through run-service.
+
+Local target coverage is checked with:
+
+```sh
+scripts/target_verify.sh
+cargo test -q
+```
+
+The future Pkl authoring path starts with a conservative evaluator check:
+
+```sh
+cargo run --bin velnor-runner -- workflow check path/to/workflow.pkl
+```
+
+This uses `pkl eval --format json` and runs Velnor's first Rust-side structural
+checks before any render/plan compiler exists.
+
+The remaining Phase 0 proof is live GitHub UI validation on the two target
+repositories from a Linux host whose Docker daemon can see Velnor's bind-mounted
+work directory.
+
+Phase 0 runner compatibility: [docs/phase-0-github-runner-compat.md](docs/phase-0-github-runner-compat.md).
+
+Implementation roadmap: [docs/implementation-roadmap.md](docs/implementation-roadmap.md).
+
+Language decision: [docs/decision-pkl.md](docs/decision-pkl.md).
+
+KCL research: [docs/research/kcl.md](docs/research/kcl.md).
+
+Language comparison and target repo workflow analysis: [docs/research/config-language-comparison.md](docs/research/config-language-comparison.md).
+
+Pkl/Rust integration research: [docs/research/pkl-rust.md](docs/research/pkl-rust.md).
+
+Pkl vs KCL language comparison: [docs/research/pkl-vs-kcl.md](docs/research/pkl-vs-kcl.md).
+
+Side-by-side GitHub Actions vs Pkl vs KCL examples: [docs/research/github-actions-vs-pkl-vs-kcl.md](docs/research/github-actions-vs-pkl-vs-kcl.md).
+
+Future Pkl authoring contract: [docs/research/pkl-authoring-contract-2026-06-01.md](docs/research/pkl-authoring-contract-2026-06-01.md).
+
+GitHub runner protocol contract: [docs/research/github-runner-protocol-contract.md](docs/research/github-runner-protocol-contract.md).
+
+GitHub runner job-message contract: [docs/research/github-runner-job-message-contract-2026-06-01.md](docs/research/github-runner-job-message-contract-2026-06-01.md).
+
+Self-hosted runner implementation blueprint: [docs/research/self-hosted-runner-implementation-blueprint-2026-06-01.md](docs/research/self-hosted-runner-implementation-blueprint-2026-06-01.md).
+
+Phase 0 current status and live proof gaps: [docs/research/phase-0-current-status-2026-06-01.md](docs/research/phase-0-current-status-2026-06-01.md).
+
+Target live validation runbook: [docs/target-live-runbook.md](docs/target-live-runbook.md).

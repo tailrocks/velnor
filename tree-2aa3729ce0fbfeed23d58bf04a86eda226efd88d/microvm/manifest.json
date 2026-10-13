@@ -1,0 +1,24 @@
+{
+  "firecracker_version": "1.16.1",
+  "jailer_version": "1.16.1",
+  "firecracker": {
+    "x86_64": "2fd0171309af7e24cf8dafc8a6f921c1434c49b5f9349bb996b7ed0a4deb8aa7",
+    "aarch64": "71ca0733576579a75cef268a8fd0ae0629b761b9844559c611f144132ac6038a"
+  },
+  "jailer": {
+    "x86_64": "1f3a0c1fe86212d0001819bfe0819071c01208b3ccc9398c3b3bc1b84cf21edd",
+    "aarch64": "7db39d34991ccdd8d12aacab384b1dcbe35e79c27823e4e4d33725d4b504edd7"
+  },
+  "kernel": {
+    "x86_64": "b31b78781c80b2432287bf7873fa4741664b3af5d5e1648be349dfc64dbde874",
+    "aarch64": "dc738af1ab93e8c723e9d72abadc94b5d1039df9be5a8861fcf6e4e354e6370c"
+  },
+  "rootfs": {
+    "x86_64": "7e321307dd21639681ad997ebddfe3a30d49c9bc65ea309bf32155a85e0738ba",
+    "aarch64": "cb90630dd1c93b871020722c1441da200ffe0b79011b36cfe1dafbefd7a78035"
+  },
+  "guest_agent": {
+    "x86_64": "64064123aafaf92691c5b45b4881607dd32e36f736f666ca531ffed0d31a1159",
+    "aarch64": "cd1bcb92891202f1b48cb5c4f517c2735e7ed7fc915b330f1c064b142b78f1a3"
+  }
+}

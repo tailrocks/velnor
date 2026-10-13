@@ -1,0 +1,45 @@
+name: check-deployed-docs
+description: Verify that a materialized Pages docs tree exists and is non-empty.
+
+inputs:
+  artifact-name:
+    description: Name of the Pages artifact associated with the docs tree.
+    required: false
+    default: github-pages-velnor
+  path:
+    description: Directory containing the materialized Pages docs tree.
+    required: false
+    default: target/doc
+
+runs:
+  using: composite
+  steps:
+    - name: Verify docs tree
+      env:
+        DOCS_ARTIFACT_NAME: ${{ inputs.artifact-name }}
+        DOCS_PATH: ${{ inputs.path }}
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if [[ -z "$DOCS_ARTIFACT_NAME" ]]; then
+          echo "::error::check-deployed-docs: artifact-name must not be empty"
+          exit 1
+        fi
+        if [[ -z "$DOCS_PATH" ]]; then
+          echo "::error::check-deployed-docs: path must not be empty"
+          exit 1
+        fi
+        if [[ ! -d "$DOCS_PATH" ]]; then
+          echo "::error::check-deployed-docs: docs tree is missing: $DOCS_PATH"
+          exit 1
+        fi
+
+        non_empty_file="$(find "$DOCS_PATH" -type f -size +0c -print -quit)"
+        if [[ -z "$non_empty_file" ]]; then
+          echo "::error::check-deployed-docs: docs tree has no non-empty regular file: $DOCS_PATH"
+          exit 1
+        fi
+
+        printf 'check-deployed-docs: artifact=%s path=%s file=%s\n' \
+          "$DOCS_ARTIFACT_NAME" "$DOCS_PATH" "$non_empty_file"

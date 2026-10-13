@@ -1,0 +1,440 @@
+name: l2-negative
+
+on:
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: "velnor | github | both (default: both)"
+        type: choice
+        default: both
+        options: [velnor, github, both]
+      case:
+        description: Fail-before-effect case.
+        required: true
+        type: choice
+        options: [mutable-ref, unknown-repository, unknown-input, unknown-subpath-input, unresolved-expression, invalid-lock]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: l2-negative-${{ github.ref }}-${{ inputs.lanes }}-${{ inputs.case }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  admit-default-head:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Require current default-branch head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "${GITHUB_REF}" = refs/heads/main
+          default_head="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+          test "${GITHUB_SHA}" = "${default_head}"
+
+  github-scanner:
+    needs: admit-default-head
+    if: inputs.lanes != 'velnor'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    env:
+      SCCACHE_GHA_ENABLED: "false"
+      SCCACHE_CACHE_SIZE: 20G
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: "false"
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
+          save-on-workflow-dispatch: true
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+          disable_annotations: "false"
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - name: Cache Cargo target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: l2-negative-target-github-${{ runner.os }}-${{ hashFiles('mise.toml', '**/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: l2-negative-target-github-${{ runner.os }}-${{ hashFiles('mise.toml', '**/Cargo.toml', 'Cargo.lock') }}-
+      - id: scan
+        name: Reject before project marker
+        continue-on-error: true
+        env:
+          CASE: ${{ inputs.case }}
+        run: |
+          set -euo pipefail
+          case "${CASE}" in
+            mutable-ref|unknown-repository|unknown-input|unresolved-expression)
+              mbx run --locked -p l2-contract -- validate-file "fixtures/l2/${CASE}.json"
+              ;;
+            unknown-subpath-input)
+              mbx run --locked -p l2-contract -- validate-file fixtures/l2/unknown-subpath.json
+              ;;
+            invalid-lock)
+              mbx run --locked -p l2-contract -- validate-lock fixtures/l2/invalid-mise.lock
+              ;;
+            *) exit 2 ;;
+          esac
+      - id: assert
+        name: Assert normalized rejection and no project effect
+        env:
+          OUTCOME: ${{ steps.scan.outcome }}
+        run: |
+          test "${OUTCOME}" = failure
+          test ! -e .l2-negative-marker
+          test ! -e .l2-negative-project
+      - name: Write canonical expected-failure evidence
+        if: always()
+        env:
+          CASE: ${{ inputs.case }}
+          SCAN_OUTCOME: ${{ steps.scan.outcome }}
+          ASSERT_OUTCOME: ${{ steps.assert.outcome }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          rejection = {
+              "mutable-ref": "admission/mutable-ref",
+              "unknown-repository": "unknown repository",
+              "unknown-input": "admission/unknown-input",
+              "unknown-subpath-input": "unknown local action",
+              "unresolved-expression": "admission/unresolved-expression",
+              "invalid-lock": "mise/invalid-disposable-lock",
+          }[os.environ["CASE"]]
+          scan = os.environ["SCAN_OUTCOME"]
+          assertion = os.environ["ASSERT_OUTCOME"]
+          payload = {
+              "case": os.environ["CASE"],
+              "fail_before_effect": assertion == "success",
+              "lane": "github",
+              "observed_outcome": "failure" if scan == "failure" else "success",
+              "rejection": rejection,
+              "schema": "velnor.fixture.l2-negative.v1",
+              "status": "passed" if assertion == "success" else "failed",
+          }
+          Path("evidence/l2-negative-github.json").write_text(
+              json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: l2-negative-github
+          path: evidence/l2-negative-github.json
+          if-no-files-found: error
+
+  # The velnor capability probes below are EXPECTED to be rejected by the
+  # fleet at capability_validation, fail-before-effect: the fleet aborts the
+  # whole job before any step runs, so the rejection cannot be asserted from
+  # inside the probe. Each probe therefore carries job-level
+  # continue-on-error and the sibling assert-velnor-rejection job proves the
+  # rejection from the fleet-emitted "Velnor rejected job (capability_
+  # validation)" step recorded in the run's jobs API. If the fleet ever
+  # ADMITS a probe, its "Admit-effect" step executes, the assert detects it,
+  # and the workflow run goes red (fleet regression).
+  velnor-mutable-ref:
+    needs: admit-default-head
+    if: inputs.lanes != 'github' && inputs.case == 'mutable-ref'
+    continue-on-error: true
+    runs-on:
+      group: velnor-trusted
+      labels: velnor-target-mvp
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # main
+      - name: Admit-effect marker
+        run: |
+          echo "::notice::L2N_MARKER case=mutable-ref phase=admit-effect fleet-admitted=true"
+          touch .l2-negative-marker
+          exit 1
+
+  velnor-unknown-repository:
+    needs: admit-default-head
+    if: inputs.lanes != 'github' && inputs.case == 'unknown-repository'
+    continue-on-error: true
+    runs-on:
+      group: velnor-trusted
+      labels: velnor-target-mvp
+    timeout-minutes: 10
+    steps:
+      - uses: untrusted/unknown@0123456789abcdef0123456789abcdef01234567
+      - name: Admit-effect marker
+        run: |
+          echo "::notice::L2N_MARKER case=unknown-repository phase=admit-effect fleet-admitted=true"
+          touch .l2-negative-marker
+          exit 1
+
+  velnor-unknown-input:
+    needs: admit-default-head
+    if: inputs.lanes != 'github' && inputs.case == 'unknown-input'
+    continue-on-error: true
+    runs-on:
+      group: velnor-trusted
+      labels: velnor-target-mvp
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          credential-persistence: "true"
+      - name: Admit-effect marker
+        run: |
+          echo "::notice::L2N_MARKER case=unknown-input phase=admit-effect fleet-admitted=true"
+          touch .l2-negative-marker
+          exit 1
+
+  velnor-unknown-subpath-input:
+    needs: admit-default-head
+    if: inputs.lanes != 'github' && inputs.case == 'unknown-subpath-input'
+    continue-on-error: true
+    runs-on:
+      group: velnor-trusted
+      labels: velnor-target-mvp
+    timeout-minutes: 10
+    steps:
+      - uses: actions/cache/bogus@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .l2-cache
+          key: never-materialized
+      - name: Admit-effect marker
+        run: |
+          echo "::notice::L2N_MARKER case=unknown-subpath-input phase=admit-effect fleet-admitted=true"
+          touch .l2-negative-marker
+          exit 1
+
+  velnor-unresolved-expression:
+    needs: admit-default-head
+    if: inputs.lanes != 'github' && inputs.case == 'unresolved-expression'
+    continue-on-error: true
+    runs-on:
+      group: velnor-trusted
+      labels: velnor-target-mvp
+    timeout-minutes: 10
+    steps:
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .l2-cache
+          key: never-materialized
+          lookup-only: ${{ runner.debug }}
+      - name: Admit-effect marker
+        run: |
+          echo "::notice::L2N_MARKER case=unresolved-expression phase=admit-effect fleet-admitted=true"
+          touch .l2-negative-marker
+          exit 1
+
+  # invalid-lock rejects inside a run step (the job itself is admitted:
+  # checkout is allowlisted). The Velnor daemon terminates the job at the
+  # failed lock-validation step, so an in-job assert-after-probe can never
+  # run on the Velnor lane (the GitHub lane covers that shape via
+  # github-scanner). Assert from the sibling assert-velnor-rejection job
+  # instead: the probe job must conclude failure at exactly the lock
+  # rejection step and must never reach a project-effect step.
+  velnor-invalid-lock:
+    needs: admit-default-head
+    if: inputs.lanes != 'github' && inputs.case == 'invalid-lock'
+    continue-on-error: true
+    runs-on:
+      group: velnor-trusted
+      labels: velnor-target-mvp
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: "false"
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
+          save-on-workflow-dispatch: true
+      - name: Reject disposable lock before project command
+        run: mbx run --locked -p l2-contract -- validate-lock fixtures/l2/invalid-mise.lock
+      - name: Unreachable project effect
+        run: |
+          touch .l2-negative-project
+          exit 1
+
+  assert-velnor-rejection:
+    needs:
+      - admit-default-head
+      - velnor-mutable-ref
+      - velnor-unknown-repository
+      - velnor-unknown-input
+      - velnor-unknown-subpath-input
+      - velnor-unresolved-expression
+      - velnor-invalid-lock
+    if: ${{ always() && inputs.lanes != 'github' }}
+    runs-on:
+      group: velnor-trusted
+      labels: velnor-target-mvp
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CASE: ${{ inputs.case }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Assert fleet rejected the probe before effect
+        id: assert
+        run: |
+          set -euo pipefail
+          case "${CASE}" in
+            mutable-ref) probe="velnor-mutable-ref" ;;
+            unknown-repository) probe="velnor-unknown-repository" ;;
+            unknown-input) probe="velnor-unknown-input" ;;
+            unknown-subpath-input) probe="velnor-unknown-subpath-input" ;;
+            unresolved-expression) probe="velnor-unresolved-expression" ;;
+            invalid-lock) probe="velnor-invalid-lock" ;;
+            *)
+              echo "::error::L2N_MARKER case=${CASE} phase=mismatch reason=unexpected-case"
+              exit 2
+              ;;
+          esac
+          jobs_json="$(curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100")"
+          probe_present="$(grep -c "\"name\": *\"${probe}\"" <<<"${jobs_json}" || true)"
+          if [[ "${probe_present}" -eq 0 ]]; then
+            echo "::error::L2N_MARKER case=${CASE} phase=mismatch reason=probe-job-absent probe=${probe}"
+            exit 1
+          fi
+          if grep -q "\"name\": *\"Admit-effect marker\"" <<<"${jobs_json}"; then
+            echo "::error::L2N_MARKER case=${CASE} phase=mismatch reason=fleet-admitted-probe probe=${probe}"
+            exit 1
+          fi
+          if [[ "${CASE}" == "invalid-lock" ]]; then
+            # The job is admitted (checkout is allowlisted); the lock rejection
+            # happens inside the probe step and must terminate the job as a
+            # failure before any project-effect step can run.
+            lock_step="$(python3 -c "import json,sys; jobs=json.load(sys.stdin)['jobs']; j=next(j for j in jobs if j['name']=='${probe}'); print(next((s['conclusion'] for s in j['steps'] if s['name']=='Reject disposable lock before project command'),'absent'))" <<<"${jobs_json}")"
+            effect_step="$(python3 -c "import json,sys; jobs=json.load(sys.stdin)['jobs']; j=next(j for j in jobs if j['name']=='${probe}'); print(next((s['conclusion'] for s in j['steps'] if s['name']=='Unreachable project effect'),'absent'))" <<<"${jobs_json}")"
+            if [[ "${lock_step}" != "failure" ]] || [[ "${effect_step}" != "skipped" && "${effect_step}" != "absent" ]]; then
+              echo "::error::L2N_MARKER case=${CASE} phase=mismatch reason=invalid-lock-not-rejected lock_step=${lock_step} effect_step=${effect_step}"
+              exit 1
+            fi
+            echo "::notice::L2N_MARKER case=${CASE} phase=rejection-asserted probe=${probe} validation=disposable-lock fail-before-effect=true"
+            echo "L2N_REJECTION_ASSERTED case=${CASE} probe=${probe}"
+            exit 0
+          fi
+          if grep -q "\"name\": *\"Velnor rejected job (capability_validation)\"" <<<"${jobs_json}"; then
+            echo "::notice::L2N_MARKER case=${CASE} phase=rejection-asserted probe=${probe} validation=capability_validation fail-before-effect=true"
+            echo "L2N_REJECTION_ASSERTED case=${CASE} probe=${probe}"
+            exit 0
+          fi
+          echo "::error::L2N_MARKER case=${CASE} phase=mismatch reason=no-fleet-rejection-evidence probe=${probe}"
+          exit 1
+      - name: Write canonical expected-failure evidence
+        if: always()
+        env:
+          CASE: ${{ inputs.case }}
+          ASSERT_OUTCOME: ${{ steps.assert.outcome }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          rejection = {
+              "mutable-ref": "admission/mutable-ref",
+              "unknown-repository": "unknown repository",
+              "unknown-input": "admission/unknown-input",
+              "unknown-subpath-input": "unknown local action",
+              "unresolved-expression": "admission/unresolved-expression",
+              "invalid-lock": "mise/invalid-disposable-lock",
+          }[os.environ["CASE"]]
+          assertion = os.environ["ASSERT_OUTCOME"]
+          payload = {
+              "case": os.environ["CASE"],
+              "fail_before_effect": assertion == "success",
+              "lane": "velnor",
+              "observed_outcome": "failure" if assertion == "success" else "unknown",
+              "rejection": rejection,
+              "schema": "velnor.fixture.l2-negative.v1",
+              "status": "passed" if assertion == "success" else "failed",
+          }
+          Path("evidence/l2-negative-velnor.json").write_text(
+              json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: l2-negative-velnor
+          path: evidence/l2-negative-velnor.json
+          if-no-files-found: error
+
+  compare-negative-evidence:
+    needs: [github-scanner, assert-velnor-rejection]
+    if: always()
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: l2-negative-*
+          path: evidence
+      - name: Require canonical expected-failure evidence
+        env:
+          CASE: ${{ inputs.case }}
+          LANES: ${{ inputs.lanes }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          expected_lanes = {"github", "velnor"} if os.environ["LANES"] == "both" else {os.environ["LANES"]}
+          paths = sorted(Path("evidence").rglob("l2-negative-*.json"))
+          rows = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+          if {row.get("lane") for row in rows} != expected_lanes:
+              raise SystemExit(f"expected L2 negative lanes {sorted(expected_lanes)}, got {rows}")
+          rejection = {
+              "mutable-ref": "admission/mutable-ref",
+              "unknown-repository": "unknown repository",
+              "unknown-input": "admission/unknown-input",
+              "unknown-subpath-input": "unknown local action",
+              "unresolved-expression": "admission/unresolved-expression",
+              "invalid-lock": "mise/invalid-disposable-lock",
+          }[os.environ["CASE"]]
+          for row in rows:
+              expected = {
+                  "case": os.environ["CASE"],
+                  "fail_before_effect": True,
+                  "lane": row["lane"],
+                  "observed_outcome": "failure",
+                  "rejection": rejection,
+                  "schema": "velnor.fixture.l2-negative.v1",
+                  "status": "passed",
+              }
+              if row != expected:
+                  raise SystemExit(f"non-canonical L2 negative evidence: {row}")
+          print(f"canonical L2 negative evidence verified for {len(rows)} lane(s)")
+          PY

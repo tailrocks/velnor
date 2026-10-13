@@ -1,0 +1,286 @@
+name: Publish apt repo
+
+on:
+  push:
+    branches: [main]
+    paths: [package-state.json]
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: velnor (default) | github | both
+        type: choice
+        default: velnor
+        options: [velnor, github, both]
+      version:
+        description: Velnor source release tag (vX.Y.Z); empty selects latest
+        type: string
+        default: ""
+  repository_dispatch:
+    types: [publish-deb]
+
+permissions:
+  contents: read
+  packages: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  APT_BASE_URL: https://velnor-apt.tailrocks.com
+
+jobs:
+  build:
+    name: Build apt repository (${{ matrix.config.lane }})
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'push') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
+    steps:
+      - name: Checkout publisher policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned tools
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install publisher packages
+        if: matrix.config.writer
+        run: mise bootstrap packages apply --yes
+
+      - name: Resolve immutable source release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ github.event.inputs.version }}${{ github.event.client_payload.version }}
+        run: |
+          set -euo pipefail
+          state_version=$(jq -er '.version | select(test("^[0-9]+[.][0-9]+[.][0-9]+$"))' package-state.json)
+          state_ref=$(jq -er '.source_ref' package-state.json)
+          state_commit=$(jq -er '.source_commit | select(test("^[0-9a-f]{40}$"))' package-state.json)
+          test "$(jq -r .source_repository package-state.json)" = tailrocks/velnor
+          version="${REQUESTED_VERSION:-v$state_version}"
+          test "$state_ref" = "refs/tags/$version"
+          case "$version" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::invalid release tag: $version" >&2; exit 1 ;;
+          esac
+          commit="$(scripts/verify-release.sh resolve-commit --version "$version")"
+          test "$commit" = "$state_commit"
+          printf 'version=%s\ncommit=%s\n' "$version" "$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Read pinned APT signer identity
+        id: signer
+        run: |
+          set -euo pipefail
+          fingerprint="$(gpg --show-keys --with-colons velnor.gpg | awk -F: '$1=="fpr" {print $10; exit}')"
+          [ -n "$fingerprint" ] || { echo "::error::velnor.gpg has no fingerprint" >&2; exit 1; }
+          gpg --batch --yes --dearmor --output velnor-keyring.gpg velnor.gpg
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Download source-owned coherence assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: scripts/verify-release.sh download --version "$VERSION" --dir incoming
+
+      - name: Authenticate source image registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify source, package, manifest, image, and signer coherence
+        env:
+          COMMIT: ${{ steps.release.outputs.commit }}
+          SIGNER: ${{ steps.signer.outputs.fingerprint }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          scripts/verify-release.sh verify \
+            --version "$VERSION" \
+            --incoming incoming \
+            --commit "$COMMIT" \
+            --signer "$SIGNER" \
+            --expect-signer "$SIGNER" \
+            --verify-oci
+
+      - name: Import and validate publisher key
+        if: matrix.config.writer
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          EXPECTED_SIGNER: ${{ steps.signer.outputs.fingerprint }}
+        run: |
+          set -euo pipefail
+          [ -n "${APT_GPG_PRIVATE_KEY:-}" ] || { echo "::error::APT_GPG_PRIVATE_KEY is unset" >&2; exit 1; }
+          printf '%s' "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          actual="$(gpg --list-secret-keys --with-colons | awk -F: '$1=="fpr" {print $10; exit}')"
+          [ "$actual" = "$EXPECTED_SIGNER" ] \
+            || { echo "::error::private signer differs from committed public key" >&2; exit 1; }
+
+      - name: Recover signed previous package pair
+        if: matrix.config.writer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p previous
+          recovered=0
+          prior_version=''
+          if curl -fsS "$APT_BASE_URL/dists/stable/InRelease" -o previous/InRelease; then
+            gpgv --keyring ./velnor-keyring.gpg previous/InRelease
+            for arch in amd64 arm64; do
+              packages="previous/Packages-$arch"
+              curl -fsS "$APT_BASE_URL/dists/stable/main/binary-$arch/Packages.gz" \
+                | gzip -dc > "$packages"
+              row="$(awk -v candidate="${VERSION#v}" '
+                BEGIN {RS=""; FS="\n"}
+                {pkg=ver=file=digest=""; for(i=1;i<=NF;i++) {
+                  if($i~/^Package: /) pkg=substr($i,10)
+                  if($i~/^Version: /) ver=substr($i,10)
+                  if($i~/^Filename: /) file=substr($i,11)
+                  if($i~/^SHA256: /) digest=substr($i,9)
+                }}
+                pkg=="velnor-runner" && ver!=candidate {print ver "|" file "|" digest}
+              ' "$packages" | sort -t'|' -k1,1V | tail -n1)"
+              [ -n "$row" ] || continue
+              IFS='|' read -r row_version filename digest <<<"$row"
+              [ -n "$row_version" ] && [ -n "$filename" ] && [ -n "$digest" ] \
+                || { echo "::error::signed $arch rollback row is incomplete" >&2; exit 1; }
+              deb="previous/$(basename "$filename")"
+              curl -fsS "$APT_BASE_URL/$filename" -o "$deb"
+              printf '%s  %s\n' "$digest" "$deb" | sha256sum --check --strict
+              [ "$(dpkg-deb -f "$deb" Version)" = "$row_version" ]
+              [ "$(dpkg-deb -f "$deb" Architecture)" = "$arch" ]
+              if [ -n "$prior_version" ] && [ "$prior_version" != "$row_version" ]; then
+                echo "::error::signed architecture rollback versions differ" >&2
+                exit 1
+              fi
+              prior_version="$row_version"
+              recovered=$((recovered + 1))
+            done
+            curl -fsS "$APT_BASE_URL/last-publish" -o last-publish || true
+            curl -fsS "$APT_BASE_URL/publication-record.json" -o previous/publication-record.json
+            curl -fsS "$APT_BASE_URL/publication-record.json.sig" -o previous/publication-record.json.sig
+            gpgv --keyring ./velnor-keyring.gpg \
+              previous/publication-record.json.sig previous/publication-record.json
+            candidate_sha="$(awk 'NR == 1 {print $1}' incoming/release-record.json.sha256)"
+            [[ "$candidate_sha" =~ ^[0-9a-f]{64}$ ]] \
+              || { echo "::error::candidate release-record checksum is invalid" >&2; exit 1; }
+            jq -e \
+              --arg candidate "$VERSION" \
+              --arg prior "v$prior_version" \
+              --arg candidate_sha "$candidate_sha" \
+              -f scripts/publication-previous.jq \
+              previous/publication-record.json > previous-pointer.json
+          else
+            echo 'No prior signed repository exists; initial publication has no rollback pair.'
+          fi
+
+          if [ "$recovered" = 0 ] && [ "$VERSION" = v0.1.130 ]; then
+            # One-shot bridge from the last source-owned release before the
+            # coherent release-record format. Checksums remain owned by the
+            # immutable v0.1.121 GitHub Release; this restores its exact pair.
+            for tuple in 'amd64 x86_64-unknown-linux-gnu' 'arm64 aarch64-unknown-linux-gnu'; do
+              read -r arch target <<<"$tuple"
+              name="velnor-runner-0.1.121-$target.deb"
+              gh release download v0.1.121 --repo tailrocks/velnor \
+                --pattern "$name" --pattern "$name.sha256" --dir previous
+              expected="$(awk '{print $1}' "previous/$name.sha256")"
+              actual="$(sha256sum "previous/$name" | awk '{print $1}')"
+              [ "$actual" = "$expected" ]
+              [ "$(dpkg-deb -f "previous/$name" Version)" = 0.1.121 ]
+              [ "$(dpkg-deb -f "previous/$name" Architecture)" = "$arch" ]
+            done
+            recovered=2
+            printf '%s\n' '"v0.1.121"' > previous-pointer.json
+          fi
+          [ "$recovered" = 2 ] \
+            || { echo "::error::exact rollback package pair unavailable" >&2; exit 1; }
+          [ -s previous-pointer.json ] \
+            || { echo "::error::signed rollback identity unavailable" >&2; exit 1; }
+
+      - name: Build and sign isolated staging repository
+        if: matrix.config.writer
+        env:
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+          SIGNER: ${{ steps.signer.outputs.fingerprint }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          scripts/verify-release.sh publish \
+            --version "$VERSION" \
+            --incoming incoming \
+            --prev-dir previous \
+            --previous-pointer previous-pointer.json \
+            --signer "$SIGNER"
+
+      - name: Setup Pages
+        if: matrix.config.writer
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
+
+      - name: Upload verified repository
+        if: matrix.config.writer
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: ./public
+
+  deploy:
+    name: Deploy apt repository (${{ matrix.config.lane }})
+    needs: build
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'push') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
+    steps:
+      - name: Deploy to GitHub Pages
+        if: matrix.config.writer
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
+
+      - name: Verify deployed signed metadata
+        if: matrix.config.writer
+        run: |
+          set -euo pipefail
+          curl -fsS "$APT_BASE_URL/dists/stable/InRelease" -o InRelease
+          curl -fsS "$APT_BASE_URL/velnor.gpg" -o velnor.gpg
+          curl -fsS "$APT_BASE_URL/publication-record.json" -o publication-record.json
+          curl -fsS "$APT_BASE_URL/publication-record.json.sig" -o publication-record.json.sig
+          gpg --batch --yes --dearmor --output velnor-keyring.gpg velnor.gpg
+          gpgv --keyring ./velnor-keyring.gpg InRelease
+          gpgv --keyring ./velnor-keyring.gpg publication-record.json.sig publication-record.json
+
+      - name: Confirm comparison lane
+        if: ${{ !matrix.config.writer }}
+        run: echo 'Coherence comparison passed; Pages writer intentionally disabled.'
+
+  publish-required:
+    name: Publish required (${{ matrix.config.lane }})
+    needs: [build, deploy]
+    if: always()
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON('[{"lane":"GitHub","runner":"ubuntu-26.04"}]') }}
+    runs-on: ${{ matrix.config.runner }}
+    steps:
+      - name: Fail on failed, cancelled, or skipped publication
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS_JSON" | jq -e \
+            'to_entries | map(.value.result) | all(. == "success")' >/dev/null \
+            || { echo 'Required publication job failed, cancelled, or skipped.' >&2; exit 1; }

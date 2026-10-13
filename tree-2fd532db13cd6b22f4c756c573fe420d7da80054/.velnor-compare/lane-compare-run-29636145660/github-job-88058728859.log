@@ -1,0 +1,396 @@
+﻿2026-07-18T07:40:35.3098088Z Current runner version: '2.335.1'
+2026-07-18T07:40:35.3126204Z ##[group]Runner Image Provisioner
+2026-07-18T07:40:35.3127092Z Hosted Compute Agent
+2026-07-18T07:40:35.3127809Z Version: 20260707.563
+2026-07-18T07:40:35.3128463Z Commit: 02667638d2b423fbc733a8e32a88b44996a3ba6e
+2026-07-18T07:40:35.3129162Z Build Date: 2026-07-07T19:33:50Z
+2026-07-18T07:40:35.3129971Z Worker ID: {d3b48031-dceb-4612-8c40-ec48307285e0}
+2026-07-18T07:40:35.3130923Z Azure Region: northcentralus
+2026-07-18T07:40:35.3131654Z ##[endgroup]
+2026-07-18T07:40:35.3133168Z ##[group]Operating System
+2026-07-18T07:40:35.3133810Z Ubuntu
+2026-07-18T07:40:35.3134406Z 26.04
+2026-07-18T07:40:35.3134912Z LTS
+2026-07-18T07:40:35.3135447Z ##[endgroup]
+2026-07-18T07:40:35.3136061Z ##[group]Runner Image
+2026-07-18T07:40:35.3136648Z Image: ubuntu-26.04
+2026-07-18T07:40:35.3137234Z Version: 20260714.74.1
+2026-07-18T07:40:35.3138555Z Included Software: https://github.com/actions/runner-images/blob/ubuntu26/20260714.74/images/ubuntu/Ubuntu2604-Readme.md
+2026-07-18T07:40:35.3140188Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu26%2F20260714.74
+2026-07-18T07:40:35.3141604Z ##[endgroup]
+2026-07-18T07:40:35.3142863Z ##[group]GITHUB_TOKEN Permissions
+2026-07-18T07:40:35.3145218Z Actions: read
+2026-07-18T07:40:35.3145927Z Contents: read
+2026-07-18T07:40:35.3146501Z Metadata: read
+2026-07-18T07:40:35.3147044Z ##[endgroup]
+2026-07-18T07:40:35.3149340Z Secret source: Actions
+2026-07-18T07:40:35.3150411Z Prepare workflow directory
+2026-07-18T07:40:35.3604904Z Prepare all required actions
+2026-07-18T07:40:35.3644625Z Getting action download info
+2026-07-18T07:40:35.5604007Z Download action repository 'actions/checkout@v6' (SHA:df4cb1c069e1874edd31b4311f1884172cec0e10)
+2026-07-18T07:40:35.7155772Z Download action repository 'mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e' (SHA:1583d6b38d7be47f593cb472781bbb21cab4321e)
+2026-07-18T07:40:35.9192695Z Download action repository 'jdx/mise-action@v4' (SHA:dad1bfd3df957f44999b559dd69dc1671cb4e9ea)
+2026-07-18T07:40:36.3194440Z Complete job name: Cache sccache (GitHub)
+2026-07-18T07:40:36.4035330Z ##[group]Run actions/checkout@v6
+2026-07-18T07:40:36.4036324Z with:
+2026-07-18T07:40:36.4036867Z   repository: tailrocks/velnor-actions-fixture
+2026-07-18T07:40:36.4041524Z   token: ***
+2026-07-18T07:40:36.4042005Z   ssh-strict: true
+2026-07-18T07:40:36.4042480Z   ssh-user: git
+2026-07-18T07:40:36.4042955Z   persist-credentials: true
+2026-07-18T07:40:36.4043474Z   clean: true
+2026-07-18T07:40:36.4043938Z   sparse-checkout-cone-mode: true
+2026-07-18T07:40:36.4044491Z   fetch-depth: 1
+2026-07-18T07:40:36.4044954Z   fetch-tags: false
+2026-07-18T07:40:36.4045434Z   show-progress: true
+2026-07-18T07:40:36.4045906Z   lfs: false
+2026-07-18T07:40:36.4046347Z   submodules: false
+2026-07-18T07:40:36.4046837Z   set-safe-directory: true
+2026-07-18T07:40:36.4047655Z env:
+2026-07-18T07:40:36.4048115Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:40:36.4048642Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:40:36.4049208Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:40:36.4049795Z ##[endgroup]
+2026-07-18T07:40:36.5142114Z Syncing repository: tailrocks/velnor-actions-fixture
+2026-07-18T07:40:36.5145672Z ##[group]Getting Git version info
+2026-07-18T07:40:36.5147507Z Working directory is '/home/runner/work/velnor-actions-fixture/velnor-actions-fixture'
+2026-07-18T07:40:36.5149956Z [command]/usr/bin/git version
+2026-07-18T07:40:36.5151423Z git version 2.53.0
+2026-07-18T07:40:36.5172405Z ##[endgroup]
+2026-07-18T07:40:36.5194570Z Temporarily overriding HOME='/home/runner/work/_temp/33957689-9841-4e24-bf81-b4cd3e445c94' before making global git config changes
+2026-07-18T07:40:36.5197250Z Adding repository directory to the temporary git global config as a safe directory
+2026-07-18T07:40:36.5203923Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:40:36.5268855Z Deleting the contents of '/home/runner/work/velnor-actions-fixture/velnor-actions-fixture'
+2026-07-18T07:40:36.5272146Z ##[group]Determining repository object format
+2026-07-18T07:40:36.5274382Z ##[endgroup]
+2026-07-18T07:40:36.5276337Z ##[group]Initializing the repository
+2026-07-18T07:40:36.5281553Z [command]/usr/bin/git init /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:40:36.5405621Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-07-18T07:40:36.5407872Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-07-18T07:40:36.5409999Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-07-18T07:40:36.5411905Z hint: call:
+2026-07-18T07:40:36.5412924Z hint:
+2026-07-18T07:40:36.5414255Z hint: 	git config --global init.defaultBranch <name>
+2026-07-18T07:40:36.5416584Z hint:
+2026-07-18T07:40:36.5417951Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-07-18T07:40:36.5420113Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-07-18T07:40:36.5422273Z hint:
+2026-07-18T07:40:36.5423321Z hint: 	git branch -m <name>
+2026-07-18T07:40:36.5424312Z hint:
+2026-07-18T07:40:36.5425461Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-07-18T07:40:36.5427592Z Initialized empty Git repository in /home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git/
+2026-07-18T07:40:36.5432016Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor-actions-fixture
+2026-07-18T07:40:36.5481836Z ##[endgroup]
+2026-07-18T07:40:36.5483719Z ##[group]Disabling automatic garbage collection
+2026-07-18T07:40:36.5486027Z [command]/usr/bin/git config --local gc.auto 0
+2026-07-18T07:40:36.5528336Z ##[endgroup]
+2026-07-18T07:40:36.5530228Z ##[group]Setting up auth
+2026-07-18T07:40:36.5531890Z Removing SSH command configuration
+2026-07-18T07:40:36.5537074Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-07-18T07:40:36.5584632Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-07-18T07:40:36.6035473Z Removing HTTP extra header
+2026-07-18T07:40:36.6041907Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-07-18T07:40:36.6093752Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-07-18T07:40:36.6394247Z Removing includeIf entries pointing to credentials config files
+2026-07-18T07:40:36.6401284Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-07-18T07:40:36.6439481Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-07-18T07:40:36.6732623Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-7a139c51-b0b9-4556-b707-3d11ad58b567.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-07-18T07:40:36.6782417Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git.path /home/runner/work/_temp/git-credentials-7a139c51-b0b9-4556-b707-3d11ad58b567.config
+2026-07-18T07:40:36.6821110Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-7a139c51-b0b9-4556-b707-3d11ad58b567.config
+2026-07-18T07:40:36.6862187Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-7a139c51-b0b9-4556-b707-3d11ad58b567.config
+2026-07-18T07:40:36.6901029Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-7a139c51-b0b9-4556-b707-3d11ad58b567.config
+2026-07-18T07:40:36.6934142Z ##[endgroup]
+2026-07-18T07:40:36.6935994Z ##[group]Fetching the repository
+2026-07-18T07:40:36.6944593Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +1ef5d108eab61e103e09efd08e1afcd3078048ae:refs/remotes/origin/main
+2026-07-18T07:40:37.0835187Z From https://github.com/tailrocks/velnor-actions-fixture
+2026-07-18T07:40:37.0837338Z  * [new ref]         1ef5d108eab61e103e09efd08e1afcd3078048ae -> origin/main
+2026-07-18T07:40:37.0902107Z [command]/usr/bin/git branch --list --remote origin/main
+2026-07-18T07:40:37.0939599Z   origin/main
+2026-07-18T07:40:37.0959564Z [command]/usr/bin/git rev-parse refs/remotes/origin/main
+2026-07-18T07:40:37.0978469Z 1ef5d108eab61e103e09efd08e1afcd3078048ae
+2026-07-18T07:40:37.0983876Z ##[endgroup]
+2026-07-18T07:40:37.0985279Z ##[group]Determining the checkout info
+2026-07-18T07:40:37.0986517Z ##[endgroup]
+2026-07-18T07:40:37.0989761Z [command]/usr/bin/git sparse-checkout disable
+2026-07-18T07:40:37.1046357Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-07-18T07:40:37.1079239Z ##[group]Checking out the ref
+2026-07-18T07:40:37.1083097Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+2026-07-18T07:40:37.1159722Z Switched to a new branch 'main'
+2026-07-18T07:40:37.1161995Z branch 'main' set up to track 'origin/main'.
+2026-07-18T07:40:37.1169941Z ##[endgroup]
+2026-07-18T07:40:37.1217523Z [command]/usr/bin/git log -1 --format=%H
+2026-07-18T07:40:37.1247282Z 1ef5d108eab61e103e09efd08e1afcd3078048ae
+2026-07-18T07:40:37.1549481Z ##[group]Run mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e
+2026-07-18T07:40:37.1551255Z with:
+2026-07-18T07:40:37.1551775Z   version: v0.16.0
+2026-07-18T07:40:37.1552414Z   disable_annotations: false
+2026-07-18T07:40:37.1562972Z   token: ***
+2026-07-18T07:40:37.1563511Z env:
+2026-07-18T07:40:37.1564126Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:40:37.1564837Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:40:37.1565601Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:40:37.1566263Z ##[endgroup]
+2026-07-18T07:40:37.2436784Z try to setup sccache version: v0.16.0
+2026-07-18T07:40:37.2475193Z sccache download from url: https://github.com/mozilla/sccache/releases/download/v0.16.0/sccache-v0.16.0-x86_64-unknown-linux-musl.tar.gz
+2026-07-18T07:40:37.5246423Z Correct checksum: aec995a83ad3dff3d14b6314e08858b7b73d35ca85a5bcf3d3a9ec07dee35588
+2026-07-18T07:40:37.5368253Z [command]/usr/bin/tar xz --warning=no-unknown-keyword --overwrite -C /home/runner/work/_temp/a604e761-a59d-448b-ad6e-881de1388faa -f /home/runner/work/_temp/9e68214d-8d0e-475a-885c-dcabaa0171dc
+2026-07-18T07:40:37.6454871Z sccache extracted to: /home/runner/work/_temp/a604e761-a59d-448b-ad6e-881de1388faa
+2026-07-18T07:40:37.6583668Z sccache cached to: /opt/hostedtoolcache/sccache/0.16.0/x64
+2026-07-18T07:40:37.6990591Z ##[group]Run jdx/mise-action@v4
+2026-07-18T07:40:37.6991541Z with:
+2026-07-18T07:40:37.6992023Z   install: true
+2026-07-18T07:40:37.6992581Z   bootstrap: false
+2026-07-18T07:40:37.6993126Z   cache: true
+2026-07-18T07:40:37.6993632Z   cache_save: true
+2026-07-18T07:40:37.6994187Z   cache_key_prefix: mise-v1
+2026-07-18T07:40:37.6994840Z   experimental: false
+2026-07-18T07:40:37.6995417Z   log_level: info
+2026-07-18T07:40:37.6995950Z   reshim: false
+2026-07-18T07:40:37.6996486Z   add_shims_to_path: true
+2026-07-18T07:40:37.7006003Z   github_token: ***
+2026-07-18T07:40:37.7006599Z   fetch_from_github: true
+2026-07-18T07:40:37.7007214Z   env: true
+2026-07-18T07:40:37.7007706Z   wings_enabled: false
+2026-07-18T07:40:37.7008274Z env:
+2026-07-18T07:40:37.7008752Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:40:37.7009398Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:40:37.7010076Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:40:37.7011138Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.16.0/x64/sccache
+2026-07-18T07:40:37.7012211Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-07-18T07:40:37.7013407Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-07-18T07:40:37.7166043Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-07-18T07:40:37.7166898Z ##[endgroup]
+2026-07-18T07:40:37.8556679Z ##[group]Restoring mise cache
+2026-07-18T07:40:37.8615833Z [command]/usr/bin/ldd --version
+2026-07-18T07:40:37.8684519Z ldd (Ubuntu GLIBC 2.43-2ubuntu2) 2.43
+2026-07-18T07:40:37.8686249Z Copyright (C) 2024 Free Software Foundation, Inc.
+2026-07-18T07:40:37.8687712Z This is free software; see the source for copying conditions.  There is NO
+2026-07-18T07:40:37.8689492Z warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+2026-07-18T07:40:37.8691354Z Written by Roland McGrath and Ulrich Drepper.
+2026-07-18T07:40:38.0841543Z mise cache not found for mise-v1-linux-x64-ubuntu26-3f09e7651569c6e9f5932bf3b371578afcca89e11d6d3f7e9e0323072f13665b
+2026-07-18T07:40:38.0845852Z ##[group]Setup mise
+2026-07-18T07:40:38.0868616Z [command]/usr/local/bin/zstd --version
+2026-07-18T07:40:38.0903103Z *** Zstandard CLI (64-bit) v1.5.7, by Yann Collet ***
+2026-07-18T07:40:38.0921358Z Using curl to download mise
+2026-07-18T07:40:38.1791190Z [command]/usr/bin/ldd --version
+2026-07-18T07:40:38.1834614Z ldd (Ubuntu GLIBC 2.43-2ubuntu2) 2.43
+2026-07-18T07:40:38.1836152Z Copyright (C) 2024 Free Software Foundation, Inc.
+2026-07-18T07:40:38.1837894Z This is free software; see the source for copying conditions.  There is NO
+2026-07-18T07:40:38.1840955Z warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+2026-07-18T07:40:38.1843488Z Written by Roland McGrath and Ulrich Drepper.
+2026-07-18T07:40:38.1867179Z [command]/usr/bin/curl -fsSL https://github.com/jdx/mise/releases/download/v2026.7.7/mise-v2026.7.7-linux-x64.tar.zst --output /tmp/mise-action-SkaDHg/mise-v2026.7.7-linux-x64.tar.zst
+2026-07-18T07:40:38.6541403Z Verified mise-v2026.7.7-linux-x64.tar.zst against signed checksums
+2026-07-18T07:40:38.6561658Z [command]/usr/bin/tar --zstd -xf /tmp/mise-action-SkaDHg/mise-v2026.7.7-linux-x64.tar.zst -C /tmp/mise-action-SkaDHg
+2026-07-18T07:40:38.8770533Z [command]/usr/bin/mv /tmp/mise-action-SkaDHg/mise/bin/mise /home/runner/.local/share/mise/bin/mise
+2026-07-18T07:40:38.9343297Z ##[group]Setting env vars
+2026-07-18T07:40:38.9344907Z Setting MISE_LOG_LEVEL=info
+2026-07-18T07:40:38.9353360Z Setting MISE_GITHUB_TOKEN=***
+2026-07-18T07:40:38.9355278Z Setting MISE_TRUSTED_CONFIG_PATHS=/home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:40:38.9357275Z Setting MISE_YES=1
+2026-07-18T07:40:38.9358752Z Adding /home/runner/.local/share/mise/shims to PATH
+2026-07-18T07:40:38.9361534Z ##[group]Running mise --version
+2026-07-18T07:40:38.9369522Z [command]/home/runner/.local/share/mise/bin/mise --version
+2026-07-18T07:40:38.9460084Z 2026.7.7 linux-x64 (2026-07-15)
+2026-07-18T07:40:38.9536151Z ##[endgroup]
+2026-07-18T07:40:38.9693342Z ##[group]Running mise install
+2026-07-18T07:40:38.9712595Z [command]/home/runner/.local/share/mise/bin/mise install
+2026-07-18T07:40:39.2203718Z [2mmise[0m [34mrust[0m@1.97.1     [1/3] install
+2026-07-18T07:40:39.2224526Z [2mmise[0m [34mjust[0m@1.52.0     [1/3] install
+2026-07-18T07:40:39.2236541Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [1/3] install
+2026-07-18T07:40:39.2772205Z info: syncing channel updates for 1.97.1-x86_64-unknown-linux-gnu
+2026-07-18T07:40:39.4779199Z info: latest update on 2026-07-16 for version 1.97.1 (8bab26f4f 2026-07-14)
+2026-07-18T07:40:39.4791873Z info: downloading 3 components
+2026-07-18T07:40:40.4206868Z [2mmise[0m [34mjust[0m@1.52.0     [1/3] download just-1.52.0-x86_64-unknown-linux-musl.tar.gz
+2026-07-18T07:40:40.4623269Z [2mmise[0m [34mjust[0m@1.52.0     [2/3] checksum just-1.52.0-x86_64-unknown-linux-musl.tar.gz
+2026-07-18T07:40:40.4639665Z [2mmise[0m [34mjust[0m@1.52.0     [3/3] extract just-1.52.0-x86_64-unknown-linux-musl.tar.gz
+2026-07-18T07:40:40.4873392Z [2mmise[0m [34mjust[0m@1.52.0   [38;5;10m✓[0m installed
+2026-07-18T07:40:40.9552820Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [1/3] download cargo-binstall-x86_64-unknown-linux-musl.tgz
+2026-07-18T07:40:41.0063537Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [2/3] verify GitHub artifact attestations
+2026-07-18T07:40:41.2835385Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [2/3] ✓ GitHub artifact attestations verified
+2026-07-18T07:40:41.2837182Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [2/3] checksum cargo-binstall-x86_64-unknown-linux-musl.tgz
+2026-07-18T07:40:41.2897052Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [3/3] extract cargo-binstall-x86_64-unknown-linux-musl.tgz
+2026-07-18T07:40:41.3599428Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [38;5;10m✓[0m installed
+2026-07-18T07:40:47.7099826Z [2mmise[0m [34mrust[0m@1.97.1     [1/3]   1.97.1-x86_64-unknown-linux-gnu installed - rustc 1.97.1 (8bab26f4f 2026-07-14)
+2026-07-18T07:40:47.7427520Z [2mmise[0m [34mrust[0m@1.97.1     [1/3] rustc -V
+2026-07-18T07:40:47.7567236Z [2mmise[0m [34mrust[0m@1.97.1     [1/3] rustc 1.97.1 (8bab26f4f 2026-07-14)
+2026-07-18T07:40:47.7607975Z [2mmise[0m [34mrust[0m@1.97.1   [38;5;10m✓[0m installed
+2026-07-18T07:40:47.7616437Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3] install
+2026-07-18T07:40:47.7763276Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3]  INFO resolve: Resolving package: 'cargo-nextest@=0.9.137'
+2026-07-18T07:40:54.1583360Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3]  WARN The package cargo-nextest v0.9.137 (x86_64-unknown-linux-gnu) has been downloaded from github.com
+2026-07-18T07:40:54.1585290Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3]  INFO This will install the following binaries:
+2026-07-18T07:40:54.1587155Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3]  INFO   - cargo-nextest => /home/runner/.local/share/mise/installs/cargo-cargo-nextest/0.9.137/bin/cargo-nextest
+2026-07-18T07:40:54.1588736Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3]  INFO Installing binaries...
+2026-07-18T07:40:54.1598171Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3]  INFO Done in 6.39337103s
+2026-07-18T07:40:54.1623726Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [38;5;10m✓[0m installed
+2026-07-18T07:40:54.1758140Z ##[endgroup]
+2026-07-18T07:40:54.1759611Z ##[group]Saving mise cache
+2026-07-18T07:40:54.1893334Z [command]/usr/bin/tar --posix -cf cache.tzst --exclude cache.tzst -P -C /home/runner/work/velnor-actions-fixture/velnor-actions-fixture --files-from manifest.txt --use-compress-program zstdmt
+2026-07-18T07:40:54.7978029Z Failed to save: Unable to reserve cache with key mise-v1-linux-x64-ubuntu26-3f09e7651569c6e9f5932bf3b371578afcca89e11d6d3f7e9e0323072f13665b, another job may be creating this cache.
+2026-07-18T07:40:54.8023908Z ##[endgroup]
+2026-07-18T07:40:54.8024678Z ##[group]Running mise ls
+2026-07-18T07:40:54.8044406Z [command]/home/runner/.local/share/mise/bin/mise ls
+2026-07-18T07:40:54.8215032Z cargo-binstall       1.21.0            ~/work/velnor-actions-fixture/velnor-actions-fixture/mise.toml  1.21.0
+2026-07-18T07:40:54.8216352Z cargo:cargo-nextest  0.9.137           ~/work/velnor-actions-fixture/velnor-actions-fixture/mise.toml  0.9.137
+2026-07-18T07:40:54.8217145Z just                 1.52.0            ~/work/velnor-actions-fixture/velnor-actions-fixture/mise.toml  1.52.0
+2026-07-18T07:40:54.8217850Z rust                 1.97.1 (symlink)  ~/work/velnor-actions-fixture/velnor-actions-fixture/mise.toml  1.97.1
+2026-07-18T07:40:54.8235130Z ##[endgroup]
+2026-07-18T07:40:54.8238041Z ##[group]Exporting mise environment variables
+2026-07-18T07:40:54.8457990Z [command]/home/runner/.local/share/mise/bin/mise env --json
+2026-07-18T07:40:54.8629637Z {
+2026-07-18T07:40:54.8630075Z   "CARGO_HOME": "/home/runner/.cargo",
+2026-07-18T07:40:54.8634218Z   "PATH": "/home/runner/.cargo/bin:/home/runner/.local/share/mise/installs/cargo-binstall/1.21.0:/home/runner/.local/share/mise/installs/cargo-cargo-nextest/0.9.137/bin:/home/runner/.local/share/mise/installs/just/1.52.0:/home/runner/.local/share/mise/shims:/home/runner/.local/share/mise/bin:/opt/hostedtoolcache/sccache/0.16.0/x64:/snap/bin:/home/runner/.local/bin:/opt/pipx_bin:/home/runner/.cargo/bin:/home/runner/.config/composer/vendor/bin:/usr/local/.ghcup/bin:/home/runner/.dotnet/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+2026-07-18T07:40:54.8636849Z   "RUSTUP_HOME": "/home/runner/.rustup",
+2026-07-18T07:40:54.8637137Z   "RUSTUP_TOOLCHAIN": "1.97.1"
+2026-07-18T07:40:54.8637371Z }
+2026-07-18T07:40:54.8656204Z ##[endgroup]
+2026-07-18T07:40:54.8796199Z ##[group]Run test "${RUSTC_WRAPPER:-}" = sccache
+2026-07-18T07:40:54.8796593Z [36;1mtest "${RUSTC_WRAPPER:-}" = sccache[0m
+2026-07-18T07:40:54.8971178Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-07-18T07:40:54.8971647Z env:
+2026-07-18T07:40:54.8971872Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:40:54.8972133Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:40:54.8972393Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:40:54.8972717Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.16.0/x64/sccache
+2026-07-18T07:40:54.8973104Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-07-18T07:40:54.8973609Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-07-18T07:40:54.9018494Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-07-18T07:40:54.9018761Z   MISE_LOG_LEVEL: info
+2026-07-18T07:40:54.9021570Z   MISE_GITHUB_TOKEN: ***
+2026-07-18T07:40:54.9021982Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:40:54.9022510Z   MISE_YES: 1
+2026-07-18T07:40:54.9022721Z   CARGO_HOME: /home/runner/.cargo
+2026-07-18T07:40:54.9022978Z   RUSTUP_HOME: /home/runner/.rustup
+2026-07-18T07:40:54.9023240Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-07-18T07:40:54.9023466Z ##[endgroup]
+2026-07-18T07:40:54.9168379Z ##[group]Run cargo check -p app-a --locked
+2026-07-18T07:40:54.9168748Z [36;1mcargo check -p app-a --locked[0m
+2026-07-18T07:40:54.9225647Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-07-18T07:40:54.9225996Z env:
+2026-07-18T07:40:54.9226192Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:40:54.9226434Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:40:54.9226691Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:40:54.9226999Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.16.0/x64/sccache
+2026-07-18T07:40:54.9227364Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-07-18T07:40:54.9227792Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-07-18T07:40:54.9272666Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-07-18T07:40:54.9272938Z   MISE_LOG_LEVEL: info
+2026-07-18T07:40:54.9275652Z   MISE_GITHUB_TOKEN: ***
+2026-07-18T07:40:54.9276067Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:40:54.9276515Z   MISE_YES: 1
+2026-07-18T07:40:54.9276784Z   CARGO_HOME: /home/runner/.cargo
+2026-07-18T07:40:54.9277042Z   RUSTUP_HOME: /home/runner/.rustup
+2026-07-18T07:40:54.9277293Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-07-18T07:40:54.9277522Z ##[endgroup]
+2026-07-18T07:40:55.1164361Z     Checking shared v0.1.0 (/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/crates/shared)
+2026-07-18T07:40:55.1358680Z     Checking app-a v0.1.0 (/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/crates/app-a)
+2026-07-18T07:40:55.1577346Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.19s
+2026-07-18T07:40:55.1678460Z Post job cleanup.
+2026-07-18T07:40:55.2508952Z ##[group]Get human-readable stats
+2026-07-18T07:40:55.2528066Z [command]/opt/hostedtoolcache/sccache/0.16.0/x64/sccache --show-stats
+2026-07-18T07:40:55.2618135Z Compile requests                      5
+2026-07-18T07:40:55.2618741Z Compile requests executed             0
+2026-07-18T07:40:55.2619265Z Cache hits                            0
+2026-07-18T07:40:55.2619742Z Cache misses                          0
+2026-07-18T07:40:55.2620231Z Cache hits rate                       -
+2026-07-18T07:40:55.2620994Z Cache timeouts                        0
+2026-07-18T07:40:55.2621497Z Cache read errors                     0
+2026-07-18T07:40:55.2621973Z Forced recaches                       0
+2026-07-18T07:40:55.2622447Z Cache write errors                    0
+2026-07-18T07:40:55.2623489Z Cache errors                          0
+2026-07-18T07:40:55.2623961Z Compilations                          0
+2026-07-18T07:40:55.2624515Z Compilation failures                  0
+2026-07-18T07:40:55.2625017Z Non-cacheable compilations            0
+2026-07-18T07:40:55.2625516Z Non-cacheable calls                   5
+2026-07-18T07:40:55.2626012Z Non-compilation calls                 0
+2026-07-18T07:40:55.2626523Z Unsupported compiler calls            0
+2026-07-18T07:40:55.2627035Z Average cache write               0.000 s
+2026-07-18T07:40:55.2627555Z Average compiler                  0.000 s
+2026-07-18T07:40:55.2628082Z Average cache read hit            0.000 s
+2026-07-18T07:40:55.2628612Z Failed distributed compilations       0
+2026-07-18T07:40:55.2628971Z 
+2026-07-18T07:40:55.2629137Z Non-cacheable reasons:
+2026-07-18T07:40:55.2629569Z missing input                         2
+2026-07-18T07:40:55.2630050Z -                                     1
+2026-07-18T07:40:55.2630540Z crate-type                            1
+2026-07-18T07:40:55.2631286Z incremental                           1
+2026-07-18T07:40:55.2631607Z 
+2026-07-18T07:40:55.2631945Z Cache location                  Local disk: "/home/runner/.cache/sccache"
+2026-07-18T07:40:55.2632620Z Base directories                (none)
+2026-07-18T07:40:55.2633172Z Use direct/preprocessor mode?   yes
+2026-07-18T07:40:55.2633685Z Version (client)                0.16.0
+2026-07-18T07:40:55.2634511Z Max cache size                       20 GiB
+2026-07-18T07:40:55.2644839Z ##[endgroup]
+2026-07-18T07:40:55.2645500Z ##[group]Get JSON stats
+2026-07-18T07:40:55.2647385Z [command]/opt/hostedtoolcache/sccache/0.16.0/x64/sccache --show-stats --stats-format=json
+2026-07-18T07:40:55.2702279Z {"stats":{"compile_requests":5,"requests_unsupported_compiler":0,"requests_not_compile":0,"requests_not_cacheable":5,"requests_executed":0,"cache_errors":{"counts":{},"adv_counts":{}},"cache_hits":{"counts":{},"adv_counts":{}},"cache_misses":{"counts":{},"adv_counts":{}},"cache_timeouts":0,"cache_read_errors":0,"non_cacheable_compilations":0,"forced_recaches":0,"cache_write_errors":0,"cache_writes":0,"cache_write_duration":{"secs":0,"nanos":0},"cache_read_hit_duration":{"secs":0,"nanos":0},"compilations":0,"compiler_write_duration":{"secs":0,"nanos":0},"compile_fails":0,"not_cached":{"-":1,"crate-type":1,"incremental":1,"missing input":2},"dist_compiles":{},"dist_errors":0,"multi_level":null},"cache_location":"Local disk: \"/home/runner/.cache/sccache\"","cache_size":null,"max_cache_size":21474836480,"use_preprocessor_cache_mode":true,"version":"0.16.0","basedirs":[]}
+2026-07-18T07:40:55.2708524Z ##[endgroup]
+2026-07-18T07:40:55.2739076Z ##[notice]0% - 0 hits, 0 misses, 0 errors
+2026-07-18T07:40:55.2749652Z 
+2026-07-18T07:40:55.2750330Z Full human-readable stats:
+2026-07-18T07:40:55.2751739Z Compile requests                      5
+2026-07-18T07:40:55.2752303Z Compile requests executed             0
+2026-07-18T07:40:55.2753071Z Cache hits                            0
+2026-07-18T07:40:55.2753579Z Cache misses                          0
+2026-07-18T07:40:55.2754307Z Cache hits rate                       -
+2026-07-18T07:40:55.2755533Z Cache timeouts                        0
+2026-07-18T07:40:55.2756081Z Cache read errors                     0
+2026-07-18T07:40:55.2756736Z Forced recaches                       0
+2026-07-18T07:40:55.2757237Z Cache write errors                    0
+2026-07-18T07:40:55.2757698Z Cache errors                          0
+2026-07-18T07:40:55.2758186Z Compilations                          0
+2026-07-18T07:40:55.2758688Z Compilation failures                  0
+2026-07-18T07:40:55.2759201Z Non-cacheable compilations            0
+2026-07-18T07:40:55.2759642Z Non-cacheable calls                   5
+2026-07-18T07:40:55.2760079Z Non-compilation calls                 0
+2026-07-18T07:40:55.2760525Z Unsupported compiler calls            0
+2026-07-18T07:40:55.2761189Z Average cache write               0.000 s
+2026-07-18T07:40:55.2761654Z Average compiler                  0.000 s
+2026-07-18T07:40:55.2762506Z Average cache read hit            0.000 s
+2026-07-18T07:40:55.2762967Z Failed distributed compilations       0
+2026-07-18T07:40:55.2763329Z 
+2026-07-18T07:40:55.2763474Z Non-cacheable reasons:
+2026-07-18T07:40:55.2763866Z missing input                         2
+2026-07-18T07:40:55.2764333Z -                                     1
+2026-07-18T07:40:55.2764806Z crate-type                            1
+2026-07-18T07:40:55.2765275Z incremental                           1
+2026-07-18T07:40:55.2765561Z 
+2026-07-18T07:40:55.2765869Z Cache location                  Local disk: "/home/runner/.cache/sccache"
+2026-07-18T07:40:55.2766492Z Base directories                (none)
+2026-07-18T07:40:55.2766945Z Use direct/preprocessor mode?   yes
+2026-07-18T07:40:55.2767390Z Version (client)                0.16.0
+2026-07-18T07:40:55.2767832Z Max cache size                       20 GiB
+2026-07-18T07:40:55.2768143Z 
+2026-07-18T07:40:55.2959135Z Post job cleanup.
+2026-07-18T07:40:55.3869561Z [command]/usr/bin/git version
+2026-07-18T07:40:55.3922138Z git version 2.53.0
+2026-07-18T07:40:55.3966694Z Temporarily overriding HOME='/home/runner/work/_temp/08fce649-bced-41aa-8089-162b56e5752f' before making global git config changes
+2026-07-18T07:40:55.3968084Z Adding repository directory to the temporary git global config as a safe directory
+2026-07-18T07:40:55.3973488Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:40:55.4016118Z Removing SSH command configuration
+2026-07-18T07:40:55.4024065Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-07-18T07:40:55.4117356Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-07-18T07:40:55.4411311Z Removing HTTP extra header
+2026-07-18T07:40:55.4416651Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-07-18T07:40:55.4460251Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-07-18T07:40:55.4787357Z Removing includeIf entries pointing to credentials config files
+2026-07-18T07:40:55.4794023Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-07-18T07:40:55.4836336Z includeif.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git.path
+2026-07-18T07:40:55.4837613Z includeif.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git/worktrees/*.path
+2026-07-18T07:40:55.4838845Z includeif.gitdir:/github/workspace/.git.path
+2026-07-18T07:40:55.4839618Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-07-18T07:40:55.4848664Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git.path
+2026-07-18T07:40:55.4879257Z /home/runner/work/_temp/git-credentials-7a139c51-b0b9-4556-b707-3d11ad58b567.config
+2026-07-18T07:40:55.4897084Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git.path /home/runner/work/_temp/git-credentials-7a139c51-b0b9-4556-b707-3d11ad58b567.config
+2026-07-18T07:40:55.4941807Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git/worktrees/*.path
+2026-07-18T07:40:55.4971157Z /home/runner/work/_temp/git-credentials-7a139c51-b0b9-4556-b707-3d11ad58b567.config
+2026-07-18T07:40:55.4985472Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-7a139c51-b0b9-4556-b707-3d11ad58b567.config
+2026-07-18T07:40:55.5033762Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+2026-07-18T07:40:55.5062892Z /github/runner_temp/git-credentials-7a139c51-b0b9-4556-b707-3d11ad58b567.config
+2026-07-18T07:40:55.5074456Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-7a139c51-b0b9-4556-b707-3d11ad58b567.config
+2026-07-18T07:40:55.5122244Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-07-18T07:40:55.5155552Z /github/runner_temp/git-credentials-7a139c51-b0b9-4556-b707-3d11ad58b567.config
+2026-07-18T07:40:55.5169204Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-7a139c51-b0b9-4556-b707-3d11ad58b567.config
+2026-07-18T07:40:55.5219494Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-07-18T07:40:55.5537311Z Removing credentials config '/home/runner/work/_temp/git-credentials-7a139c51-b0b9-4556-b707-3d11ad58b567.config'
+2026-07-18T07:40:55.5711302Z Cleaning up orphan processes
+2026-07-18T07:40:55.6071563Z Terminate orphan process: pid (3005) (sccache)

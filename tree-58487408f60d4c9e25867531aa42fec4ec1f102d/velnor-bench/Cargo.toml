@@ -1,0 +1,21 @@
+[package]
+name = "velnor-bench"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "First-class benchmark harness that measures the Velnor product, not the toolchain"
+
+# Maintainer-only measurement tooling. Never shipped in the deb: nothing in the
+# release asset list references this crate.
+[[bin]]
+name = "velnor-bench"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+libc = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+velnor-model = { path = "../velnor-model", version = "0.1.0" }

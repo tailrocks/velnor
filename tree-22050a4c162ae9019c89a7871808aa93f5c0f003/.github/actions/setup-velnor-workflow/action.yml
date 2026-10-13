@@ -1,0 +1,73 @@
+# Composite replacement for the former inline `cargo install` step, following
+# the jdx/mise-action model: declare a revision, get the binary on PATH,
+# cached. Source-build phase: installs velnor-workflow with cargo and caches
+# the result. A later tag-based phase adds prebuilt release downloads.
+name: Set up Velnor workflow runtime
+description: Install the velnor-workflow binary with cache and toolchain-env isolation
+
+inputs:
+  rev:
+    description: Velnor git revision to install
+    required: false
+    default: 05ff9b8e8a12b12f135d1fd312ac852bb8dbdccd
+  cache:
+    description: Cache the installation with GitHub cache
+    required: false
+    default: 'true'
+  cache-key-prefix:
+    description: Prefix for the installation cache key
+    required: false
+    default: velnor-workflow-v1
+  github-token:
+    description: GitHub token for authenticated git access
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Restore runtime cache
+      id: cache
+      if: inputs.cache == 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/git
+          ~/.cargo/registry
+          ~/.cargo/bin/velnor-workflow
+        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ inputs.rev }}
+
+    - name: Install runtime from source
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        INSTALL_REV: ${{ inputs.rev }}
+      run: |
+        set -euo pipefail
+        # Authenticate git for the install below (public repo; also covers
+        # anonymous rate limits and private dependency mirrors).
+        git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+        # Unset toolchain wrappers inherited from the caller job. The sccache
+        # setup step runs later in the job, so any inherited RUSTC_WRAPPER
+        # points at a binary that does not exist yet and breaks the build.
+        env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL \
+          cargo install --locked --git https://github.com/tailrocks/velnor.git \
+            --rev "$INSTALL_REV" velnor-workflow --bin velnor-workflow
+
+    - name: Add runtime to PATH
+      shell: bash
+      run: |
+        set -euo pipefail
+        test -x "$HOME/.cargo/bin/velnor-workflow"
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+    - name: Save runtime cache
+      if: inputs.cache == 'true' && steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/git
+          ~/.cargo/registry
+          ~/.cargo/bin/velnor-workflow
+        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ inputs.rev }}

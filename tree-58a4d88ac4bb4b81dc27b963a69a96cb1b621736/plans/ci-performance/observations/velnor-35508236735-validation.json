@@ -1,0 +1,28 @@
+{
+  "status": "one_successful_correctness_observation_not_performance_acceptance",
+  "head_sha": "fecc59e9e40568d92b6d828a6515ad3c68c81438",
+  "effective_merge_sha": "4ef5c402e2842e9392b505acfeaf9b829cd50e81",
+  "run_id": 35508236735,
+  "attempt": 1,
+  "policy_run_id": 35508235601,
+  "trigger_to_required_seconds": 458,
+  "aggregate_execution_seconds": 1210,
+  "executed_jobs": 20,
+  "skipped_jobs": 48,
+  "runner_job_seconds": 413,
+  "generator_job_seconds": 186,
+  "generator_tests": {
+    "passed": 1943,
+    "skipped": 0
+  },
+  "runner_tests": {
+    "passed": 2516,
+    "skipped": 5,
+    "leaky": 1,
+    "leaky_test": "execution::guest_agent::tests::guest_docker_probe_kills_hung_process_at_deadline",
+    "same_leak_in_previous_run": 35506628393
+  },
+  "telemetry_defect": "generator preparation 3s and publication 6s still categorized as cleanup",
+  "comparison_limit": "previous full run failed; do not calculate full-workflow speedup from it; sample size one; cache states differ",
+  "independent_result_review": "pending"
+}

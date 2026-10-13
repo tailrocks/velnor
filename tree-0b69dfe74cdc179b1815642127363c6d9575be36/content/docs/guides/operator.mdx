@@ -1,0 +1,302 @@
+---
+title: "Operator guide"
+---
+
+# Operator guide
+
+This guide covers Debian installation, service operation, release changes, and
+the command surfaces currently available. Velnor is research software; use a
+dedicated host and test repository.
+
+> Navigation: [← Documentation index](/docs) · [Observability →](/docs/operations/observability)
+
+## Install a release on Debian
+
+Velnor currently publishes `.deb` files and matching checksum assets as GitHub
+Release assets. This repository does not provide an APT signing-key bootstrap
+URL or an APT repository setup procedure. Download the exact approved release
+asset and verify its checksum before installation.
+
+```sh
+sha256sum --check velnor-runner-VERSION-ARCH.deb.sha256
+sudo install -d -m 0750 /run/velnor
+sudo /usr/bin/flock --exclusive --nonblock --no-fork \
+  /run/velnor/package-transaction.lock \
+  apt-get install ./velnor-runner-VERSION-ARCH.deb
+```
+
+Replace `VERSION` and `ARCH` with the downloaded asset names. Direct `dpkg -i`
+and unlocked package transactions are rejected. Installation verifies package
+identity, creates required paths, reloads systemd, and leaves services
+disabled and stopped. It does not activate a release or restart the fleet.
+
+Install host prerequisites before the package and backend prerequisites before
+starting the daemon:
+
+- systemd, outbound HTTPS, Git, curl, CA certificates, util-linux, and enough
+  CPU, memory, and disk for the selected jobs;
+- Docker backend: a running Docker daemon and the required host Docker socket;
+- MicroVM backend: `/dev/kvm`, packaged verified Firecracker artifacts, and a
+  working jailer. MicroVM never falls back to Docker.
+
+## Configure and start
+
+Edit the default-scope files:
+
+```sh
+sudoedit /etc/velnor/velnor.env
+sudoedit /etc/velnor/execution.toml
+if sudo test ! -e /etc/velnor/secrets.env; then
+  sudo install -m 0600 /dev/null /etc/velnor/secrets.env
+else
+  sudo chmod 0600 /etc/velnor/secrets.env
+fi
+sudoedit /etc/velnor/secrets.env
+```
+
+Set one backend, with no fallback:
+
+```toml
+[execution]
+backend = "docker" # or "microvm"
+```
+
+Keep the operator GitHub token in `/etc/velnor/secrets.env`:
+
+```text
+GITHUB_TOKEN=...
+```
+
+Keep it out of command arguments, shell history, and workflow files. The token
+must authorize runner registration for the configured repository, organization,
+or enterprise and any selected runner group.
+
+The main environment file defines the GitHub scope, runner name and labels,
+slot count, trust scope, capability validation, and work directory. Capability
+validation must be `strict`. Organization and enterprise scopes require an
+explicit runner group and a matching desired routing policy.
+
+Start the services explicitly:
+
+```sh
+sudo systemctl enable --now velnor-guardian.service
+sudo systemctl enable --now velnor-daemon.service
+sudo systemctl enable --now velnor-doctor.timer
+```
+
+The guardian provides local supervision only. The daemon opens durable state,
+selects storage, preflights the backend, admits capacity, and supervises slots.
+Each slot performs its own JIT registration before polling GitHub. Registration
+and network failures retry with backoff; a retrying daemon is not a healthy or
+schedulable fleet.
+
+For another scope, create matching files and use the template units:
+
+```sh
+sudoedit /etc/velnor/NAME.env
+sudoedit /etc/velnor/NAME.secrets.env
+sudo chmod 0600 /etc/velnor/NAME.secrets.env
+sudo systemctl enable --now velnor-daemon@NAME.service
+sudo systemctl enable --now velnor-doctor@NAME.timer
+```
+
+State for a named instance is kept below `/var/lib/velnor-NAME`.
+
+## Verify readiness
+
+Check both systemd state and Velnor health:
+
+```sh
+systemctl is-active velnor-guardian.service velnor-daemon.service
+velnorctl status --json
+velnorctl get runners --output wide
+velnorctl get slots --output wide
+velnorctl doctor --url https://github.com/OWNER/REPO --name velnor --slots 1
+```
+
+An active PID alone is insufficient. Ready requires live control, a writable
+journal, valid routing and runner-group state, a ready backend, and capacity.
+Confirm the runner is online in GitHub before dispatching a workflow.
+
+Run backend checks with the same paths used by the service:
+
+```sh
+velnorctl preflight \
+  --config-dir /etc/velnor \
+  --work-dir /var/lib/velnor/work
+```
+
+If Docker sees the work directory at another path, add
+`--docker-host-work-dir PATH`.
+
+## Daily inspection
+
+The read-only control socket exposes resource queries, bounded event watches,
+logs, and telemetry:
+
+```sh
+velnorctl get hosts
+velnorctl get instances
+velnorctl get runners --output wide
+velnorctl get slots --output wide
+velnorctl get jobs
+velnorctl get runs
+velnorctl get queue
+velnorctl events --limit 100
+velnorctl logs JOB_UID_OR_RUN_ID --tail 200
+velnorctl telemetry --limit 100
+velnorctl top host
+velnorctl wait instance/default --for Ready --timeout 60
+```
+
+`top` requires a target: `host`, `instances`, `slots`, `jobs`, or `storage`.
+Logs, events, and telemetry are bounded; expired cursors require a fresh
+snapshot. There is no Prometheus endpoint, dashboard, SSE endpoint, or HTTP
+health endpoint.
+
+Workflow-run reads are:
+
+```sh
+velnorctl run list
+velnorctl run view RUN_ID
+velnorctl run watch RUN_ID
+velnorctl run logs RUN_ID
+```
+
+Local status reports stored identity, labels, V2 state, and credential
+presence. It is not a systemd liveness check:
+
+```sh
+velnorctl status --json --config-dir /etc/velnor --state-dir /var/lib/velnor
+```
+
+## Files and sockets
+
+The packaged defaults are:
+
+```text
+/etc/velnor/velnor.env
+/etc/velnor/secrets.env
+/etc/velnor/execution.toml
+/var/lib/velnor/state.db
+/var/lib/velnor/work
+/run/velnor/<instance>/control.sock
+/run/velnor/<instance>/admin.sock
+```
+
+The control socket serves reads. The admin socket is reserved for lifecycle
+mutations, but mutation support is currently disabled: `/v1/info` advertises
+`mutations: false`, and lifecycle POSTs return unsupported/501. No documented
+operator command currently changes fleet state through that socket. Do not
+describe it as a working lifecycle API.
+
+Control sockets are protected by Unix peer permissions. The read socket uses
+the `velnor` group; the admin socket uses `velnor-admin`. Root and the socket
+owner are also authorized.
+
+Configuration resolution is, in order: explicit `--config-dir`,
+`VELNOR_CONFIG_DIR`, systemd state directory, `VELNOR_STORAGE_ROOT`, then XDG
+state. Runner configuration is stored as `runner.json` with a private
+directory and file permissions. The resolver does not use `$HOME/.velnor`.
+
+## Service lifecycle
+
+Inspect services and recent logs:
+
+```sh
+systemctl status velnor-daemon.service
+journalctl -u velnor-daemon.service -b --no-pager
+systemctl list-timers 'velnor-doctor*'
+```
+
+The daemon restarts automatically after failure. The doctor is a periodic
+oneshot; `loaded inactive dead` after it completes is normal. Inspect its timer
+and failed-unit state instead of treating the completed probe as a dead daemon.
+
+After configuration changes, restart the exact affected daemon:
+
+```sh
+sudo systemctl restart velnor-daemon.service
+```
+
+On SIGTERM, idle slots deregister and exit, while active jobs continue. The
+controller stops idle slots and waiters, preserves active job workers, waits
+for graceful completion, and escalates if the stop timeout is exceeded. The
+default daemon unit allows active jobs up to three hours before systemd kills
+the remaining cgroup.
+
+## Upgrade and release control
+
+Before an upgrade, stop the exact daemon and doctor units, then keep the
+exclusive transaction lock for the whole package operation:
+
+```sh
+sudo systemctl stop velnor-daemon.service velnor-guardian.service
+sudo systemctl stop velnor-doctor.timer
+sudo /usr/bin/flock --exclusive --nonblock --no-fork \
+  /run/velnor/package-transaction.lock \
+  apt-get install ./velnor-runner-VERSION-ARCH.deb
+```
+
+Every shipped Velnor service takes the shared lock. Package hooks reject direct
+or unlocked configuration and do not restart or re-enable services.
+
+Release commands are provided by `velnor-runner`:
+
+```sh
+sudo velnor-runner release verify-installed
+sudo velnor-runner release activate --record RELEASE_RECORD.json
+sudo velnor-runner release rollback
+sudo velnor-runner release export
+```
+
+`verify-installed` is also run before daemon startup and rejects an absent or
+mixed binary, package, or manifest tuple. `velnorctl release` is not an
+available command.
+
+After activation or upgrade, verify the installed tuple, then start services:
+
+```sh
+sudo velnor-runner release verify-installed
+sudo systemctl enable --now velnor-guardian.service
+sudo systemctl enable --now velnor-daemon.service
+sudo systemctl enable --now velnor-doctor.timer
+```
+
+## Commands that do not mutate state
+
+These CLI shapes are accepted but currently return unavailable, unsupported,
+or planned results. They do not change hosts, runners, or GitHub:
+
+```text
+velnorctl cordon|uncordon|drain|resume|restart|recycle instance/NAME ...
+velnorctl scale instance/NAME --slots N ...
+velnorctl reconcile runners --dry-run
+velnorctl run cancel|rerun|download|dispatch|open ...
+velnorctl diagnostics bundle --archive PATH
+velnorctl storage du|gc|history|reservations|leases|explain-pressure ...
+```
+
+`velnorctl storage paths` and `velnorctl storage status` are read-only local
+inspection commands. `velnorctl cache gc` can delete cache data only when the
+required confirmation and lease checks succeed; treat force-bypass options as
+emergency operations.
+
+## First failure checks
+
+1. Check the daemon unit, boot journal, and doctor timer.
+2. If token errors appear, fix the matching secrets file; supervised retries
+   continue automatically.
+3. If the control API is unavailable, verify the selected instance/context,
+   socket paths, and Unix group membership.
+4. If registration never starts, run `velnorctl preflight` with the service's
+   config and work paths. Backend, Docker/Buildx, KVM, and bind-visibility
+   failures are fail-closed.
+5. If GitHub queues work but Velnor sees no job, verify runner labels, scope,
+   runner-group policy, online state, and `velnorctl get runners`/`get queue`.
+6. If Velnor executes but GitHub lacks logs or completion, inspect
+   `velnorctl events`, `velnorctl logs JOB_UID_OR_RUN_ID`, telemetry, and the daemon
+   journal. Completion is retried and local outbox state is retained until
+   remote acknowledgement or terminal observation.
+
+For lifecycle-stage diagnosis, see [Troubleshooting](/docs/troubleshooting).

@@ -1,0 +1,38 @@
+# Owner-local fan-out smoke reusable workflow.
+#
+# workflow_call only, read-only, GitHub-hosted, no third-party actions and no
+# secret or environment inheritance. It emits an explicit contract=success output
+# so a caller's positive-truth-table aggregator can prove that exactly the local
+# owner's reusable workflow ran. This is the disposable Renovate/fan-out canary
+# target published at the immutable fleet CalVer.
+name: fanout-smoke
+
+on:
+  workflow_call:
+    outputs:
+      contract:
+        description: "'success' only when the owner-local fan-out smoke ran to completion."
+        value: ${{ jobs.smoke.outputs.contract }}
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      contract: ${{ steps.contract.outputs.contract }}
+    steps:
+      - name: Emit fan-out contract
+        id: contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Explicit positive contract: this reusable workflow does no work beyond
+          # proving owner-local reachability, and emits success only on completion.
+          echo "contract=success" >> "${GITHUB_OUTPUT}"
+          echo "fanout-smoke: owner-local reusable workflow reached for ${GITHUB_REPOSITORY}"

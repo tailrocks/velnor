@@ -1,0 +1,4 @@
+# Rust build output and Velnor local run artifacts.
+target/
+.velnor-compare/
+.velnor-work/

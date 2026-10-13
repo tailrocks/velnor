@@ -1,0 +1,47 @@
+[
+  {
+    "timestamp": "2026-09-20T16:36:55.6605878Z",
+    "report": {
+      "schema_version": 1,
+      "job": "rust-parallax-server",
+      "log_present": true,
+      "queue_seconds": null,
+      "queue_source": null,
+      "total_source": "job_markers",
+      "runner_setup_seconds": 4,
+      "selection_transport_seconds": 0,
+      "tool_bootstrap_seconds": 16,
+      "cache_prep_seconds": 6,
+      "cargo_fetch_seconds": 0,
+      "checks_wall_seconds": 693,
+      "checks_seconds": 693,
+      "cleanup_seconds": 0,
+      "total_seconds": 719,
+      "cache_outcomes": {
+        "lane": "github",
+        "rustup": "exact",
+        "mold": "exact",
+        "cargo": "exact",
+        "mbx": "prefix",
+        "docker_seed": null
+      },
+      "origin_downloads": {
+        "updating_crates_io_index": 0,
+        "updating_git": 0,
+        "downloading_crates": 0,
+        "downloaded_lines": []
+      },
+      "compiler": {
+        "mbx_outcomes": [
+          "mbx[cache]: object cache: 0 hits, 0 misses, 1654 not looked up, 128 bypassed; 0 B downloaded, 0 B uploaded, 27.9 GiB stored locally",
+          "mbx[cache]: object cache: 0 hits, 3 misses, 1569 not looked up, 126 bypassed; 0 B downloaded, 0 B uploaded, 473.3 MiB stored locally"
+        ],
+        "finished_segments": [
+          "    Finished `test` profile [unoptimized + debuginfo] target(s) in 8m 22s",
+          "    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 35s"
+        ],
+        "compiling_lines": 421
+      }
+    }
+  }
+]

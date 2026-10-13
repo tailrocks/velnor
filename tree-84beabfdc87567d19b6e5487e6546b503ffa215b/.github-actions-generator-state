@@ -1,0 +1,27 @@
+# Generated ownership state; do not edit.
+schema = 1
+.github/ci/project.toml	485f471ddea7a9d4
+.github/ci/workflow-templates/ci-apt.yml	658aeb904c9929d9
+.github/ci/workflow-templates/ci-code.yml	bff3bfbf7909a9cd
+.github/ci/workflow-templates/ci-fixture.yml	a54e1fbc4e4afce3
+.github/ci/workflow-templates/ci-native.yml	bd35fcd1f00f1135
+.github/ci/workflow-templates/ci-tap.yml	c27c1228c0870b71
+.github/ci/workflow-templates/ci.yml	0a24df8b5b18c098
+.github/ci/workflow-templates/fanout-smoke.yml	469ad9631f02e2cb
+.github/ci/workflow-templates/fleet-audit.yml	df00cd8d35604fbc
+.github/ci/workflow-templates/owner-fanout-canary.yml	98b816a82212d5c4
+.github/ci/workflow-templates/package-signer.yml	f2c96fb0bd691bef
+.github/ci/workflow-templates/package-updater.yml	c935e59f3ede1256
+.github/ci/workflow-templates/release-check.yml	cffd2446b8b4fe0a
+.github/workflows/ci-apt.yml	658aeb904c9929d9
+.github/workflows/ci-code.yml	bff3bfbf7909a9cd
+.github/workflows/ci-fixture.yml	a54e1fbc4e4afce3
+.github/workflows/ci-native.yml	bd35fcd1f00f1135
+.github/workflows/ci-tap.yml	c27c1228c0870b71
+.github/workflows/ci.yml	0a24df8b5b18c098
+.github/workflows/fanout-smoke.yml	469ad9631f02e2cb
+.github/workflows/fleet-audit.yml	df00cd8d35604fbc
+.github/workflows/owner-fanout-canary.yml	98b816a82212d5c4
+.github/workflows/package-signer.yml	f2c96fb0bd691bef
+.github/workflows/package-updater.yml	c935e59f3ede1256
+.github/workflows/release-check.yml	cffd2446b8b4fe0a

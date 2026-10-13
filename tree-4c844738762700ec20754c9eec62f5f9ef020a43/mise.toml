@@ -1,0 +1,68 @@
+min_version = "2026.7.12"
+
+[settings]
+lockfile = true
+
+[tools]
+gh = "2.96.0"
+"github:jdx/mise" = "2026.7.12"
+rust = "1.97.1"
+actionlint = "1.7.12"
+"cargo:cargo-nextest" = "0.9.140"
+"aqua:EmbarkStudios/cargo-deny" = "0.20.2"
+
+# Serialize the one-time rustup work before the parallel gates fan out.
+# rust-toolchain.toml pins channel 1.97.1 with components rustfmt+clippy, so the
+# first cargo proxy invocation auto-installs the toolchain and those components.
+# When the six gates run in parallel each cargo process triggers that install
+# concurrently and they race on ~/.rustup/downloads/<hash>.partial:
+#   error: could not rename 'downloaded' file ... (os error 2)
+# Every gate depends on this task, and mise dedups a shared dependency into a
+# single node that completes before its dependents start, so the toolchain and
+# its components materialize exactly once, serially, up front.
+[tasks._toolchain]
+description = "Materialize the pinned Rust toolchain + rustfmt/clippy components once, before the gates"
+run = [
+  "mise install --locked",
+  "cargo --version",
+  "rustup component add rustfmt clippy",
+]
+
+[tasks.fmt]
+description = "Check Rust formatting"
+depends = ["_toolchain"]
+run = "cargo fmt --all --check"
+
+[tasks.lint]
+description = "Clippy with warnings denied"
+depends = ["_toolchain"]
+run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
+
+[tasks.test]
+description = "Run tests via cargo-nextest"
+depends = ["_toolchain"]
+run = "cargo nextest run --workspace --locked"
+
+[tasks.actionlint]
+description = "Lint GitHub Actions workflows"
+depends = ["_toolchain"]
+run = "actionlint"
+
+[tasks.deny]
+description = "Audit dependency advisories"
+depends = ["_toolchain"]
+run = "cargo deny check advisories"
+
+[tasks.generate]
+description = "Render the five class templates and callable workflows from fleet data"
+depends = ["_toolchain"]
+run = "cargo run --locked -p velnor-actions-generator -- generate --root ."
+
+[tasks.generator-check]
+description = "Audit the fleet: regenerate, compare committed bytes, prove the closure"
+depends = ["_toolchain"]
+run = "cargo run --locked -p velnor-actions-generator -- audit --root ."
+
+[tasks.ci]
+description = "Run every repository gate"
+depends = ["fmt", "lint", "test", "actionlint", "deny", "generator-check"]

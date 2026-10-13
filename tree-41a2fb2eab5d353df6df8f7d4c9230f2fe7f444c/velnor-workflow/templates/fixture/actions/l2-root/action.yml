@@ -1,0 +1,11 @@
+name: L2 root fixture
+description: Exercise a local root to local nested to pinned remote closure.
+outputs:
+  closure:
+    description: Validated closure depth.
+    value: ${{ steps.nested.outputs.closure }}
+runs:
+  using: composite
+  steps:
+    - id: nested
+      uses: ./.github/actions/l2-nested

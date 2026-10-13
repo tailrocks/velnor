@@ -1,0 +1,46 @@
+schema_version = 1
+
+[[action]]
+root = "actions/checkout"
+sha = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+files = [
+  { path = "action.yml", kind = "manifest", sha256 = "d59219cb79590abdb877deaa14e3b65a00c05318bf5a6f3b989b9162b5d08c35" },
+  { path = "dist/index.js", kind = "behavior", sha256 = "086f5d69833562b3e91940544a05ad3f7c50046768d8151d50fc18f5ebb6f0ac" },
+]
+
+[[action]]
+root = "jdx/mise-action"
+sha = "7e36c90d9ab29c415a2384db3006f3ec8a8cc654"
+files = [
+  { path = "action.yml", kind = "manifest", sha256 = "d39d054a1402d4260af8343352cd54f4a44453276abfc2f9f47206e8beb00dec" },
+  { path = "dist/index.js", kind = "behavior", sha256 = "659a1e4c7d130dafdb121a23cd8476a7f26261552ba19f4abc633557d7cf612e" },
+]
+
+[[action]]
+root = "actions/cache"
+sha = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+files = [
+  { path = "action.yml", kind = "manifest", sha256 = "c04edf35104c16c8944076df01561748bac9cd10941417e467a236e508e52dda" },
+  { path = "dist/restore/index.js", kind = "behavior", sha256 = "96a1507f652a41bb0886da69877944c402640ffc7580498485309539331e25e0" },
+  { path = "dist/save/index.js", kind = "behavior", sha256 = "4ba91f620f3d8321b2c26d93f3c3519b870b6bb03d1a180f0c2e543b54ce81fe" },
+  { path = "restore/action.yml", kind = "manifest", sha256 = "bb552a94cec165255080b7e13fe3d2051c6c79e321e99435b5859dc7de5e9057" },
+  { path = "dist/restore-only/index.js", kind = "behavior", sha256 = "f54af50c939a42fe2de2d52deb30e1074f79b2c39c4295e6bb5951014fc613c6" },
+  { path = "save/action.yml", kind = "manifest", sha256 = "5da400e1a7551cee617339fd1a5281483d71e6c56d86dd117fbd354f047308ec" },
+  { path = "dist/save-only/index.js", kind = "behavior", sha256 = "e39e0f763b548081e9e3d14abac3b868005a264b794797706eb36d6f5e60dcdb" },
+]
+
+[[action]]
+root = "actions/upload-artifact"
+sha = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+files = [
+  { path = "action.yml", kind = "manifest", sha256 = "c5979822866a72362e609844b6ebe77d4b7e759af68cc1c2c425dcf51481fab4" },
+  { path = "dist/upload/index.js", kind = "behavior", sha256 = "79a9b54b64c68e4d0d9c2ae745f7e6ed2ac18eb015e37560ee58e0d0232e58a0" },
+]
+
+[[action]]
+root = "actions/download-artifact"
+sha = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+files = [
+  { path = "action.yml", kind = "manifest", sha256 = "e98559b7a31ba31be4709f20d22102dc2737fa630f69a339eb89981151e505fe" },
+  { path = "dist/index.js", kind = "behavior", sha256 = "f2b9b31a73b1952584858e152e912c3825ad8ae061f280edab14b842f40893c7" },
+]

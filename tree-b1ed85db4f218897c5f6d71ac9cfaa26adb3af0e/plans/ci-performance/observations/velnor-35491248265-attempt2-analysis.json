@@ -1,0 +1,149 @@
+{
+  "repository": "tailrocks/velnor",
+  "run_id": 35491248265,
+  "attempt": 2,
+  "source_sha": "bb94bac9731329b99201127210829cec5c11a425",
+  "effective_checkout_sha": "91f2fc0e8727041087bdd08f807d062a719d5d01",
+  "attempt_started_at": "2026-09-20T09:45:10Z",
+  "observed_at": "2026-09-20T09:59:56Z",
+  "total_jobs": 68,
+  "successful_jobs_started_before_attempt": [
+    {
+      "id": 106058435479,
+      "name": "Control / Planning",
+      "started_at": "2026-09-20T05:16:26Z",
+      "completed_at": "2026-09-20T05:16:57Z"
+    },
+    {
+      "id": 106058435978,
+      "name": "Bun · Bun package (velnor) · github-hosted — bun-velnor / GitHub · hosted",
+      "started_at": "2026-09-20T05:16:59Z",
+      "completed_at": "2026-09-20T05:17:26Z"
+    },
+    {
+      "id": 106058436002,
+      "name": "Docker · Docker · github-hosted — docker / GitHub · hosted",
+      "started_at": "2026-09-20T05:16:59Z",
+      "completed_at": "2026-09-20T05:18:33Z"
+    },
+    {
+      "id": 106058436206,
+      "name": "Rust · Rust production topology · github-hosted — rust-production-topology / GitHub · hosted",
+      "started_at": "2026-09-20T05:16:59Z",
+      "completed_at": "2026-09-20T05:23:36Z"
+    },
+    {
+      "id": 106058436223,
+      "name": "OpenTofu · OpenTofu · github-hosted — opentofu / GitHub · hosted",
+      "started_at": "2026-09-20T05:16:59Z",
+      "completed_at": "2026-09-20T05:17:13Z"
+    },
+    {
+      "id": 106058436274,
+      "name": "Documentation · Documentation · github-hosted — docs / GitHub · hosted",
+      "started_at": "2026-09-20T05:16:59Z",
+      "completed_at": "2026-09-20T05:17:12Z"
+    },
+    {
+      "id": 106058436342,
+      "name": "Rust · velnorctl · github-hosted — rust-velnorctl / GitHub · hosted",
+      "started_at": "2026-09-20T05:17:00Z",
+      "completed_at": "2026-09-20T05:23:48Z"
+    },
+    {
+      "id": 106058436367,
+      "name": "Rust · velnor-bench · github-hosted — rust-velnor-bench / GitHub · hosted",
+      "started_at": "2026-09-20T05:16:59Z",
+      "completed_at": "2026-09-20T05:22:22Z"
+    },
+    {
+      "id": 106058436383,
+      "name": "Rust · Rust dependency policy · github-hosted — rust-policy / GitHub · hosted",
+      "started_at": "2026-09-20T05:16:59Z",
+      "completed_at": "2026-09-20T05:17:19Z"
+    },
+    {
+      "id": 106058436411,
+      "name": "Rust · velnor-workflow · github-hosted — rust-velnor-workflow / GitHub · hosted",
+      "started_at": "2026-09-20T05:16:59Z",
+      "completed_at": "2026-09-20T05:23:29Z"
+    },
+    {
+      "id": 106058436449,
+      "name": "Rust · velnor-control · github-hosted — rust-velnor-control / GitHub · hosted",
+      "started_at": "2026-09-20T05:16:59Z",
+      "completed_at": "2026-09-20T05:18:07Z"
+    },
+    {
+      "id": 106058436482,
+      "name": "Rust · velnor-tools · github-hosted — rust-velnor-tools / GitHub · hosted",
+      "started_at": "2026-09-20T05:16:59Z",
+      "completed_at": "2026-09-20T05:19:14Z"
+    },
+    {
+      "id": 106058436493,
+      "name": "Rust · velnor-runner · github-hosted — rust-velnor-runner / GitHub · hosted",
+      "started_at": "2026-09-20T05:16:59Z",
+      "completed_at": "2026-09-20T05:26:04Z"
+    },
+    {
+      "id": 106058436496,
+      "name": "Rust · velnor-client · github-hosted — rust-velnor-client / GitHub · hosted",
+      "started_at": "2026-09-20T05:16:59Z",
+      "completed_at": "2026-09-20T05:17:52Z"
+    },
+    {
+      "id": 106058436525,
+      "name": "Rust · velnor-model · github-hosted — rust-velnor-model / GitHub · hosted",
+      "started_at": "2026-09-20T05:16:59Z",
+      "completed_at": "2026-09-20T05:18:04Z"
+    },
+    {
+      "id": 106058436582,
+      "name": "Rust · velnor-render · github-hosted — rust-velnor-render / GitHub · hosted",
+      "started_at": "2026-09-20T05:16:59Z",
+      "completed_at": "2026-09-20T05:17:52Z"
+    },
+    {
+      "id": 106058436624,
+      "name": "Rust · velnor-workflow-contract · github-hosted — rust-velnor-workflow-contract / GitHub · hosted",
+      "started_at": "2026-09-20T05:16:59Z",
+      "completed_at": "2026-09-20T05:17:28Z"
+    }
+  ],
+  "invalid_timestamp_intervals": 35,
+  "fresh_successful_jobs": [
+    {
+      "id": 106058435636,
+      "name": "Rust · unit-collector · github-hosted — rust-unit-collector / GitHub · hosted",
+      "started_at": "2026-09-20T09:45:15Z",
+      "completed_at": "2026-09-20T09:45:55Z"
+    },
+    {
+      "id": 106058520011,
+      "name": "ci-required",
+      "started_at": "2026-09-20T09:45:58Z",
+      "completed_at": "2026-09-20T09:46:01Z"
+    },
+    {
+      "id": 106058528923,
+      "name": "Control / Required",
+      "started_at": "2026-09-20T09:46:03Z",
+      "completed_at": "2026-09-20T09:46:06Z"
+    }
+  ],
+  "collector": {
+    "seconds": 40,
+    "checks_seconds": 18,
+    "runner_image": "ubuntu-24.04",
+    "image_version": "20260907.300.1",
+    "mbx_archive": "absent: No mbx cache found",
+    "compiler_hits": 1,
+    "compiler_misses": 0,
+    "not_looked_up": 104,
+    "bypasses": 5,
+    "telemetry_schema1_mbx_prefix": "incorrect; compiler log fallback, repaired in112e6acc"
+  },
+  "conclusion": "Capability probe only. New job IDs and run_attempt=2 include reused prior successful jobs and malformed skipped intervals. Not a fresh full-workflow sample; no speedup accepted.",
+  "request_timestamp": "Unavailable in parent record; agent confirmation pending"
+}

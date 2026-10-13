@@ -1,0 +1,68 @@
+schema = "velnor-actions.releases.v1"
+current = "2026.8.33"
+
+[[release]]
+calver = "2026.8.32"
+
+[[release.signer]]
+consumer = "jackin-project/homebrew-tap"
+signer_fork = "jackin-project"
+current_digest = "eeb8a182174f3c97c370ecf3f1e3e4689ae22cfe"
+
+[[release.signer]]
+consumer = "tailrocks/homebrew-tablerock"
+signer_fork = "tailrocks"
+current_digest = "1e062d5bbe329873047ee8a8e79bba0811e53b65"
+
+[[release.signer]]
+consumer = "tailrocks/homebrew-parallax"
+signer_fork = "tailrocks"
+current_digest = "643c5341b160be151a7fae19b89b6a4f8ab3b275"
+
+[[release.signer]]
+consumer = "tailrocks/homebrew-holla"
+signer_fork = "tailrocks"
+current_digest = "84a3d2c5f8f74a3054259ac494581b244bf61ee7"
+
+[[release.signer]]
+consumer = "tailrocks/velnor-apt"
+signer_fork = "tailrocks"
+current_digest = "77d323dcfdb176b332edc24bfc92cb625b3ab4c8"
+
+[[release.signer]]
+consumer = "tailrocks/holla-apt"
+signer_fork = "tailrocks"
+current_digest = "84a3d2c5f8f74a3054259ac494581b244bf61ee7"
+
+[[release]]
+calver = "2026.8.33"
+
+[[release.signer]]
+consumer = "jackin-project/homebrew-tap"
+signer_fork = "jackin-project"
+current_digest = "eeb8a182174f3c97c370ecf3f1e3e4689ae22cfe"
+
+[[release.signer]]
+consumer = "tailrocks/homebrew-tablerock"
+signer_fork = "tailrocks"
+current_digest = "1e062d5bbe329873047ee8a8e79bba0811e53b65"
+
+[[release.signer]]
+consumer = "tailrocks/homebrew-parallax"
+signer_fork = "tailrocks"
+current_digest = "643c5341b160be151a7fae19b89b6a4f8ab3b275"
+
+[[release.signer]]
+consumer = "tailrocks/homebrew-holla"
+signer_fork = "tailrocks"
+current_digest = "84a3d2c5f8f74a3054259ac494581b244bf61ee7"
+
+[[release.signer]]
+consumer = "tailrocks/velnor-apt"
+signer_fork = "tailrocks"
+current_digest = "77d323dcfdb176b332edc24bfc92cb625b3ab4c8"
+
+[[release.signer]]
+consumer = "tailrocks/holla-apt"
+signer_fork = "tailrocks"
+current_digest = "84a3d2c5f8f74a3054259ac494581b244bf61ee7"

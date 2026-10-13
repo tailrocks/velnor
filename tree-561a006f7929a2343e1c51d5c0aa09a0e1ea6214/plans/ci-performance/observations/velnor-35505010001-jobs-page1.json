@@ -1,0 +1,137 @@
+{
+  "total_count": 1,
+  "jobs": [
+    {
+      "id": 106063255131,
+      "run_id": 35505010001,
+      "workflow_name": "Velnor workflow policy",
+      "head_branch": "codex/ci-performance-campaign",
+      "run_url": "https://api.github.com/repos/tailrocks/velnor/actions/runs/35505010001",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOStNhZc8AAAAYsdzWWw",
+      "head_sha": "56017bac6a04823d456be9deb6405468e90b87c5",
+      "url": "https://api.github.com/repos/tailrocks/velnor/actions/jobs/106063255131",
+      "html_url": "https://github.com/tailrocks/velnor/actions/runs/35505010001/job/106063255131",
+      "status": "completed",
+      "conclusion": "failure",
+      "created_at": "2026-09-20T10:25:19Z",
+      "started_at": "2026-09-20T10:25:21Z",
+      "completed_at": "2026-09-20T10:40:32Z",
+      "name": "Policy",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-20T10:25:22Z",
+          "completed_at": "2026-09-20T10:25:22Z"
+        },
+        {
+          "name": "Checkout repository history",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-09-20T10:25:22Z",
+          "completed_at": "2026-09-20T10:25:27Z"
+        },
+        {
+          "name": "Check out audited head",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-20T10:25:27Z",
+          "completed_at": "2026-09-20T10:25:27Z"
+        },
+        {
+          "name": "Check out base setup action",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-20T10:25:27Z",
+          "completed_at": "2026-09-20T10:25:28Z"
+        },
+        {
+          "name": "Set up Velnor workflow runtime",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-09-20T10:25:28Z",
+          "completed_at": "2026-09-20T10:25:29Z"
+        },
+        {
+          "name": "Acquire candidate generator product",
+          "status": "completed",
+          "conclusion": "failure",
+          "number": 6,
+          "started_at": "2026-09-20T10:25:29Z",
+          "completed_at": "2026-09-20T10:40:30Z"
+        },
+        {
+          "name": "Resolve required status checks",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 7,
+          "started_at": "2026-09-20T10:40:30Z",
+          "completed_at": "2026-09-20T10:40:30Z"
+        },
+        {
+          "name": "Enforce workflow policy",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 8,
+          "started_at": "2026-09-20T10:40:30Z",
+          "completed_at": "2026-09-20T10:40:30Z"
+        },
+        {
+          "name": "Set up actionlint",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 9,
+          "started_at": "2026-09-20T10:40:30Z",
+          "completed_at": "2026-09-20T10:40:30Z"
+        },
+        {
+          "name": "Lint caller workflows",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 10,
+          "started_at": "2026-09-20T10:40:30Z",
+          "completed_at": "2026-09-20T10:40:30Z"
+        },
+        {
+          "name": "Post Check out base setup action",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 19,
+          "started_at": "2026-09-20T10:40:30Z",
+          "completed_at": "2026-09-20T10:40:31Z"
+        },
+        {
+          "name": "Post Checkout repository history",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-09-20T10:40:31Z",
+          "completed_at": "2026-09-20T10:40:31Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-09-20T10:40:31Z",
+          "completed_at": "2026-09-20T10:40:31Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/tailrocks/velnor/check-runs/106063255131",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "runner_id": 1000086205,
+      "runner_name": "GitHub Actions 1000086205",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    }
+  ]
+}

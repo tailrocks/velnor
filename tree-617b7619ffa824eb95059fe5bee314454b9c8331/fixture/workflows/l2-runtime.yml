@@ -1,0 +1,319 @@
+name: l2-runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: "velnor | github | both (default: both)"
+        type: choice
+        default: both
+        options: [velnor, github, both]
+  workflow_call:
+    inputs:
+      lane: {type: string, required: false, default: both}
+
+permissions:
+  contents: read
+
+env:
+  # Deliberately older than both lane defaults. Keep this fixture pin stable:
+  # its purpose is proving explicit-version replacement, not tracking latest.
+  EXPLICIT_MISE_VERSION: 2026.8.2
+
+concurrency:
+  group: l2-runtime-${{ github.ref }}-${{ inputs.lanes || inputs.lane }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  admit-default-head:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Require current default-branch head
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "${GITHUB_REF}" = refs/heads/main
+          default_head="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+          test "${GITHUB_SHA}" = "${default_head}"
+
+  seed:
+    needs: admit-default-head
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON((inputs.lanes || inputs.lane) == 'both' && '["github","velnor"]' || format('["{0}"]', inputs.lanes || inputs.lane)) }}
+    runs-on: ${{ matrix.lane == 'velnor' && fromJSON('{"group":"velnor-trusted","labels":"velnor-target-mvp"}') || 'ubuntu-26.04' }}
+    timeout-minutes: 25
+    env:
+      CACHE_NAMESPACE: l2-${{ github.run_id }}-${{ matrix.lane }}
+      SCCACHE_GHA_ENABLED: "false"
+      SCCACHE_CACHE_SIZE: 20G
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: "false"
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
+          save-on-workflow-dispatch: true
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+          disable_annotations: "false"
+      - id: mise
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - name: Cache Cargo target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: l2-runtime-target-${{ matrix.lane }}-${{ runner.os }}-${{ hashFiles('mise.toml', '**/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: l2-runtime-target-${{ matrix.lane }}-${{ runner.os }}-${{ hashFiles('mise.toml', '**/Cargo.toml', 'Cargo.lock') }}-
+      - name: Validate recursive closure and non-empty corpus
+        run: |
+          mbx run --locked -p l2-contract -- validate
+          mbx nextest run --workspace --locked
+      - id: closure
+        uses: ./.github/actions/l2-root
+      - name: Assert closure output
+        run: test '${{ steps.closure.outputs.closure }}' = 'root,nested,remote'
+      - id: root-miss
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .l2-cache/root
+          key: ${{ env.CACHE_NAMESPACE }}-root
+          lookup-only: "true"
+      - name: Require initial root miss and create bytes
+        run: |
+          test '${{ steps.root-miss.outputs.cache-hit }}' != true
+          mkdir -p .l2-cache/root
+          printf '%s\n' root-cache > .l2-cache/root/value
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .l2-cache/root
+          key: ${{ env.CACHE_NAMESPACE }}-root
+      - id: restore-only
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .l2-cache/restore-only
+          key: ${{ env.CACHE_NAMESPACE }}-restore-only
+          lookup-only: "true"
+      - name: Require restore-only miss
+        run: test '${{ steps.restore-only.outputs.cache-hit }}' != true
+      - name: Pre-create save-only bytes
+        run: mkdir -p .l2-cache/save-only && printf '%s\n' save-only > .l2-cache/save-only/value
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .l2-cache/save-only
+          key: ${{ env.CACHE_NAMESPACE }}-save-only
+      - name: Record mise identity and immutable bootstrap
+        run: |
+          mkdir -p l2-report
+          mise --version | tee l2-report/mise-version
+          command -v mise | tee l2-report/mise-path
+          sha256sum "$(command -v mise)" | awk '{print $1}' | tee l2-report/mise-sha256
+          if [ '${{ matrix.lane }}' = velnor ]; then
+            test -x /opt/mise/bin/mise
+            sha256sum /opt/mise/bin/mise | awk '{print $1}' | tee l2-report/bootstrap-sha256
+          else
+            printf '%s\n' hosted > l2-report/bootstrap-sha256
+          fi
+      - name: Install explicit different mise version
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          # Admission requires a literal: env expressions are runtime data
+          # and cannot be proven before a trusted runner is leased.
+          version: 2026.8.2
+          install: "false"
+      - name: Prove explicit version differs from omitted resolution
+        run: |
+          mise --version | tee l2-report/mise-explicit-version
+          test "$(cut -d' ' -f1 l2-report/mise-explicit-version)" = "$EXPLICIT_MISE_VERSION"
+          test "$(cut -d' ' -f1 l2-report/mise-explicit-version)" != "$(cut -d' ' -f1 l2-report/mise-version)"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mise-seed-${{ matrix.lane }}
+          path: l2-report
+          if-no-files-found: error
+
+  contend:
+    needs: seed
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON((inputs.lanes || inputs.lane) == 'both' && '["github","velnor"]' || format('["{0}"]', inputs.lanes || inputs.lane)) }}
+        writer: [1, 2]
+    runs-on: ${{ matrix.lane == 'velnor' && fromJSON('{"group":"velnor-trusted","labels":"velnor-target-mvp"}') || 'ubuntu-26.04' }}
+    timeout-minutes: 15
+    env:
+      CACHE_NAMESPACE: l2-${{ github.run_id }}-${{ matrix.lane }}
+    steps:
+      - name: Create identical contention bytes
+        run: mkdir -p .l2-cache/contention && printf '%s\n' contention > .l2-cache/contention/value
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .l2-cache/contention
+          key: ${{ env.CACHE_NAMESPACE }}-contention
+      - name: Record explicit writer result
+        run: |
+          mkdir -p contention-report
+          printf '%s\n' save-attempt-completed > contention-report/outcome
+          printf '%s\n' '${{ matrix.writer }}' > contention-report/writer
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: contention-${{ matrix.lane }}-${{ matrix.writer }}
+          path: contention-report
+          if-no-files-found: error
+
+  verify:
+    needs: [seed, contend]
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON((inputs.lanes || inputs.lane) == 'both' && '["github","velnor"]' || format('["{0}"]', inputs.lanes || inputs.lane)) }}
+    runs-on: ${{ matrix.lane == 'velnor' && fromJSON('{"group":"velnor-trusted","labels":"velnor-target-mvp"}') || 'ubuntu-26.04' }}
+    timeout-minutes: 20
+    env:
+      CACHE_NAMESPACE: l2-${{ github.run_id }}-${{ matrix.lane }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: "false"
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mise-seed-${{ matrix.lane }}
+          path: .l2-seed
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: contention-${{ matrix.lane }}-*
+          path: contention-reports
+      - id: root-hit
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .l2-cache/root
+          key: ${{ env.CACHE_NAMESPACE }}-root
+          fail-on-cache-miss: "true"
+      - id: restore-only-later
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .l2-cache/restore-only
+          key: ${{ env.CACHE_NAMESPACE }}-restore-only
+          lookup-only: "true"
+      - id: save-only-hit
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .l2-cache/save-only
+          key: ${{ env.CACHE_NAMESPACE }}-save-only
+          fail-on-cache-miss: "true"
+      - id: contention-hit
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .l2-cache/contention
+          key: ${{ env.CACHE_NAMESPACE }}-contention
+          fail-on-cache-miss: "true"
+      - name: Verify cache semantics and exact bytes
+        run: |
+          test "$(find contention-reports -name outcome -type f | wc -l)" -eq 2
+          test "$(find contention-reports -name outcome -type f -exec cat {} + | grep -xc save-attempt-completed)" -eq 2
+          test '${{ steps.root-hit.outputs.cache-hit }}' = true
+          test '${{ steps.restore-only-later.outputs.cache-hit }}' != true
+          test '${{ steps.save-only-hit.outputs.cache-hit }}' = true
+          test '${{ steps.contention-hit.outputs.cache-hit }}' = true
+          test "$(cat .l2-cache/root/value)" = root-cache
+          test "$(cat .l2-cache/save-only/value)" = save-only
+          test "$(cat .l2-cache/contention/value)" = contention
+      - name: Verify sequential mise identity and Velnor persistence
+        run: |
+          test "$(mise --version)" = "$(cat .l2-seed/mise-version)"
+          test "$(command -v mise)" = "$(cat .l2-seed/mise-path)"
+          test "$(sha256sum "$(command -v mise)" | awk '{print $1}')" = "$(cat .l2-seed/mise-sha256)"
+          test "$(cut -d' ' -f1 .l2-seed/mise-version)" != "$(cut -d' ' -f1 .l2-seed/mise-explicit-version)"
+          if [ '${{ matrix.lane }}' = velnor ]; then
+            test "$(sha256sum /opt/mise/bin/mise | awk '{print $1}')" = "$(cat .l2-seed/bootstrap-sha256)"
+          fi
+
+      - name: Write canonical runtime evidence
+        run: |
+          set -euo pipefail
+          mkdir -p l2-runtime-evidence
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = {
+              "schema": "velnor.fixture.l2-runtime.v1",
+              "lane": "${{ matrix.lane }}",
+              "result": "pass",
+              "closure": "root,nested,remote",
+              "cache": "root,save-only,contention-hit",
+              "mise": "explicit-version-differs-and-persists",
+          }
+          Path("l2-runtime-evidence/runtime-${{ matrix.lane }}.json").write_text(
+              json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: l2-runtime-${{ matrix.lane }}
+          path: l2-runtime-evidence/runtime-${{ matrix.lane }}.json
+          if-no-files-found: error
+
+  runtime-required:
+    if: always()
+    needs: [seed, contend, verify]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Require all jobs
+        env:
+          SEED: ${{ needs.seed.result }}
+          CONTEND: ${{ needs.contend.result }}
+          VERIFY: ${{ needs.verify.result }}
+        run: test "${SEED}/${CONTEND}/${VERIFY}" = success/success/success
+
+  compare-runtime-evidence:
+    if: always() && needs.runtime-required.result == 'success' && (inputs.lanes || inputs.lane) == 'both'
+    needs: [runtime-required]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: l2-runtime-*
+          path: evidence
+      - name: Compare canonical runtime evidence
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          paths = sorted(Path("evidence").rglob("runtime-*.json"))
+          if len(paths) != 2:
+              raise SystemExit(f"expected 2 L2 runtime evidence files, got {len(paths)}")
+          rows = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+          if {row.get("lane") for row in rows} != {"github", "velnor"}:
+              raise SystemExit(f"missing L2 runtime lanes: {rows}")
+          normalized = []
+          for row in rows:
+              lane = row.pop("lane", None)
+              if lane not in {"github", "velnor"}:
+                  raise SystemExit(f"invalid L2 runtime lane: {lane!r}")
+              normalized.append(row)
+          if normalized[0] != normalized[1]:
+              raise SystemExit(f"L2 runtime evidence mismatch: {normalized}")
+          print("L2 runtime evidence matches across GitHub and Velnor")
+          PY

@@ -1,0 +1,40 @@
+min_version = "2026.7.12"
+
+[settings]
+lockfile = true
+
+[tools]
+gh = "2.96.0"
+"github:jdx/mise" = "2026.7.12"
+rust = "1.97.1"
+actionlint = "1.7.12"
+"cargo:cargo-nextest" = "0.9.140"
+"aqua:EmbarkStudios/cargo-deny" = "0.20.2"
+
+[tasks.fmt]
+description = "Check Rust formatting"
+run = "cargo fmt --all --check"
+
+[tasks.lint]
+description = "Clippy with warnings denied"
+run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
+
+[tasks.test]
+description = "Run tests via cargo-nextest"
+run = "cargo nextest run --workspace --locked"
+
+[tasks.actionlint]
+description = "Lint GitHub Actions workflows"
+run = "actionlint"
+
+[tasks.deny]
+description = "Audit dependency advisories"
+run = "cargo deny check advisories"
+
+[tasks.generator-check]
+description = "Run the generator skeleton self-check"
+run = "cargo run --locked -p velnor-actions-generator -- check --root ."
+
+[tasks.ci]
+description = "Run every repository gate"
+depends = ["fmt", "lint", "test", "actionlint", "deny", "generator-check"]

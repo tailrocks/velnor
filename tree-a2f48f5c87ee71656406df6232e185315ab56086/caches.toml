@@ -1,0 +1,73 @@
+# Trusted canonical cache declarations. Generated class callables bind the exact
+# bytes and SHA-256; contributor code can affect content digests, never policy.
+schema_version = 1
+
+[[cache]]
+class = "code"
+id = "tools"
+artifact_class = "tool-download"
+paths = [".cache/mise", ".local/share/mise/installs"]
+lock_globs = ["mise.lock", "mise.toml", "rust-toolchain.toml"]
+phase = "install"
+compatible_phase_prefix = true
+compatible_lock_prefix = false
+
+[[cache]]
+class = "code"
+id = "dependencies"
+artifact_class = "dependency"
+paths = [".cargo/git", ".cargo/registry", ".gradle/caches", "**/node_modules"]
+lock_globs = ["**/.cargo/config.toml", "**/.npmrc", "**/.yarnrc.yml", "**/Cargo.lock", "**/Cargo.toml", "**/build.gradle", "**/build.gradle.kts", "**/bun.lock", "**/bun.lockb", "**/bunfig.toml", "**/gradle.lockfile", "**/gradle.properties", "**/gradle/libs.versions.toml", "**/gradle-wrapper.properties", "**/package-lock.json", "**/package.json", "**/pnpm-lock.yaml", "**/pnpm-workspace.yaml", "**/settings.gradle", "**/settings.gradle.kts", "**/yarn.lock", "mise.lock", "mise.toml"]
+phase = "build"
+compatible_phase_prefix = true
+compatible_lock_prefix = false
+
+[[cache]]
+class = "code"
+id = "build-output"
+artifact_class = "build-output"
+paths = ["target", "**/target"]
+lock_globs = ["**/.cargo/config.toml", "**/Cargo.lock", "**/Cargo.toml", "rust-toolchain.toml"]
+phase = "test"
+compatible_phase_prefix = true
+compatible_lock_prefix = false
+
+[[cache]]
+class = "tap"
+id = "tools"
+artifact_class = "tool-download"
+paths = [".cache/mise", ".local/share/mise/installs"]
+lock_globs = ["mise.lock", "mise.toml"]
+phase = "install"
+compatible_phase_prefix = true
+compatible_lock_prefix = false
+
+[[cache]]
+class = "apt"
+id = "tools"
+artifact_class = "tool-download"
+paths = [".cache/mise", ".local/share/mise/installs"]
+lock_globs = ["mise.lock", "mise.toml"]
+phase = "install"
+compatible_phase_prefix = true
+compatible_lock_prefix = false
+
+[[cache]]
+class = "infra"
+id = "tools"
+artifact_class = "tool-download"
+paths = [".cache/mise", ".local/share/mise/installs"]
+lock_globs = ["mise.lock", "mise.toml"]
+phase = "install"
+compatible_phase_prefix = true
+compatible_lock_prefix = false
+
+[[cache]]
+class = "fixture"
+id = "tools"
+artifact_class = "tool-download"
+paths = [".cache/mise", ".local/share/mise/installs"]
+lock_globs = ["mise.lock", "mise.toml"]
+phase = "install"
+compatible_phase_prefix = true
+compatible_lock_prefix = false

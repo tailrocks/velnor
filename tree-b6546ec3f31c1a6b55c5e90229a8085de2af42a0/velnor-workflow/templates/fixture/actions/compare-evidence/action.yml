@@ -1,0 +1,135 @@
+name: Compare lane evidence
+description: >-
+  Verify that every evidence record belongs to this run, this fixture commit
+  and the Velnor build identified by the downloaded evidence, then compare the
+  observed behaviour of every lane. A single lane is an error. The Velnor
+  source SHA is reported by the runner; this action validates its lexical shape,
+  cross-record consistency, and equality with the checked-in capability
+  baseline. It does not authenticate the release binary or prove it was built
+  from that commit; independent runner or release attestation is required at
+  that trust boundary.
+inputs:
+  scenario:
+    required: true
+    description: Scenario whose records to compare.
+  directory:
+    required: true
+    description: Directory holding the downloaded lane artifacts.
+  lanes:
+    required: false
+    default: github velnor
+    description: Space-separated lanes. At least two; one cannot establish parity.
+runs:
+  using: composite
+  steps:
+    - name: Resolve comparison identities
+      shell: bash
+      env:
+        COMPARE_DIRECTORY: ${{ inputs.directory }}
+      run: |
+        set -euo pipefail
+        python3 - "${COMPARE_DIRECTORY}" >> "${GITHUB_ENV}" <<'PY'
+        import json
+        import sys
+        from pathlib import Path
+
+        def is_full_sha(value):
+            return (
+                isinstance(value, str)
+                and len(value) == 40
+                and value == value.lower()
+                and all(character in "0123456789abcdef" for character in value)
+            )
+
+        directory = Path(sys.argv[1])
+        if not directory.is_dir():
+            raise SystemExit(f"evidence directory does not exist: {directory}")
+        paths = sorted(path for path in directory.rglob("*.json") if path.is_file())
+        if not paths:
+            raise SystemExit(f"no evidence JSON files found in {directory}")
+
+        # This binds records to one runner-reported build identity. It is not an
+        # independent release attestation: the binary/source relationship must
+        # be trusted by the Velnor runner or established separately.
+        source_paths = {}
+        for path in paths:
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as error:
+                raise SystemExit(f"{path}: cannot read evidence JSON: {error}") from error
+            if not isinstance(record, dict):
+                raise SystemExit(f"{path}: evidence record must be an object")
+            provenance = record.get("provenance")
+            if not isinstance(provenance, dict):
+                raise SystemExit(f"{path}: evidence has no provenance object")
+            if provenance.get("lane") != "velnor":
+                continue
+            source_sha = provenance.get("velnor_source_sha")
+            if not is_full_sha(source_sha):
+                raise SystemExit(
+                    f"{path}: provenance.velnor_source_sha must be a full lowercase commit SHA"
+                )
+            source_paths.setdefault(source_sha, []).append(path)
+
+        if not source_paths:
+            raise SystemExit(
+                "Velnor evidence has no provenance.velnor_source_sha; "
+                "the Velnor build cannot be identified"
+            )
+        if len(source_paths) != 1:
+            details = "; ".join(
+                f"{source}: {', '.join(str(path) for path in paths)}"
+                for source, paths in sorted(source_paths.items())
+            )
+            raise SystemExit(
+                "Velnor evidence has mixed provenance.velnor_source_sha values: "
+                f"{details}"
+            )
+
+        try:
+            baseline = json.loads(
+                Path("coverage/velnor-capabilities.json").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise SystemExit(f"cannot read Velnor capability baseline: {error}") from error
+        manifest_version = baseline.get("version")
+        if not isinstance(manifest_version, int) or isinstance(manifest_version, bool):
+            raise SystemExit("Velnor capability baseline version must be an integer")
+        baseline_source_sha = baseline.get("source_sha")
+        if not is_full_sha(baseline_source_sha):
+            raise SystemExit(
+                "Velnor capability baseline source_sha must be a full lowercase commit SHA"
+            )
+
+        source_sha = next(iter(source_paths))
+        if source_sha != baseline_source_sha:
+            raise SystemExit(
+                "Velnor evidence source SHA does not match capability baseline source_sha: "
+                f"evidence {source_sha}, baseline {baseline_source_sha}"
+            )
+        print(f"BASELINE_MANIFEST_VERSION={manifest_version}")
+        print(f"EVIDENCE_VELNOR_SOURCE_SHA={source_sha}")
+        PY
+    - name: Compare observed lane behaviour
+      shell: bash
+      env:
+        COMPARE_SCENARIO: ${{ inputs.scenario }}
+        COMPARE_DIRECTORY: ${{ inputs.directory }}
+        COMPARE_LANES: ${{ inputs.lanes }}
+      run: |
+        set -euo pipefail
+        # shellcheck disable=SC2086
+        set -- ${COMPARE_LANES}
+        if [[ "$#" -lt 2 ]]; then
+          echo "compare requires at least two lanes, got: ${COMPARE_LANES}" >&2
+          exit 1
+        fi
+        cargo run --quiet --locked -p verifier --bin verifier -- compare \
+          --directory "${COMPARE_DIRECTORY}" \
+          --scenario "${COMPARE_SCENARIO}" \
+          --expect-run-id "${GITHUB_RUN_ID}" \
+          --expect-run-attempt "${GITHUB_RUN_ATTEMPT}" \
+          --expect-commit "${GITHUB_SHA}" \
+          --expect-velnor-manifest-version "${BASELINE_MANIFEST_VERSION}" \
+          --expect-velnor-source-sha "${EVIDENCE_VELNOR_SOURCE_SHA}" \
+          --lanes "$@"

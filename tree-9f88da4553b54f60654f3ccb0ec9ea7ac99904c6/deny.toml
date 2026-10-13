@@ -1,0 +1,8 @@
+[advisories]
+version = 2
+ignore = [
+    # rsa: Marvin timing sidechannel. Velnor uses rsa only for OAuth-JWT
+    # signing with a local ephemeral runner key; the decryption-oracle threat is
+    # not on this path, and no fixed rsa release exists yet.
+    "RUSTSEC-2023-0071",
+]

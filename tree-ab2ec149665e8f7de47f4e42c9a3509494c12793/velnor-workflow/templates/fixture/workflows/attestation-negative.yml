@@ -1,0 +1,142 @@
+name: attestation-negative
+
+on:
+  workflow_dispatch:
+    inputs:
+      case:
+        description: Expected failing capability case
+        type: choice
+        required: true
+        options: [missing-permission, no-match, unapproved-input]
+      lanes:
+        description: "velnor | github | both (default: both)"
+        type: choice
+        default: both
+        options: [velnor, github, both]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Include case and lanes so sequential case dispatches cannot cancel each other.
+  group: attestation-negative-${{ github.ref }}-${{ inputs.case }}-${{ inputs.lanes }}
+  cancel-in-progress: true
+
+jobs:
+  missing-permission:
+    if: inputs.case == 'missing-permission'
+    # Deliberately omit id-token: write. The action must retain a failure
+    # conclusion; assert-negative validates that conclusion after all lanes.
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON(inputs.lanes == 'both' && '["github","velnor"]' || format('["{0}"]', inputs.lanes)) }}
+    runs-on: ${{ matrix.lane == 'velnor' && fromJSON('{"group":"velnor-trusted","labels":"velnor-target-mvp"}') || 'ubuntu-26.04' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: mkdir -p dist && tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf dist/fixture.tar.gz Cargo.toml
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+
+  no-match:
+    if: inputs.case == 'no-match'
+    # No subject is created. The action must retain a failure conclusion;
+    # assert-negative validates that conclusion after all lanes.
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON(inputs.lanes == 'both' && '["github","velnor"]' || format('["{0}"]', inputs.lanes)) }}
+    runs-on: ${{ matrix.lane == 'velnor' && fromJSON('{"group":"velnor-trusted","labels":"velnor-target-mvp"}') || 'ubuntu-26.04' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+
+  unapproved-input:
+    if: inputs.case == 'unapproved-input'
+    # Velnor rejects this input before execution; GitHub is the explicit
+    # comparison exception and is expected to succeed. assert-negative checks
+    # the selected lane conclusions individually.
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON(inputs.lanes == 'both' && '["github","velnor"]' || format('["{0}"]', inputs.lanes)) }}
+    runs-on: ${{ matrix.lane == 'velnor' && fromJSON('{"group":"velnor-trusted","labels":"velnor-target-mvp"}') || 'ubuntu-26.04' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: mkdir -p dist && tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf dist/fixture.tar.gz Cargo.toml
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+          push-to-registry: false
+
+  assert-negative:
+    needs: [missing-permission, no-match, unapproved-input]
+    if: ${{ always() && inputs.case != '' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CASE: ${{ inputs.case }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Assert the expected negative outcome per lane
+        run: |
+          set -euo pipefail
+          jobs_json="$(curl -fsSL             -H "Authorization: Bearer ${GH_TOKEN}"             -H "Accept: application/vnd.github+json"             "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100")"
+          conclusion_for() {
+            python3 -c "import json,sys; jobs=json.load(sys.stdin)['jobs']; print(next((j['conclusion'] for j in jobs if j['name']=='$1'), 'absent'))" <<<"${jobs_json}"
+          }
+          expected() {
+            case "${1}" in
+              # The fleet rejects the unapproved action input before execution;
+              # the GitHub lane has no such policy and runs it successfully.
+              unapproved-input:velnor) echo failure ;;
+              unapproved-input:github) echo success ;;
+              # No id-token: the attestation action cannot run on either lane.
+              missing-permission:velnor) echo failure ;;
+              missing-permission:github) echo failure ;;
+              # No subject files: the attestation action fails on either lane.
+              no-match:velnor) echo failure ;;
+              no-match:github) echo failure ;;
+              *) echo unknown ;;
+            esac
+          }
+          if [[ "${{ inputs.lanes }}" == "both" ]]; then
+            selected_lanes="velnor github"
+          else
+            selected_lanes="${{ inputs.lanes }}"
+          fi
+          rc=0
+          for lane in ${selected_lanes}; do
+            actual="$(conclusion_for "${CASE} (${lane})")"
+            want="$(expected "${CASE}:${lane}")"
+            if [[ "${actual}" == "absent" ]]; then
+              echo "::error::ATTN case=${CASE} lane=${lane} phase=mismatch reason=job-absent"
+              rc=1; continue
+            fi
+            if [[ "${actual}" != "${want}" ]]; then
+              echo "::error::ATTN case=${CASE} lane=${lane} phase=mismatch reason=unexpected-conclusion want=${want} got=${actual}"
+              rc=1; continue
+            fi
+            echo "::notice::ATTN case=${CASE} lane=${lane} phase=negative-asserted conclusion=${actual}"
+          done
+          exit "${rc}"

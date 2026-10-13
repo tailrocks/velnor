@@ -1,0 +1,594 @@
+{
+  "$schema": "../schemas/hosts.schema.json",
+  "schema_version": 1,
+  "campaign_id": "velnor-five-consumer-rollout",
+  "recorded_at": "2026-09-22T23:52:14Z",
+  "status": "blocked",
+  "hosts": [
+    {
+      "id": "local-mac",
+      "status": "blocked",
+      "readiness": {
+        "status": "blocked",
+        "summary": "Fresh user report: no live supervisor and state N=1 versus monitor N=4; installed identities and qualification remain unknown.",
+        "evidence_refs": [
+          "E-MAC-REFRESH"
+        ]
+      },
+      "facts": [
+        {
+          "key": "os",
+          "value": "darwin",
+          "status": "historical",
+          "evidence_refs": [
+            "E-MAC-HISTORY"
+          ]
+        },
+        {
+          "key": "docker_provider",
+          "value": "OrbStack",
+          "status": "observed",
+          "evidence_refs": [
+            "E-MAC-REFRESH"
+          ]
+        },
+        {
+          "key": "docker_version",
+          "value": "29.4.0",
+          "status": "historical",
+          "evidence_refs": [
+            "E-MAC-HISTORY"
+          ]
+        },
+        {
+          "key": "configured_max_jobs",
+          "value": 4,
+          "status": "historical",
+          "evidence_refs": [
+            "E-MAC-HISTORY"
+          ]
+        },
+        {
+          "key": "measured_max_jobs",
+          "value": null,
+          "status": "pending",
+          "evidence_refs": []
+        },
+        {
+          "key": "hardware_model",
+          "value": "Apple M5 Max",
+          "status": "observed",
+          "evidence_refs": [
+            "E-MAC-REFRESH"
+          ]
+        },
+        {
+          "key": "architecture",
+          "value": "arm64",
+          "status": "observed",
+          "evidence_refs": [
+            "E-MAC-REFRESH"
+          ]
+        },
+        {
+          "key": "docker_engine_architecture",
+          "value": "arm64",
+          "status": "observed",
+          "evidence_refs": [
+            "E-MAC-REFRESH"
+          ]
+        },
+        {
+          "key": "live_supervisor_present",
+          "value": false,
+          "status": "observed",
+          "evidence_refs": [
+            "E-MAC-REFRESH"
+          ]
+        },
+        {
+          "key": "state_max_jobs",
+          "value": 1,
+          "status": "observed",
+          "evidence_refs": [
+            "E-MAC-REFRESH"
+          ]
+        },
+        {
+          "key": "monitor_max_jobs",
+          "value": 4,
+          "status": "observed",
+          "evidence_refs": [
+            "E-MAC-REFRESH"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bastion",
+      "status": "blocked",
+      "readiness": {
+        "status": "blocked",
+        "summary": "User report at 2026-09-22T23:44Z confirms zero ready slots, unreachable GitHub, active quota settings and inactive daemon; earlier detailed snapshot remains timestamp-bound.",
+        "evidence_refs": [
+          "E-BASTION-REFRESH",
+          "E-HOST",
+          "E-HEALTH",
+          "E-BLOCKERS"
+        ]
+      },
+      "facts": [
+        {
+          "key": "address",
+          "value": "37.27.110.241",
+          "status": "observed",
+          "evidence_refs": [
+            "E-HOST"
+          ]
+        },
+        {
+          "key": "os",
+          "value": "Debian 13 trixie",
+          "status": "observed",
+          "evidence_refs": [
+            "E-HOST"
+          ]
+        },
+        {
+          "key": "architecture",
+          "value": "x86_64",
+          "status": "observed",
+          "evidence_refs": [
+            "E-HOST"
+          ]
+        },
+        {
+          "key": "physical_cores",
+          "value": 48,
+          "status": "observed",
+          "evidence_refs": [
+            "E-HOST"
+          ]
+        },
+        {
+          "key": "logical_cpus",
+          "value": 96,
+          "status": "observed",
+          "evidence_refs": [
+            "E-HOST"
+          ]
+        },
+        {
+          "key": "memory_gib",
+          "value": 125,
+          "status": "observed",
+          "evidence_refs": [
+            "E-HOST"
+          ]
+        },
+        {
+          "key": "root_device",
+          "value": "/dev/nvme0n1p4",
+          "status": "observed",
+          "evidence_refs": [
+            "E-HOST"
+          ]
+        },
+        {
+          "key": "secondary_device",
+          "value": "/dev/nvme1n1",
+          "status": "observed",
+          "evidence_refs": [
+            "E-HOST"
+          ]
+        },
+        {
+          "key": "secondary_partition_count",
+          "value": 0,
+          "status": "observed",
+          "evidence_refs": [
+            "E-HOST"
+          ]
+        },
+        {
+          "key": "secondary_filesystem_present",
+          "value": false,
+          "status": "observed",
+          "evidence_refs": [
+            "E-HOST"
+          ]
+        },
+        {
+          "key": "secondary_mounted",
+          "value": false,
+          "status": "observed",
+          "evidence_refs": [
+            "E-HOST"
+          ]
+        },
+        {
+          "key": "package_version",
+          "value": "0.1.274",
+          "status": "observed",
+          "evidence_refs": [
+            "E-BASTION-REFRESH"
+          ]
+        },
+        {
+          "key": "release_source_commit",
+          "value": "120f223655587ab0bcf2530cd4b203e0375a9dca",
+          "status": "observed",
+          "evidence_refs": [
+            "E-RELEASE"
+          ]
+        },
+        {
+          "key": "runner_sha256",
+          "value": "d5be3751959ec96f849a2a31e6f86dbac882324a6957d7bb744c68c0bc227887",
+          "status": "observed",
+          "evidence_refs": [
+            "E-RELEASE"
+          ]
+        },
+        {
+          "key": "release_verify_installed",
+          "value": true,
+          "status": "observed",
+          "evidence_refs": [
+            "E-RELEASE"
+          ]
+        },
+        {
+          "key": "apt_origin",
+          "value": "https://velnor-apt.tailrocks.com",
+          "status": "observed",
+          "evidence_refs": [
+            "E-RELEASE"
+          ]
+        },
+        {
+          "key": "apt_key_fingerprint",
+          "value": "7E66E3A53F9B3B5CA61D0F53261EDAC957DEB801",
+          "status": "observed",
+          "evidence_refs": [
+            "E-RELEASE"
+          ]
+        },
+        {
+          "key": "job_image",
+          "value": "velnor/job-ubuntu:26.04",
+          "status": "observed",
+          "evidence_refs": [
+            "E-RELEASE"
+          ]
+        },
+        {
+          "key": "job_image_index_digest",
+          "value": "sha256:42398586433d769982177f7b12d5dad269634eea7a81957012fdca47cf98e690",
+          "status": "observed",
+          "evidence_refs": [
+            "E-RELEASE"
+          ]
+        },
+        {
+          "key": "docker_version",
+          "value": "29.8.1",
+          "status": "observed",
+          "evidence_refs": [
+            "E-BASTION-REFRESH"
+          ]
+        },
+        {
+          "key": "running_containers",
+          "value": 0,
+          "status": "observed",
+          "evidence_refs": [
+            "E-RELEASE"
+          ]
+        },
+        {
+          "key": "controller_active",
+          "value": true,
+          "status": "observed",
+          "evidence_refs": [
+            "E-SERVICES"
+          ]
+        },
+        {
+          "key": "controller_enabled",
+          "value": false,
+          "status": "observed",
+          "evidence_refs": [
+            "E-SERVICES"
+          ]
+        },
+        {
+          "key": "guardian_active",
+          "value": true,
+          "status": "observed",
+          "evidence_refs": [
+            "E-SERVICES"
+          ]
+        },
+        {
+          "key": "guardian_enabled",
+          "value": false,
+          "status": "observed",
+          "evidence_refs": [
+            "E-SERVICES"
+          ]
+        },
+        {
+          "key": "daemon_active",
+          "value": false,
+          "status": "observed",
+          "evidence_refs": [
+            "E-BASTION-REFRESH"
+          ]
+        },
+        {
+          "key": "doctor_timer_active",
+          "value": false,
+          "status": "observed",
+          "evidence_refs": [
+            "E-SERVICES"
+          ]
+        },
+        {
+          "key": "policy_audit_timer_active",
+          "value": false,
+          "status": "observed",
+          "evidence_refs": [
+            "E-SERVICES"
+          ]
+        },
+        {
+          "key": "local_slot_processes",
+          "value": 16,
+          "status": "observed",
+          "evidence_refs": [
+            "E-SERVICES"
+          ]
+        },
+        {
+          "key": "cpu_quota_percent",
+          "value": 9120,
+          "status": "observed",
+          "evidence_refs": [
+            "E-SERVICES"
+          ]
+        },
+        {
+          "key": "memory_high_percent",
+          "value": 90,
+          "status": "observed",
+          "evidence_refs": [
+            "E-SERVICES"
+          ]
+        },
+        {
+          "key": "memory_max_percent",
+          "value": 95,
+          "status": "observed",
+          "evidence_refs": [
+            "E-SERVICES"
+          ]
+        },
+        {
+          "key": "memory_swap_max_bytes",
+          "value": 0,
+          "status": "observed",
+          "evidence_refs": [
+            "E-SERVICES"
+          ]
+        },
+        {
+          "key": "tasks_max",
+          "value": 4096,
+          "status": "observed",
+          "evidence_refs": [
+            "E-SERVICES"
+          ]
+        },
+        {
+          "key": "github_url",
+          "value": "https://github.com/OWNER/REPO",
+          "status": "observed",
+          "evidence_refs": [
+            "E-ROUTING"
+          ]
+        },
+        {
+          "key": "credential_state",
+          "value": "empty",
+          "status": "observed",
+          "evidence_refs": [
+            "E-ROUTING"
+          ]
+        },
+        {
+          "key": "secrets_file_state",
+          "value": "absent",
+          "status": "observed",
+          "evidence_refs": [
+            "E-ROUTING"
+          ]
+        },
+        {
+          "key": "routing_group",
+          "value": "velnor",
+          "status": "observed",
+          "evidence_refs": [
+            "E-ROUTING"
+          ]
+        },
+        {
+          "key": "selected_repository",
+          "value": "tailrocks/velnor",
+          "status": "observed",
+          "evidence_refs": [
+            "E-ROUTING"
+          ]
+        },
+        {
+          "key": "trust_scope",
+          "value": "untrusted",
+          "status": "observed",
+          "evidence_refs": [
+            "E-ROUTING"
+          ]
+        },
+        {
+          "key": "configured_max_jobs",
+          "value": 16,
+          "status": "observed",
+          "evidence_refs": [
+            "E-HEALTH"
+          ]
+        },
+        {
+          "key": "registered_slots",
+          "value": 0,
+          "status": "observed",
+          "evidence_refs": [
+            "E-HEALTH"
+          ]
+        },
+        {
+          "key": "actual_ready_slots",
+          "value": 0,
+          "status": "observed",
+          "evidence_refs": [
+            "E-BASTION-REFRESH"
+          ]
+        },
+        {
+          "key": "executor_ready_slots",
+          "value": 0,
+          "status": "observed",
+          "evidence_refs": [
+            "E-HEALTH"
+          ]
+        },
+        {
+          "key": "controller_desired_slots",
+          "value": 16,
+          "status": "observed",
+          "evidence_refs": [
+            "E-HEALTH"
+          ]
+        },
+        {
+          "key": "cli_desired_slots",
+          "value": 4,
+          "status": "observed",
+          "evidence_refs": [
+            "E-HEALTH"
+          ]
+        },
+        {
+          "key": "controller_control_live",
+          "value": true,
+          "status": "observed",
+          "evidence_refs": [
+            "E-HEALTH"
+          ]
+        },
+        {
+          "key": "cli_control_live",
+          "value": false,
+          "status": "observed",
+          "evidence_refs": [
+            "E-HEALTH"
+          ]
+        },
+        {
+          "key": "control_api_available",
+          "value": false,
+          "status": "observed",
+          "evidence_refs": [
+            "E-HEALTH"
+          ]
+        },
+        {
+          "key": "github_reachable",
+          "value": false,
+          "status": "observed",
+          "evidence_refs": [
+            "E-BASTION-REFRESH"
+          ]
+        },
+        {
+          "key": "routing_valid",
+          "value": false,
+          "status": "observed",
+          "evidence_refs": [
+            "E-HEALTH"
+          ]
+        },
+        {
+          "key": "runner_group_valid",
+          "value": false,
+          "status": "observed",
+          "evidence_refs": [
+            "E-HEALTH"
+          ]
+        },
+        {
+          "key": "active_permits",
+          "value": 0,
+          "status": "observed",
+          "evidence_refs": [
+            "E-HEALTH"
+          ]
+        },
+        {
+          "key": "demand_rows",
+          "value": 0,
+          "status": "observed",
+          "evidence_refs": [
+            "E-HEALTH"
+          ]
+        },
+        {
+          "key": "ledger_generation",
+          "value": 0,
+          "status": "observed",
+          "evidence_refs": [
+            "E-HEALTH"
+          ]
+        },
+        {
+          "key": "ledger_reconciled_generation",
+          "value": 0,
+          "status": "observed",
+          "evidence_refs": [
+            "E-HEALTH"
+          ]
+        },
+        {
+          "key": "measured_max_jobs",
+          "value": null,
+          "status": "pending",
+          "evidence_refs": []
+        },
+        {
+          "key": "reported_slots",
+          "value": 16,
+          "status": "observed",
+          "evidence_refs": [
+            "E-BASTION-REFRESH"
+          ]
+        },
+        {
+          "key": "resource_quotas_present",
+          "value": true,
+          "status": "observed",
+          "evidence_refs": [
+            "E-BASTION-REFRESH"
+          ]
+        }
+      ]
+    }
+  ]
+}

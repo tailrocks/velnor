@@ -1,0 +1,45 @@
+{
+  "total_count": 2,
+  "artifacts": [
+    {
+      "id": 10604946461,
+      "node_id": "MDg6QXJ0aWZhY3QxMDYwNDk0NjQ2MQ==",
+      "name": "velnor-workflow-candidate-376431c115b205ef-Linux-X64",
+      "size_in_bytes": 41497491,
+      "url": "https://api.github.com/repos/tailrocks/velnor/actions/artifacts/10604946461",
+      "archive_download_url": "https://api.github.com/repos/tailrocks/velnor/actions/artifacts/10604946461/zip",
+      "expired": false,
+      "digest": "sha256:69d78b1dfe25d95738040495521828fc71cf5b35502352bfca1f4d8961e760b0",
+      "created_at": "2026-09-20T11:38:13Z",
+      "updated_at": "2026-09-20T11:38:13Z",
+      "expires_at": "2026-09-21T11:38:07Z",
+      "workflow_run": {
+        "id": 35508236735,
+        "repository_id": 1255367013,
+        "head_repository_id": 1255367013,
+        "head_branch": "codex/ci-performance-campaign",
+        "head_sha": "fecc59e9e40568d92b6d828a6515ad3c68c81438"
+      }
+    },
+    {
+      "id": 10604692546,
+      "node_id": "MDg6QXJ0aWZhY3QxMDYwNDY5MjU0Ng==",
+      "name": "velnor-workflow-runtime-4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d-Linux-X64",
+      "size_in_bytes": 8416017,
+      "url": "https://api.github.com/repos/tailrocks/velnor/actions/artifacts/10604692546",
+      "archive_download_url": "https://api.github.com/repos/tailrocks/velnor/actions/artifacts/10604692546/zip",
+      "expired": false,
+      "digest": "sha256:529d41e246abd3f42ea3e3d6f5275d7fc2efc6e55e57adfd2a6e18927ec7d173",
+      "created_at": "2026-09-20T11:35:07Z",
+      "updated_at": "2026-09-20T11:35:07Z",
+      "expires_at": "2026-09-27T11:35:06Z",
+      "workflow_run": {
+        "id": 35508236735,
+        "repository_id": 1255367013,
+        "head_repository_id": 1255367013,
+        "head_branch": "codex/ci-performance-campaign",
+        "head_sha": "fecc59e9e40568d92b6d828a6515ad3c68c81438"
+      }
+    }
+  ]
+}

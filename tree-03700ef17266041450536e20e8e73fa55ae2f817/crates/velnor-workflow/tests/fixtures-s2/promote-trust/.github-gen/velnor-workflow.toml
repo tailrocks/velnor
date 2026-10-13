@@ -1,0 +1,12 @@
+schema = 2
+
+[generator]
+repository = "example/promote-trust"
+
+[workflow]
+
+
+[[units]]
+id = "docs"
+kind = "docs"
+trust = "trusted-only"
