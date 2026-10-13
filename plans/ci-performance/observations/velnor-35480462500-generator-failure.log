@@ -1,2 +1,0 @@
-2026-09-20T01:08:05.7588405Z error: generated files match but generation inputs changed: scan input changed from b096c93329fcc370 to 4d9e40db14a88597 in .github/ci/.github-actions-generator-state; regenerate to record the current generation inputs
-2026-09-20T01:08:05.7611490Z error: CI command failed for unit rust-velnor-workflow with exit status: 1
