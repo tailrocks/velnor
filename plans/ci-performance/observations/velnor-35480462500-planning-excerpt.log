@@ -1,8 +1,0 @@
-2026-09-20T01:05:11.6399989Z Image: ubuntu-24.04
-2026-09-20T01:05:11.6400726Z Version: 20260907.300.1
-2026-09-20T01:05:16.5466668Z   INSTALL_REV: 0dc79895ff1c5e88be7c3822c437e1c5b5282e12
-2026-09-20T01:05:17.4306734Z   BASE_SHA: e94b48406c4ed206fce2bbf39b788264e72cf39c
-2026-09-20T01:05:17.4307165Z   HEAD_SHA: b935b24514f18eb8f69bebfbfd1d3707f02e4154
-2026-09-20T01:05:17.4415547Z scope=affected
-2026-09-20T01:05:17.4429202Z unit_ids=bun-velnor,docker,docs,opentofu,rust-policy,rust-production-topology,rust-unit-collector,rust-velnor-bench,rust-velnor-client,rust-velnor-control,rust-velnor-model,rust-velnor-render,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnor-workflow-contract,rust-velnorctl
-2026-09-20T01:05:17.4433906Z full_units=bun-velnor,docker,docs,opentofu,rust-policy,rust-production-topology,rust-unit-collector,rust-velnor-bench,rust-velnor-client,rust-velnor-control,rust-velnor-model,rust-velnor-render,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnor-workflow-contract,rust-velnorctl
