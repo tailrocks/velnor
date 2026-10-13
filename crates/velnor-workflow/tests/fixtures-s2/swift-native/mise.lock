@@ -1,6 +1,0 @@
-lockfile_version = 2
-
-[[tools."cargo:boltffi_cli"]]
-version = "0.30.1"
-backend = "cargo:boltffi_cli"
-specifiers = ["0.30.1"]
